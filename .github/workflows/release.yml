@@ -226,6 +226,19 @@ jobs:
           exit 1
         fi
 
+        # dylibbundler may miss Homebrew's Unicorn engine library.
+        # Copy libunicorn so wowee_bin can resolve it at runtime.
+        UNICORN_LIB_DIR="$(brew --prefix unicorn)/lib"
+        for lib in "${UNICORN_LIB_DIR}"/libunicorn*.dylib; do
+          [ -e "${lib}" ] || continue
+          cp -f "${lib}" Wowee.app/Contents/Frameworks/
+        done
+
+        if ! ls Wowee.app/Contents/Frameworks/libunicorn*.dylib >/dev/null 2>&1; then
+          echo "Missing Unicorn dylib(s) in app bundle Frameworks/" >&2
+          exit 1
+        fi
+
         # Info.plist
         cat > Wowee.app/Contents/Info.plist << EOF
         <?xml version="1.0" encoding="UTF-8"?>

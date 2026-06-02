@@ -1742,6 +1742,19 @@ void GameScreen::loadSettings() {
     // Load keybindings from the same config file
     KeybindingManager::getInstance().loadFromConfigFile(path);
 
+    // Apply loaded controls settings to the runtime camera controller.
+    // loadSettings() runs at startup before settingsInit fires, so without
+    // this the camera uses default values until the settings window is opened.
+    if (auto* renderer = services_.renderer) {
+        if (auto* cam = renderer->getCameraController()) {
+            cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
+            cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
+            cam->setExtendedZoom(settingsPanel_.pendingExtendedZoom);
+            cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
+            cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
+        }
+    }
+
     LOG_INFO("Settings loaded from ", path);
 }
 

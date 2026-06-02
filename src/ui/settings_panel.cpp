@@ -636,9 +636,11 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             renderer->setShadowDistance(pendingShadowDistance);
             // Read non-volume settings from actual state (volumes come from saved settings)
             if (auto* cameraController = renderer->getCameraController()) {
-                pendingMouseSensitivity = cameraController->getMouseSensitivity();
-                pendingInvertMouse = cameraController->isInvertMouse();
+                cameraController->setMouseSensitivity(pendingMouseSensitivity);
+                cameraController->setInvertMouse(pendingInvertMouse);
                 cameraController->setExtendedZoom(pendingExtendedZoom);
+                cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
+                cameraController->setPivotHeight(pendingPivotHeight);
             }
         }
         pendingResIndex = 0;
@@ -1038,6 +1040,11 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
 
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 10.0f));
+        float saveBtnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (ImGui::Button("Save Settings", ImVec2(saveBtnW, 0))) {
+            saveCallback();
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Back to Game", ImVec2(-1, 0))) {
             showSettingsWindow = false;
         }
