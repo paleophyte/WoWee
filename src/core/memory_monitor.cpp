@@ -6,6 +6,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #elif defined(__APPLE__)
+#include <mach/mach.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #else
@@ -88,10 +89,26 @@ size_t MemoryMonitor::getAvailableRAM() const {
     }
     return totalRAM_ / 2;
 #elif defined(__APPLE__)
-    int64_t usermem = 0;
-    size_t len = sizeof(usermem);
-    if (sysctlbyname("hw.usermem", &usermem, &len, nullptr, 0) == 0) {
-        return static_cast<size_t>(usermem);
+    // hw.usermem is a 32-bit kernel sysctl on macOS: on systems with ≥16 GB RAM
+    // the value overflows signed int32, truncating to ~2 GB and causing false
+    // severe-pressure reports.  Use the Mach VM statistics API instead, which
+    // is the same source that Activity Monitor and `vm_stat` use.
+    {
+        mach_port_t host_port = mach_host_self();
+        vm_size_t page_size = 0;
+        host_page_size(host_port, &page_size);
+        if (page_size > 0) {
+            mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+            vm_statistics64_data_t vm_stat;
+            if (host_statistics64(host_port, HOST_VM_INFO64,
+                                  reinterpret_cast<host_info64_t>(&vm_stat),
+                                  &count) == KERN_SUCCESS) {
+                // free + inactive pages are reclaimable on demand
+                return (static_cast<size_t>(vm_stat.free_count) +
+                        static_cast<size_t>(vm_stat.inactive_count)) *
+                       static_cast<size_t>(page_size);
+            }
+        }
     }
     return totalRAM_ / 2;
 #else
