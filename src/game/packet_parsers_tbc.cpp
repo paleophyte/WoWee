@@ -28,7 +28,8 @@ namespace TbcMoveFlags {
 // - No interpolated movement (flags2 & 0x0200) check
 // - Pitch check: SWIMMING, else ONTRANSPORT(0x02000000)
 // - Spline data: has splineId, no durationMod/durationModNext/verticalAccel/effectStartTime/splineMode
-// - Flag 0x08 (HIGH_GUID) reads 2 u32s (Classic: 1 u32)
+// - Trailer order matches CMaNGOS TBC BuildMovementUpdate:
+//   LOWGUID, HIGHGUID, attacking target, transport time
 // ============================================================================
 bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& block) {
     auto rem = [&]() -> size_t { return packet.getRemainingSize(); };
@@ -110,21 +111,21 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 
-        // Spline elevation (TBC: 0x02000000, WotLK: 0x04000000)
+        // Spline elevation (same bit as WotLK)
         if (moveFlags & TbcMoveFlags::SPLINE_ELEVATION) {
             if (rem() < 4) return false;
             /*float splineElevation =*/ packet.readFloat();
         }
 
-        // Speeds (TBC: 8 values — walk, run, runBack, swim, fly, flyBack, swimBack, turn)
+        // Speeds (TBC: 8 values — walk, run, runBack, swim, swimBack, fly, flyBack, turn)
         if (rem() < 32) return false;
         /*float walkSpeed =*/ packet.readFloat();
         float runSpeed = packet.readFloat();
         /*float runBackSpeed =*/ packet.readFloat();
         /*float swimSpeed =*/ packet.readFloat();
+        /*float swimBackSpeed =*/ packet.readFloat();
         /*float flySpeed =*/ packet.readFloat();
         /*float flyBackSpeed =*/ packet.readFloat();
-        /*float swimBackSpeed =*/ packet.readFloat();
         /*float turnRate =*/ packet.readFloat();
 
         block.runSpeed = runSpeed;
@@ -183,29 +184,28 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
         LOG_DEBUG("  [TBC] STATIONARY: (", block.x, ", ", block.y, ", ", block.z, ")");
     }
 
-    // Target GUID
-    if (updateFlags & UPDATEFLAG_HAS_TARGET) {
-        if (rem() < 1) return false;
-        /*uint64_t targetGuid =*/ packet.readPackedGuid();
-    }
-
-    // Transport time
-    if (updateFlags & UPDATEFLAG_TRANSPORT) {
-        if (rem() < 4) return false;
-        /*uint32_t transportTime =*/ packet.readUInt32();
-    }
-
-    // LOWGUID (0x08) — TBC has 2 u32s, Classic has 1 u32
+    // LOWGUID (0x08) — CMaNGOS TBC writes one uint32.
     if (updateFlags & UPDATEFLAG_LOWGUID) {
-        if (rem() < 8) return false;
-        /*uint32_t unknown0 =*/ packet.readUInt32();
-        /*uint32_t unknown1 =*/ packet.readUInt32();
+        if (rem() < 4) return false;
+        /*uint32_t lowGuidOrTypeMarker =*/ packet.readUInt32();
     }
 
     // HIGHGUID (0x10)
     if (updateFlags & UPDATEFLAG_HIGHGUID) {
         if (rem() < 4) return false;
-        /*uint32_t unknown2 =*/ packet.readUInt32();
+        /*uint32_t highGuidOrZero =*/ packet.readUInt32();
+    }
+
+    // Attacking target (0x04)
+    if (updateFlags & UPDATEFLAG_HAS_TARGET) {
+        if (rem() < 1) return false;
+        /*uint64_t targetGuid =*/ packet.readPackedGuid();
+    }
+
+    // Transport time/path progress (0x02)
+    if (updateFlags & UPDATEFLAG_TRANSPORT) {
+        if (rem() < 4) return false;
+        /*uint32_t transportTime =*/ packet.readUInt32();
     }
 
     return true;
@@ -473,6 +473,7 @@ bool TbcPacketParsers::parseUpdateObject(network::Packet& packet, UpdateObjectDa
             UpdateBlock block;
             uint8_t updateTypeVal = packet.readUInt8();
             if (updateTypeVal > static_cast<uint8_t>(UpdateType::NEAR_OBJECTS)) {
+                if (!out.blocks.empty()) break;
                 packet.setReadPos(start);
                 return false;
             }
@@ -513,8 +514,20 @@ bool TbcPacketParsers::parseUpdateObject(network::Packet& packet, UpdateObjectDa
             }
 
             if (!ok) {
-                packet.setReadPos(start);
-                return false;
+                static int tbcBlockErrors = 0;
+                if (++tbcBlockErrors <= 5) {
+                    LOG_WARNING("[TBC] SMSG_UPDATE_OBJECT block parse failed",
+                                " blockIndex=", i, " of ", out.blockCount,
+                                " updateType=", static_cast<int>(block.updateType),
+                                " readPos=", packet.getReadPos(),
+                                " packetSize=", packet.getSize(),
+                                " (", out.blocks.size(), " blocks kept)");
+                }
+                if (out.blocks.empty()) {
+                    packet.setReadPos(start);
+                    return false;
+                }
+                break;
             }
             out.blocks.push_back(block);
         }
