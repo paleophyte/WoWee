@@ -9,14 +9,148 @@
 #include "rendering/animation_controller.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 
 namespace wowee {
 namespace game {
 
 ChatHandler::ChatHandler(GameHandler& owner)
-    : owner_(owner) {}
+    : owner_(owner) {
+    initializeChatLog();
+}
+
+namespace {
+
+bool isTruthyEnvValue(const std::string& value) {
+    std::string lower;
+    lower.reserve(value.size());
+    for (unsigned char c : value) lower.push_back(static_cast<char>(std::tolower(c)));
+    return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
+}
+
+bool isFalsyEnvValue(const std::string& value) {
+    std::string lower;
+    lower.reserve(value.size());
+    for (unsigned char c : value) lower.push_back(static_cast<char>(std::tolower(c)));
+    return lower.empty() || lower == "0" || lower == "false" || lower == "no" || lower == "off";
+}
+
+std::string escapeChatLogField(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\t': out += "\\t"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+std::string formatChatLogTimestamp(std::chrono::system_clock::time_point timestamp) {
+    auto time = std::chrono::system_clock::to_time_t(timestamp);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        timestamp.time_since_epoch()) % 1000;
+
+    std::tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &time);
+#else
+    localtime_r(&time, &tm);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
+        << "." << std::setfill('0') << std::setw(3) << ms.count();
+    return oss.str();
+}
+
+std::string formatChatLogGuid(uint64_t guid) {
+    if (guid == 0) return "";
+    std::ostringstream oss;
+    oss << "0x" << std::uppercase << std::hex
+        << std::setfill('0') << std::setw(16) << guid;
+    return oss.str();
+}
+
+std::string chatParticipant(const std::string& name, uint64_t guid, const char* fallback) {
+    if (!name.empty()) return name;
+    if (guid != 0) return formatChatLogGuid(guid);
+    return fallback ? fallback : "";
+}
+
+bool chatPacketDiagEnabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("WOWEE_CHAT_PACKET_DIAG");
+        if (!raw) return false;
+        return !isFalsyEnvValue(raw);
+    }();
+    return enabled;
+}
+
+} // namespace
+
+void ChatHandler::initializeChatLog() {
+    const char* enabledRaw = std::getenv("WOWEE_CHAT_LOG");
+    if (!enabledRaw) return;
+
+    std::string enabledValue(enabledRaw);
+    if (isFalsyEnvValue(enabledValue)) return;
+
+    const char* pathRaw = std::getenv("WOWEE_CHAT_LOG_PATH");
+    const bool hasPathOverride = pathRaw && *pathRaw;
+    chatLogPath_ = hasPathOverride ? pathRaw : "logs/chat.log";
+    if (!hasPathOverride && !isTruthyEnvValue(enabledValue) && !enabledValue.empty()) {
+        chatLogPath_ = enabledValue;
+    }
+
+    std::filesystem::path path(chatLogPath_);
+    if (!path.parent_path().empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+    }
+
+    chatLogStream_.open(path, std::ios::out | std::ios::app);
+    if (!chatLogStream_.is_open()) {
+        LOG_WARNING("Chat external log requested but could not open: ", path.string());
+        return;
+    }
+
+    chatLogEnabled_ = true;
+    chatLogInitialized_ = true;
+    chatLogStream_ << "# WoWee chat log started " << formatChatLogTimestamp(std::chrono::system_clock::now()) << '\n';
+    chatLogStream_ << "# timestamp\tsource\ttype\tsender\tsender_guid\treceiver\treceiver_guid\tchannel\tmessage\n";
+    chatLogStream_.flush();
+    LOG_INFO("External chat logging enabled: ", path.string());
+}
+
+void ChatHandler::logChatMessage(const MessageChatData& msg, const char* source) {
+    if (!chatLogEnabled_ || !chatLogInitialized_ || !chatLogStream_.is_open()) return;
+    if (msg.message.empty()) return;
+
+    const std::string sender = chatParticipant(msg.senderName, msg.senderGuid, "System");
+    const std::string receiver = chatParticipant(msg.receiverName, msg.receiverGuid, "");
+    chatLogStream_
+        << formatChatLogTimestamp(msg.timestamp) << '\t'
+        << (source ? source : "") << '\t'
+        << getChatTypeString(msg.type) << '\t'
+        << escapeChatLogField(sender) << '\t'
+        << formatChatLogGuid(msg.senderGuid) << '\t'
+        << escapeChatLogField(receiver) << '\t'
+        << formatChatLogGuid(msg.receiverGuid) << '\t'
+        << escapeChatLogField(msg.channelName) << '\t'
+        << escapeChatLogField(msg.message) << '\n';
+    chatLogStream_.flush();
+}
 
 void ChatHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_MESSAGECHAT] = [this](network::Packet& packet) {
@@ -158,6 +292,12 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     ChatLanguage language = isHorde ? ChatLanguage::ORCISH : ChatLanguage::COMMON;
 
     auto packet = MessageChatPacket::build(type, language, message, target);
+    if (chatPacketDiagEnabled()) {
+        const auto& raw = packet.getData();
+        LOG_WARNING("CHAT PACKET DIAG TX CMSG_MESSAGECHAT type=", getChatTypeString(type),
+                    " target='", target, "' bytes=", raw.size(), " data=[",
+                    raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
+    }
     owner_.getSocket()->send(packet);
 
     // Add local echo so the player sees their own message immediately
@@ -169,11 +309,13 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     auto nameIt = owner_.getPlayerNameCache().find(owner_.getPlayerGuid());
     if (nameIt != owner_.getPlayerNameCache().end()) {
         echo.senderName = nameIt->second;
+    } else if (const Character* active = owner_.getActiveCharacter()) {
+        echo.senderName = active->name;
     }
 
     if (type == ChatType::WHISPER) {
         echo.type = ChatType::WHISPER_INFORM;
-        echo.senderName = target;
+        echo.receiverName = target;
     } else {
         echo.type = type;
     }
@@ -187,15 +329,34 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
 
 void ChatHandler::handleMessageChat(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_MESSAGECHAT");
+    if (chatPacketDiagEnabled()) {
+        const auto& raw = packet.getData();
+        LOG_WARNING("CHAT PACKET DIAG RX SMSG_MESSAGECHAT bytes=", raw.size(), " data=[",
+                    raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
+    }
 
     MessageChatData data;
     if (!owner_.getPacketParsers()->parseMessageChat(packet, data)) {
-        LOG_WARNING("Failed to parse SMSG_MESSAGECHAT, size=", packet.getSize());
+        const auto& raw = packet.getData();
+        LOG_WARNING("Failed to parse SMSG_MESSAGECHAT, size=", packet.getSize(),
+                    " data=[", raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
         return;
+    }
+    if (chatPacketDiagEnabled()) {
+        LOG_WARNING("CHAT PACKET DIAG PARSED SMSG_MESSAGECHAT type=", getChatTypeString(data.type),
+                    " sender=", formatChatLogGuid(data.senderGuid), " senderName='", data.senderName,
+                    "' receiver=", formatChatLogGuid(data.receiverGuid), " receiverName='", data.receiverName,
+                    "' channel='", data.channelName, "' msg='", data.message, "'");
     }
     LOG_DEBUG("INCOMING CHAT: type=", static_cast<int>(data.type),
              " (", getChatTypeString(data.type), ") sender=0x", std::hex, data.senderGuid, std::dec,
              " '", data.senderName, "' msg='", data.message.substr(0, 60), "'");
+
+    // WoW servers echo successful outgoing whispers as WHISPER_INFORM, but the
+    // client already creates a local WHISPER_INFORM row immediately on send.
+    if (data.type == ChatType::WHISPER_INFORM) {
+        return;
+    }
 
     // Skip server echo of our own messages (we already added a local echo)
     if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
@@ -228,8 +389,22 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
         }
 
         if (data.senderName.empty()) {
+            const auto& partyData = owner_.getPartyData();
+            for (const auto& member : partyData.members) {
+                if (member.guid == data.senderGuid && !member.name.empty()) {
+                    data.senderName = member.name;
+                    break;
+                }
+            }
+        }
+
+        if (data.senderName.empty()) {
             owner_.queryPlayerName(data.senderGuid);
         }
+    }
+
+    if (data.message.empty()) {
+        return;
     }
 
     // Filter BG/Arena queue announcer spam (server-side modules on
@@ -324,6 +499,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     if (chatHistory_.size() > maxChatHistory_) {
         chatHistory_.erase(chatHistory_.begin());
     }
+    logChatMessage(data, "server");
 
     // Track whisper sender for /r command
     if (data.type == ChatType::WHISPER) {
@@ -423,7 +599,7 @@ void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
 }
 
 void ChatHandler::handleTextEmote(network::Packet& packet) {
-    const bool legacyFormat = isPreWotlk();
+    const bool legacyFormat = isClassicLikeExpansion();
     TextEmoteData data;
     if (!TextEmoteParser::parse(packet, data, legacyFormat)) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
@@ -434,20 +610,28 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         return;
     }
 
-    std::string senderName;
-    auto nameIt = owner_.getPlayerNameCache().find(data.senderGuid);
-    if (nameIt != owner_.getPlayerNameCache().end()) {
-        senderName = nameIt->second;
-    } else {
-        auto entity = owner_.getEntityManager().getEntity(data.senderGuid);
-        if (entity) {
-            auto unit = std::dynamic_pointer_cast<Unit>(entity);
-            if (unit) senderName = unit->getName();
+    std::string senderName = owner_.lookupName(data.senderGuid);
+    if (senderName.empty()) {
+        const auto& partyData = owner_.getPartyData();
+        for (const auto& member : partyData.members) {
+            if (member.guid == data.senderGuid && !member.name.empty()) {
+                senderName = member.name;
+                break;
+            }
         }
     }
+
+    uint32_t animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
+    if (animId != 0 && owner_.emoteAnimCallbackRef()) {
+        owner_.emoteAnimCallbackRef()(data.senderGuid, animId);
+    }
+
     if (senderName.empty()) {
-        senderName = "Unknown";
         owner_.queryPlayerName(data.senderGuid);
+        LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
+                  std::hex, data.senderGuid, std::dec,
+                  " emoteId=", data.textEmoteId, " anim=", animId);
+        return;
     }
 
     const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
@@ -466,11 +650,6 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     chatMsg.message = emoteText;
 
     addLocalChatMessage(chatMsg);
-
-    uint32_t animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
-    if (animId != 0 && owner_.emoteAnimCallbackRef()) {
-        owner_.emoteAnimCallbackRef()(data.senderGuid, animId);
-    }
 
     LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ", anim=", animId, ")");
 }
@@ -647,6 +826,7 @@ void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
     if (chatHistory_.size() > maxChatHistory_) {
         chatHistory_.pop_front();
     }
+    logChatMessage(msg, "local");
     if (owner_.addonChatCallbackRef()) owner_.addonChatCallbackRef()(msg);
 
     if (owner_.addonEventCallbackRef()) {
