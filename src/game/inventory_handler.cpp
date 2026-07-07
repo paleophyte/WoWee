@@ -3257,6 +3257,19 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
 
     int nonZero = 0;
     for (uint32_t e : newEntries) { if (e != 0) nonZero++; }
+    const bool hasVisibleBodySlot =
+        newEntries[2] != 0 ||  // shoulders
+        newEntries[4] != 0 ||  // chest
+        newEntries[6] != 0 ||  // legs
+        newEntries[7] != 0 ||  // feet
+        newEntries[9] != 0 ||  // hands
+        newEntries[15] != 0 || // main hand
+        newEntries[16] != 0;   // off hand
+    const bool sparseTbcVisible =
+        valuesAreDisplayIds &&
+        (nonZero == 0 || nonZero < 4 || (!hasVisibleBodySlot && nonZero < 8));
+    const bool hasInspectedEntries =
+        owner_.inspectedPlayerItemEntriesRef().find(guid) != owner_.inspectedPlayerItemEntriesRef().end();
 
     // Dump raw fields around visible item range to find the correct offset
     static int dumpCount = 0;
@@ -3282,6 +3295,19 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
                  " mainhand=", newEntries[15], " offhand=", newEntries[16]);
     }
 
+    if (sparseTbcVisible) {
+        if (!hasInspectedEntries && owner_.getSocket() && owner_.getState() == WorldState::IN_WORLD) {
+            owner_.pendingAutoInspectRef().insert(guid);
+            LOG_DEBUG("updateOtherPlayerVisibleItems: guid=0x", std::hex, guid, std::dec,
+                      " sparse TBC visible fields (nonZero=", nonZero,
+                      ", base=", base, ", stride=", stride,
+                      ") - queuing auto-inspect");
+        } else if (hasInspectedEntries) {
+            LOG_DEBUG("updateOtherPlayerVisibleItems: guid=0x", std::hex, guid, std::dec,
+                      " sparse TBC visible fields ignored; inspect gear already cached");
+        }
+    }
+
     bool changed = false;
     auto& old = owner_.otherPlayerVisibleItemEntriesRef()[guid];
     if (old != newEntries) {
@@ -3290,6 +3316,9 @@ void InventoryHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFi
     }
 
     if (valuesAreDisplayIds) {
+        if (sparseTbcVisible && hasInspectedEntries) {
+            return;
+        }
         if (changed) {
             owner_.otherPlayerVisibleDirtyRef().insert(guid);
             emitOtherPlayerEquipment(guid);

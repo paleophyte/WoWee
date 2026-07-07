@@ -93,7 +93,7 @@ static bool parseInspectEquipmentPayload(network::Packet& packet,
         return true;
     };
 
-    if (packet.getRemainingSize() == sizeof(uint64_t) + kGearBytes) {
+    if (packet.getRemainingSize() >= sizeof(uint64_t) + kGearBytes) {
         outGuid = packet.readUInt64();
         if (outGuid != 0 && readItems()) {
             return true;
@@ -104,7 +104,7 @@ static bool parseInspectEquipmentPayload(network::Packet& packet,
 
     if (packet.hasFullPackedGuid()) {
         outGuid = packet.readPackedGuid();
-        if (outGuid != 0 && packet.getRemainingSize() == kGearBytes && readItems()) {
+        if (outGuid != 0 && packet.getRemainingSize() >= kGearBytes && readItems()) {
             return true;
         }
     }
@@ -701,6 +701,8 @@ void SocialHandler::handleInspectResults(network::Packet& packet) {
             }
             return;
         }
+        LOG_DEBUG("SMSG_INSPECT_RESULTS_UPDATE (TBC gear): unrecognized payload size=",
+                  packet.getSize());
     }
 
     if (!packet.hasRemaining(1)) return;
