@@ -2,8 +2,90 @@
 #include "game/spline_packet.hpp"
 #include "core/logger.hpp"
 
+#include <algorithm>
+#include <utility>
+
 namespace wowee {
 namespace game {
+
+namespace {
+
+bool looksLikeChatText(const std::vector<uint8_t>& bytes, size_t offset, uint32_t len) {
+    if (len == 0 || len >= 8192) return false;
+    if (offset + 4 + len > bytes.size()) return false;
+
+    const size_t textStart = offset + 4;
+    const size_t textEnd = textStart + len;
+    size_t printable = 0;
+    for (size_t i = textStart; i < textEnd; ++i) {
+        const uint8_t c = bytes[i];
+        if (c == 0) {
+            return i + 1 == textEnd;
+        }
+        if (c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c < 0x7f) || c >= 0x80) {
+            ++printable;
+            continue;
+        }
+        return false;
+    }
+    return printable > 0;
+}
+
+bool recoverTbcChatTail(network::Packet& packet, MessageChatData& data) {
+    const auto& bytes = packet.getData();
+    for (size_t pos = 5; pos + 5 <= bytes.size(); ++pos) {
+        const uint32_t len =
+            static_cast<uint32_t>(bytes[pos]) |
+            (static_cast<uint32_t>(bytes[pos + 1]) << 8) |
+            (static_cast<uint32_t>(bytes[pos + 2]) << 16) |
+            (static_cast<uint32_t>(bytes[pos + 3]) << 24);
+        if (!looksLikeChatText(bytes, pos, len)) continue;
+
+        std::string recovered;
+        recovered.reserve(len);
+        const size_t textStart = pos + 4;
+        const size_t textEnd = textStart + len;
+        for (size_t i = textStart; i < textEnd; ++i) {
+            if (bytes[i] == 0) break;
+            recovered.push_back(static_cast<char>(bytes[i]));
+        }
+        if (recovered.empty()) continue;
+
+        data.message = std::move(recovered);
+        const size_t tagPos = textStart + len;
+        if (tagPos < bytes.size()) {
+            data.chatTag = bytes[tagPos];
+        }
+        packet.setReadPos(std::min(bytes.size(), tagPos + 1));
+        LOG_INFO("[TBC] Recovered SMSG_MESSAGECHAT text at offset ", pos,
+                 " type=", getChatTypeString(data.type),
+                 " senderGuid=0x", std::hex, data.senderGuid, std::dec);
+        return true;
+    }
+    return false;
+}
+
+bool canRecoverTbcChatTail(ChatType type) {
+    switch (type) {
+        case ChatType::SYSTEM:
+        case ChatType::SAY:
+        case ChatType::PARTY:
+        case ChatType::YELL:
+        case ChatType::WHISPER:
+        case ChatType::WHISPER_INFORM:
+        case ChatType::GUILD:
+        case ChatType::OFFICER:
+        case ChatType::RAID:
+        case ChatType::RAID_LEADER:
+        case ChatType::RAID_WARNING:
+        case ChatType::CHANNEL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
 
 // ============================================================================
 // TBC 2.4.3 movement flag constants (shifted relative to WotLK 3.3.5a)
@@ -1656,7 +1738,12 @@ bool TbcPacketParsers::parseMessageChat(network::Packet& packet, MessageChatData
     uint32_t langVal = packet.readUInt32();
     data.language = static_cast<ChatLanguage>(langVal);
 
-    // TBC: NO senderGuid or unknown field here (WotLK has senderGuid(u64) + unk(u32))
+    if (!packet.hasRemaining(12)) {
+        LOG_ERROR("[TBC] SMSG_MESSAGECHAT missing sender header: ", packet.getSize(), " bytes");
+        return false;
+    }
+    data.senderGuid = packet.readUInt64();
+    /*uint32_t chatGroup =*/ packet.readUInt32();
 
     switch (data.type) {
         case ChatType::MONSTER_SAY:
@@ -1666,7 +1753,6 @@ bool TbcPacketParsers::parseMessageChat(network::Packet& packet, MessageChatData
         case ChatType::MONSTER_PARTY:
         case ChatType::RAID_BOSS_EMOTE: {
             // senderGuid(u64) + nameLen(u32) + name + targetGuid(u64)
-            data.senderGuid = packet.readUInt64();
             uint32_t nameLen = packet.readUInt32();
             if (nameLen > 0 && nameLen < 256) {
                 data.senderName.resize(nameLen);
@@ -1694,23 +1780,20 @@ bool TbcPacketParsers::parseMessageChat(network::Packet& packet, MessageChatData
         case ChatType::EMOTE:
         case ChatType::TEXT_EMOTE: {
             // senderGuid(u64) + senderGuid(u64) — written twice by server
-            data.senderGuid = packet.readUInt64();
-            /*duplicateGuid*/ packet.readUInt64();
+            data.receiverGuid = packet.readUInt64();
             break;
         }
 
         case ChatType::CHANNEL: {
             // channelName(string) + rank(u32) + senderGuid(u64)
             data.channelName = packet.readString();
-            /*uint32_t rank =*/ packet.readUInt32();
-            data.senderGuid = packet.readUInt64();
+            data.receiverGuid = packet.readUInt64();
             break;
         }
 
         default: {
             // All other types: senderGuid(u64) + senderGuid(u64) — written twice
-            data.senderGuid = packet.readUInt64();
-            /*duplicateGuid*/ packet.readUInt64();
+            data.receiverGuid = packet.readUInt64();
             break;
         }
     }
@@ -1730,6 +1813,10 @@ bool TbcPacketParsers::parseMessageChat(network::Packet& packet, MessageChatData
     // Read chat tag
     if (packet.getReadPos() < packet.getSize()) {
         data.chatTag = packet.readUInt8();
+    }
+
+    if (data.message.empty() && canRecoverTbcChatTail(data.type)) {
+        recoverTbcChatTail(packet, data);
     }
 
     LOG_DEBUG("[TBC] SMSG_MESSAGECHAT: type=", getChatTypeString(data.type),

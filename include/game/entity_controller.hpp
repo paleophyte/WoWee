@@ -35,6 +35,9 @@ public:
     void queryPlayerName(uint64_t guid);
     void queryCreatureInfo(uint32_t entry, uint64_t guid);
     void queryGameObjectInfo(uint32_t entry, uint64_t guid);
+    void cachePlayerName(uint64_t guid, const std::string& name) {
+        if (guid != 0 && !name.empty()) playerNameCache[guid] = name;
+    }
     std::string getCachedPlayerName(uint64_t guid) const;
     std::string getCachedCreatureName(uint32_t entry) const;
     void invalidatePlayerName(uint64_t guid) { playerNameCache.erase(guid); }

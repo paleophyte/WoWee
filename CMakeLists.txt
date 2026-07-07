@@ -1420,6 +1420,75 @@ set_target_properties(auth_login_probe PROPERTIES
 )
 install(TARGETS auth_login_probe RUNTIME DESTINATION bin)
 
+set(WOWEE_HEADLESS_SOURCES ${WOWEE_SOURCES})
+list(REMOVE_ITEM WOWEE_HEADLESS_SOURCES src/main.cpp)
+add_executable(wowee_headless
+    tools/headless_client/main.cpp
+    ${WOWEE_HEADLESS_SOURCES}
+)
+target_compile_definitions(wowee_headless PRIVATE WOWEE_HEADLESS_DEFAULT=1)
+if(TARGET opcodes-generate)
+    add_dependencies(wowee_headless opcodes-generate)
+endif()
+target_include_directories(wowee_headless PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_include_directories(wowee_headless SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src
+)
+if(HAVE_FFMPEG)
+    target_compile_definitions(wowee_headless PRIVATE HAVE_FFMPEG)
+    target_include_directories(wowee_headless PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(wowee_headless PRIVATE ${FFMPEG_LIBRARIES})
+    if(FFMPEG_LIBRARY_DIRS)
+        target_link_directories(wowee_headless PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    endif()
+endif()
+target_link_libraries(wowee_headless PRIVATE
+    SDL2::SDL2
+    Vulkan::Vulkan
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+    ZLIB::ZLIB
+    lua51
+    ${CMAKE_DL_LIBS}
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(wowee_headless PRIVATE X11)
+endif()
+if(WIN32)
+    target_link_libraries(wowee_headless PRIVATE ws2_32)
+endif()
+if(TARGET imgui)
+    target_link_libraries(wowee_headless PRIVATE imgui)
+endif()
+if(TARGET vk-bootstrap)
+    target_link_libraries(wowee_headless PRIVATE vk-bootstrap)
+endif()
+if(TARGET wowee_fsr2_amd_vk)
+    target_link_libraries(wowee_headless PRIVATE wowee_fsr2_amd_vk)
+endif()
+if(TARGET wowee_fsr3_framegen_amd_vk_probe)
+    target_link_libraries(wowee_headless PRIVATE wowee_fsr3_framegen_amd_vk_probe)
+endif()
+if(HAVE_UNICORN)
+    target_link_libraries(wowee_headless PRIVATE ${UNICORN_LIBRARY})
+    target_include_directories(wowee_headless PRIVATE ${UNICORN_INCLUDE_DIR})
+    target_compile_definitions(wowee_headless PRIVATE HAVE_UNICORN)
+endif()
+if(TARGET glm::glm)
+    target_link_libraries(wowee_headless PRIVATE glm::glm)
+elseif(glm_FOUND)
+    target_include_directories(wowee_headless PRIVATE ${GLM_INCLUDE_DIRS})
+endif()
+set_target_properties(wowee_headless PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+install(TARGETS wowee_headless RUNTIME DESTINATION bin)
+
 # ---- Tool: blp_convert (BLP ↔ PNG) ----
 add_executable(blp_convert
     tools/blp_convert/main.cpp

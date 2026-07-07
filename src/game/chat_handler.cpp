@@ -7,13 +7,62 @@
 #include "network/world_socket.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/animation/emote_registry.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 
 namespace wowee {
 namespace game {
+
+namespace {
+
+bool headlessMode() {
+    static const bool enabled = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+#endif
+    }();
+    return enabled;
+}
+
+bool equalNameIgnoreCase(const std::string& a, const std::string& b) {
+    return a.size() == b.size() &&
+        std::equal(a.begin(), a.end(), b.begin(), [](unsigned char ca, unsigned char cb) {
+            return std::tolower(ca) == std::tolower(cb);
+        });
+}
+
+uint64_t findGuidByKnownName(GameHandler& owner, const std::string& name) {
+    if (name.empty()) return 0;
+
+    if (const auto* active = owner.getActiveCharacter()) {
+        if (equalNameIgnoreCase(active->name, name)) {
+            return owner.getPlayerGuid();
+        }
+    }
+
+    for (const auto& [guid, cachedName] : owner.getPlayerNameCache()) {
+        if (equalNameIgnoreCase(cachedName, name)) {
+            return guid;
+        }
+    }
+
+    for (const auto& member : owner.getPartyData().members) {
+        if (equalNameIgnoreCase(member.name, name)) {
+            return member.guid;
+        }
+    }
+
+    return 0;
+}
+
+} // namespace
 
 ChatHandler::ChatHandler(GameHandler& owner)
     : owner_(owner) {}
@@ -197,6 +246,19 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
              " (", getChatTypeString(data.type), ") sender=0x", std::hex, data.senderGuid, std::dec,
              " '", data.senderName, "' msg='", data.message.substr(0, 60), "'");
 
+    const bool monsterChat =
+        data.type == ChatType::MONSTER_SAY ||
+        data.type == ChatType::MONSTER_YELL ||
+        data.type == ChatType::MONSTER_EMOTE ||
+        data.type == ChatType::MONSTER_WHISPER ||
+        data.type == ChatType::MONSTER_PARTY ||
+        data.type == ChatType::RAID_BOSS_EMOTE ||
+        data.type == ChatType::RAID_BOSS_WHISPER;
+    if (monsterChat && data.message.empty()) {
+        LOG_DEBUG("Skipping empty monster chat packet");
+        return;
+    }
+
     // Skip server echo of our own messages (we already added a local echo)
     if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
         if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
@@ -227,7 +289,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
             }
         }
 
-        if (data.senderName.empty()) {
+        if (data.senderName.empty() && !headlessMode()) {
             owner_.queryPlayerName(data.senderGuid);
         }
     }
@@ -423,7 +485,7 @@ void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
 }
 
 void ChatHandler::handleTextEmote(network::Packet& packet) {
-    const bool legacyFormat = isPreWotlk();
+    const bool legacyFormat = isClassicLikeExpansion();
     TextEmoteData data;
     if (!TextEmoteParser::parse(packet, data, legacyFormat)) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
@@ -447,15 +509,25 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
     if (senderName.empty()) {
         senderName = "Unknown";
-        owner_.queryPlayerName(data.senderGuid);
+        if (!headlessMode()) {
+            owner_.queryPlayerName(data.senderGuid);
+        }
     }
 
     const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    std::string emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
+    std::string emoteText;
+    uint32_t animId = 0;
+    if (!headlessMode()) {
+        emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
+        animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
+    } else {
+        emoteText = rendering::EmoteRegistry::instance().textByDbcId(data.textEmoteId, senderName, targetPtr);
+        animId = rendering::EmoteRegistry::instance().animByDbcId(data.textEmoteId);
+    }
     if (emoteText.empty()) {
         emoteText = data.targetName.empty()
-            ? senderName + " performs an emote."
-            : senderName + " performs an emote at " + data.targetName + ".";
+            ? senderName + " performs text emote " + std::to_string(data.textEmoteId) + "."
+            : senderName + " performs text emote " + std::to_string(data.textEmoteId) + " at " + data.targetName + ".";
     }
 
     MessageChatData chatMsg;
@@ -463,16 +535,19 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     chatMsg.language = ChatLanguage::COMMON;
     chatMsg.senderGuid = data.senderGuid;
     chatMsg.senderName = senderName;
+    chatMsg.receiverGuid = findGuidByKnownName(owner_, data.targetName);
+    chatMsg.receiverName = data.targetName;
     chatMsg.message = emoteText;
+    chatMsg.channelName = "TEXT_EMOTE:" + std::to_string(data.textEmoteId);
 
     addLocalChatMessage(chatMsg);
 
-    uint32_t animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
     if (animId != 0 && owner_.emoteAnimCallbackRef()) {
         owner_.emoteAnimCallbackRef()(data.senderGuid, animId);
     }
 
-    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ", anim=", animId, ")");
+    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId,
+             ", emoteNum=", data.emoteNum, ", anim=", animId, ")");
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {

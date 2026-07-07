@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace rendering {
 
 // ============================================================================
@@ -33,6 +34,7 @@ public:
 
     /// Load emotes from DBC files (called once on first use).
     void loadFromDbc();
+    void loadFromDbc(pipeline::AssetManager* assetManager);
 
     struct EmoteResult { uint32_t animId; bool loop; };
 

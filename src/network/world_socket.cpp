@@ -33,6 +33,19 @@ constexpr size_t kRecentPacketHistoryLimit = 96;
 constexpr auto kRecentPacketHistoryWindow = std::chrono::seconds(15);
 constexpr const char* kCloseTraceEnv = "WOWEE_NET_CLOSE_TRACE";
 
+inline int headerTracePacketCount() {
+    static int count = []() {
+        const char* raw = std::getenv("WOWEE_NET_HEADER_TRACE_PACKETS");
+        if (!raw || !*raw) return 0;
+        char* end = nullptr;
+        long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || parsed <= 0) return 0;
+        if (parsed > 256) return 256;
+        return static_cast<int>(parsed);
+    }();
+    return count;
+}
+
 inline int parsedPacketsBudgetPerUpdate() {
     static int budget = []() {
         const char* raw = std::getenv("WOWEE_NET_MAX_PARSED_PACKETS");
@@ -893,7 +906,7 @@ void WorldSocket::initEncryption(const std::vector<uint8_t>& sessionKey, uint32_
     }
 
     encryptionEnabled = true;
-    headerTracePacketsLeft = 24;
+    headerTracePacketsLeft = headerTracePacketCount();
     LOG_INFO("World server encryption initialized successfully");
 }
 

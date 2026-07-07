@@ -83,6 +83,7 @@ imgui.ini
 # Config files
 config.ini
 config.json
+tools/headless_client/settings.json
 
 # Runtime cache (floor heights, etc.)
 cache/

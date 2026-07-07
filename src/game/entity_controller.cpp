@@ -44,6 +44,17 @@ bool envFlagEnabled(const char* key, bool defaultValue = false) {
              raw[0] == 'n' || raw[0] == 'N');
 }
 
+bool headlessModeEnabled() {
+    static const bool enabled = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        return envFlagEnabled("WOWEE_HEADLESS", false);
+#endif
+    }();
+    return enabled;
+}
+
 int parseEnvIntClamped(const char* key, int defaultValue, int minValue, int maxValue) {
     const char* raw = std::getenv(key);
     if (!raw || !*raw) return defaultValue;
@@ -394,6 +405,15 @@ void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
 // ============================================================
 
 void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
+    if (headlessModeEnabled() &&
+        block.guid != owner_.getPlayerGuid() &&
+        block.objectType == ObjectType::PLAYER &&
+        (block.updateType == UpdateType::CREATE_OBJECT ||
+         block.updateType == UpdateType::CREATE_OBJECT2)) {
+        LOG_INFO("Headless skipped remote player create guid=0x", std::hex, block.guid, std::dec);
+        return;
+    }
+
     switch (block.updateType) {
         case UpdateType::CREATE_OBJECT:
         case UpdateType::CREATE_OBJECT2:
@@ -1986,6 +2006,21 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 // ============================================================
 
 void EntityController::queryPlayerName(uint64_t guid) {
+    static const bool headlessAllowRemoteNameQueries =
+        envFlagEnabled("WOWEE_HEADLESS_QUERY_REMOTE_NAMES", false);
+    if (headlessModeEnabled() && !headlessAllowRemoteNameQueries &&
+        guid != owner_.getPlayerGuid()) {
+        LOG_INFO("queryPlayerName: headless skipped remote guid=0x", std::hex, guid, std::dec);
+        return;
+    }
+
+    static const bool headlessAllowHighGuidNameQueries =
+        envFlagEnabled("WOWEE_HEADLESS_QUERY_HIGH_GUIDS", false);
+    if (headlessModeEnabled() && !headlessAllowHighGuidNameQueries && (guid >> 32) != 0) {
+        LOG_INFO("queryPlayerName: headless skipped high guid=0x", std::hex, guid, std::dec);
+        return;
+    }
+
     // If already cached, apply the name to the entity (handles entity recreation after
     // moving out/in range — the entity object is new but the cached name is valid).
     auto cacheIt = playerNameCache.find(guid);
@@ -2013,6 +2048,7 @@ void EntityController::queryPlayerName(uint64_t guid) {
 }
 
 void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
+    if (headlessModeEnabled()) return;
     if (creatureInfoCache.count(entry) || pendingCreatureQueries.count(entry)) return;
     if (!owner_.isInWorld()) return;
 
@@ -2022,6 +2058,7 @@ void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
 }
 
 void EntityController::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
+    if (headlessModeEnabled()) return;
     if (gameObjectInfoCache_.count(entry) || pendingGameObjectQueries_.count(entry)) return;
     if (!owner_.isInWorld()) return;
 
@@ -2110,6 +2147,11 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
 }
 
 void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
+    if (headlessModeEnabled()) {
+        packet.skipAll();
+        return;
+    }
+
     CreatureQueryResponseData data;
     if (!owner_.getPacketParsers()->parseCreatureQueryResponse(packet, data)) return;
 
@@ -2134,6 +2176,11 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
 // ============================================================
 
 void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
+    if (headlessModeEnabled()) {
+        packet.skipAll();
+        return;
+    }
+
     GameObjectQueryResponseData data;
     bool ok = owner_.getPacketParsers() ? owner_.getPacketParsers()->parseGameObjectQueryResponse(packet, data)
                              : GameObjectQueryResponseParser::parse(packet, data);

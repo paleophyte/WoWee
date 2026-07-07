@@ -2,11 +2,16 @@
 
 #include "game/expansion_profile.hpp"
 #include "core/application.hpp"
+#include <cstdlib>
+#include <string>
 
 namespace wowee {
 namespace game {
 
 inline bool isActiveExpansion(const char* expansionId) {
+    if (const char* env = std::getenv("WOWEE_ACTIVE_EXPANSION")) {
+        if (*env) return std::string(env) == expansionId;
+    }
     auto& app = core::Application::getInstance();
     auto* registry = app.getExpansionRegistry();
     if (!registry) return false;

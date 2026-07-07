@@ -669,7 +669,11 @@ void GameHandler::updateTimers(float deltaTime) {
     // Periodically re-query names for players whose initial CMSG_NAME_QUERY was
     // lost (server didn't respond) or whose entity was recreated while the query
     // was still pending. Runs every 5 seconds to keep overhead minimal.
-    if (isInWorld()) {
+    static const bool headlessMode = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+    }();
+    if (!headlessMode && isInWorld()) {
         static float nameResyncTimer = 0.0f;
         nameResyncTimer += deltaTime;
         if (nameResyncTimer >= 5.0f) {

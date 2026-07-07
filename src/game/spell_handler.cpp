@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 
 namespace wowee {
@@ -113,6 +114,14 @@ void SpellHandler::playSpellImpactSound(uint32_t spellId) {
 
 // ---- Spell visual effect helpers ----
 
+static bool headlessMode() {
+    static const bool enabled = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+    }();
+    return enabled;
+}
+
 uint32_t SpellHandler::resolveSpellVisualId(uint32_t spellId) {
     owner_.loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
@@ -134,6 +143,7 @@ bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
 }
 
 void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint32_t castTimeMs) {
+    if (headlessMode()) return;
     LOG_INFO("SpellVisual: triggerCastVisual spellId=", spellId, " casterGuid=0x", std::hex, casterGuid, std::dec);
     auto* renderer = owner_.services().renderer;
     if (!renderer) { LOG_WARNING("SpellVisual: triggerCastVisual — no renderer"); return; }
@@ -148,6 +158,7 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
 }
 
 void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
+    if (headlessMode()) return;
     LOG_INFO("SpellVisual: triggerImpactVisual spellId=", spellId, " targetGuid=0x", std::hex, targetGuid, std::dec);
     auto* renderer = owner_.services().renderer;
     if (!renderer) return;

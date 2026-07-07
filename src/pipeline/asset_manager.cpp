@@ -85,6 +85,22 @@ bool AssetManager::initialize(const std::string& dataPath_) {
     return true;
 }
 
+bool AssetManager::initializeDbcOnly(const std::string& dataPath_) {
+    if (initialized) {
+        LOG_WARNING("AssetManager already initialized");
+        return true;
+    }
+
+    dataPath = dataPath_;
+    overridePath_ = dataPath + "/override";
+    LOG_WARNING("Initializing asset manager in DBC-only mode with data path: ", dataPath);
+
+    setupFileCacheBudget();
+
+    initialized = true;
+    return true;
+}
+
 void AssetManager::setupFileCacheBudget() {
     auto& memMonitor = core::MemoryMonitor::getInstance();
     size_t recommendedBudget = memMonitor.getRecommendedCacheBudget();
@@ -339,7 +355,10 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
     if (dbcData.empty()) {
         // dataPath is expansion-specific (e.g. Data/expansions/wotlk/); go up to Data/
         for (const std::string& base : {dataPath + "/db/" + name,
+                                         dataPath + "/DBFilesClient/" + name,
                                          dataPath + "/../../db/" + name,
+                                         dataPath + "/../../DBFilesClient/" + name,
+                                         "Data/DBFilesClient/" + name,
                                          "Data/db/" + name}) {
             if (std::filesystem::exists(base)) {
                 std::ifstream f(base, std::ios::binary | std::ios::ate);

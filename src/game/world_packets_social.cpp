@@ -11,6 +11,7 @@
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <utility>
 #include <zlib.h>
 
 namespace wowee {
@@ -337,7 +338,19 @@ bool TextEmoteParser::parse(network::Packet& packet, TextEmoteData& data, bool l
 
     uint32_t nameLen = packet.readUInt32();
     if (nameLen > 0 && nameLen <= 256) {
-        data.targetName = packet.readString();
+        if (!packet.hasRemaining(nameLen)) {
+            LOG_WARNING("SMSG_TEXT_EMOTE target name truncated: len=", nameLen,
+                        " remaining=", packet.getRemainingSize());
+            return false;
+        }
+        std::string targetName;
+        targetName.reserve(nameLen);
+        for (uint32_t i = 0; i < nameLen; ++i) {
+            const uint8_t c = packet.readUInt8();
+            if (c == 0) break;
+            targetName.push_back(static_cast<char>(c));
+        }
+        data.targetName = std::move(targetName);
     } else if (nameLen > 0) {
         // Implausible name length — misaligned read
         return false;

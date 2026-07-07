@@ -422,9 +422,12 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     LOG_INFO("========================================");
     LOG_INFO("Character GUID: 0x", std::hex, characterGuid, std::dec);
 
+    std::string selectedCharacterName;
+
     // Find character name for logging
     for (const auto& character : characters) {
         if (character.guid == characterGuid) {
+            selectedCharacterName = character.name;
             LOG_INFO("Character: ", character.name);
             LOG_INFO("Level ", static_cast<int>(character.level), " ",
                      getRaceName(character.race), " ",
@@ -499,6 +502,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     lastTargetGuid = 0;
     tabCycleStale = true;
     entityController_->clearAll();
+    cachePlayerName(characterGuid, selectedCharacterName);
 
     // Build CMSG_PLAYER_LOGIN packet
     auto packet = PlayerLoginPacket::build(characterGuid);
@@ -679,8 +683,19 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
         // correctly sets the active spec (static locals don't reset across logins).
         if (spellHandler_) spellHandler_->resetTalentState();
 
-        // Auto-join default chat channels only on first world entry.
-        autoJoinDefaultChannels();
+        // Auto-join default chat channels only on first world entry. The
+        // headless client opts into channels from its own settings instead.
+        const bool headlessMode = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+            return true;
+#else
+            const char* raw = std::getenv("WOWEE_HEADLESS");
+            return raw && *raw && raw[0] != '0';
+#endif
+        }();
+        if (!headlessMode) {
+            autoJoinDefaultChannels();
+        }
 
         // Auto-query guild info on login.
         const Character* activeChar = getActiveCharacter();
@@ -803,8 +818,8 @@ void GameHandler::sendPing() {
     // Increment sequence number
     pingSequence++;
 
-    LOG_DEBUG("Sending CMSG_PING: sequence=", pingSequence,
-              " latencyHintMs=", lastLatency);
+    LOG_INFO("Sending CMSG_PING: sequence=", pingSequence,
+             " latencyHintMs=", lastLatency);
 
     // Record send time for RTT measurement
     pingTimestamp_ = std::chrono::steady_clock::now();
@@ -1117,8 +1132,8 @@ void GameHandler::handlePong(network::Packet& packet) {
     lastLatency = static_cast<uint32_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(rtt).count());
 
-    LOG_DEBUG("SMSG_PONG acknowledged: sequence=", data.sequence,
-              " latencyMs=", lastLatency);
+    LOG_INFO("SMSG_PONG acknowledged: sequence=", data.sequence,
+             " latencyMs=", lastLatency);
 }
 
 bool GameHandler::isServerMovementAllowed() const {

@@ -125,6 +125,49 @@ float slowPacketLogThresholdMs() {
     return static_cast<float>(thresholdMs);
 }
 
+bool headlessTracePackets() {
+    static const bool enabled = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS_TRACE_PACKETS");
+        return raw && *raw && raw[0] != '0';
+    }();
+    return enabled;
+}
+
+bool headlessMode() {
+    static const bool enabled = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+#endif
+    }();
+    return enabled;
+}
+
+bool shouldSkipHeadlessWorldSimulationPacket(LogicalOpcode op) {
+    switch (op) {
+        case Opcode::SMSG_UPDATE_OBJECT:
+        case Opcode::SMSG_COMPRESSED_UPDATE_OBJECT:
+        case Opcode::SMSG_DESTROY_OBJECT:
+        case Opcode::SMSG_MONSTER_MOVE:
+        case Opcode::MSG_MOVE_HEARTBEAT:
+        case Opcode::SMSG_EMOTE:
+        case Opcode::SMSG_SPELL_START:
+        case Opcode::SMSG_SPELL_GO:
+        case Opcode::SMSG_SET_EXTRA_AURA_INFO_OBSOLETE:
+        case Opcode::SMSG_INIT_EXTRA_AURA_INFO_OBSOLETE:
+        case Opcode::SMSG_SET_EXTRA_AURA_INFO_NEED_UPDATE_OBSOLETE:
+        case Opcode::SMSG_CREATURE_QUERY_RESPONSE:
+        case Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE:
+        case Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE:
+        case Opcode::SMSG_ITEM_QUERY_MULTIPLE_RESPONSE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 constexpr size_t kMaxQueuedInboundPackets = 4096;
 
 } // end anonymous namespace
@@ -2820,9 +2863,28 @@ void GameHandler::handlePacket(network::Packet& packet) {
     }
 
     // Dispatch via the opcode handler table
+    if (headlessMode() && state == WorldState::IN_WORLD &&
+        shouldSkipHeadlessWorldSimulationPacket(*logicalOp)) {
+        packet.skipAll();
+        return;
+    }
+
     auto it = dispatchTable_.find(*logicalOp);
     if (it != dispatchTable_.end()) {
+        if (headlessTracePackets()) {
+            LOG_INFO("HEADLESS DISPATCH begin wire=0x", std::hex, opcode, std::dec,
+                     " logical=", OpcodeTable::logicalToName(*logicalOp),
+                     " size=", packet.getSize(),
+                     " readPos=", packet.getReadPos(),
+                     " state=", worldStateName(state));
+        }
         it->second(packet);
+        if (headlessTracePackets()) {
+            LOG_INFO("HEADLESS DISPATCH end wire=0x", std::hex, opcode, std::dec,
+                     " logical=", OpcodeTable::logicalToName(*logicalOp),
+                     " readPos=", packet.getReadPos(), "/", packet.getSize(),
+                     " state=", worldStateName(state));
+        }
     } else {
         // In pre-world states we need full visibility (char create/login handshakes).
         // In-world we keep de-duplication to avoid heavy log I/O in busy areas.
