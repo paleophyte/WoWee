@@ -241,6 +241,7 @@ public:
     void rebuildOnlineInventory();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
+    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries);
     void emitOtherPlayerEquipment(uint64_t guid);
     void emitAllOtherPlayerEquipment();
     void handleItemQueryResponse(network::Packet& packet);
@@ -308,19 +309,6 @@ private:
         bool itemAutoLootSent = false;
     };
     std::unordered_map<uint64_t, LocalLootState> localLootState_;
-    struct PendingLootRetry {
-        uint64_t guid = 0;
-        float timer = 0.0f;
-        uint8_t remainingRetries = 0;
-        bool sendLoot = false;
-    };
-    std::vector<PendingLootRetry> pendingGameObjectLootRetries_;
-    struct PendingLootOpen {
-        uint64_t guid = 0;
-        float timer = 0.0f;
-    };
-    std::vector<PendingLootOpen> pendingGameObjectLootOpens_;
-    uint64_t lastInteractedGoGuid_ = 0;
     uint64_t pendingLootMoneyGuid_ = 0;
     uint32_t pendingLootMoneyAmount_ = 0;
     float pendingLootMoneyNotifyTimer_ = 0.0f;

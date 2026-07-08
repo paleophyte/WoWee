@@ -1062,6 +1062,19 @@ network::Packet CastSpellPacket::build(uint32_t spellId, uint64_t targetGuid, ui
     return packet;
 }
 
+network::Packet CastSpellPacket::buildGameObjectTarget(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) {
+    network::Packet packet(wireOpcode(Opcode::CMSG_CAST_SPELL));
+    packet.writeUInt8(castCount);
+    packet.writeUInt32(spellId);
+    packet.writeUInt8(0x00); // castFlags = 0 for normal cast
+    packet.writeUInt32(0x0800); // TARGET_FLAG_GAMEOBJECT
+    packet.writePackedGuid(targetGuid);
+
+    LOG_DEBUG("Built CMSG_CAST_SPELL: spell=", spellId, " gameObject=0x",
+              std::hex, targetGuid, std::dec);
+    return packet;
+}
+
 network::Packet CancelAuraPacket::build(uint32_t spellId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_CANCEL_AURA));
     packet.writeUInt32(spellId);

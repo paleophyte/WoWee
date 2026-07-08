@@ -79,6 +79,71 @@ const char* worldStateName(WorldState state) {
     return "UNKNOWN";
 }
 
+std::string lowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool containsAnyTerm(const std::string& haystack, const char* const* terms, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (haystack.find(terms[i]) != std::string::npos) return true;
+    }
+    return false;
+}
+
+uint32_t gatherSpellForGameObject(const GameObjectQueryResponseData* info, const std::string& name) {
+    if (info && info->type != 3) return 0; // GAMEOBJECT_TYPE_CHEST
+
+    const std::string lower = lowerCopy(name);
+    static constexpr const char* kMiningTerms[] = {
+        "vein", "deposit", "mineral"
+    };
+    static constexpr const char* kHerbTerms[] = {
+        "peacebloom", "silverleaf", "earthroot", "mageroyal", "briarthorn",
+        "stranglekelp", "bruiseweed", "steelbloom", "grave moss", "kingsblood",
+        "liferoot", "fadeleaf", "goldthorn", "khadgar", "wintersbite",
+        "firebloom", "purple lotus", "arthas", "sungrass", "blindweed",
+        "ghost mushroom", "gromsblood", "dreamfoil", "silversage",
+        "plaguebloom", "icecap", "black lotus", "felweed", "dreaming glory",
+        "terocone", "ragveil", "ancient lichen", "netherbloom",
+        "nightmare vine", "mana thistle"
+    };
+
+    if (containsAnyTerm(lower, kMiningTerms, sizeof(kMiningTerms) / sizeof(kMiningTerms[0]))) return 2575; // Mining
+    if (containsAnyTerm(lower, kHerbTerms, sizeof(kHerbTerms) / sizeof(kHerbTerms[0]))) return 2366; // Herb Gathering
+    return 0;
+}
+
+uint32_t knownGatherRank(const SpellHandler* spellHandler, uint32_t baseSpellId) {
+    if (!spellHandler) return 0;
+
+    static constexpr uint32_t kMiningRanks[] = {
+        2575, 2576, 3564, 10248, 29354
+    };
+    static constexpr uint32_t kHerbRanks[] = {
+        2366, 2368, 3570, 11993, 28695
+    };
+
+    const uint32_t* ranks = nullptr;
+    size_t count = 0;
+    if (baseSpellId == kMiningRanks[0]) {
+        ranks = kMiningRanks;
+        count = sizeof(kMiningRanks) / sizeof(kMiningRanks[0]);
+    } else if (baseSpellId == kHerbRanks[0]) {
+        ranks = kHerbRanks;
+        count = sizeof(kHerbRanks) / sizeof(kHerbRanks[0]);
+    } else {
+        return 0;
+    }
+
+    for (size_t i = count; i > 0; --i) {
+        const uint32_t spellId = ranks[i - 1];
+        if (spellHandler->hasKnownSpell(spellId)) return spellId;
+    }
+    return 0;
+}
+
 } // end anonymous namespace
 
 void GameHandler::handleAuthChallenge(network::Packet& packet) {
@@ -1248,6 +1313,10 @@ void GameHandler::inspectTarget() {
     if (socialHandler_) socialHandler_->inspectTarget();
 }
 
+const GameHandler::InspectResult* GameHandler::getInspectResult() const {
+    return socialHandler_ ? socialHandler_->getInspectResult() : nullptr;
+}
+
 void GameHandler::queryServerTime() {
     if (socialHandler_) socialHandler_->queryServerTime();
 }
@@ -1554,6 +1623,10 @@ void GameHandler::maybeDetectVisibleItemLayout() {
 
 void GameHandler::updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields) {
     if (inventoryHandler_) inventoryHandler_->updateOtherPlayerVisibleItems(guid, fields);
+}
+
+void GameHandler::cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries) {
+    if (inventoryHandler_) inventoryHandler_->cacheInspectedPlayerEquipment(guid, itemEntries);
 }
 
 void GameHandler::emitOtherPlayerEquipment(uint64_t guid) {
@@ -1969,6 +2042,62 @@ void GameHandler::closeLoot() {
     if (inventoryHandler_) inventoryHandler_->closeLoot();
 }
 
+void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, uint8_t attempts) {
+    if (guid == 0) return;
+    clearPendingGameObjectLootOpen(guid);
+    PendingLootOpen pending;
+    pending.guid = guid;
+    pending.timer = std::max(0.0f, delaySeconds);
+    pending.remainingAttempts = std::max<uint8_t>(attempts, 1);
+    pendingGameObjectLootOpens_.push_back(pending);
+}
+
+void GameHandler::clearPendingGameObjectLootOpen(uint64_t guid) {
+    pendingGameObjectLootOpens_.erase(
+        std::remove_if(pendingGameObjectLootOpens_.begin(), pendingGameObjectLootOpens_.end(),
+                       [guid](const PendingLootOpen& pending) {
+                           return guid == 0 || pending.guid == guid;
+                       }),
+        pendingGameObjectLootOpens_.end());
+}
+
+bool GameHandler::hasPendingGameObjectLootOpen(uint64_t guid) const {
+    if (guid == 0) return false;
+    return std::any_of(pendingGameObjectLootOpens_.begin(), pendingGameObjectLootOpens_.end(),
+                       [guid](const PendingLootOpen& pending) {
+                           return pending.guid == guid;
+                       });
+}
+
+bool GameHandler::isGatherGameObject(uint64_t guid) const {
+    if (guid == 0 || !entityController_) return false;
+    auto entity = entityController_->getEntityManager().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
+
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
+    return gatherSpellForGameObject(goInfo, go->getName()) != 0;
+}
+
+void GameHandler::despawnGameObjectLocally(uint64_t guid) {
+    if (guid == 0 || !entityController_) return;
+
+    auto& entityManager = entityController_->getEntityManager();
+    auto entity = entityManager.getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return;
+
+    if (gameObjectDespawnCallback_) gameObjectDespawnCallback_(guid);
+    entityManager.removeEntity(guid);
+
+    clearPendingGameObjectLootOpen(guid);
+    if (lastInteractedGoGuid_ == guid) lastInteractedGoGuid_ = 0;
+    if (pendingGameObjectInteractGuid_ == guid) pendingGameObjectInteractGuid_ = 0;
+    if (getTargetGuid() == guid) setTargetGuidRaw(0);
+    tabCycleStale = true;
+
+    LOG_INFO("Locally despawned game object: 0x", std::hex, guid, std::dec);
+}
+
 void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
     if (inventoryHandler_) inventoryHandler_->lootMasterGive(lootSlot, targetGuid);
 }
@@ -2023,17 +2152,17 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     uint32_t goEntry = 0;
     uint32_t goType = 0;
     std::string goName;
+    const GameObjectQueryResponseData* goInfo = nullptr;
 
     if (entity) {
         if (entity->getType() == ObjectType::GAMEOBJECT) {
             auto go = std::static_pointer_cast<GameObject>(entity);
             goEntry = go->getEntry();
             goName = go->getName();
-            if (auto* info = getCachedGameObjectInfo(goEntry)) goType = info->type;
+            goInfo = getCachedGameObjectInfo(goEntry);
+            if (goInfo) goType = goInfo->type;
             if (goType == 5 && !goName.empty()) {
-                std::string lower = goName;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::string lower = lowerCopy(goName);
                 if (lower.rfind("doodad_", 0) != 0) {
                     addSystemChatMessage(goName);
                 }
@@ -2072,17 +2201,15 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     bool chestLike = false;
     if (entity && entity->getType() == ObjectType::GAMEOBJECT) {
         auto go = std::static_pointer_cast<GameObject>(entity);
-        auto* info = getCachedGameObjectInfo(go->getEntry());
-        if (info && info->type == 19) {
+        if (!goInfo) goInfo = getCachedGameObjectInfo(go->getEntry());
+        if (goInfo && goInfo->type == 19) {
             isMailbox = true;
-        } else if (info && info->type == 3) {
+        } else if (goInfo && goInfo->type == 3) {
             chestLike = true;
         }
     }
     if (!chestLike && !goName.empty()) {
-        std::string lower = goName;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string lower = lowerCopy(goName);
         chestLike = (lower.find("chest") != std::string::npos ||
                      lower.find("lockbox") != std::string::npos ||
                      lower.find("strongbox") != std::string::npos ||
@@ -2095,6 +2222,26 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
              " entry=", goEntry, " type=", goType,
              " name='", goName, "' chestLike=", chestLike, " isMailbox=", isMailbox);
 
+    const uint32_t gatherBaseSpellId = gatherSpellForGameObject(goInfo, goName);
+    if (gatherBaseSpellId != 0) {
+        const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
+        if (gatherSpellId == 0) {
+            addSystemChatMessage(gatherBaseSpellId == 2575 ? "Requires Mining." : "Requires Herbalism.");
+            LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
+                     " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
+            return;
+        }
+        auto castPacket = getPacketParsers()
+            ? getPacketParsers()->buildCastGameObjectSpell(gatherSpellId, guid, 0)
+            : CastSpellPacket::buildGameObjectTarget(gatherSpellId, guid, 0);
+        socket->send(castPacket);
+        lastInteractedGoGuid_ = guid;
+        scheduleGameObjectLootOpen(guid, 0.50f, 8);
+        LOG_INFO("GO gather cast: spell=", gatherSpellId, " guid=0x",
+                 std::hex, guid, std::dec, " name='", goName, "'");
+        return;
+    }
+
     // Always send CMSG_GAMEOBJ_USE first — this triggers the server-side
     // GameObject::Use() handler for all GO types.
     auto usePacket = GameObjectUsePacket::build(guid);
@@ -2106,9 +2253,10 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // (e.g., "Opening") and the GO isn't lootable until the cast finishes.
         // Sending LOOT prematurely gets an empty response or is silently dropped,
         // which can interfere with the server's loot state machine.
-        // Instead, handleSpellGo will send LOOT after the cast completes
-        // (using lastInteractedGoGuid_ set above). For instant-open chests
-        // (no cast), the server sends SMSG_LOOT_RESPONSE directly after USE.
+        // Queue a delayed open: if a server-side gather cast starts, update()
+        // defers this until the cast is over; if no cast packet arrives, retry
+        // a few times so resource nodes do not fail after one early CMSG_LOOT.
+        scheduleGameObjectLootOpen(guid, 0.35f, 8);
     } else if (isMailbox) {
         openMailbox(guid);
     }

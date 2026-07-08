@@ -54,6 +54,11 @@ public:
         return CastSpellPacket::build(spellId, targetGuid, castCount);
     }
 
+    /** Build CMSG_CAST_SPELL with SpellCastTargets targeting a game object. */
+    virtual network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) {
+        return CastSpellPacket::buildGameObjectTarget(spellId, targetGuid, castCount);
+    }
+
     /** Build CMSG_USE_ITEM (WotLK default: bag + slot + castCount + spellId + itemGuid + glyphIndex + castFlags + targets) */
     virtual network::Packet buildUseItem(uint8_t bagIndex, uint8_t slotIndex,
                                          uint64_t itemGuid, uint32_t spellId = 0,
@@ -336,6 +341,7 @@ public:
     network::Packet buildAcceptQuestPacket(uint64_t npcGuid, uint32_t questId) override;
     // TBC 2.4.3 CMSG_CAST_SPELL has no castFlags byte (WotLK added it)
     network::Packet buildCastSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
+    network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
     // TBC 2.4.3 CMSG_USE_ITEM uses spellIndex + castCount + itemGuid + targets.
     network::Packet buildUseItem(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
@@ -418,6 +424,7 @@ public:
                                          const MovementInfo& info,
                                          uint64_t playerGuid = 0) override;
     network::Packet buildCastSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
+    network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) override;
     network::Packet buildUseItem(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
                                  uint64_t targetGuid = 0) override;

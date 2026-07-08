@@ -1193,7 +1193,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
                     hitCenter.z += isGo ? 1.2f : 1.0f;
                 } else {
-                    hitRadius = std::max(hitRadius * 1.25f, 1.0f);
+                    // Resource nodes can have very tight render bounds; keep
+                    // their click target close to the no-bounds fallback.
+                    hitRadius = std::max(hitRadius * 1.25f, isGo ? 2.5f : 1.0f);
                 }
 
                 float hitT;
@@ -1270,7 +1272,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                         hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
                         hitCenter.z += heightOffset;
                     } else {
-                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
+                        hitRadius = std::max(
+                            hitRadius * 1.25f,
+                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
                     }
 
                     float hitT;
@@ -1413,7 +1417,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                             }
                         }
                     } else {
-                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
+                        hitRadius = std::max(
+                            hitRadius * 1.25f,
+                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
                     }
 
                     float hitT;

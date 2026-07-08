@@ -39,6 +39,9 @@ constexpr uint32_t kItemClassConsumable = 0;
 constexpr uint32_t kConsumableSubclassBandage = 7;
 constexpr uint32_t kConsumableSubclassItemEnhancement = 6;
 constexpr uint8_t kSpellFailedNotReady = 67;
+constexpr uint8_t kSpellFailedAlreadyOpen = 8;
+constexpr uint8_t kSpellFailedChestInUse = 25;
+constexpr uint8_t kSpellFailedTryAgain = 132;
 
 bool isBandageItem(const ItemQueryResponseData* info) {
     return info && info->valid &&
@@ -53,6 +56,27 @@ uint64_t targetGuidForUseItem(GameHandler& owner, const ItemQueryResponseData* i
     }
     if (info->subClass == kConsumableSubclassItemEnhancement) return 0;
     return owner.getPlayerGuid();
+}
+
+bool isGatherSpellId(uint32_t spellId) {
+    static constexpr uint32_t kGatherRanks[] = {
+        2575, 2576, 3564, 10248, 29354, // Mining
+        2366, 2368, 3570, 11993, 28695  // Herbalism
+    };
+    for (uint32_t rankSpellId : kGatherRanks) {
+        if (spellId == rankSpellId) return true;
+    }
+    return false;
+}
+
+bool shouldDespawnGatherTarget(uint8_t result) {
+    return result == kSpellFailedAlreadyOpen || result == kSpellFailedChestInUse;
+}
+
+std::string gatherCastFailureMessage(uint8_t result, const std::string& fallback) {
+    if (result == kSpellFailedTryAgain) return "Failed.";
+    if (result == kSpellFailedChestInUse) return "Already in use.";
+    return fallback;
 }
 } // namespace
 
@@ -997,6 +1021,9 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
                                     : CastFailedParser::parse(packet, data);
     if (!ok) return;
 
+    const uint64_t gatherGoGuid = owner_.lastInteractedGoGuidRef();
+    const bool gatherCast = gatherGoGuid != 0 && isGatherSpellId(data.spellId);
+
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
@@ -1032,6 +1059,12 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     const char* reason = getSpellCastResultString(data.result, powerType);
     std::string errMsg = reason ? reason
                                 : ("Spell cast failed (error " + std::to_string(data.result) + ")");
+    if (gatherCast) {
+        errMsg = gatherCastFailureMessage(data.result, errMsg);
+        if (shouldDespawnGatherTarget(data.result)) {
+            owner_.despawnGameObjectLocally(gatherGoGuid);
+        }
+    }
     owner_.addUIError(errMsg);
     MessageChatData msg;
     msg.type = ChatType::SYSTEM;
@@ -1211,7 +1244,6 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             LOG_DEBUG("[GO-DIAG] Sending CMSG_LOOT for GO 0x", std::hex,
                         owner_.lastInteractedGoGuidRef(), std::dec);
             owner_.lootTarget(owner_.lastInteractedGoGuidRef());
-            owner_.lastInteractedGoGuidRef() = 0;
         }
         // Clear the GO interaction guard so future cancelCast() calls work
         // normally. Without this, pendingGameObjectInteractGuid_ stays stale
@@ -2390,8 +2422,11 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
     if (owner_.getPacketParsers()->parseCastResult(packet, castResultSpellId, castResult)) {
         LOG_DEBUG("SMSG_CAST_RESULT: spellId=", castResultSpellId, " result=", static_cast<int>(castResult));
         if (castResult != 0) {
+            const uint64_t gatherGoGuid = owner_.lastInteractedGoGuidRef();
+            const bool gatherCast = gatherGoGuid != 0 && isGatherSpellId(castResultSpellId);
             casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0; castTimeRemaining_ = 0.0f;
             owner_.lastInteractedGoGuidRef() = 0;
+            owner_.pendingGameObjectInteractGuidRef() = 0;
             craftQueueSpellId_ = 0; craftQueueRemaining_ = 0;
             queuedSpellId_ = 0; queuedSpellTarget_ = 0;
             int playerPowerType = -1;
@@ -2405,6 +2440,12 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
             }
             std::string errMsg = reason ? reason
                                         : ("Spell cast failed (error " + std::to_string(castResult) + ")");
+            if (gatherCast) {
+                errMsg = gatherCastFailureMessage(castResult, errMsg);
+                if (shouldDespawnGatherTarget(castResult)) {
+                    owner_.despawnGameObjectLocally(gatherGoGuid);
+                }
+            }
             owner_.addUIError(errMsg);
             if (owner_.spellCastFailedCallbackRef()) owner_.spellCastFailedCallbackRef()(castResultSpellId);
                 owner_.fireAddonEvent("UNIT_SPELLCAST_FAILED", {"player", std::to_string(castResultSpellId)});

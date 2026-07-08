@@ -726,8 +726,8 @@ struct TextEmoteData {
  */
 class TextEmoteParser {
 public:
-    // legacyFormat: Classic 1.12 and TBC 2.4.3 send textEmoteId+emoteNum first, then senderGuid.
-    //               WotLK 3.3.5a reverses this: senderGuid first, then textEmoteId+emoteNum.
+    // legacyFormat: Classic 1.12 sends textEmoteId+emoteNum first, then senderGuid.
+    //               TBC/WotLK send senderGuid first, then textEmoteId+emoteNum.
     static bool parse(network::Packet& packet, TextEmoteData& data, bool legacyFormat = false);
 };
 
@@ -1842,6 +1842,7 @@ public:
 class CastSpellPacket {
 public:
     static network::Packet build(uint32_t spellId, uint64_t targetGuid, uint8_t castCount);
+    static network::Packet buildGameObjectTarget(uint32_t spellId, uint64_t targetGuid, uint8_t castCount);
 };
 
 /** CMSG_CANCEL_AURA packet builder */

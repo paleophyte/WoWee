@@ -430,8 +430,10 @@ public:
 
     using InspectArenaTeam = game::InspectArenaTeam;
     using InspectResult = game::InspectResult;
-    const InspectResult* getInspectResult() const {
-        return inspectResult_.guid ? &inspectResult_ : nullptr;
+    const InspectResult* getInspectResult() const;
+    const std::array<uint32_t, 19>* getOtherPlayerVisibleEquipment(uint64_t guid) const {
+        auto it = otherPlayerVisibleItemEntries_.find(guid);
+        return (it != otherPlayerVisibleItemEntries_.end()) ? &it->second : nullptr;
     }
 
     // Server info commands
@@ -865,10 +867,12 @@ public:
 
     // Talent DBC access
     const TalentEntry* getTalentEntry(uint32_t talentId) const {
+        if (spellHandler_) return spellHandler_->getTalentEntry(talentId);
         auto it = talentCache_.find(talentId);
         return (it != talentCache_.end()) ? &it->second : nullptr;
     }
     const TalentTabEntry* getTalentTabEntry(uint32_t tabId) const {
+        if (spellHandler_) return spellHandler_->getTalentTabEntry(tabId);
         auto it = talentTabCache_.find(tabId);
         return (it != talentTabCache_.end()) ? &it->second : nullptr;
     }
@@ -1455,6 +1459,11 @@ public:
     void lootTarget(uint64_t guid);
     void lootItem(uint8_t slotIndex);
     void closeLoot();
+    void scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds = 0.35f, uint8_t attempts = 1);
+    void clearPendingGameObjectLootOpen(uint64_t guid);
+    bool hasPendingGameObjectLootOpen(uint64_t guid) const;
+    bool isGatherGameObject(uint64_t guid) const;
+    void despawnGameObjectLocally(uint64_t guid);
     void activateSpiritHealer(uint64_t npcGuid);
     bool isLootWindowOpen() const;
     const LootResponseData& getCurrentLoot() const;
@@ -2468,6 +2477,7 @@ public:
     void rebuildOnlineInventory();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
+    void cacheInspectedPlayerEquipment(uint64_t guid, const std::array<uint32_t, 19>& itemEntries);
     void detectInventorySlotBases(const FlatFieldMap& fields);
     bool applyInventoryFields(const FlatFieldMap& fields);
     void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
@@ -3140,6 +3150,7 @@ private:
     struct PendingLootOpen {
         uint64_t guid = 0;
         float timer = 0.0f;
+        uint8_t remainingAttempts = 1;
     };
     std::vector<PendingLootOpen> pendingGameObjectLootOpens_;
     // Tracks the last GO we sent CMSG_GAMEOBJ_USE to; used in handleSpellGo

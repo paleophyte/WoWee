@@ -2273,8 +2273,11 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                 npcEmote = std::static_pointer_cast<game::Unit>(entity)->getNpcEmoteState();
             }
         }
-        if (npcEmote != 0 && charRenderer->hasAnimation(instanceId, npcEmote)) {
-            charRenderer->playAnimation(instanceId, npcEmote, true);
+        uint32_t npcEmoteAnim = npcEmote != 0
+            ? rendering::AnimationController::getEmoteAnimByEmotesId(npcEmote)
+            : 0;
+        if (npcEmoteAnim != 0 && charRenderer->hasAnimation(instanceId, npcEmoteAnim)) {
+            charRenderer->playAnimation(instanceId, npcEmoteAnim, true);
         } else if (charRenderer->hasAnimation(instanceId, rendering::anim::BIRTH)) {
             // Play birth animation (one-shot) — will return to STAND after
             charRenderer->playAnimation(instanceId, rendering::anim::BIRTH, false);

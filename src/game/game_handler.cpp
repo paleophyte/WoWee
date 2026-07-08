@@ -660,7 +660,13 @@ void GameHandler::updateTimers(float deltaTime) {
                 }
                 lootTarget(it->guid);
             }
-            it = pendingGameObjectLootOpens_.erase(it);
+            if (it->remainingAttempts > 1) {
+                --it->remainingAttempts;
+                it->timer = 0.75f;
+                ++it;
+            } else {
+                it = pendingGameObjectLootOpens_.erase(it);
+            }
         } else {
             ++it;
         }
