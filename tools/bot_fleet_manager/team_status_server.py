@@ -143,7 +143,48 @@ def render_dashboard(title: str) -> bytes:
     }}
     h1 {{ margin: 0; font-size: 20px; font-weight: 650; letter-spacing: 0; }}
     main {{ padding: 18px 24px 28px; }}
+    h2 {{ margin: 0; font-size: 14px; font-weight: 650; letter-spacing: 0; }}
     .meta {{ color: #aab2bd; font-size: 13px; }}
+    .map-shell {{
+      border: 1px solid #2a3037;
+      border-radius: 6px;
+      background: #15191e;
+      margin-bottom: 18px;
+      overflow: hidden;
+    }}
+    .map-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #2a3037;
+    }}
+    .map-wrap {{ position: relative; height: min(52vh, 520px); min-height: 280px; }}
+    #leader-map {{ display: block; width: 100%; height: 100%; background: #0f1317; }}
+    .map-tabs {{ display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }}
+    .map-tabs button {{
+      border: 1px solid #3b4652;
+      background: #1e252d;
+      color: #dbe3ec;
+      border-radius: 5px;
+      padding: 5px 9px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    .map-tabs button.active {{ background: #d3e5ff; color: #10151a; border-color: #d3e5ff; }}
+    .map-legend {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 8px 12px 10px;
+      border-top: 1px solid #2a3037;
+      color: #c5ced8;
+      font-size: 12px;
+    }}
+    .legend-item {{ display: inline-flex; align-items: center; gap: 6px; }}
+    .dot {{ width: 9px; height: 9px; border-radius: 50%; display: inline-block; }}
     table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
     th, td {{ padding: 10px 8px; border-bottom: 1px solid #2a3037; vertical-align: top; text-align: left; }}
     th {{ color: #b8c0cc; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }}
@@ -171,6 +212,16 @@ def render_dashboard(title: str) -> bytes:
     <div class="meta" id="updated">loading...</div>
   </header>
   <main>
+    <section class="map-shell">
+      <div class="map-head">
+        <h2>Leader Map</h2>
+        <div class="map-tabs" id="map-tabs"></div>
+      </div>
+      <div class="map-wrap">
+        <canvas id="leader-map"></canvas>
+      </div>
+      <div class="map-legend" id="map-legend"></div>
+    </section>
     <table>
       <thead>
         <tr>
@@ -187,6 +238,147 @@ def render_dashboard(title: str) -> bytes:
   </main>
   <script>
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
+    let selectedMapId = "";
+    const colors = ["#67d391", "#7db7ff", "#f2c166", "#ff8f8f", "#c49bff", "#58d6d1", "#f48bc2", "#a8d86d"];
+    function leaderPositions(teams) {{
+      return teams.map((team, index) => {{
+        const world = team.world || {{}};
+        const pos = world.position || {{}};
+        const x = Number(pos.x);
+        const y = Number(pos.y);
+        const z = Number(pos.z);
+        const mapId = String(world.mapId ?? "");
+        if (!team.apiReachable || team.state !== "in_world" || !mapId || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return {{
+          id: String(team.id || `leader-${{index + 1}}`),
+          fleet: String(team.fleet || "default"),
+          mapId,
+          x,
+          y,
+          z: Number.isFinite(z) ? z : 0,
+          color: colors[index % colors.length],
+          activity: String(team.activity || "")
+        }};
+      }}).filter(Boolean);
+    }}
+    function groupedMaps(points) {{
+      const groups = new Map();
+      for (const point of points) {{
+        if (!groups.has(point.mapId)) groups.set(point.mapId, []);
+        groups.get(point.mapId).push(point);
+      }}
+      return [...groups.entries()].sort((a, b) => Number(b[1].length) - Number(a[1].length) || a[0].localeCompare(b[0]));
+    }}
+    function mapBounds(points) {{
+      let minX = Math.min(...points.map(p => p.x));
+      let maxX = Math.max(...points.map(p => p.x));
+      let minY = Math.min(...points.map(p => p.y));
+      let maxY = Math.max(...points.map(p => p.y));
+      const spanX = Math.max(maxX - minX, 250);
+      const spanY = Math.max(maxY - minY, 250);
+      const padX = spanX * 0.35;
+      const padY = spanY * 0.35;
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      return {{
+        minX: midX - spanX / 2 - padX,
+        maxX: midX + spanX / 2 + padX,
+        minY: midY - spanY / 2 - padY,
+        maxY: midY + spanY / 2 + padY
+      }};
+    }}
+    function drawMap(points, mapId) {{
+      const canvas = document.getElementById("leader-map");
+      const wrap = canvas.parentElement;
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(wrap.clientWidth));
+      const height = Math.max(1, Math.floor(wrap.clientHeight));
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.width = `${{width}}px`;
+      canvas.style.height = `${{height}}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#0f1317";
+      ctx.fillRect(0, 0, width, height);
+
+      if (!points.length) {{
+        ctx.fillStyle = "#aab2bd";
+        ctx.font = "14px Inter, Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("No online leader positions", width / 2, height / 2);
+        return;
+      }}
+
+      const bounds = mapBounds(points);
+      const toScreen = (point) => ({{
+        x: ((point.y - bounds.minY) / (bounds.maxY - bounds.minY)) * width,
+        y: ((bounds.maxX - point.x) / (bounds.maxX - bounds.minX)) * height
+      }});
+
+      ctx.strokeStyle = "#202832";
+      ctx.lineWidth = 1;
+      const grid = 8;
+      for (let i = 1; i < grid; i++) {{
+        const gx = (width / grid) * i;
+        const gy = (height / grid) * i;
+        ctx.beginPath();
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, height);
+        ctx.moveTo(0, gy);
+        ctx.lineTo(width, gy);
+        ctx.stroke();
+      }}
+
+      ctx.fillStyle = "#7f8a96";
+      ctx.font = "12px Inter, Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(`map ${{esc(mapId)}}`, 12, 20);
+      ctx.textAlign = "right";
+      ctx.fillText(`N ${{bounds.maxX.toFixed(0)}} / W ${{bounds.maxY.toFixed(0)}}`, width - 12, 20);
+      ctx.fillText(`S ${{bounds.minX.toFixed(0)}} / E ${{bounds.minY.toFixed(0)}}`, width - 12, height - 12);
+
+      for (const point of points) {{
+        const p = toScreen(point);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+        ctx.fillStyle = point.color;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#071014";
+        ctx.stroke();
+        ctx.fillStyle = "#edf0f2";
+        ctx.font = "12px Inter, Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(point.id, p.x + 13, p.y - 2);
+        ctx.fillStyle = "#aab2bd";
+        ctx.fillText(`${{point.x.toFixed(1)}}, ${{point.y.toFixed(1)}}, ${{point.z.toFixed(1)}}`, p.x + 13, p.y + 13);
+      }}
+    }}
+    function renderMap(data) {{
+      const points = leaderPositions(data.teams || []);
+      const groups = groupedMaps(points);
+      const tabs = document.getElementById("map-tabs");
+      if (!groups.length) {{
+        selectedMapId = "";
+        tabs.innerHTML = "";
+        document.getElementById("map-legend").innerHTML = "<span class='muted'>No online leaders with positions</span>";
+        drawMap([], "");
+        return;
+      }}
+      if (!selectedMapId || !groups.some(([mapId]) => mapId === selectedMapId)) selectedMapId = groups[0][0];
+      tabs.innerHTML = groups.map(([mapId, mapPoints]) => `<button type="button" class="${{mapId === selectedMapId ? "active" : ""}}" data-map="${{esc(mapId)}}">map ${{esc(mapId)}} (${{mapPoints.length}})</button>`).join("");
+      for (const button of tabs.querySelectorAll("button")) {{
+        button.onclick = () => {{
+          selectedMapId = button.dataset.map || "";
+          renderMap(data);
+        }};
+      }}
+      const selected = groups.find(([mapId]) => mapId === selectedMapId)?.[1] || [];
+      document.getElementById("map-legend").innerHTML = selected.map(p => `<span class="legend-item"><span class="dot" style="background:${{p.color}}"></span>${{esc(p.id)}} <span class="muted">${{esc(p.fleet)}}</span></span>`).join("");
+      drawMap(selected, selectedMapId);
+    }}
     function locationText(team) {{
       const world = team.world || {{}};
       const pos = world.position || {{}};
@@ -215,6 +407,7 @@ def render_dashboard(title: str) -> bytes:
       const res = await fetch("/api/teams", {{cache: "no-store"}});
       const data = await res.json();
       document.getElementById("updated").textContent = `updated ${{data.collectedAt}}`;
+      renderMap(data);
       document.getElementById("teams").innerHTML = data.teams.map(team => `
         <tr>
           <td data-label="Team"><div class="name">${{esc(team.id)}}</div><div class="muted">${{esc(team.fleet || "default")}}</div><div class="muted">${{esc(team.apiBase)}}</div></td>
@@ -227,6 +420,7 @@ def render_dashboard(title: str) -> bytes:
     }}
     refresh();
     setInterval(refresh, 3000);
+    window.addEventListener("resize", refresh);
   </script>
 </body>
 </html>"""

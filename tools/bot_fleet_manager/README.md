@@ -42,7 +42,7 @@ Or run only the dashboard against already-running leaders:
 python tools/bot_fleet_manager/bot_fleet_manager.py tools/bot_fleet_manager/fleet.settings.json dashboard
 ```
 
-The dashboard listens on `http://127.0.0.1:8780` by default and shows leader status, textual position, current activity, party members, and recent chat. Use `--dashboard-port` with `supervise` or `--port` with `dashboard` to change the port.
+The dashboard listens on `http://127.0.0.1:8780` by default and shows an abstract leader-position map, leader status, textual position, current activity, party members, and recent chat. Use `--dashboard-port` with `supervise` or `--port` with `dashboard` to change the port.
 
 Common commands:
 
