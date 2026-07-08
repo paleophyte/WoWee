@@ -58,6 +58,93 @@ Status:
 curl http://127.0.0.1:8787/status
 ```
 
+World self:
+
+```bash
+curl http://127.0.0.1:8787/world/self
+```
+
+Party:
+
+```bash
+curl http://127.0.0.1:8787/party
+```
+
+Queue a raw command:
+
+```bash
+curl -X POST http://127.0.0.1:8787/commands \
+  -H "Content-Type: application/json" \
+  -d "{\"command\":\".bot follow\"}"
+```
+
+Move the leader toward coordinates on the current map:
+
+```bash
+curl -X POST http://127.0.0.1:8787/movement/goto \
+  -H "Content-Type: application/json" \
+  -d "{\"mapId\":530,\"x\":-248.0,\"y\":951.0,\"z\":84.0,\"arrivalRadius\":3.0}"
+```
+
+Move through a sequence of waypoints:
+
+```bash
+curl -X POST http://127.0.0.1:8787/movement/goto/waypoints \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mapId": 0,
+    "arrivalRadius": 5.0,
+    "waypoints": [
+      {"x": -8970, "y": 610, "z": 95},
+      {"x": -9050, "y": 520, "z": 92},
+      {"x": -9465, "y": 62, "z": 56}
+    ]
+  }'
+```
+
+### Coordinate Convention
+
+The headless client's position and movement API use **game-world coordinates `(game.x, game.y)`**:
+- `game.x` = north-south axis (positive = north)
+- `game.y` = east-west axis (positive = east)
+
+The `tools.pathfinding.pathfinder` uses **canonical ADT coordinates `(wx, wy)`** where:
+- `wx` = east-west (= headless `position.y`)
+- `wy` = north-south (= headless `position.x`)
+
+When using the pathfinder output, swap axes before sending to the movement API:
+```python
+# pathfinder returns (wx, wy)
+headless_waypoint = {"x": wy, "y": wx, "z": wz}
+```
+
+The `travel_demo.py --pathfind` flag handles this conversion automatically.
+
+Each waypoint can optionally override the arrival radius:
+
+```json
+{"x": -8970, "y": 610, "z": 95, "arrivalRadius": 8.0}
+```
+
+Stop leader movement:
+
+```bash
+curl -X POST http://127.0.0.1:8787/movement/stop \
+  -H "Content-Type: application/json" \
+  -d "{\"reason\":\"manual stop\"}"
+```
+
+The `GET /status` endpoint reports waypoint progress:
+
+```json
+"movement": {
+  "state": "moving",
+  "waypointIndex": 2,
+  "waypointCount": 3,
+  ...
+}
+```
+
 Read chat:
 
 ```bash

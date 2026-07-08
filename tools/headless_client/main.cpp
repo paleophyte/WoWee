@@ -31,6 +31,7 @@
 #include <thread>
 #include <ctime>
 #include <vector>
+#include <cmath>
 
 #ifdef _WIN32
 #include <conio.h>
@@ -90,12 +91,52 @@ struct Settings {
 
     std::vector<std::string> onEnterWorldCommands;
     float onEnterCommandDelaySeconds = 0.25f;
+
+    std::optional<game::CharCreateData> createCharacter;
+    bool exitAfterCreateCharacter = false;
 };
 
 struct PendingChat {
     game::ChatType type = game::ChatType::SAY;
     std::string message;
     std::string target;
+};
+
+struct Waypoint {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float arrivalRadius = 0.0f;
+};
+
+struct MovementTask {
+    bool active = false;
+    bool started = false;
+    uint32_t mapId = 0;
+    std::vector<Waypoint> waypoints;
+    size_t currentWaypoint = 0;
+    float arrivalRadius = 3.0f;
+    std::string status = "idle";
+    std::string error;
+    float lastSetX = 0.0f;
+    float lastSetY = 0.0f;
+    float lastSetZ = 0.0f;
+    bool lastSetValid = false;
+
+    float targetX() const {
+        return currentWaypoint < waypoints.size() ? waypoints[currentWaypoint].x : 0.0f;
+    }
+    float targetY() const {
+        return currentWaypoint < waypoints.size() ? waypoints[currentWaypoint].y : 0.0f;
+    }
+    float targetZ() const {
+        return currentWaypoint < waypoints.size() ? waypoints[currentWaypoint].z : 0.0f;
+    }
+    float targetRadius() const {
+        if (currentWaypoint < waypoints.size() && waypoints[currentWaypoint].arrivalRadius > 0.0f)
+            return waypoints[currentWaypoint].arrivalRadius;
+        return arrivalRadius;
+    }
 };
 
 std::string lowerAscii(std::string value) {
@@ -116,6 +157,10 @@ std::string detectExpansion(uint32_t build) {
     if (build <= 8606) return "tbc";
     return "wotlk";
 }
+
+std::optional<game::Race> raceFromString(std::string value);
+std::optional<game::Class> classFromString(std::string value);
+std::optional<game::Gender> genderFromString(std::string value);
 
 template <typename T>
 T jsonValue(const json& obj, const char* key, T fallback) {
@@ -201,6 +246,32 @@ Settings loadSettings(const std::string& path) {
         }
     }
 
+    const auto provisionObj = doc.value("provision", json::object());
+    if (provisionObj.is_object()) {
+        const auto createObj = provisionObj.value("createCharacter", json::object());
+        if (createObj.is_object() && jsonValue<bool>(createObj, "enabled", false)) {
+            game::CharCreateData data;
+            data.name = trim(jsonValue<std::string>(createObj, "name", ""));
+            const auto race = raceFromString(jsonValue<std::string>(createObj, "race", ""));
+            const auto cls = classFromString(jsonValue<std::string>(createObj, "class", ""));
+            const auto gender = genderFromString(jsonValue<std::string>(createObj, "gender", "male"));
+            if (data.name.empty()) throw std::runtime_error("provision.createCharacter.name is required");
+            if (!race) throw std::runtime_error("provision.createCharacter.race is invalid");
+            if (!cls) throw std::runtime_error("provision.createCharacter.class is invalid");
+            if (!gender) throw std::runtime_error("provision.createCharacter.gender is invalid");
+            data.race = *race;
+            data.characterClass = *cls;
+            data.gender = *gender;
+            data.skin = static_cast<uint8_t>(std::clamp(jsonValue<int>(createObj, "skin", 0), 0, 255));
+            data.face = static_cast<uint8_t>(std::clamp(jsonValue<int>(createObj, "face", 0), 0, 255));
+            data.hairStyle = static_cast<uint8_t>(std::clamp(jsonValue<int>(createObj, "hairStyle", 0), 0, 255));
+            data.hairColor = static_cast<uint8_t>(std::clamp(jsonValue<int>(createObj, "hairColor", 0), 0, 255));
+            data.facialHair = static_cast<uint8_t>(std::clamp(jsonValue<int>(createObj, "facialHair", 0), 0, 255));
+            s.createCharacter = data;
+            s.exitAfterCreateCharacter = jsonValue<bool>(createObj, "exitAfterCreate", true);
+        }
+    }
+
     return s;
 }
 
@@ -227,6 +298,47 @@ std::optional<game::ChatType> chatTypeFromString(const std::string& value) {
 
 std::string chatTypeName(game::ChatType type) {
     return game::getChatTypeString(type);
+}
+
+std::optional<game::Race> raceFromString(std::string value) {
+    value = lowerAscii(trim(std::move(value)));
+    if (value == "human" || value == "1") return game::Race::HUMAN;
+    if (value == "orc" || value == "2") return game::Race::ORC;
+    if (value == "dwarf" || value == "3") return game::Race::DWARF;
+    if (value == "night_elf" || value == "nightelf" || value == "night elf" || value == "4") return game::Race::NIGHT_ELF;
+    if (value == "undead" || value == "5") return game::Race::UNDEAD;
+    if (value == "tauren" || value == "6") return game::Race::TAUREN;
+    if (value == "gnome" || value == "7") return game::Race::GNOME;
+    if (value == "troll" || value == "8") return game::Race::TROLL;
+    if (value == "blood_elf" || value == "bloodelf" || value == "blood elf" || value == "10") return game::Race::BLOOD_ELF;
+    if (value == "draenei" || value == "11") return game::Race::DRAENEI;
+    return std::nullopt;
+}
+
+std::optional<game::Class> classFromString(std::string value) {
+    value = lowerAscii(trim(std::move(value)));
+    if (value == "warrior" || value == "1") return game::Class::WARRIOR;
+    if (value == "paladin" || value == "2") return game::Class::PALADIN;
+    if (value == "hunter" || value == "3") return game::Class::HUNTER;
+    if (value == "rogue" || value == "4") return game::Class::ROGUE;
+    if (value == "priest" || value == "5") return game::Class::PRIEST;
+    if (value == "shaman" || value == "7") return game::Class::SHAMAN;
+    if (value == "mage" || value == "8") return game::Class::MAGE;
+    if (value == "warlock" || value == "9") return game::Class::WARLOCK;
+    if (value == "druid" || value == "11") return game::Class::DRUID;
+    return std::nullopt;
+}
+
+std::optional<game::Gender> genderFromString(std::string value) {
+    value = lowerAscii(trim(std::move(value)));
+    if (value == "male" || value == "m" || value == "0") return game::Gender::MALE;
+    if (value == "female" || value == "f" || value == "1") return game::Gender::FEMALE;
+    return std::nullopt;
+}
+
+std::string movementTaskStateName(const MovementTask& task) {
+    if (task.active) return "moving";
+    return task.status.empty() ? "idle" : task.status;
 }
 
 std::string timeToIso(std::chrono::system_clock::time_point tp) {
@@ -279,6 +391,17 @@ public:
         game_.setOnFailure([this](const std::string& reason) {
             fail("World failed: " + reason);
         });
+        game_.setCharCreateCallback([this](bool success, const std::string& message) {
+            std::cout << "Character create result: " << message << "\n";
+            if (success) {
+                charCreateDone_ = true;
+                if (settings_.exitAfterCreateCharacter) {
+                    g_running = false;
+                }
+            } else {
+                fail("Character create failed: " + message);
+            }
+        });
 
         if (!auth_.connect(settings_.authHost, settings_.authPort)) {
             fail("Could not connect to auth server");
@@ -301,6 +424,10 @@ public:
         inWorldForApi_ = (game_.getState() == game::WorldState::IN_WORLD);
 
         if (!selectedCharacter_ && game_.getState() == game::WorldState::CHAR_LIST_RECEIVED) {
+            if (settings_.createCharacter) {
+                provisionConfiguredCharacter();
+                return;
+            }
             selectConfiguredCharacter();
         }
 
@@ -319,6 +446,7 @@ public:
         if (!logoutRequested_) {
             drainScheduledCommands(deltaSeconds);
             drainPendingChat();
+            updateMovementTask(deltaSeconds);
         }
         syncChatSnapshot();
         updateLogoutExit();
@@ -327,14 +455,188 @@ public:
     bool isFailed() const { return failed_.load(); }
     bool isInWorld() const { return inWorldForApi_.load(); }
     bool isLogoutRequested() const { return logoutRequested_.load(); }
-    std::string status() const {
-        if (failed_) {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            return "failed: " + failureReason_;
+    json statusJson() const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        bool inCombat = false, isDead = false, isPlayerDead = false;
+        uint32_t hp = 0, maxHp = 0;
+        if (isInWorld()) {
+            auto playerEntity = game_.getEntityManager().getEntity(game_.getPlayerGuid());
+            if (playerEntity) {
+                if (auto* unit = dynamic_cast<game::Unit*>(playerEntity.get())) {
+                    hp = unit->getHealth();
+                    maxHp = unit->getMaxHealth();
+                }
+            }
+            inCombat = game_.isInCombat();
+            isDead = game_.isDead();
+            isPlayerDead = game_.isPlayerDead();
         }
-        if (logoutRequested_) return "logging_out";
-        if (isInWorld()) return "in_world";
-        return "connecting";
+        return {
+            {"status", statusUnlocked()},
+            {"inWorld", isInWorld()},
+            {"movement", movementTaskToJsonLocked()},
+            {"combat", {{"inCombat", inCombat}}},
+            {"health", {{"current", hp}, {"max", maxHp}, {"isDead", isDead}, {"isPlayerDead", isPlayerDead}}}
+        };
+    }
+    std::string status() const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return statusUnlocked();
+    }
+
+    json worldSelf() const {
+        const auto& move = game_.getMovementInfo();
+        json character = json::object();
+        if (const auto* ch = game_.getActiveCharacter()) {
+            character = {
+                {"name", ch->name},
+                {"guid", ch->guid},
+                {"race", static_cast<uint8_t>(ch->race)},
+                {"class", static_cast<uint8_t>(ch->characterClass)},
+                {"level", ch->level}
+            };
+        }
+
+uint32_t hp = 0, maxHp = 0;
+        {
+            auto playerEntity = game_.getEntityManager().getEntity(game_.getPlayerGuid());
+            if (playerEntity) {
+                if (auto* unit = dynamic_cast<game::Unit*>(playerEntity.get())) {
+                    hp = unit->getHealth();
+                    maxHp = unit->getMaxHealth();
+                }
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return {
+            {"status", statusUnlocked()},
+            {"inWorld", isInWorld()},
+            {"character", character},
+            {"playerGuid", game_.getPlayerGuid()},
+            {"mapId", game_.getCurrentMapId()},
+            {"position", {{"x", move.x}, {"y", move.y}, {"z", move.z}}},
+            {"orientation", move.orientation},
+            {"movementFlags", move.flags},
+            {"movementFlags2", move.flags2},
+            {"runSpeed", game_.getServerRunSpeed()},
+            {"movement", movementTaskToJsonLocked()},
+            {"combat", {{"inCombat", game_.isInCombat()}}},
+            {"health", {{"current", hp}, {"max", maxHp}, {"isDead", game_.isDead()}, {"isPlayerDead", game_.isPlayerDead()}}}
+        };
+    }
+
+    json partyJson() const {
+        const auto& party = game_.getPartyData();
+        json members = json::array();
+        for (const auto& member : party.members) {
+            members.push_back({
+                {"name", member.name},
+                {"guid", member.guid},
+                {"isOnline", member.isOnline != 0},
+                {"subGroup", member.subGroup},
+                {"flags", member.flags},
+                {"roles", member.roles},
+                {"level", member.level},
+                {"zoneId", member.zoneId},
+                {"hasPartyStats", member.hasPartyStats}
+            });
+        }
+        return {
+            {"status", status()},
+            {"inGroup", !party.isEmpty()},
+            {"groupType", party.groupType},
+            {"memberCount", party.memberCount},
+            {"leaderGuid", party.leaderGuid},
+            {"members", members}
+        };
+    }
+
+    json queueCommand(const std::string& command) {
+        const std::string trimmed = trim(command);
+        if (trimmed.empty()) {
+            return {{"ok", false}, {"error", "command is required"}};
+        }
+        PendingChat msg;
+        msg.type = game::ChatType::SAY;
+        msg.message = trimmed;
+        enqueueChat(std::move(msg));
+        return {{"ok", true}};
+    }
+
+    json startGoto(uint32_t mapId, float x, float y, float z, float arrivalRadius) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (mapId != 0 && mapId != game_.getCurrentMapId()) {
+            return {{"ok", false}, {"error", "map mismatch"}, {"currentMapId", game_.getCurrentMapId()}};
+        }
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            return {{"ok", false}, {"error", "coordinates must be finite"}};
+        }
+        if (!std::isfinite(arrivalRadius) || arrivalRadius <= 0.0f) {
+            arrivalRadius = 3.0f;
+        }
+        if (game_.isPlayerRooted()) {
+            return {{"ok", false}, {"error", "movement_locked: player is rooted"}};
+        }
+        if (!game_.isServerMovementAllowed()) {
+            return {{"ok", false}, {"error", "movement_locked: server movement not allowed"}};
+        }
+        if (game_.isOnTaxiFlight()) {
+            return {{"ok", false}, {"error", "movement_locked: on taxi flight"}};
+        }
+
+        Waypoint wp;
+        wp.x = x;
+        wp.y = y;
+        wp.z = z;
+        wp.arrivalRadius = std::max(0.5f, arrivalRadius);
+
+        movementTask_ = MovementTask{};
+        movementTask_.active = true;
+        movementTask_.mapId = mapId == 0 ? game_.getCurrentMapId() : mapId;
+        movementTask_.arrivalRadius = std::max(0.5f, arrivalRadius);
+        movementTask_.waypoints.push_back(wp);
+        movementTask_.status = "moving";
+        return {{"ok", true}, {"movement", movementTaskToJsonLocked()}};
+    }
+
+    json startGotoWaypoints(uint32_t mapId, const std::vector<Waypoint>& waypoints, float defaultRadius) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (waypoints.empty()) {
+            return {{"ok", false}, {"error", "waypoints list is empty"}};
+        }
+        if (!std::isfinite(defaultRadius) || defaultRadius <= 0.0f) {
+            defaultRadius = 3.0f;
+        }
+        if (game_.isPlayerRooted()) {
+            return {{"ok", false}, {"error", "movement_locked: player is rooted"}};
+        }
+        if (!game_.isServerMovementAllowed()) {
+            return {{"ok", false}, {"error", "movement_locked: server movement not allowed"}};
+        }
+        if (game_.isOnTaxiFlight()) {
+            return {{"ok", false}, {"error", "movement_locked: on taxi flight"}};
+        }
+
+        movementTask_ = MovementTask{};
+        movementTask_.active = true;
+        movementTask_.mapId = mapId == 0 ? game_.getCurrentMapId() : mapId;
+        movementTask_.arrivalRadius = std::max(0.5f, defaultRadius);
+        movementTask_.waypoints = waypoints;
+        movementTask_.status = "moving";
+        return {{"ok", true}, {"movement", movementTaskToJsonLocked()}};
+    }
+
+    json stopMovementTask(const std::string& reason = "stopped") {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        stopMovementTaskLocked(reason, "");
+        return {{"ok", true}, {"movement", movementTaskToJsonLocked()}};
     }
 
     void requestGracefulLogout() {
@@ -372,6 +674,30 @@ public:
     }
 
 private:
+    std::string statusUnlocked() const {
+        if (failed_) return "failed: " + failureReason_;
+        if (logoutRequested_) return "logging_out";
+        if (isInWorld()) return "in_world";
+        return "connecting";
+    }
+
+    json movementTaskToJsonLocked() const {
+        const size_t total = movementTask_.waypoints.size();
+        const size_t index = movementTask_.currentWaypoint;
+        return {
+            {"state", movementTaskStateName(movementTask_)},
+            {"active", movementTask_.active},
+            {"mapId", movementTask_.mapId},
+            {"x", movementTask_.targetX()},
+            {"y", movementTask_.targetY()},
+            {"z", movementTask_.targetZ()},
+            {"arrivalRadius", movementTask_.targetRadius()},
+            {"error", movementTask_.error},
+            {"waypointIndex", total > 0 ? static_cast<uint64_t>(index + 1) : 0ull},
+            {"waypointCount", static_cast<uint64_t>(total)}
+        };
+    }
+
     game::MessageChatData resolveChatSender(const game::MessageChatData& msg) const {
         if (!msg.senderName.empty() || msg.senderGuid == 0) return msg;
 
@@ -478,6 +804,26 @@ private:
         game_.selectCharacter(chosen->guid);
     }
 
+    void provisionConfiguredCharacter() {
+        if (charCreateRequested_ || charCreateDone_) return;
+        const auto& data = *settings_.createCharacter;
+        const std::string want = lowerAscii(data.name);
+        for (const auto& ch : game_.getCharacters()) {
+            if (lowerAscii(ch.name) == want) {
+                std::cout << "Character already exists: " << data.name << "\n";
+                charCreateDone_ = true;
+                if (settings_.exitAfterCreateCharacter) {
+                    g_running = false;
+                }
+                return;
+            }
+        }
+
+        charCreateRequested_ = true;
+        std::cout << "Creating character " << data.name << "\n";
+        game_.createCharacter(data);
+    }
+
     void drainPendingChat() {
         if (!isInWorld()) return;
 
@@ -516,6 +862,117 @@ private:
         scheduledCommands_.pop_front();
         enqueueChat(std::move(msg));
         nextScheduledCommandDelay_ = settings_.onEnterCommandDelaySeconds;
+    }
+
+    void stopMovementTaskLocked(const std::string& status, const std::string& error) {
+        if (movementTask_.active || movementTask_.started) {
+            game_.sendMovement(game::Opcode::MSG_MOVE_STOP);
+            game_.sendMovement(game::Opcode::MSG_MOVE_HEARTBEAT);
+        }
+        movementTask_.active = false;
+        movementTask_.started = false;
+        movementTask_.status = status;
+        movementTask_.error = error;
+        movementTask_.lastSetValid = false;
+    }
+
+    void advanceToNextWaypointLocked() {
+        if (movementTask_.currentWaypoint + 1 < movementTask_.waypoints.size()) {
+            ++movementTask_.currentWaypoint;
+            movementTask_.lastSetValid = false;
+            if (movementTask_.currentWaypoint + 1 == movementTask_.waypoints.size()) {
+                std::cout << "Waypoint " << (movementTask_.currentWaypoint + 1)
+                          << "/" << movementTask_.waypoints.size() << " (final)\n";
+            } else {
+                std::cout << "Waypoint " << (movementTask_.currentWaypoint + 1)
+                          << "/" << movementTask_.waypoints.size() << "\n";
+            }
+        } else {
+            stopMovementTaskLocked("arrived", "");
+        }
+    }
+
+    void updateMovementTask(float deltaSeconds) {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!movementTask_.active) return;
+
+        if (!isInWorld()) {
+            stopMovementTaskLocked("failed", "not in world");
+            return;
+        }
+        if (movementTask_.mapId != 0 && movementTask_.mapId != game_.getCurrentMapId()) {
+            stopMovementTaskLocked("failed", "map changed");
+            return;
+        }
+        if (game_.isPlayerRooted()) {
+            stopMovementTaskLocked("movement_locked", "player is rooted");
+            return;
+        }
+        if (!game_.isServerMovementAllowed()) {
+            stopMovementTaskLocked("movement_locked", "server movement not allowed");
+            return;
+        }
+        if (game_.isOnTaxiFlight()) {
+            stopMovementTaskLocked("movement_locked", "on taxi flight");
+            return;
+        }
+
+        if (movementTask_.waypoints.empty()) {
+            stopMovementTaskLocked("failed", "no waypoints");
+            return;
+        }
+
+        const auto& move = game_.getMovementInfo();
+
+        if (movementTask_.lastSetValid) {
+            const float resetDx = move.x - movementTask_.lastSetX;
+            const float resetDy = move.y - movementTask_.lastSetY;
+            const float resetDz = move.z - movementTask_.lastSetZ;
+            const float resetDist = std::sqrt(resetDx * resetDx + resetDy * resetDy + resetDz * resetDz);
+            if (resetDist > 1.0f) {
+                stopMovementTaskLocked("movement_locked", "server reset position");
+                return;
+            }
+        }
+
+        const float tx = movementTask_.targetX();
+        const float ty = movementTask_.targetY();
+        const float tz = movementTask_.targetZ();
+        const float radius = movementTask_.targetRadius();
+
+        const float dx = tx - move.x;
+        const float dy = ty - move.y;
+        const float dz = tz - move.z;
+        const float horizontalDist = std::sqrt(dx * dx + dy * dy);
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (distance <= radius) {
+            game_.setPosition(tx, ty, tz);
+            advanceToNextWaypointLocked();
+            return;
+        }
+
+        if (horizontalDist > 0.001f) {
+            game_.setOrientation(std::atan2(-dy, dx));
+            game_.sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
+        }
+        if (!movementTask_.started) {
+            game_.sendMovement(game::Opcode::MSG_MOVE_START_FORWARD);
+            movementTask_.started = true;
+        }
+
+        const float speed = std::max(0.1f, game_.getServerRunSpeed());
+        const float step = std::min(distance, speed * std::max(0.0f, deltaSeconds));
+        const float t = distance > 0.001f ? (step / distance) : 1.0f;
+        const float newX = move.x + dx * t;
+        const float newY = move.y + dy * t;
+        const float newZ = move.z + dz * t;
+        game_.setPosition(newX, newY, newZ);
+        movementTask_.lastSetX = newX;
+        movementTask_.lastSetY = newY;
+        movementTask_.lastSetZ = newZ;
+        movementTask_.lastSetValid = true;
+        game_.sendMovement(game::Opcode::MSG_MOVE_HEARTBEAT);
     }
 
     void syncChatSnapshot() {
@@ -588,6 +1045,8 @@ private:
     std::string failureReason_;
     bool selectedCharacter_ = false;
     bool enteredWorld_ = false;
+    bool charCreateRequested_ = false;
+    bool charCreateDone_ = false;
 
     std::mutex pendingMutex_;
     std::deque<PendingChat> pendingChat_;
@@ -599,6 +1058,7 @@ private:
     size_t chatBaseId_ = 1;
     size_t nextChatId_ = 1;
     size_t lastGameHistorySize_ = 0;
+    MovementTask movementTask_;
     std::atomic<bool> logoutRequested_{false};
     std::chrono::steady_clock::time_point logoutRequestedAt_{};
 };
@@ -694,7 +1154,11 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
 
     try {
         if (method == "GET" && path == "/status") {
-            sendHttp(client, 200, {{"status", session.status()}, {"inWorld", session.isInWorld()}});
+            sendHttp(client, 200, session.statusJson());
+        } else if (method == "GET" && path == "/world/self") {
+            sendHttp(client, 200, session.worldSelf());
+        } else if (method == "GET" && path == "/party") {
+            sendHttp(client, 200, session.partyJson());
         } else if (method == "GET" && path == "/chat") {
             const size_t after = queryParam(query, "after").empty() ? 0 : static_cast<size_t>(std::stoull(queryParam(query, "after")));
             const size_t limit = queryParam(query, "limit").empty() ? 100 : static_cast<size_t>(std::stoull(queryParam(query, "limit")));
@@ -718,6 +1182,48 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
                     sendHttp(client, 200, {{"ok", true}});
                 }
             }
+        } else if (method == "POST" && path == "/commands") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            if (payload.contains("commands") && payload["commands"].is_array()) {
+                json results = json::array();
+                for (const auto& item : payload["commands"]) {
+                    results.push_back(session.queueCommand(item.is_string() ? item.get<std::string>() : ""));
+                }
+                sendHttp(client, 200, {{"ok", true}, {"results", results}});
+            } else {
+                const auto result = session.queueCommand(payload.value("command", payload.value("message", "")));
+                sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+            }
+        } else if (method == "POST" && path == "/movement/goto/waypoints") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const uint32_t mapId = static_cast<uint32_t>(std::max(0, payload.value("mapId", 0)));
+            const float defaultRadius = payload.value("arrivalRadius", 3.0f);
+            std::vector<Waypoint> waypoints;
+            for (const auto& wpJson : payload.value("waypoints", json::array())) {
+                if (!wpJson.is_object()) continue;
+                Waypoint wp;
+                wp.x = wpJson.value("x", 0.0f);
+                wp.y = wpJson.value("y", 0.0f);
+                wp.z = wpJson.value("z", 0.0f);
+                wp.arrivalRadius = wpJson.value("arrivalRadius", 0.0f);
+                if (std::isfinite(wp.x) && std::isfinite(wp.y) && std::isfinite(wp.z)) {
+                    waypoints.push_back(wp);
+                }
+            }
+            const auto result = session.startGotoWaypoints(mapId, waypoints, defaultRadius);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/movement/goto") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const uint32_t mapId = static_cast<uint32_t>(std::max(0, payload.value("mapId", 0)));
+            const float x = payload.value("x", 0.0f);
+            const float y = payload.value("y", 0.0f);
+            const float z = payload.value("z", 0.0f);
+            const float arrivalRadius = payload.value("arrivalRadius", 3.0f);
+            const auto result = session.startGoto(mapId, x, y, z, arrivalRadius);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/movement/stop") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            sendHttp(client, 200, session.stopMovementTask(payload.value("reason", "stopped")));
         } else {
             sendHttp(client, 404, {{"error", "not found"}});
         }

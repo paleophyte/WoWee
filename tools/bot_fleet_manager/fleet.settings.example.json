@@ -1,0 +1,61 @@
+{
+  "woweeHeadless": "build/bin/wowee_headless.exe",
+  "runtimeDir": "tools/bot_fleet_manager/runtime",
+  "launchDelaySeconds": 2.0,
+  "supervision": {
+    "initialRestartBackoffSeconds": 5.0,
+    "maxRestartBackoffSeconds": 60.0,
+    "maxRestarts": 0
+  },
+  "defaults": {
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 3724
+    },
+    "client": {
+      "major": 2,
+      "minor": 4,
+      "patch": 3,
+      "build": 8606,
+      "protocol": 8,
+      "locale": "enUS",
+      "platform": "x86",
+      "os": "Win",
+      "expansion": "tbc"
+    },
+    "realm": {
+      "name": "",
+      "index": 0,
+      "id": 0
+    },
+    "api": {
+      "bind": "127.0.0.1",
+      "basePort": 8787,
+      "maxMessages": 500
+    },
+    "automation": {
+      "commandDelaySeconds": 0.25,
+      "onEnterWorldCommands": []
+    }
+  },
+  "leaders": [
+    {
+      "id": "leader-1",
+      "fleet": "alpha",
+      "account": "ACCOUNT_1",
+      "password": "PASSWORD_1",
+      "character": "Leaderone",
+      "apiPort": 8787,
+      "partyBots": ["Botone", "Bottwo", "Botthree", "Botfour"]
+    },
+    {
+      "id": "leader-2",
+      "fleet": "beta",
+      "account": "ACCOUNT_2",
+      "password": "PASSWORD_2",
+      "character": "Leadertwo",
+      "apiPort": 8788,
+      "partyBots": []
+    }
+  ]
+}

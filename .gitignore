@@ -84,7 +84,12 @@ imgui.ini
 config.ini
 config.json
 .env
+tools/.env
 tools/headless_client/settings.json
+tools/bot_fleet_manager/fleet.settings.json
+tools/bot_fleet_manager/runtime/
+tools/provisioning/*.local.json
+tools/provisioning/roster.json
 
 # Runtime cache (floor heights, etc.)
 cache/
@@ -105,9 +110,11 @@ asset_pipeline/
 # Local texture dumps / extracted art should never be committed
 assets/textures/
 node_modules/
+vcpkg_installed/
 
 # Python cache artifacts
 tools/__pycache__/
+**/__pycache__/
 *.pyc
 
 # artifacts

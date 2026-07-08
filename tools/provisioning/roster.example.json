@@ -1,0 +1,34 @@
+{
+  "defaults": {
+    "settings": "tools/headless_client/settings.json",
+    "woweeHeadless": "build/bin/wowee_headless.exe",
+    "accountPassword": "change-me",
+    "expansion": 1,
+    "race": "human",
+    "class": "warrior",
+    "gender": "male",
+    "createAccount": true,
+    "createCharacter": true
+  },
+  "accounts": [
+    {
+      "account": "BOT001",
+      "password": "change-me",
+      "characters": [
+        {
+          "name": "Botone"
+        }
+      ]
+    },
+    {
+      "account": "BOT002",
+      "password": "change-me",
+      "characters": [
+        {
+          "name": "Bottwo",
+          "class": "paladin"
+        }
+      ]
+    }
+  ]
+}
