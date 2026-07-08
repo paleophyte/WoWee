@@ -202,7 +202,7 @@ def render_dashboard(title: str) -> bytes:
     }}
     function chatText(team) {{
       if (team.endpointErrors && team.endpointErrors.chat) return "<span class='muted'>chat endpoint stale</span>";
-      const messages = team.recentChat || [];
+      const messages = [...(team.recentChat || [])].reverse();
       if (!messages.length) return "<span class='muted'>no recent chat</span>";
       return `<div class="chat">${{messages.map(m => `<div><code>${{esc(m.type)}}</code> ${{esc(m.from || "")}}: ${{esc(m.message || "")}}</div>`).join("")}}</div>`;
     }}
