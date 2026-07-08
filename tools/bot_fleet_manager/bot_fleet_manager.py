@@ -157,34 +157,66 @@ def creation_flags() -> int:
 
 
 class ManagedLeader:
-    def __init__(self, config: FleetConfig, leader: dict[str, Any], index: int, settings_path: Path):
+    def __init__(self, config: FleetConfig, leader: dict[str, Any], index: int, settings_path: Path, verbose: bool = False):
         self.config = config
         self.leader = leader
         self.index = index
         self.settings_path = settings_path
         self.leader_id = leader.get("id", f"leader-{index + 1}")
-        self.process: subprocess.Popen[bytes] | None = None
+        self.process: subprocess.Popen[Any] | None = None
         self.log_handle: Any = None
+        self.stream_thread: threading.Thread | None = None
         self.restart_count = 0
         self.next_start_at = 0.0
         self.backoff = config.initial_restart_backoff
         self.disabled = False
+        self.verbose = verbose
+
+    def stream_output(self) -> None:
+        if not self.process or not self.process.stdout:
+            return
+        try:
+            for line in self.process.stdout:
+                if self.log_handle:
+                    self.log_handle.write(line)
+                    self.log_handle.flush()
+                print(f"[{self.leader_id}] {line}", end="", flush=True)
+        except ValueError:
+            return
 
     def start(self) -> None:
         self.config.log_dir.mkdir(parents=True, exist_ok=True)
         if self.log_handle:
             self.log_handle.close()
         log_path = self.config.log_dir / f"{self.leader_id}.log"
-        self.log_handle = log_path.open("ab")
+        log_mode = "a" if self.verbose else "ab"
+        log_kwargs = {"encoding": "utf-8", "errors": "replace"} if self.verbose else {}
+        self.log_handle = log_path.open(log_mode, **log_kwargs)
         print(f"Starting {self.leader_id} with {self.settings_path}; log={log_path}")
-        self.process = subprocess.Popen(
-            [str(self.config.headless), str(self.settings_path)],
-            cwd=str(ROOT),
-            stdout=self.log_handle,
-            stderr=subprocess.STDOUT,
-            creationflags=creation_flags(),
-            env=runtime_env(),
-        )
+        if self.verbose:
+            self.process = subprocess.Popen(
+                [str(self.config.headless), str(self.settings_path)],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags(),
+                env=runtime_env(),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            self.stream_thread = threading.Thread(target=self.stream_output, daemon=True)
+            self.stream_thread.start()
+        else:
+            self.process = subprocess.Popen(
+                [str(self.config.headless), str(self.settings_path)],
+                cwd=str(ROOT),
+                stdout=self.log_handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags(),
+                env=runtime_env(),
+            )
 
     def poll(self) -> None:
         if self.disabled:
@@ -201,6 +233,9 @@ class ManagedLeader:
 
         print(f"{self.leader_id}: exited with code {rc}")
         self.process = None
+        if self.stream_thread:
+            self.stream_thread.join(timeout=2.0)
+            self.stream_thread = None
         if self.log_handle:
             self.log_handle.close()
             self.log_handle = None
@@ -226,6 +261,9 @@ class ManagedLeader:
             except subprocess.TimeoutExpired:
                 print(f"{self.leader_id}: terminate timed out; killing")
                 self.process.kill()
+        if self.stream_thread:
+            self.stream_thread.join(timeout=2.0)
+            self.stream_thread = None
         if self.log_handle:
             self.log_handle.close()
             self.log_handle = None
@@ -275,13 +313,19 @@ def start_dashboard_thread(config: FleetConfig, host: str, port: int) -> threadi
     return thread
 
 
-def cmd_supervise(config: FleetConfig, dashboard: bool = False, dashboard_host: str = "127.0.0.1", dashboard_port: int = 8780) -> int:
+def cmd_supervise(
+    config: FleetConfig,
+    dashboard: bool = False,
+    dashboard_host: str = "127.0.0.1",
+    dashboard_port: int = 8780,
+    verbose: bool = False,
+) -> int:
     if not config.headless.exists():
         print(f"Missing wowee_headless executable: {config.headless}", file=sys.stderr)
         return 2
 
     managed = [
-        ManagedLeader(config, leader, index, settings_path)
+        ManagedLeader(config, leader, index, settings_path, verbose=verbose)
         for index, (leader, settings_path) in enumerate(config.write_runtime_settings())
     ]
 
@@ -364,6 +408,14 @@ def main(argv: list[str]) -> int:
     supervise_parser.add_argument("--dashboard", action="store_true", help="Also start the team status dashboard")
     supervise_parser.add_argument("--dashboard-port", type=int, default=8780, help="Dashboard port")
     supervise_parser.add_argument("--dashboard-host", default="127.0.0.1", help="Dashboard bind address")
+    supervise_parser.add_argument(
+        "-v",
+        "--verbose",
+        "--debug",
+        "--v",
+        action="store_true",
+        help="Stream each leader's log output to the supervisor console",
+    )
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--fleet", default="")
     status_parser.add_argument("--leader", action="append", default=[])
@@ -392,7 +444,13 @@ def main(argv: list[str]) -> int:
     if args.command == "start":
         return cmd_start(config)
     if args.command == "supervise":
-        return cmd_supervise(config, dashboard=args.dashboard, dashboard_host=args.dashboard_host, dashboard_port=args.dashboard_port)
+        return cmd_supervise(
+            config,
+            dashboard=args.dashboard,
+            dashboard_host=args.dashboard_host,
+            dashboard_port=args.dashboard_port,
+            verbose=args.verbose,
+        )
     if args.command == "status":
         return cmd_status(config, args.fleet, args.leader)
     if args.command == "stop":

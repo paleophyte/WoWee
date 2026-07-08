@@ -28,6 +28,14 @@ Start the textual team dashboard while supervising:
 python tools/bot_fleet_manager/bot_fleet_manager.py tools/bot_fleet_manager/fleet.settings.json supervise --dashboard
 ```
 
+Stream each leader's log output to the same console while supervising:
+
+```bash
+python tools/bot_fleet_manager/bot_fleet_manager.py tools/bot_fleet_manager/fleet.settings.json supervise --dashboard --debug
+```
+
+The same flag is also available as `--verbose`, `--v`, or `-v`. Logs are still written under `tools/bot_fleet_manager/runtime/logs/`.
+
 Or run only the dashboard against already-running leaders:
 
 ```bash
