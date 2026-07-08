@@ -28,21 +28,30 @@ def _safe_get(doc: dict[str, Any], *path: str, default: Any = "") -> Any:
 
 def _summarize_activity(status: dict[str, Any]) -> str:
     movement = status.get("movement", {})
-    state = str(movement.get("state") or status.get("status") or "unknown")
-    if state == "moving":
+    movement_state = str(movement.get("state") or "idle")
+    session_state = str(status.get("status") or "unknown")
+    if movement_state == "moving":
         index = movement.get("waypointIndex", 0)
         count = movement.get("waypointCount", 0)
         target = movement.get("target", {})
         return f"moving to {target.get('x', '?')}, {target.get('y', '?')}, {target.get('z', '?')} ({index}/{count})"
     if movement.get("error"):
-        return f"{state}: {movement.get('error')}"
+        return f"{movement_state}: {movement.get('error')}"
     combat = status.get("combat", {})
     if combat.get("inCombat"):
         return "in combat"
     health = status.get("health", {})
     if health.get("isDead") or health.get("isPlayerDead"):
         return "dead"
-    return state
+    return session_state
+
+
+def _team_state(status: dict[str, Any] | None) -> str:
+    if not status:
+        return "offline"
+    if status.get("inWorld"):
+        return "in_world"
+    return str(status.get("status") or "connecting")
 
 
 def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
@@ -56,7 +65,8 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
             "id": leader_id,
             "fleet": item.get("fleet", ""),
             "apiBase": base,
-            "ok": False,
+            "apiReachable": False,
+            "state": "offline",
             "activity": "unavailable",
         }
         try:
@@ -65,7 +75,8 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
             party = _request_json(base + "/party")
             chat = _request_json(base + "/chat?after=0&limit=8")
             team.update({
-                "ok": True,
+                "apiReachable": True,
+                "state": _team_state(status),
                 "status": status,
                 "world": world,
                 "party": party,
@@ -113,6 +124,7 @@ def render_dashboard(title: str) -> bytes:
     td {{ font-size: 14px; }}
     .name {{ font-weight: 650; }}
     .ok {{ color: #85d996; }}
+    .warn {{ color: #ffd27a; }}
     .bad {{ color: #ff9a8b; }}
     .muted {{ color: #aab2bd; }}
     .chat {{ display: grid; gap: 3px; max-height: 140px; overflow: auto; }}
@@ -152,8 +164,9 @@ def render_dashboard(title: str) -> bytes:
     function locationText(team) {{
       const world = team.world || {{}};
       const pos = world.position || {{}};
-      if (!team.ok) return team.error || "unavailable";
-      return `map ${{esc(world.mapId)}} · x=${{Number(pos.x || 0).toFixed(1)}} y=${{Number(pos.y || 0).toFixed(1)}} z=${{Number(pos.z || 0).toFixed(1)}}`;
+      if (!team.apiReachable) return team.error || "unavailable";
+      if (team.state !== "in_world") return "not in world";
+      return `map ${{esc(world.mapId)}} - x=${{Number(pos.x || 0).toFixed(1)}} y=${{Number(pos.y || 0).toFixed(1)}} z=${{Number(pos.z || 0).toFixed(1)}}`;
     }}
     function partyText(team) {{
       const members = ((team.party || {{}}).members || []).map(m => esc(m.name || m.guid || "?"));
@@ -164,6 +177,11 @@ def render_dashboard(title: str) -> bytes:
       if (!messages.length) return "<span class='muted'>no recent chat</span>";
       return `<div class="chat">${{messages.map(m => `<div><code>${{esc(m.type)}}</code> ${{esc(m.from || "")}}: ${{esc(m.message || "")}}</div>`).join("")}}</div>`;
     }}
+    function statusClass(team) {{
+      if (!team.apiReachable || team.state === "offline") return "bad";
+      if (team.state === "in_world") return "ok";
+      return "warn";
+    }}
     async function refresh() {{
       const res = await fetch("/api/teams", {{cache: "no-store"}});
       const data = await res.json();
@@ -171,7 +189,7 @@ def render_dashboard(title: str) -> bytes:
       document.getElementById("teams").innerHTML = data.teams.map(team => `
         <tr>
           <td data-label="Team"><div class="name">${{esc(team.id)}}</div><div class="muted">${{esc(team.fleet || "default")}}</div><div class="muted">${{esc(team.apiBase)}}</div></td>
-          <td data-label="Status" class="${{team.ok ? "ok" : "bad"}}">${{team.ok ? "online" : "offline"}}</td>
+          <td data-label="Status" class="${{statusClass(team)}}">${{esc(team.state || "offline")}}</td>
           <td data-label="Location">${{locationText(team)}}</td>
           <td data-label="Activity">${{esc(team.activity)}}</td>
           <td data-label="Party">${{partyText(team)}}</td>
