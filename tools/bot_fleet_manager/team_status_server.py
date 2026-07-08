@@ -12,9 +12,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 
-def _request_json(url: str, timeout: float = 1.5) -> dict[str, Any]:
+def _request_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _try_request_json(url: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        return _request_json(url), ""
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return None, str(exc)
 
 
 def _safe_get(doc: dict[str, Any], *path: str, default: Any = "") -> Any:
@@ -68,23 +75,42 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
             "apiReachable": False,
             "state": "offline",
             "activity": "unavailable",
+            "endpointErrors": {},
         }
-        try:
-            status = _request_json(base + "/status")
-            world = _request_json(base + "/world/self")
-            party = _request_json(base + "/party")
-            chat = _request_json(base + "/chat?after=0&limit=8")
-            team.update({
-                "apiReachable": True,
-                "state": _team_state(status),
-                "status": status,
-                "world": world,
-                "party": party,
-                "recentChat": chat.get("messages", [])[-8:],
-                "activity": _summarize_activity(status),
-            })
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            team["error"] = str(exc)
+        status, status_error = _try_request_json(base + "/status")
+        if status is None:
+            team["error"] = status_error
+            teams.append(team)
+            continue
+
+        team.update({
+            "apiReachable": True,
+            "state": _team_state(status),
+            "status": status,
+            "activity": _summarize_activity(status),
+        })
+
+        endpoint_errors: dict[str, str] = {}
+        world, world_error = _try_request_json(base + "/world/self")
+        if world is not None:
+            team["world"] = world
+        elif world_error:
+            endpoint_errors["world"] = world_error
+
+        party, party_error = _try_request_json(base + "/party")
+        if party is not None:
+            team["party"] = party
+        elif party_error:
+            endpoint_errors["party"] = party_error
+
+        chat, chat_error = _try_request_json(base + "/chat?after=0&limit=8")
+        if chat is not None:
+            team["recentChat"] = chat.get("messages", [])[-8:]
+        elif chat_error:
+            endpoint_errors["chat"] = chat_error
+
+        if endpoint_errors:
+            team["endpointErrors"] = endpoint_errors
         teams.append(team)
 
     return {"collectedAt": collected_at, "teams": teams}
@@ -165,14 +191,17 @@ def render_dashboard(title: str) -> bytes:
       const world = team.world || {{}};
       const pos = world.position || {{}};
       if (!team.apiReachable) return team.error || "unavailable";
+      if (team.endpointErrors && team.endpointErrors.world) return "world endpoint stale";
       if (team.state !== "in_world") return "not in world";
       return `map ${{esc(world.mapId)}} - x=${{Number(pos.x || 0).toFixed(1)}} y=${{Number(pos.y || 0).toFixed(1)}} z=${{Number(pos.z || 0).toFixed(1)}}`;
     }}
     function partyText(team) {{
+      if (team.endpointErrors && team.endpointErrors.party) return "<span class='muted'>party endpoint stale</span>";
       const members = ((team.party || {{}}).members || []).map(m => esc(m.name || m.guid || "?"));
       return members.length ? members.join(", ") : "<span class='muted'>none reported</span>";
     }}
     function chatText(team) {{
+      if (team.endpointErrors && team.endpointErrors.chat) return "<span class='muted'>chat endpoint stale</span>";
       const messages = team.recentChat || [];
       if (!messages.length) return "<span class='muted'>no recent chat</span>";
       return `<div class="chat">${{messages.map(m => `<div><code>${{esc(m.type)}}</code> ${{esc(m.from || "")}}: ${{esc(m.message || "")}}</div>`).join("")}}</div>`;
