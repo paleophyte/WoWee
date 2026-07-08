@@ -95,6 +95,7 @@ void Logger::emitLineLocked(LogLevel level, const std::string& message) {
 
     if (echoToStdout_) {
         std::cout << line.str() << '\n';
+        std::cout.flush();
     }
     if (fileStream.is_open()) {
         fileStream << line.str() << '\n';
