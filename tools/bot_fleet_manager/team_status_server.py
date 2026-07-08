@@ -5,11 +5,36 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import posixpath
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent
+MAP_DATA_PATH = ROOT / "map_data" / "zone_map_bounds.json"
+RUNTIME_ZONE_ASSET_DIR = ROOT / "runtime" / "map_assets" / "zone"
+DEFAULT_ZONE_ASSET_DIRS = [
+    RUNTIME_ZONE_ASSET_DIR,
+    Path(os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR", "")) if os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR") else None,
+    Path(r"C:\Users\admin\code\wow_server\minimanager_remote\img\zone"),
+]
+
+
+def _load_zone_bounds() -> dict[str, dict[str, Any]]:
+    try:
+        with MAP_DATA_PATH.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+ZONE_BOUNDS = _load_zone_bounds()
 
 
 def _request_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
@@ -61,6 +86,90 @@ def _team_state(status: dict[str, Any] | None) -> str:
     return str(status.get("status") or "connecting")
 
 
+def _zone_score(x: float, y: float, bounds: dict[str, Any]) -> tuple[float, float]:
+    min_x = min(float(bounds["top"]), float(bounds["bottom"]))
+    max_x = max(float(bounds["top"]), float(bounds["bottom"]))
+    min_y = min(float(bounds["left"]), float(bounds["right"]))
+    max_y = max(float(bounds["left"]), float(bounds["right"]))
+    area = max(1.0, (max_x - min_x) * (max_y - min_y))
+    center_x = (min_x + max_x) / 2.0
+    center_y = (min_y + max_y) / 2.0
+    half_height = max(1.0, (max_x - min_x) / 2.0)
+    half_width = max(1.0, (max_y - min_y) / 2.0)
+    score = ((x - center_x) / half_height) ** 2 + ((y - center_y) / half_width) ** 2
+    return score, area
+
+
+def _zone_contains(map_id: int, x: float, y: float, bounds: dict[str, Any]) -> bool:
+    if int(bounds.get("map_id", -1)) != map_id:
+        return False
+    min_x = min(float(bounds["top"]), float(bounds["bottom"]))
+    max_x = max(float(bounds["top"]), float(bounds["bottom"]))
+    min_y = min(float(bounds["left"]), float(bounds["right"]))
+    max_y = max(float(bounds["left"]), float(bounds["right"]))
+    return min_x <= x <= max_x and min_y <= y <= max_y
+
+
+def _zone_for_position(map_id: int, x: float, y: float) -> tuple[str, dict[str, Any]] | None:
+    best: tuple[str, dict[str, Any], float, float] | None = None
+    for zone_id, bounds in ZONE_BOUNDS.items():
+        if not _zone_contains(map_id, x, y, bounds):
+            continue
+        score, area = _zone_score(x, y, bounds)
+        if best is None or score < best[2] or (score <= best[2] + 0.10 and area < best[3]):
+            best = (zone_id, bounds, score, area)
+    if best is None:
+        return None
+    return best[0], best[1]
+
+
+def _map_zone_for_world(world: dict[str, Any]) -> dict[str, Any] | None:
+    position = world.get("position", {})
+    try:
+        map_id = int(world.get("mapId", -1))
+        x = float(position.get("x"))
+        y = float(position.get("y"))
+    except (TypeError, ValueError):
+        return None
+
+    explicit_zone = world.get("zoneId")
+    if explicit_zone is not None:
+        bounds = ZONE_BOUNDS.get(str(explicit_zone))
+        if bounds and int(bounds.get("map_id", -1)) == map_id:
+            return {"zoneId": int(explicit_zone), **bounds}
+
+    found = _zone_for_position(map_id, x, y)
+    if not found:
+        return None
+    zone_id, bounds = found
+    return {"zoneId": int(zone_id), **bounds}
+
+
+def _zone_asset_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    for item in DEFAULT_ZONE_ASSET_DIRS:
+        if item is None:
+            continue
+        try:
+            path = item.expanduser().resolve()
+        except OSError:
+            continue
+        if path.exists() and path.is_dir() and path not in dirs:
+            dirs.append(path)
+    return dirs
+
+
+def _zone_asset_path(asset_name: str) -> Path | None:
+    clean_name = posixpath.basename(asset_name)
+    if clean_name != asset_name or not clean_name.lower().endswith(".png"):
+        return None
+    for directory in _zone_asset_dirs():
+        candidate = directory / clean_name
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
     teams: list[dict[str, Any]] = []
     collected_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -94,6 +203,21 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
         world, world_error = _try_request_json(base + "/world/self")
         if world is not None:
             team["world"] = world
+            map_zone = _map_zone_for_world(world)
+            if map_zone is not None:
+                asset = str(map_zone.get("asset", ""))
+                team["mapZone"] = {
+                    "zoneId": map_zone["zoneId"],
+                    "mapId": int(map_zone["map_id"]),
+                    "asset": asset,
+                    "assetUrl": f"/map-assets/zone/{urllib.parse.quote(asset)}" if _zone_asset_path(asset) else "",
+                    "left": float(map_zone["left"]),
+                    "right": float(map_zone["right"]),
+                    "top": float(map_zone["top"]),
+                    "bottom": float(map_zone["bottom"]),
+                    "assetWidth": int(map_zone["asset_width"]),
+                    "assetHeight": int(map_zone["asset_height"]),
+                }
         elif world_error:
             endpoint_errors["world"] = world_error
 
@@ -240,19 +364,37 @@ def render_dashboard(title: str) -> bytes:
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
     let selectedMapId = "";
     const colors = ["#67d391", "#7db7ff", "#f2c166", "#ff8f8f", "#c49bff", "#58d6d1", "#f48bc2", "#a8d86d"];
+    const zoneImages = new Map();
+    function loadZoneImage(url) {{
+      if (!url) return null;
+      if (zoneImages.has(url)) return zoneImages.get(url);
+      const image = new Image();
+      image.onload = () => refresh();
+      image.src = url;
+      zoneImages.set(url, image);
+      return image;
+    }}
     function leaderPositions(teams) {{
       return teams.map((team, index) => {{
         const world = team.world || {{}};
         const pos = world.position || {{}};
+        const zone = team.mapZone || null;
         const x = Number(pos.x);
         const y = Number(pos.y);
         const z = Number(pos.z);
         const mapId = String(world.mapId ?? "");
         if (!team.apiReachable || team.state !== "in_world" || !mapId || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+        const zoneId = zone ? String(zone.zoneId ?? "") : "";
+        const assetUrl = zone ? String(zone.assetUrl || "") : "";
         return {{
           id: String(team.id || `leader-${{index + 1}}`),
           fleet: String(team.fleet || "default"),
           mapId,
+          zoneId,
+          groupId: zoneId && assetUrl ? `zone:${{zoneId}}` : `map:${{mapId}}`,
+          groupLabel: zoneId && assetUrl ? `zone ${{zoneId}}` : `map ${{mapId}}`,
+          zone,
+          assetUrl,
           x,
           y,
           z: Number.isFinite(z) ? z : 0,
@@ -264,10 +406,10 @@ def render_dashboard(title: str) -> bytes:
     function groupedMaps(points) {{
       const groups = new Map();
       for (const point of points) {{
-        if (!groups.has(point.mapId)) groups.set(point.mapId, []);
-        groups.get(point.mapId).push(point);
+        if (!groups.has(point.groupId)) groups.set(point.groupId, {{ label: point.groupLabel, points: [] }});
+        groups.get(point.groupId).points.push(point);
       }}
-      return [...groups.entries()].sort((a, b) => Number(b[1].length) - Number(a[1].length) || a[0].localeCompare(b[0]));
+      return [...groups.entries()].sort((a, b) => Number(b[1].points.length) - Number(a[1].points.length) || a[1].label.localeCompare(b[1].label));
     }}
     function mapBounds(points) {{
       let minX = Math.min(...points.map(p => p.x));
@@ -311,11 +453,28 @@ def render_dashboard(title: str) -> bytes:
         return;
       }}
 
-      const bounds = mapBounds(points);
-      const toScreen = (point) => ({{
+      const zone = points.find(point => point.zone && point.assetUrl)?.zone || null;
+      const zoneImage = zone ? loadZoneImage(String(zone.assetUrl || "")) : null;
+      const hasZoneImage = zone && zoneImage && zoneImage.complete && zoneImage.naturalWidth > 0;
+      const bounds = zone ? {{
+        minX: Math.min(Number(zone.top), Number(zone.bottom)),
+        maxX: Math.max(Number(zone.top), Number(zone.bottom)),
+        minY: Math.min(Number(zone.left), Number(zone.right)),
+        maxY: Math.max(Number(zone.left), Number(zone.right))
+      }} : mapBounds(points);
+      const toScreen = (point) => zone ? ({{
+        x: (((point.y - Number(zone.left)) / (Number(zone.right) - Number(zone.left))) || 0) * width,
+        y: (((point.x - Number(zone.top)) / (Number(zone.bottom) - Number(zone.top))) || 0) * height
+      }}) : ({{
         x: ((point.y - bounds.minY) / (bounds.maxY - bounds.minY)) * width,
         y: ((bounds.maxX - point.x) / (bounds.maxX - bounds.minX)) * height
       }});
+
+      if (hasZoneImage) {{
+        ctx.drawImage(zoneImage, 0, 0, width, height);
+        ctx.fillStyle = "rgba(15,19,23,0.22)";
+        ctx.fillRect(0, 0, width, height);
+      }}
 
       ctx.strokeStyle = "#202832";
       ctx.lineWidth = 1;
@@ -334,7 +493,7 @@ def render_dashboard(title: str) -> bytes:
       ctx.fillStyle = "#7f8a96";
       ctx.font = "12px Inter, Segoe UI, Arial, sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText(`map ${{esc(mapId)}}`, 12, 20);
+      ctx.fillText(zone ? `${{points[0].groupLabel}} / map ${{points[0].mapId}} / ${{hasZoneImage ? "zone art" : "coordinate plot"}}` : `map ${{esc(mapId)}}`, 12, 20);
       ctx.textAlign = "right";
       ctx.fillText(`N ${{bounds.maxX.toFixed(0)}} / W ${{bounds.maxY.toFixed(0)}}`, width - 12, 20);
       ctx.fillText(`S ${{bounds.minX.toFixed(0)}} / E ${{bounds.minY.toFixed(0)}}`, width - 12, height - 12);
@@ -367,15 +526,15 @@ def render_dashboard(title: str) -> bytes:
         drawMap([], "");
         return;
       }}
-      if (!selectedMapId || !groups.some(([mapId]) => mapId === selectedMapId)) selectedMapId = groups[0][0];
-      tabs.innerHTML = groups.map(([mapId, mapPoints]) => `<button type="button" class="${{mapId === selectedMapId ? "active" : ""}}" data-map="${{esc(mapId)}}">map ${{esc(mapId)}} (${{mapPoints.length}})</button>`).join("");
+      if (!selectedMapId || !groups.some(([groupId]) => groupId === selectedMapId)) selectedMapId = groups[0][0];
+      tabs.innerHTML = groups.map(([groupId, group]) => `<button type="button" class="${{groupId === selectedMapId ? "active" : ""}}" data-map="${{esc(groupId)}}">${{esc(group.label)}} (${{group.points.length}})</button>`).join("");
       for (const button of tabs.querySelectorAll("button")) {{
         button.onclick = () => {{
           selectedMapId = button.dataset.map || "";
           renderMap(data);
         }};
       }}
-      const selected = groups.find(([mapId]) => mapId === selectedMapId)?.[1] || [];
+      const selected = groups.find(([groupId]) => groupId === selectedMapId)?.[1]?.points || [];
       document.getElementById("map-legend").innerHTML = selected.map(p => `<span class="legend-item"><span class="dot" style="background:${{p.color}}"></span>${{esc(p.id)}} <span class="muted">${{esc(p.fleet)}}</span></span>`).join("");
       drawMap(selected, selectedMapId);
     }}
@@ -447,6 +606,12 @@ def run_team_status_server(api_bases: list[dict[str, str]], host: str = "127.0.0
                 body = json.dumps(collect_team_status(api_bases)).encode("utf-8")
                 self._send(200, body, "application/json")
                 return
+            if self.path.startswith("/map-assets/zone/"):
+                asset_name = urllib.parse.unquote(self.path.removeprefix("/map-assets/zone/").split("?", 1)[0])
+                asset_path = _zone_asset_path(asset_name)
+                if asset_path is not None:
+                    self._send(200, asset_path.read_bytes(), "image/png")
+                    return
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     server = ThreadingHTTPServer((host, port), Handler)
