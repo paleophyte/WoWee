@@ -57,6 +57,7 @@ class FleetConfig:
         self.headless = resolve_path(self.doc.get("woweeHeadless", "build/bin/wowee_headless.exe"))
         self.launch_delay = float(self.doc.get("launchDelaySeconds", 2.0))
         self.supervision = self.doc.get("supervision", {})
+        self.integrity_dir = self.doc.get("integrityDir", "")
         if not self.leaders:
             raise ValueError("fleet config must contain at least one leader")
 
@@ -141,7 +142,7 @@ class FleetConfig:
         return selected
 
 
-def runtime_env() -> dict[str, str]:
+def runtime_env(config: FleetConfig | None = None) -> dict[str, str]:
     env = os.environ.copy()
     path_entries: list[str] = []
     msys_ucrt = Path("C:/msys64/ucrt64/bin")
@@ -149,6 +150,8 @@ def runtime_env() -> dict[str, str]:
         path_entries.append(str(msys_ucrt))
     if path_entries:
         env["PATH"] = os.pathsep.join(path_entries + [env.get("PATH", "")])
+    if config and config.integrity_dir:
+        env["WOWEE_INTEGRITY_DIR"] = str(resolve_path(config.integrity_dir))
     return env
 
 
@@ -200,7 +203,7 @@ class ManagedLeader:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 creationflags=creation_flags(),
-                env=runtime_env(),
+                env=runtime_env(self.config),
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -215,7 +218,7 @@ class ManagedLeader:
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
                 creationflags=creation_flags(),
-                env=runtime_env(),
+                env=runtime_env(self.config),
             )
 
     def poll(self) -> None:
@@ -239,6 +242,12 @@ class ManagedLeader:
         if self.log_handle:
             self.log_handle.close()
             self.log_handle = None
+
+        # Exit code 0 = clean logout/shutdown; don't restart
+        if rc == 0:
+            print(f"{self.leader_id}: clean exit; disabling auto-restart")
+            self.disabled = True
+            return
 
         self.restart_count += 1
         if self.config.max_restarts > 0 and self.restart_count > self.config.max_restarts:
@@ -281,7 +290,7 @@ def cmd_start(config: FleetConfig) -> int:
             [str(config.headless), str(settings_path)],
             cwd=str(ROOT),
             creationflags=creation_flags(),
-            env=runtime_env(),
+            env=runtime_env(config),
         )
         time.sleep(config.launch_delay)
     return 0

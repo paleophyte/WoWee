@@ -44,9 +44,9 @@ python tools/bot_fleet_manager/bot_fleet_manager.py tools/bot_fleet_manager/flee
 
 The dashboard listens on `http://127.0.0.1:8780` by default and shows a leader-position map, leader status, textual position, current activity, party members, and recent chat. Use `--dashboard-port` with `supervise` or `--port` with `dashboard` to change the port.
 
-The map uses bundled MiniManager zone bounds and will draw client zone art when PNGs are available under `tools/bot_fleet_manager/runtime/map_assets/zone/`. That runtime directory is ignored by git. Set `WOWEE_MINIMANAGER_ZONE_DIR` to another `img/zone` folder if you want to serve the art from a different local MiniManager checkout.
+The map uses MiniManager's continental projection for the high-level overview, and bundled MiniManager zone bounds for zone-level fallback views. It will draw client art when assets are available under `tools/bot_fleet_manager/runtime/map_assets/continent/` and `tools/bot_fleet_manager/runtime/map_assets/zone/`. That runtime directory is ignored by git. Set `WOWEE_MINIMANAGER_ZONE_DIR` to another `img/zone` folder if you want to serve the zone art from a different local MiniManager checkout.
 
-Refresh MiniManager zone art from the CMaNGOS host described by the external `wow_server` `.env`:
+Refresh MiniManager map art from the CMaNGOS host described by the external `wow_server` `.env`:
 
 ```bash
 python tools/bot_fleet_manager/fetch_minimanager_assets.py --env C:\Users\admin\code\wow_server\.env

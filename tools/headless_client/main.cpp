@@ -1104,7 +1104,8 @@ void sendHttp(socket_t client, int status, const json& body) {
         << "Connection: close\r\n\r\n"
         << payload;
     const std::string response = out.str();
-    wowee::net::portableSend(client, reinterpret_cast<const uint8_t*>(response.data()), response.size());
+    ssize_t sent = wowee::net::portableSend(client, reinterpret_cast<const uint8_t*>(response.data()), response.size());
+    (void)sent; // client may have disconnected — ignore
 }
 
 void handleHttpClient(socket_t client, HeadlessSession& session) {

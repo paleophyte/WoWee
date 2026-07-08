@@ -19,11 +19,19 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 MAP_DATA_PATH = ROOT / "map_data" / "zone_map_bounds.json"
 RUNTIME_ZONE_ASSET_DIR = ROOT / "runtime" / "map_assets" / "zone"
+RUNTIME_CONTINENT_ASSET_DIR = ROOT / "runtime" / "map_assets" / "continent"
+STALE_TEAM_GRACE_SECONDS = 20.0
 DEFAULT_ZONE_ASSET_DIRS = [
     RUNTIME_ZONE_ASSET_DIR,
     Path(os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR", "")) if os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR") else None,
     Path(r"C:\Users\admin\code\wow_server\minimanager_remote\img\zone"),
 ]
+CONTINENT_ASSETS = {
+    "azeroth": {"label": "Azeroth", "asset": "azeroth.jpg", "width": 966, "height": 732},
+    "outland": {"label": "Outland", "asset": "outland.jpg", "width": 966, "height": 732},
+    "northrend": {"label": "Northrend", "asset": "northrend.jpg", "width": 966, "height": 732},
+}
+TEAM_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _load_zone_bounds() -> dict[str, dict[str, Any]]:
@@ -42,10 +50,18 @@ def _request_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _try_request_json(url: str) -> tuple[dict[str, Any] | None, str]:
+def _try_request_json(url: str, attempts: int = 2) -> tuple[dict[str, Any] | None, str]:
+    last_error = ""
     try:
-        return _request_json(url), ""
-    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        for attempt in range(max(1, attempts)):
+            try:
+                return _request_json(url, timeout=1.8), ""
+            except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                last_error = str(exc)
+                if attempt + 1 < attempts:
+                    time.sleep(0.08)
+        return None, last_error
+    except Exception as exc:
         return None, str(exc)
 
 
@@ -170,6 +186,117 @@ def _zone_asset_path(asset_name: str) -> Path | None:
     return None
 
 
+def _continent_asset_path(asset_name: str) -> Path | None:
+    clean_name = posixpath.basename(asset_name)
+    if clean_name != asset_name or not clean_name.lower().endswith((".jpg", ".jpeg", ".png", ".gif")):
+        return None
+    candidate = RUNTIME_CONTINENT_ASSET_DIR / clean_name
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    fallback = Path(r"C:\Users\admin\code\wow_server\minimanager_remote\img\map") / clean_name
+    if fallback.exists() and fallback.is_file():
+        return fallback
+    return None
+
+
+def _continent_for_world(world: dict[str, Any]) -> dict[str, Any] | None:
+    position = world.get("position", {})
+    try:
+        map_id = int(world.get("mapId", -1))
+        x = float(position.get("x"))
+        y = float(position.get("y"))
+    except (TypeError, ValueError):
+        return None
+
+    continent_key = "azeroth"
+    working_x = round(x)
+    working_y = round(y)
+    if map_id == 530:
+        if working_y < -1000 and working_y > -10000 and working_x > 5000:
+            working_x -= 10349
+            working_y += 6357
+            where_530 = 1
+        elif working_y < -7000 and working_x < 0:
+            working_x += 3961
+            working_y += 13931
+            where_530 = 2
+        else:
+            working_x -= 3070
+            working_y -= 1265
+            where_530 = 3
+    elif map_id == 609:
+        working_x -= 2355
+        working_y += 5662
+        where_530 = 0
+    else:
+        where_530 = 0
+
+    if where_530 == 3:
+        x_pos = round(working_x * 0.051446)
+        y_pos = round(working_y * 0.051446)
+    elif map_id == 571:
+        x_pos = round(working_x * 0.047055)
+        y_pos = round(working_y * 0.047055)
+    else:
+        x_pos = round(working_x * 0.025140)
+        y_pos = round(working_y * 0.025140)
+
+    if map_id == 530 and where_530 == 1:
+        pixel_x = 858 - y_pos
+        pixel_y = 84 - x_pos
+    elif map_id == 530 and where_530 == 2:
+        pixel_x = 103 - y_pos
+        pixel_y = 261 - x_pos
+    elif map_id == 530 and where_530 == 3:
+        continent_key = "outland"
+        pixel_x = 684 - y_pos
+        pixel_y = 229 - x_pos
+    elif map_id == 571:
+        continent_key = "northrend"
+        pixel_x = 515 - y_pos
+        pixel_y = 644 - x_pos
+    elif map_id == 609:
+        pixel_x = 896 - y_pos
+        pixel_y = 232 - x_pos
+    elif map_id == 1:
+        pixel_x = 194 - y_pos
+        pixel_y = 398 - x_pos
+    elif map_id == 0:
+        pixel_x = 752 - y_pos
+        pixel_y = 291 - x_pos
+    else:
+        return None
+
+    meta = CONTINENT_ASSETS[continent_key]
+    asset = str(meta["asset"])
+    return {
+        "id": continent_key,
+        "label": meta["label"],
+        "asset": asset,
+        "assetUrl": f"/map-assets/continent/{urllib.parse.quote(asset)}" if _continent_asset_path(asset) else "",
+        "x": max(0, min(int(meta["width"]), int(pixel_x))),
+        "y": max(0, min(int(meta["height"]), int(pixel_y))),
+        "width": int(meta["width"]),
+        "height": int(meta["height"]),
+    }
+
+
+def _cached_team(leader_id: str, error: str) -> dict[str, Any] | None:
+    cached = TEAM_CACHE.get(leader_id)
+    if cached is None:
+        return None
+    cached_at, cached_team = cached
+    age = time.monotonic() - cached_at
+    if age > STALE_TEAM_GRACE_SECONDS:
+        return None
+    team = json.loads(json.dumps(cached_team))
+    team["stale"] = True
+    team["staleSeconds"] = round(age, 1)
+    team.setdefault("endpointErrors", {})["status"] = error
+    team["error"] = error
+    return team
+
+
 def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
     teams: list[dict[str, Any]] = []
     collected_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -188,6 +315,10 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
         }
         status, status_error = _try_request_json(base + "/status")
         if status is None:
+            cached_team = _cached_team(leader_id, status_error)
+            if cached_team is not None:
+                teams.append(cached_team)
+                continue
             team["error"] = status_error
             teams.append(team)
             continue
@@ -203,6 +334,9 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
         world, world_error = _try_request_json(base + "/world/self")
         if world is not None:
             team["world"] = world
+            continent = _continent_for_world(world)
+            if continent is not None:
+                team["continentMap"] = continent
             map_zone = _map_zone_for_world(world)
             if map_zone is not None:
                 asset = str(map_zone.get("asset", ""))
@@ -219,22 +353,41 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
                     "assetHeight": int(map_zone["asset_height"]),
                 }
         elif world_error:
+            cached = TEAM_CACHE.get(leader_id)
+            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS:
+                cached_team = cached[1]
+                if "world" in cached_team:
+                    team["world"] = cached_team["world"]
+                if "continentMap" in cached_team:
+                    team["continentMap"] = cached_team["continentMap"]
+                if "mapZone" in cached_team:
+                    team["mapZone"] = cached_team["mapZone"]
             endpoint_errors["world"] = world_error
 
         party, party_error = _try_request_json(base + "/party")
         if party is not None:
             team["party"] = party
         elif party_error:
+            cached = TEAM_CACHE.get(leader_id)
+            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS and "party" in cached[1]:
+                team["party"] = cached[1]["party"]
             endpoint_errors["party"] = party_error
 
         chat, chat_error = _try_request_json(base + "/chat?after=0&limit=8")
         if chat is not None:
             team["recentChat"] = chat.get("messages", [])[-8:]
         elif chat_error:
+            cached = TEAM_CACHE.get(leader_id)
+            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS and "recentChat" in cached[1]:
+                team["recentChat"] = cached[1]["recentChat"]
             endpoint_errors["chat"] = chat_error
 
         if endpoint_errors:
             team["endpointErrors"] = endpoint_errors
+            if any(key in endpoint_errors for key in ("world", "party", "chat")):
+                team["partialStale"] = True
+        else:
+            TEAM_CACHE[leader_id] = (time.monotonic(), json.loads(json.dumps(team)))
         teams.append(team)
 
     return {"collectedAt": collected_at, "teams": teams}
@@ -318,6 +471,7 @@ def render_dashboard(title: str) -> bytes:
     .warn {{ color: #ffd27a; }}
     .bad {{ color: #ff9a8b; }}
     .muted {{ color: #aab2bd; }}
+    .stale-pill {{ color: #ffd27a; }}
     .chat {{ display: grid; gap: 3px; max-height: 140px; overflow: auto; }}
     .chat div {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     code {{ color: #d3e5ff; }}
@@ -363,6 +517,8 @@ def render_dashboard(title: str) -> bytes:
   <script>
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
     let selectedMapId = "";
+    let lastData = null;
+    let refreshInFlight = false;
     const colors = ["#67d391", "#7db7ff", "#f2c166", "#ff8f8f", "#c49bff", "#58d6d1", "#f48bc2", "#a8d86d"];
     const zoneImages = new Map();
     function loadZoneImage(url) {{
@@ -378,6 +534,7 @@ def render_dashboard(title: str) -> bytes:
       return teams.map((team, index) => {{
         const world = team.world || {{}};
         const pos = world.position || {{}};
+        const continent = team.continentMap || null;
         const zone = team.mapZone || null;
         const x = Number(pos.x);
         const y = Number(pos.y);
@@ -391,14 +548,16 @@ def render_dashboard(title: str) -> bytes:
           fleet: String(team.fleet || "default"),
           mapId,
           zoneId,
-          groupId: zoneId && assetUrl ? `zone:${{zoneId}}` : `map:${{mapId}}`,
-          groupLabel: zoneId && assetUrl ? `zone ${{zoneId}}` : `map ${{mapId}}`,
+          groupId: continent && continent.assetUrl ? `continent:${{continent.id}}` : (zoneId && assetUrl ? `zone:${{zoneId}}` : `map:${{mapId}}`),
+          groupLabel: continent && continent.assetUrl ? String(continent.label || continent.id) : (zoneId && assetUrl ? `zone ${{zoneId}}` : `map ${{mapId}}`),
+          continent,
           zone,
           assetUrl,
           x,
           y,
           z: Number.isFinite(z) ? z : 0,
           color: colors[index % colors.length],
+          stale: Boolean(team.stale || team.partialStale),
           activity: String(team.activity || "")
         }};
       }}).filter(Boolean);
@@ -453,16 +612,27 @@ def render_dashboard(title: str) -> bytes:
         return;
       }}
 
-      const zone = points.find(point => point.zone && point.assetUrl)?.zone || null;
+      const continent = points.find(point => point.continent && point.continent.assetUrl)?.continent || null;
+      const continentImage = continent ? loadZoneImage(String(continent.assetUrl || "")) : null;
+      const hasContinentImage = continent && continentImage && continentImage.complete && continentImage.naturalWidth > 0;
+      const zone = continent ? null : (points.find(point => point.zone && point.assetUrl)?.zone || null);
       const zoneImage = zone ? loadZoneImage(String(zone.assetUrl || "")) : null;
       const hasZoneImage = zone && zoneImage && zoneImage.complete && zoneImage.naturalWidth > 0;
-      const bounds = zone ? {{
+      const bounds = continent ? {{
+        minX: 0,
+        maxX: Number(continent.height || 732),
+        minY: 0,
+        maxY: Number(continent.width || 966)
+      }} : zone ? {{
         minX: Math.min(Number(zone.top), Number(zone.bottom)),
         maxX: Math.max(Number(zone.top), Number(zone.bottom)),
         minY: Math.min(Number(zone.left), Number(zone.right)),
         maxY: Math.max(Number(zone.left), Number(zone.right))
       }} : mapBounds(points);
-      const toScreen = (point) => zone ? ({{
+      const toScreen = (point) => continent ? ({{
+        x: (Number(point.continent?.x || 0) / Number(point.continent?.width || 966)) * width,
+        y: (Number(point.continent?.y || 0) / Number(point.continent?.height || 732)) * height
+      }}) : zone ? ({{
         x: (((point.y - Number(zone.left)) / (Number(zone.right) - Number(zone.left))) || 0) * width,
         y: (((point.x - Number(zone.top)) / (Number(zone.bottom) - Number(zone.top))) || 0) * height
       }}) : ({{
@@ -470,8 +640,8 @@ def render_dashboard(title: str) -> bytes:
         y: ((bounds.maxX - point.x) / (bounds.maxX - bounds.minX)) * height
       }});
 
-      if (hasZoneImage) {{
-        ctx.drawImage(zoneImage, 0, 0, width, height);
+      if (hasContinentImage || hasZoneImage) {{
+        ctx.drawImage(hasContinentImage ? continentImage : zoneImage, 0, 0, width, height);
         ctx.fillStyle = "rgba(15,19,23,0.22)";
         ctx.fillRect(0, 0, width, height);
       }}
@@ -493,7 +663,7 @@ def render_dashboard(title: str) -> bytes:
       ctx.fillStyle = "#7f8a96";
       ctx.font = "12px Inter, Segoe UI, Arial, sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText(zone ? `${{points[0].groupLabel}} / map ${{points[0].mapId}} / ${{hasZoneImage ? "zone art" : "coordinate plot"}}` : `map ${{esc(mapId)}}`, 12, 20);
+      ctx.fillText(continent ? `${{points[0].groupLabel}} / continent overview` : (zone ? `${{points[0].groupLabel}} / map ${{points[0].mapId}} / ${{hasZoneImage ? "zone art" : "coordinate plot"}}` : `map ${{esc(mapId)}}`), 12, 20);
       ctx.textAlign = "right";
       ctx.fillText(`N ${{bounds.maxX.toFixed(0)}} / W ${{bounds.maxY.toFixed(0)}}`, width - 12, 20);
       ctx.fillText(`S ${{bounds.minX.toFixed(0)}} / E ${{bounds.minY.toFixed(0)}}`, width - 12, height - 12);
@@ -512,7 +682,7 @@ def render_dashboard(title: str) -> bytes:
         ctx.textAlign = "left";
         ctx.fillText(point.id, p.x + 13, p.y - 2);
         ctx.fillStyle = "#aab2bd";
-        ctx.fillText(`${{point.x.toFixed(1)}}, ${{point.y.toFixed(1)}}, ${{point.z.toFixed(1)}}`, p.x + 13, p.y + 13);
+        ctx.fillText(`${{point.x.toFixed(1)}}, ${{point.y.toFixed(1)}}${{point.stale ? " stale" : ""}}`, p.x + 13, p.y + 13);
       }}
     }}
     function renderMap(data) {{
@@ -541,7 +711,8 @@ def render_dashboard(title: str) -> bytes:
     function locationText(team) {{
       const world = team.world || {{}};
       const pos = world.position || {{}};
-      if (!team.apiReachable) return team.error || "unavailable";
+      if (team.stale && world.position) return `<span class="stale-pill">stale ${{Number(team.staleSeconds || 0).toFixed(1)}}s</span> map ${{esc(world.mapId)}} - x=${{Number(pos.x || 0).toFixed(1)}} y=${{Number(pos.y || 0).toFixed(1)}} z=${{Number(pos.z || 0).toFixed(1)}}`;
+      if (!team.apiReachable) return esc(team.error || "unavailable");
       if (team.endpointErrors && team.endpointErrors.world) return "world endpoint stale";
       if (team.state !== "in_world") return "not in world";
       return `map ${{esc(world.mapId)}} - x=${{Number(pos.x || 0).toFixed(1)}} y=${{Number(pos.y || 0).toFixed(1)}} z=${{Number(pos.z || 0).toFixed(1)}}`;
@@ -559,23 +730,38 @@ def render_dashboard(title: str) -> bytes:
     }}
     function statusClass(team) {{
       if (!team.apiReachable || team.state === "offline") return "bad";
+      if (team.stale || team.partialStale) return "warn";
       if (team.state === "in_world") return "ok";
       return "warn";
     }}
-    async function refresh() {{
-      const res = await fetch("/api/teams", {{cache: "no-store"}});
-      const data = await res.json();
-      document.getElementById("updated").textContent = `updated ${{data.collectedAt}}`;
+    function render(data, note = "") {{
+      document.getElementById("updated").innerHTML = `updated ${{esc(data.collectedAt)}}${{note ? ` <span class="stale-pill">${{esc(note)}}</span>` : ""}}`;
       renderMap(data);
       document.getElementById("teams").innerHTML = data.teams.map(team => `
         <tr>
           <td data-label="Team"><div class="name">${{esc(team.id)}}</div><div class="muted">${{esc(team.fleet || "default")}}</div><div class="muted">${{esc(team.apiBase)}}</div></td>
-          <td data-label="Status" class="${{statusClass(team)}}">${{esc(team.state || "offline")}}</td>
+          <td data-label="Status" class="${{statusClass(team)}}">${{esc(team.state || "offline")}}${{team.stale ? " (stale)" : ""}}</td>
           <td data-label="Location">${{locationText(team)}}</td>
           <td data-label="Activity">${{esc(team.activity)}}</td>
           <td data-label="Party">${{partyText(team)}}</td>
           <td data-label="Recent Chat">${{chatText(team)}}</td>
         </tr>`).join("");
+    }}
+    async function refresh() {{
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      try {{
+        const res = await fetch("/api/teams", {{cache: "no-store"}});
+        if (!res.ok) throw new Error(`HTTP ${{res.status}}`);
+        const data = await res.json();
+        lastData = data;
+        render(data);
+      }} catch (err) {{
+        if (lastData) render(lastData, "using last dashboard sample");
+        else document.getElementById("updated").innerHTML = `<span class="bad">dashboard fetch failed: ${{esc(err.message || err)}}</span>`;
+      }} finally {{
+        refreshInFlight = false;
+      }}
     }}
     refresh();
     setInterval(refresh, 3000);
@@ -611,6 +797,12 @@ def run_team_status_server(api_bases: list[dict[str, str]], host: str = "127.0.0
                 asset_path = _zone_asset_path(asset_name)
                 if asset_path is not None:
                     self._send(200, asset_path.read_bytes(), "image/png")
+                    return
+            if self.path.startswith("/map-assets/continent/"):
+                asset_name = urllib.parse.unquote(self.path.removeprefix("/map-assets/continent/").split("?", 1)[0])
+                asset_path = _continent_asset_path(asset_name)
+                if asset_path is not None:
+                    self._send(200, asset_path.read_bytes(), "image/jpeg")
                     return
             self._send(404, b"not found", "text/plain; charset=utf-8")
 

@@ -337,7 +337,12 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
                     " target='", target, "' bytes=", raw.size(), " data=[",
                     raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
     }
-    owner_.getSocket()->send(packet);
+    auto* sock = owner_.getSocket();
+    if (!sock) {
+        LOG_WARNING("Cannot send chat: socket is null");
+        return;
+    }
+    sock->send(packet);
 
     // Add local echo so the player sees their own message immediately
     MessageChatData echo;

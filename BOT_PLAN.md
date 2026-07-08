@@ -67,6 +67,7 @@ Turn `wowee_headless` into a bot automation foundation that can supervise multip
 - [x] Review MiniManager's map/data approach and adapt the useful pieces into Python.
 - [x] Build on top of the textual dashboard once leader status data is stable.
 - [x] Add an abstract dashboard map that plots online leaders from `/world/self` without requiring map assets.
+- [x] Add a high-level MiniManager/POMM-style continental overview map.
 - [x] Augment the abstract map with MiniManager-style zone bounds and optional zone art.
 - [x] Add a scripted asset refresh command for pulling MiniManager zone PNGs into the ignored runtime asset directory.
 - [x] Avoid committing the experimental static WHM/Leaflet map server until its coordinate and asset assumptions are validated.
