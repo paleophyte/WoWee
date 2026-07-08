@@ -39,8 +39,12 @@ public:
     /// Look up an emote by chat command (e.g. "dance", "wave").
     std::optional<EmoteResult> findEmote(const std::string& command) const;
 
-    /// Get the animation ID for a DBC emote ID.
+    /// Get the animation ID for an EmotesText.dbc text-emote ID.
     uint32_t animByDbcId(uint32_t dbcId) const;
+
+    /// Get the animation ID for an Emotes.dbc emote ID, as used by SMSG_EMOTE
+    /// and UNIT_NPC_EMOTESTATE.
+    uint32_t animByEmotesId(uint32_t emoteId) const;
 
     /// Get the emote state variant (looping) for a one-shot emote animation.
     uint32_t getStateVariant(uint32_t oneShotAnimId) const;
@@ -71,6 +75,7 @@ private:
     bool loaded_ = false;
     std::unordered_map<std::string, EmoteInfo> emoteTable_;
     std::unordered_map<uint32_t, const EmoteInfo*> emoteByDbcId_;
+    std::unordered_map<uint32_t, uint32_t> animByEmotesId_;
 };
 
 } // namespace rendering

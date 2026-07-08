@@ -69,6 +69,7 @@ public:
                                            const std::string& senderName,
                                            const std::string* targetName = nullptr);
     static uint32_t getEmoteAnimByDbcId(uint32_t dbcId);
+    static uint32_t getEmoteAnimByEmotesId(uint32_t emoteId);
 
     // ── Targeting / combat ─────────────────────────────────────────────────
     void setTargetPosition(const glm::vec3* pos);

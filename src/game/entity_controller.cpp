@@ -10,6 +10,7 @@
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
 #include "network/world_socket.hpp"
+#include "rendering/animation_controller.hpp"
 #include <algorithm>
 #include <cstring>
 #include <zlib.h>
@@ -915,7 +916,12 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             unit->setNpcEmoteState(val);
             // Fire emote animation callback so entity_spawner can update the NPC's idle anim
             if (val != oldEmote && owner_.emoteAnimCallbackRef()) {
-                owner_.emoteAnimCallbackRef()(block.guid, val);
+                uint32_t animId = val != 0 ? rendering::AnimationController::getEmoteAnimByEmotesId(val) : 0;
+                if (val == 0 || animId != 0) {
+                    owner_.emoteAnimCallbackRef()(block.guid, animId);
+                } else {
+                    LOG_DEBUG("UNIT_NPC_EMOTESTATE emoteId=", val, " had no Emotes.dbc animation mapping");
+                }
             }
         }
         // Power/maxpower range checks AFTER all specific fields

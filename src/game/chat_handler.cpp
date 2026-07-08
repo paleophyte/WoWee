@@ -189,10 +189,14 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_EMOTE] = [this](network::Packet& packet) {
         if (owner_.getState() != WorldState::IN_WORLD) return;
         if (!packet.hasRemaining(12)) return;
-        uint32_t emoteAnim  = packet.readUInt32();
+        uint32_t emoteId    = packet.readUInt32();
         uint64_t sourceGuid = packet.readUInt64();
-        if (owner_.emoteAnimCallbackRef() && sourceGuid != 0)
-            owner_.emoteAnimCallbackRef()(sourceGuid, emoteAnim);
+        uint32_t animId = rendering::AnimationController::getEmoteAnimByEmotesId(emoteId);
+        if (owner_.emoteAnimCallbackRef() && sourceGuid != 0 && animId != 0) {
+            owner_.emoteAnimCallbackRef()(sourceGuid, animId);
+        } else if (emoteId != 0 && animId == 0) {
+            LOG_DEBUG("SMSG_EMOTE emoteId=", emoteId, " had no Emotes.dbc animation mapping");
+        }
     };
     table[Opcode::SMSG_CHANNEL_NOTIFY] = [this](network::Packet& packet) {
         if (owner_.getState() == WorldState::IN_WORLD ||
