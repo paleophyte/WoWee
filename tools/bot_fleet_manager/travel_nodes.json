@@ -1,0 +1,326 @@
+{
+  "schemaVersion": 1,
+  "coordinateSpace": "wowee-canonical",
+  "notes": [
+    "WoWee canonical coordinates use x=north/south and y=west/east. CMaNGOS/DBC server coordinates often appear swapped relative to this.",
+    "Nodes marked requiresSurvey=true are intentional placeholders for in-game observation before execution is enabled."
+  ],
+  "nodes": {
+    "goldshire": {
+      "type": "walk",
+      "mapId": 0,
+      "x": 63.52180099487305,
+      "y": -9480.08984375,
+      "z": 56.17570114135742,
+      "radius": 8.0,
+      "name": "Goldshire",
+      "description": "Goldshire, Elwynn Forest",
+      "verified": true
+    },
+    "stormwind-city": {
+      "type": "walk",
+      "mapId": 0,
+      "x": 364.0570068359375,
+      "y": -9153.76953125,
+      "z": 90.48290252685547,
+      "radius": 10.0,
+      "name": "Stormwind City",
+      "description": "Known Stormwind waypoint used by current route demos",
+      "verified": true
+    },
+    "stormwind-flight-master": {
+      "type": "flight_master",
+      "mapId": 0,
+      "x": 489.70001220703125,
+      "y": -8840.5595703125,
+      "z": 109.61000061035156,
+      "radius": 12.0,
+      "name": "Stormwind, Elwynn",
+      "description": "Taxi node from TBC TaxiNodes DBC",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
+    "stormwind-dwarven-district": {
+      "type": "walk",
+      "mapId": 0,
+      "x": 514.031005859375,
+      "y": -8346.4599609375,
+      "z": 92.02064514160156,
+      "radius": 18.0,
+      "name": "Stormwind Dwarven District",
+      "description": "Dwarven District tram approach; floor-level endpoint near Stormwind Deeprun AreaTrigger 2173",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport"
+    },
+    "stormwind-tram-entrance": {
+      "type": "tram_entrance",
+      "mapId": 0,
+      "x": 514.031005859375,
+      "y": -8346.4599609375,
+      "z": 92.02064514160156,
+      "radius": 10.0,
+      "name": "Stormwind Deeprun Tram Entrance",
+      "description": "AreaTrigger 2173: Stormwind to Deeprun Tram",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "id": 2173,
+        "targetMapId": 369,
+        "targetX": 2490.97998046875,
+        "targetY": 67.76069641113281,
+        "targetZ": -4.29649019241333,
+        "targetOrientation": 3.14159
+      },
+      "links": [
+        {
+          "to": "deeprun-tram-stormwind-platform",
+          "mode": "enter_instance",
+          "description": "Enter Deeprun Tram from Stormwind"
+        }
+      ]
+    },
+    "deeprun-tram-stormwind-platform": {
+      "type": "tram_platform",
+      "mapId": 369,
+      "x": 2490.97998046875,
+      "y": 67.76069641113281,
+      "z": -4.29649019241333,
+      "radius": 12.0,
+      "name": "Deeprun Tram Stormwind Platform",
+      "description": "Deeprun arrival from Stormwind AreaTrigger 2173; exit trigger 2171 is nearby",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "entryId": 2173,
+        "exitId": 2171,
+        "exitSourceX": 2490.8798828125,
+        "exitSourceY": 80.16329956054688,
+        "exitSourceZ": -1.8569300174713135,
+        "exitTargetMapId": 0,
+        "exitTargetX": 524.0679931640625,
+        "exitTargetY": -8354.23046875,
+        "exitTargetZ": 91.7970962524414,
+        "exitTargetOrientation": 2.35619
+      },
+      "links": [
+        {
+          "to": "deeprun-tram-ironforge-platform",
+          "mode": "ride_tram",
+          "description": "Board tram, wait for transit, disembark on the Ironforge side"
+        }
+      ]
+    },
+    "deeprun-tram-ironforge-platform": {
+      "type": "tram_platform",
+      "mapId": 369,
+      "x": 8.11925983428955,
+      "y": 11.050399780273438,
+      "z": -4.021659851074219,
+      "radius": 12.0,
+      "name": "Deeprun Tram Ironforge Platform",
+      "description": "Surveyed Ironforge-side Deeprun Tram platform near the portal instance; AreaTrigger 2175 lands nearby but not on this platform",
+      "verified": true,
+      "source": "live Codexvale survey after real-client placement + Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "entryId": 2175,
+        "entryTargetX": 10.393199920654297,
+        "entryTargetY": 69.22769927978516,
+        "entryTargetZ": -4.296649932861328,
+        "exitId": 2166,
+        "exitSourceX": 10.504300117492676,
+        "exitSourceY": 76.0270004272461,
+        "exitSourceZ": -4.2965898513793945,
+        "exitTargetMapId": 0,
+        "exitTargetX": -1317.739990234375,
+        "exitTargetY": -4839.509765625,
+        "exitTargetZ": 501.8680114746094,
+        "exitTargetOrientation": 1.48353
+      },
+      "links": [
+        {
+          "to": "ironforge-tram-exit",
+          "mode": "exit_instance",
+          "description": "Exit Deeprun Tram into Ironforge"
+        }
+      ]
+    },
+    "ironforge-tram-exit": {
+      "type": "tram_entrance",
+      "mapId": 0,
+      "x": -1317.739990234375,
+      "y": -4839.509765625,
+      "z": 501.8680114746094,
+      "radius": 12.0,
+      "name": "Ironforge Deeprun Tram Exit",
+      "description": "AreaTrigger 2166 target: Deeprun Tram to Ironforge",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "id": 2166,
+        "sourceMapId": 369,
+        "sourceX": 10.504300117492676,
+        "sourceY": 76.0270004272461,
+        "sourceZ": -4.2965898513793945,
+        "targetMapId": 0,
+        "targetX": -1317.739990234375,
+        "targetY": -4839.509765625,
+        "targetZ": 501.8680114746094,
+        "targetOrientation": 1.48353
+      }
+    },
+    "ironforge-city": {
+      "type": "walk",
+      "mapId": 0,
+      "x": -834.0590209960938,
+      "y": -5021.0,
+      "z": 495.3190002441406,
+      "radius": 12.0,
+      "name": "Ironforge",
+      "description": "Ironforge city waypoint used by current route demos",
+      "verified": true
+    },
+    "ironforge-flight-master": {
+      "type": "flight_master",
+      "mapId": 0,
+      "x": -1155.43994140625,
+      "y": -4821.77978515625,
+      "z": 502.2099914550781,
+      "radius": 12.0,
+      "name": "Ironforge, Dun Morogh",
+      "description": "Taxi node from TBC TaxiNodes DBC",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
+    "menethil-harbor": {
+      "type": "walk",
+      "mapId": 0,
+      "x": -783.2899780273438,
+      "y": -3792.260009765625,
+      "z": 9.0600004196167,
+      "radius": 20.0,
+      "name": "Menethil Harbor, Wetlands",
+      "description": "Taxi-node position near Menethil Harbor; dock path requires survey",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
+    "menethil-auberdine-dock": {
+      "type": "boat_dock",
+      "name": "Menethil to Auberdine Dock",
+      "description": "Dock/boarding point for Transport176310: Menethil to Auberdine",
+      "requiresSurvey": true,
+      "links": [
+        {
+          "to": "auberdine-menethil-dock",
+          "mode": "ride_boat",
+          "transportMap": "Transport176310",
+          "description": "Board Menethil -> Auberdine boat, wait for arrival, disembark"
+        }
+      ]
+    },
+    "auberdine-menethil-dock": {
+      "type": "boat_dock",
+      "name": "Auberdine Menethil Dock",
+      "description": "Arrival dock for Transport176310: Menethil to Auberdine",
+      "requiresSurvey": true
+    },
+    "auberdine": {
+      "type": "walk",
+      "mapId": 1,
+      "x": 557.6799926757812,
+      "y": 6341.3798828125,
+      "z": 16.290000915527344,
+      "radius": 20.0,
+      "name": "Auberdine, Darkshore",
+      "description": "Taxi-node position near Auberdine",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
+    "auberdine-ruttheran-dock": {
+      "type": "boat_dock",
+      "name": "Auberdine to Rut'theran Dock",
+      "description": "Dock/boarding point for Transport176244: Rut'theran to Auberdine; direction and boarding behavior need survey",
+      "requiresSurvey": true,
+      "links": [
+        {
+          "to": "ruttheran-dock",
+          "mode": "ride_boat",
+          "transportMap": "Transport176244",
+          "description": "Ride between Auberdine and Rut'theran Village"
+        }
+      ]
+    },
+    "ruttheran-dock": {
+      "type": "boat_dock",
+      "mapId": 1,
+      "x": 841.0499877929688,
+      "y": 8643.58984375,
+      "z": 23.299999237060547,
+      "radius": 20.0,
+      "name": "Rut'theran Village, Teldrassil",
+      "description": "Taxi-node position near Rut'theran Village; exact boat/portal points need survey",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
+    "ruttheran-darnassus-portal": {
+      "type": "portal",
+      "name": "Rut'theran to Darnassus Portal",
+      "description": "Portal into Darnassus from Rut'theran Village",
+      "requiresSurvey": true
+    },
+    "darnassus": {
+      "type": "walk",
+      "name": "Darnassus",
+      "description": "Grand Expedition destination; city coordinate needs survey",
+      "requiresSurvey": true
+    }
+  },
+  "routes": {
+    "deeprun-prototype": {
+      "name": "Deeprun Tram Prototype",
+      "description": "Goldshire to Ironforge via Stormwind and the Deeprun Tram. Read-only until tram nodes are surveyed.",
+      "nodes": [
+        "goldshire",
+        "stormwind-city",
+        "stormwind-dwarven-district",
+        "stormwind-tram-entrance",
+        "deeprun-tram-stormwind-platform",
+        "deeprun-tram-ironforge-platform",
+        "ironforge-tram-exit",
+        "ironforge-city"
+      ]
+    },
+    "grand-expedition-v0": {
+      "name": "Grand Expedition v0",
+      "description": "Goldshire -> Stormwind -> Deeprun Tram -> Ironforge -> Menethil -> Auberdine -> Rut'theran -> Darnassus.",
+      "nodes": [
+        "goldshire",
+        "stormwind-city",
+        "stormwind-dwarven-district",
+        "stormwind-tram-entrance",
+        "deeprun-tram-stormwind-platform",
+        "deeprun-tram-ironforge-platform",
+        "ironforge-tram-exit",
+        "ironforge-city",
+        "menethil-harbor",
+        "menethil-auberdine-dock",
+        "auberdine-menethil-dock",
+        "auberdine",
+        "auberdine-ruttheran-dock",
+        "ruttheran-dock",
+        "ruttheran-darnassus-portal",
+        "darnassus"
+      ]
+    },
+    "alliance-flight-nodes-v0": {
+      "name": "Alliance Flight Node Survey",
+      "description": "Known taxi-node positions useful for future flight-master automation.",
+      "nodes": [
+        "stormwind-flight-master",
+        "ironforge-flight-master",
+        "menethil-harbor",
+        "auberdine",
+        "ruttheran-dock"
+      ]
+    }
+  }
+}

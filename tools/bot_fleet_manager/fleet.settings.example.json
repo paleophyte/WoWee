@@ -7,6 +7,12 @@
     "maxRestartBackoffSeconds": 60.0,
     "maxRestarts": 0
   },
+  "pathfinding": {
+    "enabled": false,
+    "baseUrl": "http://127.0.0.1:8790",
+    "coordinateSpace": "wowee-canonical",
+    "timeoutSeconds": 45.0
+  },
   "defaults": {
     "auth": {
       "host": "127.0.0.1",

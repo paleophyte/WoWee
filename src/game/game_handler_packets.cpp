@@ -31,6 +31,7 @@
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "core/crash_diagnostics.hpp"
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <glm/gtx/quaternion.hpp>
@@ -2859,23 +2860,44 @@ void GameHandler::handlePacket(network::Packet& packet) {
     // Dispatch via the opcode handler table
     if (headlessMode() && state == WorldState::IN_WORLD &&
         shouldSkipHeadlessWorldSimulationPacket(*logicalOp)) {
+        const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+        wowee::core::setCrashBreadcrumb("world_packet:headless_skip",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
         packet.skipAll();
         return;
     }
+
+    const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+    wowee::core::setCrashBreadcrumb("world_packet:dispatch_begin",
+                                    opcode,
+                                    logicalName.c_str(),
+                                    packet.getSize(),
+                                    packet.getReadPos(),
+                                    static_cast<int>(state));
 
     auto it = dispatchTable_.find(*logicalOp);
     if (it != dispatchTable_.end()) {
         if (headlessTracePackets()) {
             LOG_INFO("HEADLESS DISPATCH begin wire=0x", std::hex, opcode, std::dec,
-                     " logical=", OpcodeTable::logicalToName(*logicalOp),
+                     " logical=", logicalName,
                      " size=", packet.getSize(),
                      " readPos=", packet.getReadPos(),
                      " state=", worldStateName(state));
         }
         it->second(packet);
+        wowee::core::setCrashBreadcrumb("world_packet:dispatch_end",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
         if (headlessTracePackets()) {
             LOG_INFO("HEADLESS DISPATCH end wire=0x", std::hex, opcode, std::dec,
-                     " logical=", OpcodeTable::logicalToName(*logicalOp),
+                     " logical=", logicalName,
                      " readPos=", packet.getReadPos(), "/", packet.getSize(),
                      " state=", worldStateName(state));
         }

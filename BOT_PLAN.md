@@ -38,7 +38,78 @@ Turn `wowee_headless` into a bot automation foundation that can supervise multip
 - [x] Add waypoint-list travel for hand-authored route segments.
 - [ ] Validate direct travel against live CMaNGOS after the upstream merge.
 - [ ] Add runtime collision checks during movement.
-- [ ] Decide whether pathfinding should come from CMaNGOS/Detour data, MiniManager-style map assets, or a separate extracted navmesh.
+- [x] Decide whether pathfinding should come from CMaNGOS/Detour data, MiniManager-style map assets, or a separate extracted navmesh.
+- [x] Add a standalone pathfinding service boundary with `/health` and `/path`.
+- [x] Add an MVP direct-line backend for transport and waypoint handoff testing.
+- [x] Add fleet `pathfind-goto` command that asks the path service for waypoints and posts them to leaders.
+- [x] Add a native `mmap_path_query` helper that loads CMaNGOS mmap/Detour data and emits JSON waypoints.
+- [x] Wire the path service `external` backend to pass `DataDir` and preserve helper JSON errors.
+- [x] Validate `mmap_path_query` against real extracted `mmaps/` data on the CMaNGOS host.
+- [x] Deploy the pathfinding service on the CMaNGOS host and validate live fleet `pathfind-goto` against it.
+- [ ] Validate the helper output against CMaNGOS `.mmap path` on the same start/end points.
+- [x] Optimize `mmap_path_query` with bbox tile loading for short route queries.
+- [x] Add navmesh-projected waypoint densification so stairs, ramps, and bridges are followed more closely by the headless mover.
+- [ ] Add route smoothing and height stabilization pass to reduce visual jitter from tiny navmesh Z oscillations while preserving stairs/ramps.
+- [ ] Broaden bbox validation across continents, instances, and longer cross-zone routes.
+- [x] Add an iterative `/route` planner endpoint that can expose partial/stalled/max-leg progress without moving leaders.
+- [x] Add a read-only fleet `plan-route` command for inspecting route legs from a live leader position.
+- [x] Add guarded route execution that can move one leg, replan, and stop safely on stalled/partial routes.
+- [x] Live-test guarded `route-goto` on a short complete path, then on a known stalled long path.
+- [x] Harden the headless HTTP API server against intermittent 10053/10054/reset/400 responses during frequent polling.
+- [x] Add named landmarks for common route/demo targets.
+- [x] Add a route demo command for repeatable named route tests.
+- [x] Add route stop/resume state for guarded route targets.
+- [x] Add named travel nodes for cross-map and long-range routes: tram, boats, portals, and flight masters.
+
+## Phase 2b: Grand Expedition Travel Planner
+
+The aspirational route for the next pathfinding phase is a low-level Alliance "Grand Expedition" from Goldshire to Darnassus. It is intentionally bigger than one navmesh query: it forces the automation stack to handle city navigation, transports, continent transitions, and route resumption.
+
+Target route:
+
+- [ ] Goldshire -> Stormwind City -> Dwarven District tram entrance.
+- [ ] Deeprun Tram: enter tram instance/area, board tram car, wait for transit, exit at Ironforge side.
+- [ ] Ironforge -> Dun Morogh -> Loch Modan -> Wetlands -> Menethil Harbor, favoring roads for low-level safety.
+- [ ] Menethil Harbor -> Auberdine boat: navigate onto boat, detect departure/transit/arrival, navigate off boat.
+- [ ] Auberdine -> Rut'theran Village transport: navigate to the correct dock/boat or validated alternate travel method.
+- [ ] Rut'theran Village -> Darnassus: navigate off transport and through the portal.
+- [ ] Include at least one griffon/flight-path leg once flight-master gossip and known-route availability can be detected. Candidate: Auberdine/Darkshore <-> Rut'theran Village if available in the active TBC server data.
+
+Implementation roadmap:
+
+- [x] Add a travel node registry with typed nodes: `walk`, `tram_entrance`, `tram_platform`, `boat_dock`, `boat_deck`, `portal`, `flight_master`, `zone_handoff`.
+- [x] Store each node in WoWee canonical coordinates with map id, radius, faction/expansion notes, and optional linked destination node.
+- [x] Add a route planner mode that chains navmesh legs and travel-node transitions.
+- [x] Add planner output that distinguishes `walk`, `board_transport`, `wait_transport`, `disembark`, `use_portal`, and `use_flight` steps.
+- [x] Add survey tooling to record live map/position/orientation/movement flags while manually walking transport areas.
+- [x] Add a capture command that writes surveyed leader positions back into the travel node registry.
+- [ ] Add execution state for travel-node steps so `resume-route` can continue after a crash, disconnect, death, or manual intervention.
+- [ ] Prototype with Deeprun Tram first because it directly addresses the current Goldshire/Stormwind -> Ironforge stall.
+  - [x] Verify Stormwind tram entrance AreaTrigger `2173` and target landing on map `369`.
+  - [x] Add an explicit headless `/area-trigger` API and fleet `area-trigger` command for validated transition prototyping.
+  - [x] Identify Deeprun Tram cars as CMaNGOS `GAMEOBJECT_TYPE_TRANSPORT` / ElevatorTransport objects using `gameobject` spawn rows plus `TransportAnimation.dbc`, not boat-style `transports` rows.
+  - [x] Add fleet `tram-state` predictor/calibration tooling that estimates Deeprun car positions from DBC animation data and live leader position.
+  - [x] Split broad tram station detection from tighter platform boarding candidates after live Ironforge-side testing showed the far tram can still be inside the coarse station window.
+  - [ ] Discover/implement actual tram boarding/wait/disembark behavior instead of walking the Deeprun tunnel.
+  - [ ] Wire calibrated tram state into `ride_tram` execution: wait for car, board at platform, ride, disembark, then trigger the destination exit.
+  - [ ] Move the Deeprun ElevatorTransport math into shared C++ client code so the regular WoWee client and headless automation agree on tram car placement.
+- [ ] Add same-continent landmark routing polish after tram prototype: clearer map-mismatch messages, route feasibility labels, and better named demos.
+- [ ] Add surveyed road/handoff waypoints for Ironforge -> Dun Morogh -> Loch Modan -> Wetlands -> Menethil; the first `grand-expedition-v0` dry run stalls when asking for Ironforge -> Menethil as one giant leg.
+- [ ] Survey and capture `stormwind-dwarven-district`, `stormwind-tram-entrance`, `deeprun-tram-stormwind-platform`, `deeprun-tram-ironforge-platform`, and `ironforge-tram-exit`.
+  - [x] Seed Stormwind entrance and Deeprun/Ironforge platform nodes from `AreaTrigger.dbc` plus live CMaNGOS `areatrigger_teleport`.
+  - [x] Adjust Stormwind tram approach nodes to the floor-level navmesh endpoint reached by the headless client.
+
+Known unknowns:
+
+- [ ] Confirm exact TBC coordinates and map/area transitions for both Deeprun Tram entrances, platforms, and exit points.
+  - [x] Confirm Stormwind entrance `2173` -> Deeprun Stormwind platform on map `369`.
+  - [ ] Confirm Ironforge exit `2166` from the Deeprun Ironforge platform once the tram-side leg is reachable.
+- [ ] Determine whether the headless client can detect being on a tram/boat through movement flags, transport GUID, map id changes, position deltas, or server packets.
+  - [x] Confirm the headless entity stream does not reliably expose Deeprun type-11 tram gameobjects while stationary on the platform; use DBC/DB prediction as the current Deeprun prototype.
+  - [x] Confirm simply moving onto the floor-projected predicted tram position does not attach the headless client to a Deeprun transport; `onTransport` remains false and the character stays at the static floor position.
+- [ ] Determine how to interact with portals and flight masters through available packets/Gossip APIs.
+- [ ] Confirm whether Darkshore <-> Rut'theran flight is available to the test characters or if boat/portal flow should be the canonical Darnassus route.
+- [ ] Decide how aggressive low-level road-following should be around Wetlands deaths: pure road route, spirit-resume support, or escort/guard behavior.
 
 ## Phase 3: Bot Fleet Manager
 
@@ -49,6 +120,7 @@ Turn `wowee_headless` into a bot automation foundation that can supervise multip
 - [x] Track leader process state and restart failures with backoff.
 - [x] Poll and report leader API status.
 - [x] Expose or document aggregate fleet commands: start, stop, status, command, goto.
+- [x] Expose or document aggregate pathfinding command: pathfind-goto.
 - [x] Add explicit fleet assignment semantics.
 - [x] Support multiple fleet managers by making ports, settings paths, and process labels explicit.
 

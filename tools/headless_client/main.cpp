@@ -5,9 +5,12 @@
 #include "game/packet_parsers.hpp"
 #include "game/world_packets.hpp"
 #include "network/net_platform.hpp"
+#include "network/packet.hpp"
+#include "network/world_socket.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "rendering/animation/emote_registry.hpp"
+#include "core/crash_diagnostics.hpp"
 #include "core/logger.hpp"
 
 #include <nlohmann/json.hpp>
@@ -46,6 +49,20 @@ std::atomic<bool> g_running{true};
 
 constexpr int kEscKey = 27;
 constexpr auto kLogoutSilentExitTimeout = std::chrono::seconds(12);
+
+const char* objectTypeName(game::ObjectType type) {
+    switch (type) {
+        case game::ObjectType::OBJECT: return "OBJECT";
+        case game::ObjectType::ITEM: return "ITEM";
+        case game::ObjectType::CONTAINER: return "CONTAINER";
+        case game::ObjectType::UNIT: return "UNIT";
+        case game::ObjectType::PLAYER: return "PLAYER";
+        case game::ObjectType::GAMEOBJECT: return "GAMEOBJECT";
+        case game::ObjectType::DYNAMICOBJECT: return "DYNAMICOBJECT";
+        case game::ObjectType::CORPSE: return "CORPSE";
+    }
+    return "UNKNOWN";
+}
 
 bool consumeEscKeypress() {
 #ifdef _WIN32
@@ -412,9 +429,12 @@ public:
     }
 
     void update(float deltaSeconds) {
+        wowee::core::setCrashNote("headless update: auth");
         auth_.update(deltaSeconds);
+        wowee::core::setCrashNote("headless update: game");
         const auto beforeWorldState = game_.getState();
         game_.update(deltaSeconds);
+        wowee::core::setCrashNote("headless update: state transition");
         const auto afterWorldState = game_.getState();
         if (afterWorldState != beforeWorldState) {
             std::cout << "World state changed: "
@@ -424,6 +444,7 @@ public:
         inWorldForApi_ = (game_.getState() == game::WorldState::IN_WORLD);
 
         if (!selectedCharacter_ && game_.getState() == game::WorldState::CHAR_LIST_RECEIVED) {
+            wowee::core::setCrashNote("headless update: character selection");
             if (settings_.createCharacter) {
                 provisionConfiguredCharacter();
                 return;
@@ -432,6 +453,7 @@ public:
         }
 
         if (!enteredWorld_ && game_.getState() == game::WorldState::IN_WORLD) {
+            wowee::core::setCrashNote("headless update: enter world");
             enteredWorld_ = true;
             inWorldForApi_ = true;
             std::cout << "Entered world";
@@ -444,12 +466,18 @@ public:
         }
 
         if (!logoutRequested_) {
+            wowee::core::setCrashNote("headless update: scheduled commands");
             drainScheduledCommands(deltaSeconds);
+            wowee::core::setCrashNote("headless update: pending chat");
             drainPendingChat();
+            wowee::core::setCrashNote("headless update: movement");
             updateMovementTask(deltaSeconds);
         }
+        wowee::core::setCrashNote("headless update: chat snapshot");
         syncChatSnapshot();
+        wowee::core::setCrashNote("headless update: logout");
         updateLogoutExit();
+        wowee::core::setCrashNote("headless update: idle");
     }
 
     bool isFailed() const { return failed_.load(); }
@@ -520,9 +548,83 @@ uint32_t hp = 0, maxHp = 0;
             {"movementFlags", move.flags},
             {"movementFlags2", move.flags2},
             {"runSpeed", game_.getServerRunSpeed()},
+            {"transport", {
+                {"onTransport", game_.isOnTransport()},
+                {"guid", game_.getPlayerTransportGuid()},
+                {"offset", {
+                    {"x", game_.getPlayerTransportOffset().x},
+                    {"y", game_.getPlayerTransportOffset().y},
+                    {"z", game_.getPlayerTransportOffset().z}
+                }}
+            }},
             {"movement", movementTaskToJsonLocked()},
             {"combat", {{"inCombat", game_.isInCombat()}}},
             {"health", {{"current", hp}, {"max", maxHp}, {"isDead", game_.isDead()}, {"isPlayerDead", game_.isPlayerDead()}}}
+        };
+    }
+
+    json worldEntities(float radius = 120.0f, bool onlyTransports = false) const {
+        const auto& move = game_.getMovementInfo();
+        json entities = json::array();
+        size_t total = 0;
+        size_t included = 0;
+        for (const auto& [guid, entity] : game_.getEntityManager().getEntities()) {
+            if (!entity) continue;
+            ++total;
+            const float dx = entity->getX() - move.x;
+            const float dy = entity->getY() - move.y;
+            const float dz = entity->getZ() - move.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (radius >= 0.0f && distance > radius) continue;
+
+            const bool isTransport = game_.isTransportGuid(guid);
+            if (onlyTransports && !isTransport) continue;
+
+            json item = {
+                {"guid", guid},
+                {"type", objectTypeName(entity->getType())},
+                {"isTransport", isTransport},
+                {"hasServerTransportUpdate", isTransport ? game_.hasServerTransportUpdate(guid) : false},
+                {"position", {{"x", entity->getX()}, {"y", entity->getY()}, {"z", entity->getZ()}}},
+                {"orientation", entity->getOrientation()},
+                {"distance", distance}
+            };
+
+            if (entity->isUnit()) {
+                const auto* unit = static_cast<const game::Unit*>(entity.get());
+                item["name"] = unit->getName();
+                item["entry"] = unit->getEntry();
+                item["displayId"] = unit->getDisplayId();
+                item["level"] = unit->getLevel();
+            } else if (entity->getType() == game::ObjectType::GAMEOBJECT) {
+                const auto* go = static_cast<const game::GameObject*>(entity.get());
+                item["name"] = go->getName();
+                item["entry"] = go->getEntry();
+                item["displayId"] = go->getDisplayId();
+                if (const auto* info = game_.getCachedGameObjectInfo(go->getEntry())) {
+                    item["template"] = {
+                        {"entry", info->entry},
+                        {"name", info->name},
+                        {"type", info->type},
+                        {"displayId", info->displayId}
+                    };
+                }
+            }
+
+            entities.push_back(std::move(item));
+            ++included;
+        }
+
+        return {
+            {"status", status()},
+            {"inWorld", isInWorld()},
+            {"mapId", game_.getCurrentMapId()},
+            {"position", {{"x", move.x}, {"y", move.y}, {"z", move.z}}},
+            {"radius", radius},
+            {"onlyTransports", onlyTransports},
+            {"entityCount", total},
+            {"included", included},
+            {"entities", entities}
         };
     }
 
@@ -637,6 +739,30 @@ uint32_t hp = 0, maxHp = 0;
         std::lock_guard<std::mutex> lock(stateMutex_);
         stopMovementTaskLocked(reason, "");
         return {{"ok", true}, {"movement", movementTaskToJsonLocked()}};
+    }
+
+    json fireAreaTrigger(uint32_t triggerId) {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (triggerId == 0) {
+            return {{"ok", false}, {"error", "trigger id is required"}};
+        }
+        auto* socket = game_.getSocket();
+        if (!socket || !socket->isConnected()) {
+            return {{"ok", false}, {"error", "world socket is not connected"}};
+        }
+
+        network::Packet pkt(game::wireOpcode(game::Opcode::CMSG_AREATRIGGER));
+        pkt.writeUInt32(triggerId);
+        socket->send(pkt);
+        std::cout << "Sent CMSG_AREATRIGGER id=" << triggerId << "\n";
+        return {
+            {"ok", true},
+            {"triggerId", triggerId},
+            {"mapId", game_.getCurrentMapId()},
+            {"position", {{"x", game_.getMovementInfo().x}, {"y", game_.getMovementInfo().y}, {"z", game_.getMovementInfo().z}}}
+        };
     }
 
     void requestGracefulLogout() {
@@ -947,7 +1073,12 @@ private:
         const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
 
         if (distance <= radius) {
-            game_.setPosition(tx, ty, tz);
+            // Treat waypoint radius as "close enough", not as permission to
+            // snap forward. Snapping at every intermediate waypoint makes the
+            // headless client visibly outrun a normal WoW client on dense paths.
+            if (movementTask_.currentWaypoint + 1 >= movementTask_.waypoints.size() && distance <= 0.5f) {
+                game_.setPosition(tx, ty, tz);
+            }
             advanceToNextWaypointLocked();
             return;
         }
@@ -1094,32 +1225,130 @@ std::string queryParam(const std::string& query, const std::string& key) {
     return "";
 }
 
+bool apiDebugEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("WOWEE_API_DEBUG");
+        return value && value[0] != '\0' && std::string(value) != "0";
+    }();
+    return enabled;
+}
+
+const char* httpReason(int status) {
+    switch (status) {
+        case 200: return "OK";
+        case 400: return "Bad Request";
+        case 404: return "Not Found";
+        case 408: return "Request Timeout";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        default: return "Error";
+    }
+}
+
+void configureApiClientSocket(socket_t client) {
+// Accepted sockets can inherit non-blocking mode from the listening socket on
+// Windows. The per-client handler expects blocking reads with a short timeout.
+#ifdef _WIN32
+    u_long blockingMode = 0;
+    ioctlsocket(client, FIONBIO, &blockingMode);
+#else
+    int flags = fcntl(client, F_GETFL, 0);
+    if (flags >= 0) fcntl(client, F_SETFL, flags & ~O_NONBLOCK);
+#endif
+
+    int one = 1;
+    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
+#ifdef _WIN32
+    DWORD timeoutMs = 5000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#else
+    timeval tv{};
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+bool sendAll(socket_t client, const std::string& response) {
+    size_t offset = 0;
+    while (offset < response.size()) {
+        const size_t remaining = response.size() - offset;
+        ssize_t sent = wowee::net::portableSend(
+            client,
+            reinterpret_cast<const uint8_t*>(response.data() + offset),
+            remaining
+        );
+        if (sent <= 0) {
+            if (apiDebugEnabled()) {
+                std::cerr << "API send failed: "
+                          << wowee::net::errorString(wowee::net::lastError()) << "\n";
+            }
+            return false;
+        }
+        offset += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+bool parseContentLengthLine(const std::string& line, size_t& contentLength) {
+    const std::string lower = lowerAscii(line);
+    if (lower.rfind("content-length:", 0) != 0) return true;
+    const std::string raw = trim(line.substr(15));
+    if (raw.empty() || raw.size() > 10) return false;
+    size_t value = 0;
+    for (char ch : raw) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+        value = value * 10 + static_cast<size_t>(ch - '0');
+        if (value > 1024 * 1024) return false;
+    }
+    contentLength = value;
+    return true;
+}
+
+bool recvAppend(socket_t client, std::string& out, size_t maxBytes) {
+    std::array<uint8_t, 8192> buf{};
+    ssize_t n = wowee::net::portableRecv(client, buf.data(), buf.size());
+    if (n <= 0) {
+        if (n < 0 && apiDebugEnabled()) {
+            const int err = wowee::net::lastError();
+            if (!wowee::net::isConnectionClosed(err)) {
+                std::cerr << "API recv failed: " << wowee::net::errorString(err) << "\n";
+            }
+        }
+        return false;
+    }
+    const size_t available = maxBytes > out.size() ? maxBytes - out.size() : 0;
+    const size_t toCopy = std::min(available, static_cast<size_t>(n));
+    out.append(reinterpret_cast<const char*>(buf.data()), toCopy);
+    return toCopy == static_cast<size_t>(n);
+}
+
 void sendHttp(socket_t client, int status, const json& body) {
     const std::string payload = body.dump();
     std::ostringstream out;
-    out << "HTTP/1.1 " << status << (status == 200 ? " OK" : " Error") << "\r\n"
+    out << "HTTP/1.1 " << status << " " << httpReason(status) << "\r\n"
         << "Content-Type: application/json\r\n"
         << "Access-Control-Allow-Origin: *\r\n"
         << "Content-Length: " << payload.size() << "\r\n"
         << "Connection: close\r\n\r\n"
         << payload;
     const std::string response = out.str();
-    ssize_t sent = wowee::net::portableSend(client, reinterpret_cast<const uint8_t*>(response.data()), response.size());
+    bool sent = sendAll(client, response);
     (void)sent; // client may have disconnected — ignore
 }
 
 void handleHttpClient(socket_t client, HeadlessSession& session) {
+    configureApiClientSocket(client);
     std::string req;
-    std::array<uint8_t, 8192> buf{};
     while (req.find("\r\n\r\n") == std::string::npos && req.size() < 65536) {
-        ssize_t n = wowee::net::portableRecv(client, buf.data(), buf.size());
-        if (n <= 0) break;
-        req.append(reinterpret_cast<const char*>(buf.data()), static_cast<size_t>(n));
+        if (!recvAppend(client, req, 65536)) break;
     }
 
     const size_t headerEnd = req.find("\r\n\r\n");
     if (headerEnd == std::string::npos) {
-        sendHttp(client, 400, {{"error", "bad request"}});
+        sendHttp(client, req.empty() ? 408 : 400, {{"ok", false}, {"error", req.empty() ? "request timeout" : "bad request: missing header terminator"}});
         wowee::net::closeSocket(client);
         return;
     }
@@ -1130,34 +1359,59 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
     std::string target;
     std::string version;
     hs >> method >> target >> version;
+    if (method.empty() || target.empty() || version.rfind("HTTP/", 0) != 0) {
+        sendHttp(client, 400, {{"ok", false}, {"error", "bad request line"}});
+        wowee::net::closeSocket(client);
+        return;
+    }
 
     size_t contentLength = 0;
     std::string line;
     std::getline(hs, line);
     while (std::getline(hs, line)) {
         line = trim(line);
-        const std::string lower = lowerAscii(line);
-        if (lower.rfind("content-length:", 0) == 0) {
-            contentLength = static_cast<size_t>(std::stoul(trim(line.substr(15))));
+        if (!parseContentLengthLine(line, contentLength)) {
+            sendHttp(client, 400, {{"ok", false}, {"error", "invalid Content-Length"}});
+            wowee::net::closeSocket(client);
+            return;
         }
+    }
+    if (contentLength > 1024 * 1024) {
+        sendHttp(client, 413, {{"ok", false}, {"error", "request body too large"}});
+        wowee::net::closeSocket(client);
+        return;
     }
 
     std::string body = req.substr(headerEnd + 4);
     while (body.size() < contentLength) {
-        ssize_t n = wowee::net::portableRecv(client, buf.data(), buf.size());
-        if (n <= 0) break;
-        body.append(reinterpret_cast<const char*>(buf.data()), static_cast<size_t>(n));
+        if (!recvAppend(client, body, contentLength)) break;
+    }
+    if (body.size() < contentLength) {
+        sendHttp(client, 400, {{"ok", false}, {"error", "incomplete request body"}});
+        wowee::net::closeSocket(client);
+        return;
     }
 
     const size_t qpos = target.find('?');
     const std::string path = qpos == std::string::npos ? target : target.substr(0, qpos);
     const std::string query = qpos == std::string::npos ? "" : target.substr(qpos + 1);
+    if (apiDebugEnabled()) {
+        std::cerr << "API " << method << " " << path << " body=" << body.size() << "\n";
+    }
 
     try {
-        if (method == "GET" && path == "/status") {
+        if (method == "OPTIONS") {
+            sendHttp(client, 200, {{"ok", true}});
+        } else if (method == "GET" && path == "/status") {
             sendHttp(client, 200, session.statusJson());
         } else if (method == "GET" && path == "/world/self") {
             sendHttp(client, 200, session.worldSelf());
+        } else if (method == "GET" && path == "/world/entities") {
+            const std::string radiusParam = queryParam(query, "radius");
+            const float radius = radiusParam.empty() ? 120.0f : std::stof(radiusParam);
+            const std::string transportsParam = queryParam(query, "transports");
+            const bool onlyTransports = transportsParam == "1" || transportsParam == "true" || transportsParam == "yes";
+            sendHttp(client, 200, session.worldEntities(radius, onlyTransports));
         } else if (method == "GET" && path == "/party") {
             sendHttp(client, 200, session.partyJson());
         } else if (method == "GET" && path == "/chat") {
@@ -1225,11 +1479,20 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
         } else if (method == "POST" && path == "/movement/stop") {
             json payload = json::parse(body.empty() ? "{}" : body);
             sendHttp(client, 200, session.stopMovementTask(payload.value("reason", "stopped")));
+        } else if (method == "POST" && path == "/area-trigger") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const uint32_t triggerId = static_cast<uint32_t>(std::max(0, payload.value("id", payload.value("triggerId", 0))));
+            const auto result = session.fireAreaTrigger(triggerId);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else {
-            sendHttp(client, 404, {{"error", "not found"}});
+            sendHttp(client, 404, {{"ok", false}, {"error", "not found"}});
         }
     } catch (const std::exception& ex) {
-        sendHttp(client, 400, {{"error", ex.what()}});
+        std::cerr << "API handler exception for " << method << " " << path << ": " << ex.what() << "\n";
+        sendHttp(client, 500, {{"ok", false}, {"error", ex.what()}, {"path", path}});
+    } catch (...) {
+        std::cerr << "API handler unknown exception for " << method << " " << path << "\n";
+        sendHttp(client, 500, {{"ok", false}, {"error", "unknown API handler exception"}, {"path", path}});
     }
 
     wowee::net::closeSocket(client);
@@ -1298,6 +1561,7 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    wowee::core::installCrashDiagnostics("wowee_headless");
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
     setDefaultEnv("WOWEE_HEADLESS", "1");

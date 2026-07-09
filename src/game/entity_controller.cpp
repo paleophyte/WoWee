@@ -79,6 +79,27 @@ float slowUpdateObjectBlockLogThresholdMs() {
     return static_cast<float>(thresholdMs);
 }
 
+bool transportDebugEnabled() {
+    static const bool enabled = envFlagEnabled("WOWEE_TRANSPORT_DEBUG", false);
+    return enabled;
+}
+
+const char* updateTypeDebugName(UpdateType type) {
+    switch (type) {
+        case UpdateType::VALUES: return "VALUES";
+        case UpdateType::MOVEMENT: return "MOVEMENT";
+        case UpdateType::CREATE_OBJECT: return "CREATE_OBJECT";
+        case UpdateType::CREATE_OBJECT2: return "CREATE_OBJECT2";
+        case UpdateType::OUT_OF_RANGE_OBJECTS: return "OUT_OF_RANGE_OBJECTS";
+        case UpdateType::NEAR_OBJECTS: return "NEAR_OBJECTS";
+    }
+    return "UNKNOWN";
+}
+
+bool isDeeprunSubwayEntry(uint32_t entry) {
+    return entry >= 176080 && entry <= 176086;
+}
+
 } // anonymous namespace
 
 EntityController::EntityController(GameHandler& owner)
@@ -221,6 +242,55 @@ void EntityController::handleUpdateObject(network::Packet& packet) {
             LOG_WARNING("Failed to parse SMSG_UPDATE_OBJECT");
         if (data.blocks.empty()) return;
         // Fall through: process any blocks that were successfully parsed before the failure.
+    }
+
+    if (transportDebugEnabled()) {
+        size_t creates = 0;
+        size_t movements = 0;
+        size_t gameObjects = 0;
+        size_t transportFlagged = 0;
+        size_t subwayCandidates = 0;
+        const uint16_t entryIdx = fieldIndex(UF::OBJECT_FIELD_ENTRY);
+        const uint16_t displayIdx = fieldIndex(UF::GAMEOBJECT_DISPLAYID);
+        for (const auto& block : data.blocks) {
+            const bool isCreate = block.updateType == UpdateType::CREATE_OBJECT ||
+                                  block.updateType == UpdateType::CREATE_OBJECT2;
+            if (isCreate) ++creates;
+            if (block.updateType == UpdateType::MOVEMENT) ++movements;
+            if (block.objectType == ObjectType::GAMEOBJECT) ++gameObjects;
+            if ((block.updateFlags & 0x0002) != 0) ++transportFlagged;
+
+            uint32_t entry = 0;
+            uint32_t displayId = 0;
+            auto entryIt = block.fields.find(entryIdx);
+            if (entryIt != block.fields.end()) entry = entryIt->second;
+            auto displayIt = block.fields.find(displayIdx);
+            if (displayIt != block.fields.end()) displayId = displayIt->second;
+
+            if (isDeeprunSubwayEntry(entry) || displayId == 3831 || (block.objectType == ObjectType::GAMEOBJECT && (block.updateFlags & 0x0002) != 0)) {
+                ++subwayCandidates;
+                LOG_INFO("TRANSPORT DEBUG block type=", updateTypeDebugName(block.updateType),
+                         " guid=0x", std::hex, block.guid, std::dec,
+                         " objectType=", static_cast<int>(block.objectType),
+                         " updateFlags=0x", std::hex, block.updateFlags, std::dec,
+                         " entry=", entry,
+                         " displayId=", displayId,
+                         " hasMovement=", block.hasMovement,
+                         " pos=(", block.x, ", ", block.y, ", ", block.z, ")",
+                         " onTransport=", block.onTransport,
+                         " transportGuid=0x", std::hex, block.transportGuid, std::dec);
+            }
+        }
+        if (creates || movements || gameObjects || transportFlagged || !data.outOfRangeGuids.empty()) {
+            LOG_INFO("TRANSPORT DEBUG update packet blocks=", data.blocks.size(),
+                     " creates=", creates,
+                     " movements=", movements,
+                     " gameObjects=", gameObjects,
+                     " transportFlagged=", transportFlagged,
+                     " subwayCandidates=", subwayCandidates,
+                     " outOfRange=", data.outOfRangeGuids.size(),
+                     " entitiesNow=", entityManager.getEntityCount());
+        }
     }
 
     enqueueUpdateObjectWork(std::move(data));

@@ -64,3 +64,12 @@ Available landmarks: `goldshire`, `stormwind`, `elwynn_forest`.
 Available named routes: `stormwind_to_goldshire` (7 waypoints).
 
 The script polls `GET /status` every second and prints state transitions (`moving` to `arrived`, `failed`, or `movement_locked`) and waypoint progress. Press Ctrl-C to interrupt and stop the leader.
+
+For fleet-level pathfinding, start the path service and use the manager's `pathfind-goto` command:
+
+```bash
+python tools/pathfinding_service/pathfinding_service.py --host 127.0.0.1 --port 8790
+python tools/bot_fleet_manager/bot_fleet_manager.py tools/bot_fleet_manager/fleet.settings.json pathfind-goto 0 -9465 62 56
+```
+
+The current path service backend returns straight-line waypoints for integration testing. It is the API boundary where the CMaNGOS mmap/Detour backend will plug in.

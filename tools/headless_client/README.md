@@ -104,21 +104,17 @@ curl -X POST http://127.0.0.1:8787/movement/goto/waypoints \
 
 ### Coordinate Convention
 
-The headless client's position and movement API use **game-world coordinates `(game.x, game.y)`**:
-- `game.x` = north-south axis (positive = north)
-- `game.y` = east-west axis (positive = east)
+The headless client's `/world/self` and movement APIs use WoWee canonical world coordinates:
+- `x` = north/south axis
+- `y` = west/east axis
+- `z` = up/down axis
 
-The `tools.pathfinding.pathfinder` uses **canonical ADT coordinates `(wx, wy)`** where:
-- `wx` = east-west (= headless `position.y`)
-- `wy` = north-south (= headless `position.x`)
+CMaNGOS server/wire coordinates use the opposite X/Y order at the native pathfinding boundary:
+- CMaNGOS `x` = WoWee canonical `y`
+- CMaNGOS `y` = WoWee canonical `x`
+- CMaNGOS `z` = WoWee canonical `z`
 
-When using the pathfinder output, swap axes before sending to the movement API:
-```python
-# pathfinder returns (wx, wy)
-headless_waypoint = {"x": wy, "y": wx, "z": wz}
-```
-
-The `travel_demo.py --pathfind` flag handles this conversion automatically.
+The fleet pathfinding service accepts and returns WoWee canonical coordinates, so callers can post returned waypoints directly to `/movement/goto/waypoints`.
 
 Each waypoint can optionally override the arrival radius:
 

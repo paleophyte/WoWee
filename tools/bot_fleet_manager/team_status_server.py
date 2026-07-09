@@ -21,6 +21,7 @@ MAP_DATA_PATH = ROOT / "map_data" / "zone_map_bounds.json"
 RUNTIME_ZONE_ASSET_DIR = ROOT / "runtime" / "map_assets" / "zone"
 RUNTIME_CONTINENT_ASSET_DIR = ROOT / "runtime" / "map_assets" / "continent"
 STALE_TEAM_GRACE_SECONDS = 20.0
+ACTIVITY_HISTORY: dict[str, dict[str, Any]] = {}
 DEFAULT_ZONE_ASSET_DIRS = [
     RUNTIME_ZONE_ASSET_DIR,
     Path(os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR", "")) if os.environ.get("WOWEE_MINIMANAGER_ZONE_DIR") else None,
@@ -28,7 +29,7 @@ DEFAULT_ZONE_ASSET_DIRS = [
 ]
 CONTINENT_ASSETS = {
     "azeroth": {"label": "Azeroth", "asset": "azeroth.jpg", "width": 966, "height": 732},
-    "outland": {"label": "Outland", "asset": "outland.jpg", "width": 966, "height": 732},
+    "outland": {"label": "Outland", "asset": "outland.jpg", "width": 966, "height": 695},
     "northrend": {"label": "Northrend", "asset": "northrend.jpg", "width": 966, "height": 732},
 }
 TEAM_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -74,23 +75,67 @@ def _safe_get(doc: dict[str, Any], *path: str, default: Any = "") -> Any:
     return value
 
 
-def _summarize_activity(status: dict[str, Any]) -> str:
+def _summarize_activity(
+    leader_id: str,
+    status: dict[str, Any],
+    recent_chat: list[dict[str, Any]],
+) -> str:
     movement = status.get("movement", {})
     movement_state = str(movement.get("state") or "idle")
     session_state = str(status.get("status") or "unknown")
+    combat = status.get("combat", {})
+    health = status.get("health", {})
+    is_dead = bool(health.get("isDead") or health.get("isPlayerDead"))
+
+    last = ACTIVITY_HISTORY.setdefault(leader_id, {})
+    prev_movement_state = last.get("movementState")
+    prev_in_combat = last.get("inCombat")
+    prev_dead = last.get("dead")
+    last.update({
+        "movementState": movement_state,
+        "inCombat": combat.get("inCombat"),
+        "dead": is_dead,
+        "sessionState": session_state,
+        "updatedAt": time.monotonic(),
+    })
+
+    if is_dead:
+        return "dead" if not prev_dead else "dead (continuing)"
+
+    if combat.get("inCombat"):
+        return "in combat" if not prev_in_combat else "in combat (continuing)"
+
     if movement_state == "moving":
         index = movement.get("waypointIndex", 0)
         count = movement.get("waypointCount", 0)
-        target = movement.get("target", {})
-        return f"moving to {target.get('x', '?')}, {target.get('y', '?')}, {target.get('z', '?')} ({index}/{count})"
+        if prev_movement_state != "moving":
+            return f"started moving ({index}/{count})"
+        return f"moving ({index}/{count})"
+
     if movement.get("error"):
         return f"{movement_state}: {movement.get('error')}"
-    combat = status.get("combat", {})
-    if combat.get("inCombat"):
-        return "in combat"
-    health = status.get("health", {})
-    if health.get("isDead") or health.get("isPlayerDead"):
-        return "dead"
+
+    if prev_movement_state in ("moving", "arrived"):
+        return "arrived (settling)"
+
+    if prev_in_combat and not combat.get("inCombat"):
+        return "exited combat"
+
+    if prev_dead and not is_dead:
+        return "resurrected"
+
+    command_queue = status.get("commandQueue", {})
+    pending = int(command_queue.get("pending", 0) or 0)
+    if pending > 0:
+        return f"command pending ({pending})"
+
+    if recent_chat:
+        last_msg = recent_chat[-1]
+        msg_type = str(last_msg.get("type", ""))
+        from_name = str(last_msg.get("from", ""))
+        if msg_type in ("SYSTEM", "WHISPER"):
+            return f"whisper/system: {last_msg.get('message', '')[:50]}"
+
     return session_state
 
 
@@ -209,8 +254,10 @@ def _continent_for_world(world: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     continent_key = "azeroth"
-    working_x = round(x)
-    working_y = round(y)
+    # WoWee APIs expose canonical coordinates: x=north, y=west.
+    # MiniManager's continent formulas use server coordinates: x=west, y=north.
+    working_x = round(y)
+    working_y = round(x)
     if map_id == 530:
         if working_y < -1000 and working_y > -10000 and working_x > 5000:
             working_x -= 10349
@@ -297,23 +344,43 @@ def _cached_team(leader_id: str, error: str) -> dict[str, Any] | None:
     return team
 
 
-def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
+def _maybe_stale_fallback(leader_id, key, team, endpoint_errors):
+    if key in team:
+        return
+    cached = TEAM_CACHE.get(leader_id)
+    if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS:
+        cached_team = cached[1]
+        if key in cached_team:
+            team[key] = cached_team[key]
+
+
+def collect_team_status(
+    api_bases: list[dict[str, str]],
+    fleet_filter: str = "",
+    compact: bool = False,
+) -> dict[str, Any]:
     teams: list[dict[str, Any]] = []
     collected_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     for item in api_bases:
         leader_id = item["id"]
+        item_fleet = item.get("fleet", "")
+        if fleet_filter and item_fleet != fleet_filter:
+            continue
+
         base = item["base"].rstrip("/")
         team: dict[str, Any] = {
             "id": leader_id,
-            "fleet": item.get("fleet", ""),
+            "fleet": item_fleet,
             "apiBase": base,
             "apiReachable": False,
             "state": "offline",
             "activity": "unavailable",
             "endpointErrors": {},
         }
+
         status, status_error = _try_request_json(base + "/status")
+        now = time.monotonic()
         if status is None:
             cached_team = _cached_team(leader_id, status_error)
             if cached_team is not None:
@@ -327,13 +394,14 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
             "apiReachable": True,
             "state": _team_state(status),
             "status": status,
-            "activity": _summarize_activity(status),
         })
 
         endpoint_errors: dict[str, str] = {}
         world, world_error = _try_request_json(base + "/world/self")
+        world_ts = time.monotonic()
         if world is not None:
             team["world"] = world
+            team["worldCollectedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             continent = _continent_for_world(world)
             if continent is not None:
                 team["continentMap"] = continent
@@ -353,44 +421,72 @@ def collect_team_status(api_bases: list[dict[str, str]]) -> dict[str, Any]:
                     "assetHeight": int(map_zone["asset_height"]),
                 }
         elif world_error:
-            cached = TEAM_CACHE.get(leader_id)
-            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS:
-                cached_team = cached[1]
-                if "world" in cached_team:
-                    team["world"] = cached_team["world"]
-                if "continentMap" in cached_team:
-                    team["continentMap"] = cached_team["continentMap"]
-                if "mapZone" in cached_team:
-                    team["mapZone"] = cached_team["mapZone"]
+            _maybe_stale_fallback(leader_id, "world", team, endpoint_errors)
+            _maybe_stale_fallback(leader_id, "continentMap", team, endpoint_errors)
+            _maybe_stale_fallback(leader_id, "mapZone", team, endpoint_errors)
             endpoint_errors["world"] = world_error
+            team["worldCollectedAt"] = "stale"
 
         party, party_error = _try_request_json(base + "/party")
         if party is not None:
             team["party"] = party
+            team["partyCollectedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         elif party_error:
-            cached = TEAM_CACHE.get(leader_id)
-            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS and "party" in cached[1]:
-                team["party"] = cached[1]["party"]
+            _maybe_stale_fallback(leader_id, "party", team, endpoint_errors)
             endpoint_errors["party"] = party_error
+            team["partyCollectedAt"] = "stale"
 
         chat, chat_error = _try_request_json(base + "/chat?after=0&limit=8")
         if chat is not None:
             team["recentChat"] = chat.get("messages", [])[-8:]
+            team["chatCollectedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         elif chat_error:
-            cached = TEAM_CACHE.get(leader_id)
-            if cached is not None and time.monotonic() - cached[0] <= STALE_TEAM_GRACE_SECONDS and "recentChat" in cached[1]:
-                team["recentChat"] = cached[1]["recentChat"]
+            _maybe_stale_fallback(leader_id, "recentChat", team, endpoint_errors)
             endpoint_errors["chat"] = chat_error
+            team["chatCollectedAt"] = "stale"
+
+        team["activity"] = _summarize_activity(
+            leader_id, status, team.get("recentChat", [])
+        )
 
         if endpoint_errors:
             team["endpointErrors"] = endpoint_errors
             if any(key in endpoint_errors for key in ("world", "party", "chat")):
                 team["partialStale"] = True
         else:
-            TEAM_CACHE[leader_id] = (time.monotonic(), json.loads(json.dumps(team)))
+            TEAM_CACHE[leader_id] = (now, json.loads(json.dumps(team)))
         teams.append(team)
 
-    return {"collectedAt": collected_at, "teams": teams}
+    result: dict[str, Any] = {"collectedAt": collected_at, "teams": teams}
+
+    if compact:
+        result["teams"] = [
+            {
+                "id": t.get("id", ""),
+                "fleet": t.get("fleet", ""),
+                "state": t.get("state", "offline"),
+                "apiReachable": t.get("apiReachable", False),
+                "activity": t.get("activity", ""),
+                "mapId": (
+                    int(t.get("world", {}).get("mapId", -1))
+                    if t.get("world") else -1
+                ),
+                "position": {
+                    "x": float(t.get("world", {}).get("position", {}).get("x", 0)),
+                    "y": float(t.get("world", {}).get("position", {}).get("y", 0)),
+                    "z": float(t.get("world", {}).get("position", {}).get("z", 0)),
+                } if t.get("world") else None,
+                "partyMembers": [
+                    m.get("name", "") for m in
+                    (t.get("party", {}).get("members", []))
+                ] if t.get("party") else None,
+                "collectedAt": t.get("worldCollectedAt", ""),
+                "stale": t.get("partialStale", False) or t.get("stale", False),
+            }
+            for t in teams
+        ]
+
+    return result
 
 
 def render_dashboard(title: str) -> bytes:
@@ -437,7 +533,7 @@ def render_dashboard(title: str) -> bytes:
       padding: 10px 12px;
       border-bottom: 1px solid #2a3037;
     }}
-    .map-wrap {{ position: relative; height: min(52vh, 520px); min-height: 280px; }}
+    .map-wrap {{ position: relative; height: min(64vh, 740px); min-height: 420px; }}
     #leader-map {{ display: block; width: 100%; height: 100%; background: #0f1317; }}
     .map-tabs {{ display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }}
     .map-tabs button {{
@@ -470,6 +566,9 @@ def render_dashboard(title: str) -> bytes:
     .ok {{ color: #85d996; }}
     .warn {{ color: #ffd27a; }}
     .bad {{ color: #ff9a8b; }}
+    .moving {{ color: #7db7ff; }}
+    .settling {{ color: #85d996; }}
+    .chat {{ color: #f2c166; }}
     .muted {{ color: #aab2bd; }}
     .stale-pill {{ color: #ffd27a; }}
     .chat {{ display: grid; gap: 3px; max-height: 140px; overflow: auto; }}
@@ -588,6 +687,39 @@ def render_dashboard(title: str) -> bytes:
         maxY: midY + spanY / 2 + padY
       }};
     }}
+    function fittedRect(containerWidth, containerHeight, contentWidth, contentHeight) {{
+      const safeContentWidth = Math.max(1, Number(contentWidth) || containerWidth);
+      const safeContentHeight = Math.max(1, Number(contentHeight) || containerHeight);
+      const scale = Math.min(containerWidth / safeContentWidth, containerHeight / safeContentHeight);
+      const w = safeContentWidth * scale;
+      const h = safeContentHeight * scale;
+      return {{
+        x: (containerWidth - w) / 2,
+        y: (containerHeight - h) / 2,
+        w,
+        h
+      }};
+    }}
+    function drawGrid(ctx, rect) {{
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(rect.x, rect.y, rect.w, rect.h);
+      ctx.clip();
+      ctx.strokeStyle = "#202832";
+      ctx.lineWidth = 1;
+      const grid = 8;
+      for (let i = 1; i < grid; i++) {{
+        const gx = rect.x + (rect.w / grid) * i;
+        const gy = rect.y + (rect.h / grid) * i;
+        ctx.beginPath();
+        ctx.moveTo(gx, rect.y);
+        ctx.lineTo(gx, rect.y + rect.h);
+        ctx.moveTo(rect.x, gy);
+        ctx.lineTo(rect.x + rect.w, gy);
+        ctx.stroke();
+      }}
+      ctx.restore();
+    }}
     function drawMap(points, mapId) {{
       const canvas = document.getElementById("leader-map");
       const wrap = canvas.parentElement;
@@ -618,11 +750,14 @@ def render_dashboard(title: str) -> bytes:
       const zone = continent ? null : (points.find(point => point.zone && point.assetUrl)?.zone || null);
       const zoneImage = zone ? loadZoneImage(String(zone.assetUrl || "")) : null;
       const hasZoneImage = zone && zoneImage && zoneImage.complete && zoneImage.naturalWidth > 0;
+      const imageWidth = continent ? Number(continent.width || 966) : (hasZoneImage ? Number(zoneImage.naturalWidth) : Number(zone?.assetWidth || width));
+      const imageHeight = continent ? Number(continent.height || 732) : (hasZoneImage ? Number(zoneImage.naturalHeight) : Number(zone?.assetHeight || height));
+      const rect = (continent || hasZoneImage) ? fittedRect(width, height, imageWidth, imageHeight) : {{ x: 0, y: 0, w: width, h: height }};
       const bounds = continent ? {{
         minX: 0,
-        maxX: Number(continent.height || 732),
+        maxX: Number(continent.height || imageHeight || 732),
         minY: 0,
-        maxY: Number(continent.width || 966)
+        maxY: Number(continent.width || imageWidth || 966)
       }} : zone ? {{
         minX: Math.min(Number(zone.top), Number(zone.bottom)),
         maxX: Math.max(Number(zone.top), Number(zone.bottom)),
@@ -630,43 +765,34 @@ def render_dashboard(title: str) -> bytes:
         maxY: Math.max(Number(zone.left), Number(zone.right))
       }} : mapBounds(points);
       const toScreen = (point) => continent ? ({{
-        x: (Number(point.continent?.x || 0) / Number(point.continent?.width || 966)) * width,
-        y: (Number(point.continent?.y || 0) / Number(point.continent?.height || 732)) * height
+        x: rect.x + (Number(point.continent?.x || 0) / Number(point.continent?.width || imageWidth || 966)) * rect.w,
+        y: rect.y + (Number(point.continent?.y || 0) / Number(point.continent?.height || imageHeight || 732)) * rect.h
       }}) : zone ? ({{
-        x: (((point.y - Number(zone.left)) / (Number(zone.right) - Number(zone.left))) || 0) * width,
-        y: (((point.x - Number(zone.top)) / (Number(zone.bottom) - Number(zone.top))) || 0) * height
+        x: rect.x + ((((point.y - Number(zone.left)) / (Number(zone.right) - Number(zone.left))) || 0) * rect.w),
+        y: rect.y + ((((point.x - Number(zone.top)) / (Number(zone.bottom) - Number(zone.top))) || 0) * rect.h)
       }}) : ({{
         x: ((point.y - bounds.minY) / (bounds.maxY - bounds.minY)) * width,
         y: ((bounds.maxX - point.x) / (bounds.maxX - bounds.minX)) * height
       }});
 
       if (hasContinentImage || hasZoneImage) {{
-        ctx.drawImage(hasContinentImage ? continentImage : zoneImage, 0, 0, width, height);
+        ctx.drawImage(hasContinentImage ? continentImage : zoneImage, rect.x, rect.y, rect.w, rect.h);
         ctx.fillStyle = "rgba(15,19,23,0.22)";
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+        ctx.strokeStyle = "#303842";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
       }}
 
-      ctx.strokeStyle = "#202832";
-      ctx.lineWidth = 1;
-      const grid = 8;
-      for (let i = 1; i < grid; i++) {{
-        const gx = (width / grid) * i;
-        const gy = (height / grid) * i;
-        ctx.beginPath();
-        ctx.moveTo(gx, 0);
-        ctx.lineTo(gx, height);
-        ctx.moveTo(0, gy);
-        ctx.lineTo(width, gy);
-        ctx.stroke();
-      }}
+      drawGrid(ctx, rect);
 
       ctx.fillStyle = "#7f8a96";
       ctx.font = "12px Inter, Segoe UI, Arial, sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText(continent ? `${{points[0].groupLabel}} / continent overview` : (zone ? `${{points[0].groupLabel}} / map ${{points[0].mapId}} / ${{hasZoneImage ? "zone art" : "coordinate plot"}}` : `map ${{esc(mapId)}}`), 12, 20);
+      ctx.fillText(continent ? `${{points[0].groupLabel}} / continent overview` : (zone ? `${{points[0].groupLabel}} / map ${{points[0].mapId}} / ${{hasZoneImage ? "zone art" : "coordinate plot"}}` : `map ${{esc(mapId)}}`), rect.x + 12, rect.y + 20);
       ctx.textAlign = "right";
-      ctx.fillText(`N ${{bounds.maxX.toFixed(0)}} / W ${{bounds.maxY.toFixed(0)}}`, width - 12, 20);
-      ctx.fillText(`S ${{bounds.minX.toFixed(0)}} / E ${{bounds.minY.toFixed(0)}}`, width - 12, height - 12);
+      ctx.fillText(`N ${{bounds.maxX.toFixed(0)}} / W ${{bounds.maxY.toFixed(0)}}`, rect.x + rect.w - 12, rect.y + 20);
+      ctx.fillText(`S ${{bounds.minX.toFixed(0)}} / E ${{bounds.minY.toFixed(0)}}`, rect.x + rect.w - 12, rect.y + rect.h - 12);
 
       for (const point of points) {{
         const p = toScreen(point);
@@ -734,6 +860,16 @@ def render_dashboard(title: str) -> bytes:
       if (team.state === "in_world") return "ok";
       return "warn";
     }}
+    function activityClass(team) {{
+      const a = (team.activity || "").toLowerCase();
+      if (a.startsWith("dead") || a.startsWith("in combat") || a.startsWith("exited combat")) return "bad";
+      if (a.startsWith("moving") || a.startsWith("started moving")) return "moving";
+      if (a.includes("settling")) return "settling";
+      if (a.startsWith("command pending")) return "warn";
+      if (a.startsWith("whisper") || a.startsWith("resurrected")) return "chat";
+      if (a === "in_world" || a === "idle" || a === "") return "";
+      return "";
+    }}
     function render(data, note = "") {{
       document.getElementById("updated").innerHTML = `updated ${{esc(data.collectedAt)}}${{note ? ` <span class="stale-pill">${{esc(note)}}</span>` : ""}}`;
       renderMap(data);
@@ -742,7 +878,7 @@ def render_dashboard(title: str) -> bytes:
           <td data-label="Team"><div class="name">${{esc(team.id)}}</div><div class="muted">${{esc(team.fleet || "default")}}</div><div class="muted">${{esc(team.apiBase)}}</div></td>
           <td data-label="Status" class="${{statusClass(team)}}">${{esc(team.state || "offline")}}${{team.stale ? " (stale)" : ""}}</td>
           <td data-label="Location">${{locationText(team)}}</td>
-          <td data-label="Activity">${{esc(team.activity)}}</td>
+          <td data-label="Activity" class="${{activityClass(team)}}">${{esc(team.activity)}}</td>
           <td data-label="Party">${{partyText(team)}}</td>
           <td data-label="Recent Chat">${{chatText(team)}}</td>
         </tr>`).join("");
@@ -788,8 +924,14 @@ def run_team_status_server(api_bases: list[dict[str, str]], host: str = "127.0.0
             if self.path == "/" or self.path.startswith("/?"):
                 self._send(200, render_dashboard("WoWee Team Status"), "text/html; charset=utf-8")
                 return
-            if self.path == "/api/teams":
-                body = json.dumps(collect_team_status(api_bases)).encode("utf-8")
+            if self.path.startswith("/api/teams"):
+                parsed = urllib.parse.urlparse(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+                fleet_filter = (params.get("fleet") or [""])[0]
+                compact = (params.get("compact") or [""])[0].lower() in ("1", "true", "yes")
+                body = json.dumps(
+                    collect_team_status(api_bases, fleet_filter=fleet_filter, compact=compact)
+                ).encode("utf-8")
                 self._send(200, body, "application/json")
                 return
             if self.path.startswith("/map-assets/zone/"):

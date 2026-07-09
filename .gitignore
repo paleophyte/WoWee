@@ -84,6 +84,7 @@ imgui.ini
 config.ini
 config.json
 .env
+client/
 tools/.env
 tools/headless_client/settings.json
 tools/bot_fleet_manager/fleet.settings.json
