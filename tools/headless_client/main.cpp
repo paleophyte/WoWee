@@ -514,8 +514,23 @@ public:
             updateMovementTask(deltaSeconds);
             wowee::core::setCrashNote("headless update: transport boarding");
             if (inWorldForApi_) {
-                const auto& move = game_.getMovementInfo();
-                game_.updateM2TransportBoarding(glm::vec3(move.x, move.y, move.z));
+                // While riding with no active goto, movementInfo doesn't move on its own here
+                // (unlike the GUI client's per-frame render loop, which relocks the player to
+                // the deck each frame) - keep it following the transport so /world/self and
+                // the disembark distance check both see the real, moving position instead of
+                // wherever the player happened to be standing at the moment they boarded. If a
+                // goto is active (e.g. walking off at the destination), let
+                // updateMovementTask() drive movementInfo instead so that walk can actually
+                // carry the player off the deck rather than being overwritten back onto it.
+                glm::vec3 playerCanonical;
+                if (game_.isOnTransport() && !movementTask_.active) {
+                    playerCanonical = game_.getComposedWorldPosition();
+                    game_.setPosition(playerCanonical.x, playerCanonical.y, playerCanonical.z);
+                } else {
+                    const auto& move = game_.getMovementInfo();
+                    playerCanonical = glm::vec3(move.x, move.y, move.z);
+                }
+                game_.updateM2TransportBoarding(playerCanonical);
             }
         }
         wowee::core::setCrashNote("headless update: chat snapshot");
