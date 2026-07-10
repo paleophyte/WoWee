@@ -30,13 +30,18 @@ uint64_t TransportManager::nowEpochMs() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-namespace {
-
-bool isDeeprunTramTransport(const ActiveTransport& transport) {
+bool TransportManager::isDeeprunTramTransport(const ActiveTransport& transport) {
     return transport.displayId == 3831u ||
            (transport.entry >= 176080u && transport.entry <= 176085u) ||
            (transport.pathId >= 176080u && transport.pathId <= 176085u);
 }
+
+uint32_t TransportManager::deeprunTramSeedDurationMs(uint32_t durationMs) {
+    constexpr uint32_t kRoundTo = 500;
+    return ((durationMs + kRoundTo / 2) / kRoundTo) * kRoundTo;
+}
+
+namespace {
 
 bool seedDeeprunTramStationPhase(ActiveTransport& transport,
                                  const PathEntry& pathEntry,
@@ -197,7 +202,13 @@ void TransportManager::registerTransport(uint64_t guid,
         // Seed to a stable phase derived from absolute time (see nowEpochMs comment)
         // so elevators don't all start at t=0, and so paired/opposing transports like
         // the Deeprun Tram's two cars land at the same relative phase for every client.
-        transport.localClockMs = static_cast<uint32_t>(nowEpochMs() % spline.durationMs());
+        // Deeprun tram cars use a rounded duration for the modulo (see
+        // deeprunTramSeedDurationMs comment) since sibling cars' own path durations
+        // don't quite match and that mismatch was decorrelating their seeds.
+        const uint32_t seedDurationMs = isDeeprunTramTransport(transport)
+            ? deeprunTramSeedDurationMs(spline.durationMs())
+            : spline.durationMs();
+        transport.localClockMs = static_cast<uint32_t>(nowEpochMs() % seedDurationMs);
         LOG_INFO("TransportManager: Enabled client animation for transport 0x",
                  std::hex, guid, std::dec, " path=", pathId,
                  " durationMs=", spline.durationMs(), " seedMs=", transport.localClockMs,
@@ -259,7 +270,6 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
     if (shipOrZeppelinDisplay) {
         hasUsablePath = hasUsableMovingPathForEntry(entry, 25.0f);
     }
-
     if (preferServerData) {
         // Strict server-authoritative mode: no inferred/remapped fallback routes.
         if (!hasUsablePath) {

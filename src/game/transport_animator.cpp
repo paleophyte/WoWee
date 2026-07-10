@@ -7,6 +7,7 @@
 #include "math/spline.hpp"
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
+#include <cmath>
 
 namespace wowee::game {
 
@@ -40,16 +41,26 @@ void TransportAnimator::evaluateAndApply(
         // orientationFromTangent orients along the full 3D tangent, pitching/banking to
         // match vertical slope - correct for something like a boat cresting swells, but
         // a subway car shouldn't nose-dive on a downhill grade the way this made it look
-        // ("angling downwards instead of staying flat" reported live). Flatten the
-        // vertical component so the Deeprun Tram only yaws to face its horizontal
-        // heading and stays level regardless of grade; other transports keep full
-        // tangent-based orientation.
+        // ("angling downwards instead of staying flat" reported live). Fully flattening
+        // tangent.z to 0 fixed that but overcorrected: the car's position still follows
+        // the real track elevation (unchanged below), so a level, unpitched model on a
+        // real grade visually clips into the sloped tunnel floor ("cars clipping into
+        // the ground when going up and/or down the hills" reported live). Clamp the
+        // pitch instead of removing it, so the car banks gently with real grade changes
+        // without the exaggerated nose-dive the raw Catmull-Rom tangent produced near
+        // control points; other transports keep full tangent-based orientation.
         const bool isDeeprunTram =
             transport.displayId == 3831u ||
             (transport.entry >= 176080u && transport.entry <= 176085u) ||
             (transport.pathId >= 176080u && transport.pathId <= 176085u);
         if (isDeeprunTram) {
-            tangent.z = 0.0f;
+            const float horizLen = std::sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
+            if (horizLen > 1e-4f) {
+                // ~0.3 rad (~17 degrees) max pitch either way.
+                constexpr float kMaxSlope = 0.3f;
+                const float maxAbsZ = horizLen * kMaxSlope;
+                tangent.z = std::clamp(tangent.z, -maxAbsZ, maxAbsZ);
+            }
         }
         transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
     }
