@@ -1537,20 +1537,21 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
     constexpr float kTbLiftDisembarkHorizDistSq = 28.0f * 28.0f;
     constexpr float kM2DisembarkVertDist = 18.0f;
     constexpr float kTbLiftDisembarkVertDist = 16.0f;
-    // Was 24.0 - way bigger than SubwayCar.m2's actual footprint (boarding only
-    // succeeds out to ~9.5 horizontal, per the boarding radius above). There's no
-    // deck-edge collision keeping the player on the car while riding (setDeckBounds
-    // exists but is only ever wired up for a test/fake transport, never real Deeprun
-    // cars), so a 24-unit disembark radius meant a few seconds of held-over walking
-    // input right after boarding (e.g. still moving forward from the approach) could
-    // carry the player clean off the car and off the disembark radius while still
-    // "attached", ejecting them into open tunnel track with nothing below - "started
-    // pulling away from the station, I fell through the bottom of the train, through
-    // the bottom of the world, and died" reported live. Tighten close to the board
-    // radius so incidental walking after boarding gets caught quickly, before it can
-    // carry the player far from the car; a small margin above the ~9.5 board radius
-    // avoids instantly disembarking a rider who boarded near the edge of that box.
-    constexpr float kDeeprunTramDisembarkHorizDistSq = 14.0f * 14.0f;
+    // Was 24.0 (way bigger than SubwayCar.m2's actual footprint - boarding only
+    // succeeds out to ~9.5 horizontal), then tightened to 14.0 to stop that. 14.0
+    // turned out too tight the other way: live data showed a rider boarding near the
+    // edge of the 9.5 board box (offset ~9.49, essentially the max) getting disembarked
+    // at horizDist=14.0106 after only a few seconds of ordinary walking - a ~4.5 unit
+    // margin isn't enough room to so much as reposition without tripping the check
+    // ("felt like I got pushed off to the side" reported live). There's still no real
+    // deck-edge collision keeping the player physically on the car while riding
+    // (setDeckBounds exists but is only ever wired up for a test/fake transport, never
+    // real Deeprun cars), so *some* disembark radius will always be a compromise between
+    // "wide enough to walk around" and "narrow enough that wandering off doesn't strand
+    // you over open track with nothing below." Widen to a more generous ~8.5 unit margin
+    // above the worst-case board offset - real room to stand/shift without instantly
+    // ejecting, while still far tighter than the original 24.
+    constexpr float kDeeprunTramDisembarkHorizDistSq = 18.0f * 18.0f;
     constexpr float kDeeprunTramDisembarkVertDist = 22.0f;
     const float disembarkHorizDistSq = isThunderBluffLift
         ? kTbLiftDisembarkHorizDistSq
