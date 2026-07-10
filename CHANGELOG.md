@@ -1,5 +1,25 @@
 # Changelog
 
+## [v1.9.7-preview] — 2026-07-09
+
+### Bug Fixes
+- Fix world login pipeline: login-critical opcodes (AUTH_CHALLENGE, AUTH_RESPONSE, CHAR_ENUM, CHAR_CREATE, CHAR_DELETE, WARDEN_DATA) now fall back to hardcoded wire values when opcode table lookup fails, preventing "Unhandled world opcode: 0x1ec" blocking character list retrieval (issue #87)
+- OpcodeTable::loadFromJson() now loads into temporaries and only swaps on success — a failed reload no longer wipes the working table
+- Integrity hash is now build-aware: Classic-era DLLs (fmod.dll, ijl15.dll, dbghelp.dll, unicows.dll) only required for builds <=6005 or Turtle; TBC/WotLK clients hash only the .exe
+
+### Animation & Camera
+- Rework strafing to use walk/run animations with SpineLow bone torso twist instead of dedicated strafe/run-left/right animations
+- Add `setInstanceTorsoYaw()` to CharacterRenderer for per-instance upper-body rotation
+- Camera smoothing snaps 1:1 while actively dragging or keyboard turning instead of always lerping, reducing perceived input lag
+- Add `travelYaw_` tracker to CameraController for movement vector heading separate from camera facing
+- Mount strafing uses MOUNT_RUN_LEFT/RIGHT animations when available
+- Default mouse invert changed to off
+
+### Tests
+- Add "OpcodeTable failed reload preserves existing data" test case
+
+---
+
 ## [v1.9.1-preview] — released, captures changes since v1.8.9-preview
 
 ### Architecture

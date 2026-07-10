@@ -1247,9 +1247,16 @@ void Renderer::update(float deltaTime) {
 
         // Movement-facing comes from camera controller and is decoupled from LMB orbit.
         bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
+        bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
+                             && !cameraController->isMovingBackward();
+        float torsoYawDeltaDeg = 0.0f;
         if (taxiFlight) {
             characterYaw = cameraController->getFacingYaw();
-        } else if (cameraController->isMoving() || cameraController->isRightMouseHeld()) {
+        } else if (cameraController->isMoving() && activeStrafe) {
+            characterYaw = cameraController->getTravelYaw();
+            torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
+        } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
+                   cameraController->isTurningLeft() || cameraController->isTurningRight()) {
             characterYaw = cameraController->getFacingYaw();
         } else if (animationController_ && animationController_->isInCombat() &&
                    animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
@@ -1269,6 +1276,10 @@ void Renderer::update(float deltaTime) {
         }
         float yawRad = glm::radians(characterYaw);
         characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
+
+        while (torsoYawDeltaDeg > 180.0f) torsoYawDeltaDeg -= 360.0f;
+        while (torsoYawDeltaDeg < -180.0f) torsoYawDeltaDeg += 360.0f;
+        characterRenderer->setInstanceTorsoYaw(characterInstanceId, glm::radians(torsoYawDeltaDeg));
 
         // Update animation based on movement state (delegated to AnimationController §4.2)
         if (animationController_) {

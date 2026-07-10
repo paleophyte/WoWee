@@ -299,7 +299,7 @@ void AuthHandler::sendLogonProof() {
         for (const auto& dir : candidateDirs) {
             for (const char* exe : candidateExes) {
                 std::string err;
-                if (computeIntegrityHashWin32WithExe(checksumSalt_, A, dir, exe, crcHash, err)) {
+                if (computeIntegrityHashWin32WithExe(checksumSalt_, A, dir, exe, clientInfo.build, crcHash, err)) {
                     crcHashPtr = &crcHash;
                     LOG_INFO("Integrity hash computed from ", dir, " (", exe, ")");
                     ok = true;

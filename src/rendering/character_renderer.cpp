@@ -435,6 +435,7 @@ void CharacterRenderer::shutdown() {
     // Clean up texture cache (VkTexture unique_ptrs auto-destroy)
     textureCache.clear();
     texturePropsByPtr_.clear();
+    normalMapByTexPtr_.clear();
     textureCacheBytes_ = 0;
     textureCacheCounter_ = 0;
 
@@ -533,6 +534,7 @@ void CharacterRenderer::clear() {
     // Clear texture cache (VkTexture unique_ptrs auto-destroy)
     textureCache.clear();
     texturePropsByPtr_.clear();
+    normalMapByTexPtr_.clear();
     textureCacheBytes_ = 0;
     textureCacheCounter_ = 0;
     loggedTextureLoadFails_.clear();
@@ -937,6 +939,10 @@ void CharacterRenderer::processPendingNormalMaps(int budget) {
             it->second.approxBytes += approxTextureBytesWithMips(result.width, result.height);
             textureCacheBytes_ += approxTextureBytesWithMips(result.width, result.height);
             it->second.normalHeightMap = std::move(tex);
+            if (it->second.texture) {
+                normalMapByTexPtr_[it->second.texture.get()] = {
+                    it->second.normalHeightMap.get(), it->second.heightMapVariance};
+            }
         }
         vkCtx_->endUploadBatch();
         it->second.normalMapPending = false;
@@ -1566,9 +1572,11 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
         return false;
     }
 
-    if (models.find(id) != models.end()) {
+    auto existingIt = models.find(id);
+    if (existingIt != models.end()) {
         core::Logger::getInstance().warning("Model ID ", id, " already loaded, replacing");
-        destroyModelGPU(models[id], /*defer=*/true);
+        destroyModelGPU(existingIt->second, /*defer=*/true);
+        models.erase(existingIt);
     }
 
     M2ModelGPU gpuModel;
@@ -1605,6 +1613,17 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
                 return ba.priorityPlane < bb.priorityPlane;
             return ba.materialLayer < bb.materialLayer;
         });
+
+    {
+        std::string lowerName = gpuModel.data.name;
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        gpuModel.isKoboldFlame =
+            (lowerName.find("kobold") != std::string::npos) &&
+            ((lowerName.find("candle") != std::string::npos) ||
+             (lowerName.find("torch") != std::string::npos) ||
+             (lowerName.find("mine") != std::string::npos));
+    }
 
     models[id] = std::move(gpuModel);
 
@@ -1740,7 +1759,8 @@ void CharacterRenderer::calculateBindPose(M2ModelGPU& gpuModel) {
 
 uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& position,
                                            const glm::vec3& rotation, float scale) {
-    if (models.find(modelId) == models.end()) {
+    auto modelIt = models.find(modelId);
+    if (modelIt == models.end()) {
         core::Logger::getInstance().error("Cannot create instance: model ", modelId, " not loaded");
         return 0;
     }
@@ -1753,7 +1773,7 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.scale = scale;
 
     // Initialize bone matrices to identity
-    auto& gpuRef = models[modelId];
+    auto& gpuRef = modelIt->second;
     instance.boneMatrices.resize(std::max(static_cast<size_t>(1), gpuRef.data.bones.size()), glm::mat4(1.0f));
     instance.cachedModel = &gpuRef;
 
@@ -1823,8 +1843,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
     const float animUpdateRadiusSq = animUpdateRadius * animUpdateRadius;
 
     // Single pass: fade-in, movement, and animation bone collection
-    std::vector<std::reference_wrapper<CharacterInstance>> toUpdate;
-    toUpdate.reserve(instances.size());
+    toUpdate_.clear();
 
     for (auto& pair : instances) {
         auto& inst = pair.second;
@@ -1898,11 +1917,11 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         bool needsBones = (inst.boneUpdateCounter >= boneInterval) || inst.boneMatrices.empty();
         if (needsBones) {
             inst.boneUpdateCounter = 0;
-            toUpdate.push_back(std::ref(inst));
+            toUpdate_.push_back(std::ref(inst));
         }
     }
 
-    const size_t updatedCount = toUpdate.size();
+    const size_t updatedCount = toUpdate_.size();
 
     // Thread bone matrix computation in chunks
     if (updatedCount >= 8 && numAnimThreads_ > 1) {
@@ -1913,7 +1932,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
 
         if (numThreads <= 1) {
-            for (auto& instRef : toUpdate) {
+            for (auto& instRef : toUpdate_) {
                 calculateBoneMatrices(instRef.get());
             }
         } else {
@@ -1929,9 +1948,9 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             for (size_t t = 0; t < numThreads; t++) {
                 size_t end = start + chunkSize + (t < remainder ? 1 : 0);
                 animFutures_.push_back(std::async(std::launch::async,
-                    [this, &toUpdate, start, end]() {
+                    [this, start, end]() {
                         for (size_t i = start; i < end; i++) {
-                            calculateBoneMatrices(toUpdate[i].get());
+                            calculateBoneMatrices(toUpdate_[i].get());
                         }
                     }));
                 start = end;
@@ -1942,7 +1961,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             }
         }
     } else {
-        for (auto& instRef : toUpdate) {
+        for (auto& instRef : toUpdate_) {
             calculateBoneMatrices(instRef.get());
         }
     }
@@ -2112,6 +2131,8 @@ glm::quat CharacterRenderer::interpolateQuat(const pipeline::M2AnimationTrack& t
 
 // --- Bone transform calculation ---
 
+constexpr int32_t kKeyBoneSpineLow = 4;
+
 void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     if (!instance.cachedModel) return;
     auto& model = instance.cachedModel->data;
@@ -2145,6 +2166,13 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         // At rest this is identity, so no separate bind pose is needed
         glm::mat4 localTransform = getBoneTransform(bone, instance.animationTime, instance.globalSequenceTime,
                                                     instance.currentSequenceIndex, gsd);
+
+        if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
+            glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
+                                * glm::rotate(glm::mat4(1.0f), instance.torsoYawOverrideRad, glm::vec3(0.0f, 0.0f, 1.0f))
+                                * glm::translate(glm::mat4(1.0f), -bone.pivot);
+            localTransform = extraYaw * localTransform;
+        }
 
         // Compose with parent
         if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones) {
@@ -2645,18 +2673,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 float emissiveBoost = 1.0f;
                 glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
-                // Keep custom warm/flicker treatment narrowly scoped to kobold candle flames.
-                bool koboldCandleFlame = false;
-                if (colorKeyBlack) {
-                    std::string modelKey = gpuModel.data.name;
-                    std::transform(modelKey.begin(), modelKey.end(), modelKey.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    koboldCandleFlame =
-                        (modelKey.find("kobold") != std::string::npos) &&
-                        ((modelKey.find("candle") != std::string::npos) ||
-                         (modelKey.find("torch") != std::string::npos) ||
-                         (modelKey.find("mine") != std::string::npos));
-                }
+                const bool koboldCandleFlame = colorKeyBlack && gpuModel.isKoboldFlame;
                 if (unlit && koboldCandleFlame) {
                     using clock = std::chrono::steady_clock;
                     float t = std::chrono::duration<float>(clock::now().time_since_epoch()).count();
@@ -2686,12 +2703,10 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 VkTexture* normalMap = flatNormalTexture_.get();
                 float batchHeightVariance = 0.0f;
                 if (texPtr && texPtr != whiteTexture_.get()) {
-                    for (const auto& ce : textureCache) {
-                        if (ce.second.texture.get() == texPtr && ce.second.normalHeightMap) {
-                            normalMap = ce.second.normalHeightMap.get();
-                            batchHeightVariance = ce.second.heightMapVariance;
-                            break;
-                        }
+                    auto nmIt = normalMapByTexPtr_.find(texPtr);
+                    if (nmIt != normalMapByTexPtr_.end()) {
+                        normalMap = nmIt->second.normalMap;
+                        batchHeightVariance = nmIt->second.heightMapVariance;
                     }
                 }
 
@@ -3185,6 +3200,13 @@ void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.rotation = rotation;
+    }
+}
+
+void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) {
+        it->second.torsoYawOverrideRad = deltaYawRad;
     }
 }
 

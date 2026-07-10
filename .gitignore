@@ -109,13 +109,6 @@ node_modules/
 tools/__pycache__/
 *.pyc
 
-# artifacts
-.codex-loop/
-
 # World editor output: scaffolded/exported zones and per-user ImGui layout
 custom_zones/
 wowee_editor_layout.ini
-
-# Local agent instructions
-AGENTS.md
-codex-loop.sh
