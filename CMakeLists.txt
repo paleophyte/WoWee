@@ -1349,6 +1349,18 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         if(BZ2_LIB)
             target_link_libraries(asset_extract PRIVATE ${BZ2_LIB})
         endif()
+        # StormLib's Windows build uses libtomcrypt/libtommath as its crypto
+        # backend (MPQ signature verification) — link them or the final
+        # executable fails with undefined references to md5_init, sha1_*,
+        # rsa_*, ltc_mp, ltm_desc, etc.
+        find_library(TOMCRYPT_LIB NAMES tomcrypt)
+        find_library(TOMMATH_LIB NAMES tommath)
+        if(TOMCRYPT_LIB)
+            target_link_libraries(asset_extract PRIVATE ${TOMCRYPT_LIB})
+        endif()
+        if(TOMMATH_LIB)
+            target_link_libraries(asset_extract PRIVATE ${TOMMATH_LIB})
+        endif()
     endif()
     set_target_properties(asset_extract PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
