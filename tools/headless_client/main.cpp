@@ -3,6 +3,7 @@
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/packet_parsers.hpp"
+#include "game/transport_manager.hpp"
 #include "game/world_packets.hpp"
 #include "network/net_platform.hpp"
 #include "network/packet.hpp"
@@ -420,6 +421,45 @@ public:
             }
         });
 
+        // Headless has no renderer, so it never learns whether a transport's model
+        // resolved to a WMO or M2 asset (see EntitySpawner::spawnOnlineGameObject).
+        // Known M2 transports (Deeprun Tram cars, Thunder Bluff lifts) are hardcoded
+        // here since that's the whole population this harness needs to track; anything
+        // else defaults to isM2=false (WMO), matching ships/zeppelins.
+        auto registerOrUpdateTransport = [this](uint64_t guid, uint32_t entry, uint32_t displayId,
+                                                float x, float y, float z, float orientation) {
+            auto* tm = game_.getTransportManager();
+            if (!tm) return;
+            const bool isM2 =
+                displayId == 3831u ||
+                (entry >= 176080u && entry <= 176085u) ||
+                (entry >= 20649u && entry <= 20657u);
+            const glm::vec3 canonicalPos(x, y, z);
+            if (!tm->getTransport(guid)) {
+                tm->resolveAndRegisterSpawn(guid, entry, displayId, canonicalPos,
+                                            /*wmoInstanceId=*/0, isM2,
+                                            game_.hasServerTransportUpdate(guid));
+            }
+            tm->updateServerTransport(guid, canonicalPos, orientation);
+        };
+        game_.setGameObjectSpawnCallback([this, registerOrUpdateTransport](
+                uint64_t guid, uint32_t entry, uint32_t displayId,
+                float x, float y, float z, float orientation, float /*scale*/) {
+            if (!game_.isTransportGuid(guid)) return;
+            registerOrUpdateTransport(guid, entry, displayId, x, y, z, orientation);
+        });
+        game_.setTransportMoveCallback([this, registerOrUpdateTransport](
+                uint64_t guid, float x, float y, float z, float orientation) {
+            uint32_t entry = 0, displayId = 0;
+            auto entity = game_.getEntityManager().getEntity(guid);
+            if (entity && entity->getType() == game::ObjectType::GAMEOBJECT) {
+                auto go = std::static_pointer_cast<game::GameObject>(entity);
+                entry = go->getEntry();
+                displayId = go->getDisplayId();
+            }
+            registerOrUpdateTransport(guid, entry, displayId, x, y, z, orientation);
+        });
+
         if (!auth_.connect(settings_.authHost, settings_.authPort)) {
             fail("Could not connect to auth server");
             return false;
@@ -472,6 +512,11 @@ public:
             drainPendingChat();
             wowee::core::setCrashNote("headless update: movement");
             updateMovementTask(deltaSeconds);
+            wowee::core::setCrashNote("headless update: transport boarding");
+            if (inWorldForApi_) {
+                const auto& move = game_.getMovementInfo();
+                game_.updateM2TransportBoarding(glm::vec3(move.x, move.y, move.z));
+            }
         }
         wowee::core::setCrashNote("headless update: chat snapshot");
         syncChatSnapshot();
@@ -859,6 +904,14 @@ private:
         if (assetManager_.initialize(dataPath.string()) || assetManager_.initializeDbcOnly(dataPath.string())) {
             assetManager_.setExpansionDataPath(expansionPath.string());
             rendering::EmoteRegistry::instance().loadFromDbc(&assetManager_);
+            // Without this, TransportManager::hasPathForEntry() never finds a real
+            // moving path for any transport (Deeprun Tram, boats, elevators) - they
+            // register but sit stationary at their spawn point forever, since nothing
+            // else in this harness ever loads the animation curves.
+            if (auto* tm = game_.getTransportManager()) {
+                tm->loadTransportAnimationDBC(&assetManager_);
+                tm->loadTaxiPathNodeDBC(&assetManager_);
+            }
         } else {
             std::cerr << "Warning: asset manager not initialized; headless emotes will use fallback text\n";
         }
