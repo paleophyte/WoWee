@@ -2841,7 +2841,7 @@ void MovementHandler::checkAreaTriggers() {
                         postTransferReturnAreaTriggerSawNear_ = true;
                     }
                     owner_.activeAreaTriggersRef().insert(at.id);
-                    LOG_WARNING("AreaTrigger armed on post-transfer spawn: AT", at.id,
+                    LOG_INFO("AreaTrigger armed on post-transfer spawn: AT", at.id,
                                 " cooldown=", owner_.areaTriggerCooldownRef());
                 } else if (postTransferReturnAreaTriggerId_ == at.id) {
                     // After a map transfer, the destination can place or
@@ -2921,14 +2921,16 @@ void MovementHandler::checkAreaTriggers() {
                     // from the destination trigger and must not clear the guard
                     // before the destination position arrives.
                     owner_.activeAreaTriggersRef().insert(at.id);
-                    LOG_WARNING("AreaTrigger post-transfer return portal waiting for destination position: AT",
+                    // Fires every frame for the brief window between a map switch and
+                    // the destination position arriving - routine, not exceptional.
+                    LOG_DEBUG("AreaTrigger post-transfer return portal waiting for destination position: AT",
                                 at.id, " dist=", std::sqrt(distSq));
                     continue;
                 }
 
                 postTransferReturnAreaTriggerId_ = 0;
                 postTransferReturnAreaTriggerSawNear_ = false;
-                LOG_WARNING("AreaTrigger post-transfer return portal cleared after leaving: AT", at.id,
+                LOG_INFO("AreaTrigger post-transfer return portal cleared after leaving: AT", at.id,
                             " dist=", std::sqrt(distSq));
             }
 

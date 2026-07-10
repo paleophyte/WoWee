@@ -561,7 +561,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
     if (isWMOOnlyMap) {
         // ---- WMO-only map (dungeon/raid/BG): load root WMO directly ----
-        LOG_WARNING("WMO-only map detected — loading root WMO: ", wdtInfo.rootWMOPath);
+        LOG_DEBUG("WMO-only map detected — loading root WMO: ", wdtInfo.rootWMOPath);
         showProgress("Loading instance geometry...", 0.25f);
 
         // Initialize renderers if they don't exist yet (first login to a WMO-only map).
@@ -587,14 +587,14 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
         // Load the root WMO
         auto* wmoRenderer = renderer_->getWMORenderer();
-        LOG_WARNING("WMO-only: wmoRenderer=", (wmoRenderer ? "valid" : "NULL"));
+        LOG_DEBUG("WMO-only: wmoRenderer=", (wmoRenderer ? "valid" : "NULL"));
         if (wmoRenderer) {
-            LOG_WARNING("WMO-only: reading root WMO file: ", wdtInfo.rootWMOPath);
+            LOG_DEBUG("WMO-only: reading root WMO file: ", wdtInfo.rootWMOPath);
             std::vector<uint8_t> wmoData = assetManager_->readFile(wdtInfo.rootWMOPath);
-            LOG_WARNING("WMO-only: root WMO data size=", wmoData.size());
+            LOG_DEBUG("WMO-only: root WMO data size=", wmoData.size());
             if (!wmoData.empty()) {
                 pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
-                LOG_WARNING("WMO-only: parsed WMO model, nGroups=", wmoModel.nGroups);
+                LOG_DEBUG("WMO-only: parsed WMO model, nGroups=", wmoModel.nGroups);
 
                 if (wmoModel.nGroups > 0) {
                     showProgress("Loading instance groups...", 0.35f);
@@ -661,15 +661,15 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 if (wmoRenderer->loadModel(wmoModel, wmoModelId)) {
                     uint32_t instanceId = wmoRenderer->createInstance(wmoModelId, wmoPos, wmoRot, 1.0f);
                     if (instanceId > 0) {
-                        LOG_WARNING("Instance WMO loaded: modelId=", wmoModelId,
+                        LOG_DEBUG("Instance WMO loaded: modelId=", wmoModelId,
                                 " instanceId=", instanceId);
-                        LOG_WARNING("  MOHD bbox local: (",
+                        LOG_DEBUG("  MOHD bbox local: (",
                                    wmoModel.boundingBoxMin.x, ", ", wmoModel.boundingBoxMin.y, ", ", wmoModel.boundingBoxMin.z,
                                    ") to (", wmoModel.boundingBoxMax.x, ", ", wmoModel.boundingBoxMax.y, ", ", wmoModel.boundingBoxMax.z, ")");
-                        LOG_WARNING("  WMO pos: (", wmoPos.x, ", ", wmoPos.y, ", ", wmoPos.z,
+                        LOG_DEBUG("  WMO pos: (", wmoPos.x, ", ", wmoPos.y, ", ", wmoPos.z,
                                    ") rot: (", wmoRot.x, ", ", wmoRot.y, ", ", wmoRot.z, ")");
-                        LOG_WARNING("  Player render pos: (", spawnRender.x, ", ", spawnRender.y, ", ", spawnRender.z, ")");
-                        LOG_WARNING("  Player canonical: (", spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
+                        LOG_DEBUG("  Player render pos: (", spawnRender.x, ", ", spawnRender.y, ", ", spawnRender.z, ")");
+                        LOG_DEBUG("  Player canonical: (", spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
                         // Show player position in WMO local space
                         {
                             glm::mat4 instMat(1.0f);
@@ -679,11 +679,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                             instMat = glm::rotate(instMat, wmoRot.x, glm::vec3(1,0,0));
                             glm::mat4 invMat = glm::inverse(instMat);
                             glm::vec3 localPlayer = glm::vec3(invMat * glm::vec4(spawnRender, 1.0f));
-                            LOG_WARNING("  Player in WMO local: (", localPlayer.x, ", ", localPlayer.y, ", ", localPlayer.z, ")");
+                            LOG_DEBUG("  Player in WMO local: (", localPlayer.x, ", ", localPlayer.y, ", ", localPlayer.z, ")");
                             bool inside = localPlayer.x >= wmoModel.boundingBoxMin.x && localPlayer.x <= wmoModel.boundingBoxMax.x &&
                                           localPlayer.y >= wmoModel.boundingBoxMin.y && localPlayer.y <= wmoModel.boundingBoxMax.y &&
                                           localPlayer.z >= wmoModel.boundingBoxMin.z && localPlayer.z <= wmoModel.boundingBoxMax.z;
-                            LOG_WARNING("  Player inside MOHD bbox: ", inside ? "YES" : "NO");
+                            LOG_DEBUG("  Player inside MOHD bbox: ", inside ? "YES" : "NO");
                         }
 
                         // Load doodads from the specified doodad set
@@ -786,16 +786,22 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 }
                 LOG_INFO("Snapped player to instance WMO floor: z=", *floor);
             } else {
-                LOG_WARNING("Could not find WMO floor at player spawn (",
+                // Fires routinely for this map's floor-query path (correlates with the
+                // warmup ground-check below also failing to find a floor here) without
+                // visible player impact so far - the server-provided spawn position
+                // already lands correctly. Demoted from WARNING; if this map ever does
+                // let a player fall through, this and the warmup hard-cap message are
+                // the first places to look.
+                LOG_DEBUG("Could not find WMO floor at player spawn (",
                            playerPos.x, ", ", playerPos.y, ", ", playerPos.z, ")");
             }
         }
 
         // Diagnostic: verify WMO renderer state after instance loading
-        LOG_WARNING("=== INSTANCE WMO LOAD COMPLETE ===");
-        LOG_WARNING("  wmoRenderer models loaded: ", wmoRenderer->getLoadedModelCount());
-        LOG_WARNING("  wmoRenderer instances: ", wmoRenderer->getInstanceCount());
-        LOG_WARNING("  wmoRenderer floor cache: ", wmoRenderer->getFloorCacheSize());
+        LOG_DEBUG("=== INSTANCE WMO LOAD COMPLETE ===");
+        LOG_DEBUG("  wmoRenderer models loaded: ", wmoRenderer->getLoadedModelCount());
+        LOG_DEBUG("  wmoRenderer instances: ", wmoRenderer->getInstanceCount());
+        LOG_DEBUG("  wmoRenderer floor cache: ", wmoRenderer->getFloorCacheSize());
 
         terrainOk = true;  // Mark as OK so post-load setup runs
     } else {
@@ -1028,6 +1034,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         // Track consecutive idle iterations (all queues empty) to detect convergence
         int idleIterations = 0;
         const int kIdleThreshold = 5;  // require 5 consecutive empty loops (~80ms)
+        // Throttle for the "ground not ready" debug log below - must be a fresh local
+        // (not static), since a static here would retain its value across separate
+        // warmup calls (e.g. different map loads) and could suppress logging on a
+        // later call for a long time after an earlier call ran close to the hard cap.
+        float lastGroundNotReadyLogTime = -1000.0f;
 
         while (true) {
             SDL_Event event;
@@ -1126,8 +1137,16 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                     }
                 }
 
-                if (!groundReady && elapsed > 5.0f && static_cast<int>(elapsed * 2) % 3 == 0) {
-                    LOG_WARNING("Warmup: ground not ready at spawn (", rx, ",", ry, ",", rz,
+                // Routine during a normal load window, not exceptional by itself - only
+                // the hard-cap-with-ground-still-not-ready case below is worth WARNING.
+                // The old throttle condition (elapsed*2 % 3 == 0) looked like "once every
+                // ~1.5s" but int-truncation actually held it true for a continuous 0.5s
+                // window every 1.5s, so it fired on nearly every frame in that window -
+                // explains the burst-then-gap pattern seen live. Use a real elapsed-time
+                // gate instead.
+                if (!groundReady && elapsed > 5.0f && elapsed - lastGroundNotReadyLogTime >= 1.5f) {
+                    lastGroundNotReadyLogTime = elapsed;
+                    LOG_DEBUG("Warmup: ground not ready at spawn (", rx, ",", ry, ",", rz,
                                 ") after ", elapsed, "s");
                 }
             }
