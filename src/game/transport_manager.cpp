@@ -92,7 +92,39 @@ bool seedDeeprunTramStationPhase(ActiveTransport& transport,
     // registration (see nowEpochMs comment above) instead of snapping back to
     // "docked at this waypoint" every time an echo arrives.
     const glm::vec3 stationOffset = keys[stationIdx].position;
-    transport.basePosition = serverPosition - stationOffset;
+    const glm::vec3 candidateBasePosition = serverPosition - stationOffset;
+
+    // The useMaxOffsetStation==true branch assumes the server's static echo represents
+    // the tram docked at the path's far/max-offset end - true for most of these six
+    // paths, but at least one (176085) has local key data where that assumption is
+    // simply wrong: the echo position is really the near-origin "home" point, and
+    // trusting the heuristic silently shifted basePosition by ~2481 units toward the
+    // opposite station. That desyncs this car's *logical* position (used for boarding
+    // distance and path evaluation) from where it's actually spawned/rendered, while
+    // leaving it looking fine on screen - "climbed onto the middle car, it drove away
+    // without me, hung in midair" reported live, and very likely also this entry's
+    // contribution to "solo cars" (its real position no longer lines up with its train).
+    // registerTransport() already computed a sane basePosition from the spawn position
+    // directly; a legitimate correction should only be a modest nudge from that, not a
+    // jump on the order of the whole route length. Reject implausible corrections
+    // rather than trust the heuristic blindly.
+    // Note: returning true here (not false) is deliberate even though no correction is
+    // applied. The caller's false-branch fallback resets localClockMs to 0 and slams
+    // basePosition to the raw server position - correct for the genuinely-no-usable-path
+    // cases above, but here registerTransport() already left the transport in a good
+    // state (sane basePosition, correctly-seeded localClockMs); rejecting a bad
+    // correction should mean "leave that alone", not "wipe it and start over".
+    constexpr float kMaxPlausibleCorrectionDist = 300.0f;
+    if (glm::distance(candidateBasePosition, transport.basePosition) > kMaxPlausibleCorrectionDist) {
+        LOG_WARNING("Deeprun tram station anchor correction rejected as implausible: guid=0x",
+                    std::hex, transport.guid, std::dec,
+                    " entry=", transport.entry, " pathId=", transport.pathId,
+                    " candidateBase=(", candidateBasePosition.x, ",", candidateBasePosition.y, ",", candidateBasePosition.z, ")",
+                    " existingBase=(", transport.basePosition.x, ",", transport.basePosition.y, ",", transport.basePosition.z, ")");
+        return true;
+    }
+
+    transport.basePosition = candidateBasePosition;
     transport.position = transport.basePosition + spline.evaluatePosition(transport.localClockMs % spline.durationMs());
     transport.hasServerYaw = false;
 
