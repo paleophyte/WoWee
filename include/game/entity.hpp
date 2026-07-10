@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include "math/spline.hpp"
 #include "game/flat_field_map.hpp"
 
@@ -434,24 +435,45 @@ public:
     // Check if entity exists
     bool hasEntity(uint64_t guid) const;
 
-    // Get all entities
+    // Get all entities. MAIN-THREAD-ONLY: mutations happen via dispatchQueuedPackets()
+    // on the main thread, and this reference is not lock-protected. Callers on any
+    // other thread (e.g. the headless HTTP API thread) must use snapshotEntities()
+    // instead, which is safe to call from anywhere.
     const std::unordered_map<uint64_t, std::shared_ptr<Entity>>& getEntities() const {
         return entities;
     }
 
+    // Thread-safe copy of all tracked entities, safe to call from any thread.
+    std::vector<std::shared_ptr<Entity>> snapshotEntities() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::shared_ptr<Entity>> snapshot;
+        snapshot.reserve(entities.size());
+        for (const auto& [guid, entity] : entities) {
+            snapshot.push_back(entity);
+        }
+        return snapshot;
+    }
+
     // Clear all entities
     void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
         entities.clear();
     }
 
     // Get entity count
     size_t getEntityCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return entities.size();
     }
 
 private:
-    // MAIN-THREAD-ONLY: all entity map mutations happen via dispatchQueuedPackets()
-    // which runs on the main thread.  Do NOT access from the async network pump thread.
+    // MAIN-THREAD-ONLY for getEntities(): all entity map mutations happen via
+    // dispatchQueuedPackets() on the main thread. mutex_ guards addEntity/removeEntity/
+    // getEntity/hasEntity/snapshotEntities so those are safe to call cross-thread (the
+    // headless HTTP API thread reads player HP and nearby entities this way); it is not
+    // taken by the unlocked getEntities() reference accessor above, which remains
+    // main-thread-only.
+    mutable std::mutex mutex_;
     std::unordered_map<uint64_t, std::shared_ptr<Entity>> entities;
 };
 
