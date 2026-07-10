@@ -2103,6 +2103,8 @@ glm::quat CharacterRenderer::interpolateQuat(const pipeline::M2AnimationTrack& t
 
 // --- Bone transform calculation ---
 
+constexpr int32_t kKeyBoneSpineLow = 4;
+
 void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     if (!instance.cachedModel) return;
     auto& model = instance.cachedModel->data;
@@ -2136,6 +2138,13 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         // At rest this is identity, so no separate bind pose is needed
         glm::mat4 localTransform = getBoneTransform(bone, instance.animationTime, instance.globalSequenceTime,
                                                     instance.currentSequenceIndex, gsd);
+
+        if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
+            glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
+                                * glm::rotate(glm::mat4(1.0f), instance.torsoYawOverrideRad, glm::vec3(0.0f, 0.0f, 1.0f))
+                                * glm::translate(glm::mat4(1.0f), -bone.pivot);
+            localTransform = extraYaw * localTransform;
+        }
 
         // Compose with parent
         if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones) {
@@ -3163,6 +3172,13 @@ void CharacterRenderer::setInstanceRotation(uint32_t instanceId, const glm::vec3
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.rotation = rotation;
+    }
+}
+
+void CharacterRenderer::setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) {
+        it->second.torsoYawOverrideRad = deltaYawRad;
     }
 }
 

@@ -77,6 +77,7 @@ public:
     float getYaw() const { return yaw; }
     float getPitch() const { return pitch; }
     float getFacingYaw() const { return facingYaw; }
+    float getTravelYaw() const { return travelYaw_; }
     bool isThirdPerson() const { return thirdPerson; }
     bool isFirstPersonView() const { return thirdPerson && (userTargetDistance <= MIN_DISTANCE + 0.15f); }
     bool isGrounded() const { return grounded; }
@@ -88,6 +89,8 @@ public:
     bool isMovingBackward() const { return moveBackwardActive; }
     bool isStrafingLeft() const { return strafeLeftActive; }
     bool isStrafingRight() const { return strafeRightActive; }
+    bool isTurningLeft() const { return turningLeftActive; }
+    bool isTurningRight() const { return turningRightActive; }
     bool isAutoRunning() const { return autoRunning; }
     bool isRightMouseHeld() const { return rightMouseDown; }
     bool isSitting() const { return sitting; }
@@ -187,6 +190,7 @@ private:
     float yaw = 180.0f;
     float pitch = -30.0f;
     float facingYaw = 180.0f;  // Character-facing yaw (can differ from camera yaw)
+    float travelYaw_ = 180.0f; // Heading of actual movement vector (see getTravelYaw)
 
     // Movement settings
     float movementSpeed = 50.0f;
@@ -195,7 +199,7 @@ private:
 
     // Mouse settings
     float mouseSensitivity = 0.2f;
-    bool invertMouse = true;
+    bool invertMouse = false;
     bool mouseButtonDown = false;
     bool leftMouseDown = false;
     bool rightMouseDown = false;
@@ -321,6 +325,8 @@ private:
     bool moveBackwardActive = false;
     bool strafeLeftActive = false;
     bool strafeRightActive = false;
+    bool turningLeftActive = false;
+    bool turningRightActive = false;
 
     // Movement callback
     MovementCallback movementCallback;
