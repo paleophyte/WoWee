@@ -8,6 +8,7 @@
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace wowee::game {
 
@@ -20,6 +21,26 @@ void TransportAnimator::evaluateAndApply(
 
     // Evaluate position from time via CatmullRomSpline (path is local offsets, add base position)
     glm::vec3 pathOffset = spline.evaluatePosition(pathTimeMs);
+
+    // Catmull-Rom splines aren't constrained to the convex hull of their control
+    // points. TransportAnimation.dbc uses sparse keyframes near each Deeprun Tram
+    // station, and live position polling showed the evaluated path visibly
+    // overshooting past the authored stop keyframe before correcting back to it
+    // (observed ~12 units of dip-and-recover on final approach) - reported live
+    // as cars not quite lining up with the platform ramps. Clamp X/Y to the
+    // authored keyframe extents (in raw, pre-mirror spline space) to remove the
+    // overshoot without touching the keyframe values themselves. Z has its own
+    // clampZOffset() below for the same underlying spline behavior.
+    if (TransportManager::isDeeprunTramTransport(transport) && !spline.keys().empty()) {
+        glm::vec3 keyMin(std::numeric_limits<float>::max());
+        glm::vec3 keyMax(std::numeric_limits<float>::lowest());
+        for (const auto& key : spline.keys()) {
+            keyMin = glm::min(keyMin, key.position);
+            keyMax = glm::max(keyMax, key.position);
+        }
+        pathOffset.x = std::clamp(pathOffset.x, keyMin.x, keyMax.x);
+        pathOffset.y = std::clamp(pathOffset.y, keyMin.y, keyMax.y);
+    }
 
     // Entry 176085's TransportAnimation.dbc path data is mirrored relative to its real
     // train siblings (176080, 176081): diagnostic dump of all six entries' raw key
