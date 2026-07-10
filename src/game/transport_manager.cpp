@@ -116,7 +116,9 @@ bool seedDeeprunTramStationPhase(ActiveTransport& transport,
     // correction should mean "leave that alone", not "wipe it and start over".
     constexpr float kMaxPlausibleCorrectionDist = 300.0f;
     if (glm::distance(candidateBasePosition, transport.basePosition) > kMaxPlausibleCorrectionDist) {
-        LOG_WARNING("Deeprun tram station anchor correction rejected as implausible: guid=0x",
+        // Entry 176085 rejects this every re-sync cycle by design (its real spawn is
+        // legitimately far from the heuristic's candidate) - routine, not worth WARN.
+        LOG_DEBUG("Deeprun tram station anchor correction rejected as implausible: guid=0x",
                     std::hex, transport.guid, std::dec,
                     " entry=", transport.entry, " pathId=", transport.pathId,
                     " candidateBase=(", candidateBasePosition.x, ",", candidateBasePosition.y, ",", candidateBasePosition.z, ")",
@@ -128,7 +130,7 @@ bool seedDeeprunTramStationPhase(ActiveTransport& transport,
     transport.position = transport.basePosition + spline.evaluatePosition(transport.localClockMs % spline.durationMs());
     transport.hasServerYaw = false;
 
-    LOG_WARNING("Deeprun tram station anchor corrected: guid=0x", std::hex, transport.guid, std::dec,
+    LOG_DEBUG("Deeprun tram station anchor corrected: guid=0x", std::hex, transport.guid, std::dec,
                 " entry=", transport.entry,
                 " pathId=", transport.pathId,
                 " localClockMs=", transport.localClockMs,
@@ -266,7 +268,7 @@ void TransportManager::registerTransport(uint64_t guid,
              " initialRenderPos=(", renderPos.x, ", ", renderPos.y, ", ", renderPos.z, ")");
 
     if (isDeeprunTramTransport(transport)) {
-        LOG_WARNING("Deeprun tram registered: guid=0x", std::hex, guid, std::dec,
+        LOG_DEBUG("Deeprun tram registered: guid=0x", std::hex, guid, std::dec,
                     " entry=", entry,
                     " displayId=", displayId,
                     " pathId=", pathId,
@@ -344,7 +346,7 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
 
     if (displayId == 3831u) {
         if (auto* tr = getTransport(guid)) {
-            LOG_WARNING("Auto-spawned Deeprun tram transport: guid=0x",
+            LOG_DEBUG("Auto-spawned Deeprun tram transport: guid=0x",
                         std::hex, guid, std::dec,
                         " entry=", entry,
                         " pathId=", tr->pathId,
@@ -528,7 +530,7 @@ void TransportManager::updateServerTransport(uint64_t guid, const glm::vec3& pos
             }
         }
         if (transport->serverUpdateCount <= 3) {
-            LOG_WARNING("Deeprun tram server update kept client-driven: guid=0x", std::hex, guid, std::dec,
+            LOG_DEBUG("Deeprun tram server update kept client-driven: guid=0x", std::hex, guid, std::dec,
                         " entry=", transport->entry,
                         " displayId=", transport->displayId,
                         " pathId=", transport->pathId,
@@ -564,7 +566,7 @@ void TransportManager::rebindTransportInstance(uint64_t guid, uint32_t instanceI
     pushTransform(*transport);
 
     if (changed && isDeeprunTramTransport(*transport)) {
-        LOG_WARNING("Deeprun tram rebound to render instance: guid=0x", std::hex, guid, std::dec,
+        LOG_INFO("Deeprun tram rebound to render instance: guid=0x", std::hex, guid, std::dec,
                     " instanceId=", instanceId,
                     " isM2=", isM2,
                     " displayId=", transport->displayId,

@@ -31,6 +31,7 @@ void TransportAnimator::evaluateAndApply(
     // authored keyframe extents (in raw, pre-mirror spline space) to remove the
     // overshoot without touching the keyframe values themselves. Z has its own
     // clampZOffset() below for the same underlying spline behavior.
+    bool xyClamped = false;
     if (TransportManager::isDeeprunTramTransport(transport) && !spline.keys().empty()) {
         glm::vec3 keyMin(std::numeric_limits<float>::max());
         glm::vec3 keyMax(std::numeric_limits<float>::lowest());
@@ -38,8 +39,11 @@ void TransportAnimator::evaluateAndApply(
             keyMin = glm::min(keyMin, key.position);
             keyMax = glm::max(keyMax, key.position);
         }
-        pathOffset.x = std::clamp(pathOffset.x, keyMin.x, keyMax.x);
-        pathOffset.y = std::clamp(pathOffset.y, keyMin.y, keyMax.y);
+        const float clampedX = std::clamp(pathOffset.x, keyMin.x, keyMax.x);
+        const float clampedY = std::clamp(pathOffset.y, keyMin.y, keyMax.y);
+        xyClamped = (clampedX != pathOffset.x) || (clampedY != pathOffset.y);
+        pathOffset.x = clampedX;
+        pathOffset.y = clampedY;
     }
 
     // Entry 176085's TransportAnimation.dbc path data is mirrored relative to its real
@@ -75,6 +79,18 @@ void TransportAnimator::evaluateAndApply(
         float effectiveYaw = transport.serverYaw +
             (transport.serverYawFlipped180 ? glm::pi<float>() : 0.0f);
         transport.rotation = glm::angleAxis(effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+    } else if (xyClamped) {
+        // The tangent below comes from a separate, unclamped evaluation of the same
+        // spline - it doesn't know the position is currently pinned at the keyframe
+        // boundary above. Near the station, the raw (unclamped) path loops through a
+        // little overshoot-and-recover S-curve, and its tangent sweeps through whatever
+        // instantaneous directions that loop produces - including briefly near-
+        // perpendicular to the direction of travel - while the rendered position sits
+        // still. Reported live as cars "turning sideways for a brief period before
+        // leaving the station." Leave transport.rotation at its last computed value
+        // while the position is clamped; there's no real facing change to reflect since
+        // the car isn't actually moving from the rider's point of view during that
+        // window.
     } else {
         auto result = spline.evaluate(pathTimeMs);
         glm::vec3 tangent = result.tangent;

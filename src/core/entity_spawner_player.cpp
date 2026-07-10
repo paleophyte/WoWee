@@ -1020,7 +1020,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             } else if (displayId == 3831) {
                 // Deeprun Tram car
                 modelPath = "World\\Generic\\Gnome\\Passive Doodads\\Subway\\SubwayCar.m2";
-                LOG_WARNING("Overriding transport displayId ", displayId, " → SubwayCar.m2");
+                LOG_INFO("Overriding transport displayId ", displayId, " → SubwayCar.m2");
             }
         }
 

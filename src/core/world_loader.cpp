@@ -96,6 +96,16 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
         {0,   glm::vec3(-1330.46f, -4840.26f, 503.85f), 3.10f},
         // Deeprun Tram -> Ironforge station
         {369, glm::vec3(10.50f, 76.03f, -2.30f),       3.12f},
+        // Stormwind station -> Deeprun Tram. Coordinates from a live playthrough's
+        // actual AreaTrigger 2173 fire: entrance trigger position on map 0, and the
+        // canonical position the player actually landed at on map 369 after transfer
+        // (Z lifted by the same ~+2.0 offset the Ironforge map-369 entry uses relative
+        // to its own arrival point, since both tunnel ends have similar floor height).
+        // Yaw reuses the Ironforge value as a starting point - Stormwind's entrance
+        // faces a different direction, so this likely needs live tuning.
+        {0,   glm::vec3(514.03f, -8346.46f, 97.60f),   3.12f},
+        // Deeprun Tram -> Stormwind station
+        {369, glm::vec3(2490.91f, 68.30f, -2.30f),     3.12f},
     };
 
     for (const auto& portal : kPortals) {
@@ -103,8 +113,10 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
 
         glm::vec3 renderPos = core::coords::canonicalToRender(portal.canonicalPos);
         float renderYaw = portal.canonicalYaw + glm::radians(90.0f);
+        // Bumped from 2.75 - reported live as too small/subtle to read clearly as a
+        // portal effect ("aren't great, but they are something").
         uint32_t instanceId = m2Renderer->createInstance(
-            kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 2.75f);
+            kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 4.25f);
         if (instanceId) {
             m2Renderer->setSkipCollision(instanceId, true);
             LOG_INFO("Spawned Deeprun portal visual map=", mapId,
