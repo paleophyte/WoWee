@@ -1181,6 +1181,7 @@ public:
     bool hasServerTransportUpdate(uint64_t guid) const { return entityController_->hasServerTransportUpdate(guid); }
     glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
+    const TransportManager* getTransportManager() const { return transportManager_.get(); }
     // Client-side M2 transport (trams, lifts) board/disembark check by proximity to the
     // transport's live position. Call once per tick with the player's current canonical
     // world position; safe to call whether or not any M2 transports are registered.

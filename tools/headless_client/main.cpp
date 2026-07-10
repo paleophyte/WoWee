@@ -32,6 +32,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <thread>
 #include <ctime>
 #include <vector>
@@ -628,6 +629,21 @@ uint32_t hp = 0, maxHp = 0;
         json entities = json::array();
         size_t total = 0;
         size_t included = 0;
+
+        // entity->getX/Y/Z() below is the raw GameObject spawn/presence-echo field -
+        // for transports it never moves, since CMaNGOS only sends a static echo and all
+        // actual motion is simulated client-side by TransportManager. Snapshot the live
+        // simulated state once (thread-safe, mutex-guarded copy) so transport entities
+        // can additionally report where they actually are, without disturbing the
+        // existing GameObject-sourced fields other callers may depend on.
+        std::unordered_map<uint64_t, game::ActiveTransport> liveTransports;
+        if (const auto* tm = game_.getTransportManager()) {
+            for (auto& t : tm->snapshotTransports()) {
+                const uint64_t guid = t.guid;
+                liveTransports.emplace(guid, std::move(t));
+            }
+        }
+
         for (const auto& entity : game_.getEntityManager().snapshotEntities()) {
             if (!entity) continue;
             const uint64_t guid = entity->getGuid();
@@ -650,6 +666,15 @@ uint32_t hp = 0, maxHp = 0;
                 {"orientation", entity->getOrientation()},
                 {"distance", distance}
             };
+
+            if (isTransport) {
+                if (auto it = liveTransports.find(guid); it != liveTransports.end()) {
+                    const auto& t = it->second;
+                    item["livePosition"] = {{"x", t.position.x}, {"y", t.position.y}, {"z", t.position.z}};
+                    item["localPathTimeMs"] = t.localClockMs;
+                    item["playerOnBoard"] = t.playerOnBoard;
+                }
+            }
 
             if (entity->isUnit()) {
                 const auto* unit = static_cast<const game::Unit*>(entity.get());
