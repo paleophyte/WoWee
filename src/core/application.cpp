@@ -1655,6 +1655,17 @@ void Application::update(float deltaTime) {
                                     }
                                 }
                             }
+                            // Z is fully locked for the Deeprun tram (see below), so
+                            // CameraController's own gravity integration never sees a
+                            // grounded frame and silently accumulates fall velocity the
+                            // entire ride - reported live as clipping through the world
+                            // "at a weird angle" right after disembarking, and as being
+                            // unable to jump while riding (coyote time never has a
+                            // grounded frame to key off). Suppress it every frame the
+                            // lock is active so nothing is queued up to unleash later.
+                            if (isDeeprunTram && renderer->getCameraController()) {
+                                renderer->getCameraController()->suppressVerticalPhysics();
+                            }
                             // Thunder Bluff lifts have real floor at both ends of their travel,
                             // so letting Z track physics while airborne (jumping) is recoverable -
                             // the player lands back on the platform. The Deeprun Tram tunnel has

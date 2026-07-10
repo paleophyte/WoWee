@@ -82,6 +82,16 @@ public:
     bool isGrounded() const { return grounded; }
     bool isJumping() const { return !grounded && verticalVelocity > 0.0f; }
     bool isFalling() const { return !grounded && verticalVelocity <= 0.0f; }
+
+    // Call every frame while riding a transport that forces Z to a locked value
+    // externally (e.g. the Deeprun Tram, which has no real floor mid-tunnel).
+    // Without this, gravity keeps integrating verticalVelocity every frame since
+    // grounded never goes true on a moving M2 deck, even though the position
+    // itself is being overwritten and looks static - the huge fall speed that
+    // silently built up over the whole ride would then unleash all at once the
+    // instant the external Z lock releases at disembark, clipping the player
+    // through the floor.
+    void suppressVerticalPhysics() { verticalVelocity = 0.0f; grounded = true; }
     bool isJumpKeyPressed() const { return jumpBufferTimer > 0.0f; }
     bool isSprinting() const;
     bool isMovingForward() const { return moveForwardActive; }
