@@ -2003,17 +2003,25 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // Remove entity
     if (entityManager.hasEntity(data.guid)) {
         if (transportGuids_.count(data.guid) > 0) {
+            // Mirror processOutOfRangeObjects(): keep any known transport alive across
+            // an explicit DESTROY_OBJECT too, not just implicit "fell out of the near
+            // list" removal. CMaNGOS judges visibility for these using their static DB
+            // spawn coordinate, which for a client-animated transport (e.g. the Deeprun
+            // Tram) can be arbitrarily far from where it currently, actually is - the
+            // server can send DESTROY_OBJECT for a car that's animated right next to the
+            // player. Previously that erased transportGuids_ for it, which made
+            // isTransportGuid() false and silently rejected setPlayerOnTransport()'s
+            // validation check, even though the render instance (kept alive separately
+            // in EntitySpawner::despawnGameObject) was still visible right there.
             const bool playerAboardNow = (owner_.playerTransportGuidRef() == data.guid);
             const bool stickyAboard = (owner_.playerTransportStickyGuidRef() == data.guid && owner_.playerTransportStickyTimerRef() > 0.0f);
             const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == data.guid);
-            if (playerAboardNow || stickyAboard || movementSaysAboard) {
-                serverUpdatedTransportGuids_.erase(data.guid);
-                LOG_INFO("Preserving in-use transport on destroy: 0x", std::hex, data.guid, std::dec,
-                         " now=", playerAboardNow,
-                         " sticky=", stickyAboard,
-                         " movement=", movementSaysAboard);
-                return;
-            }
+            serverUpdatedTransportGuids_.erase(data.guid);
+            LOG_INFO("Preserving transport on destroy: 0x", std::hex, data.guid, std::dec,
+                     " now=", playerAboardNow,
+                     " sticky=", stickyAboard,
+                     " movement=", movementSaysAboard);
+            return;
         }
         // Mirror out-of-range handling: invoke render-layer despawn callbacks before entity removal.
         auto entity = entityManager.getEntity(data.guid);
