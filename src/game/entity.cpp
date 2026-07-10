@@ -11,13 +11,17 @@ void EntityManager::addEntity(uint64_t guid, std::shared_ptr<Entity> entity) {
     }
 
     const int type = static_cast<int>(entity->getType());
-    entities[guid] = std::move(entity);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entities[guid] = std::move(entity);
+    }
 
     LOG_DEBUG("Added entity: GUID=0x", std::hex, guid, std::dec,
               ", Type=", type);
 }
 
 void EntityManager::removeEntity(uint64_t guid) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = entities.find(guid);
     if (it != entities.end()) {
         LOG_DEBUG("Removed entity: GUID=0x", std::hex, guid, std::dec);
@@ -26,11 +30,13 @@ void EntityManager::removeEntity(uint64_t guid) {
 }
 
 std::shared_ptr<Entity> EntityManager::getEntity(uint64_t guid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = entities.find(guid);
     return (it != entities.end()) ? it->second : nullptr;
 }
 
 bool EntityManager::hasEntity(uint64_t guid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return entities.find(guid) != entities.end();
 }
 
