@@ -1612,12 +1612,41 @@ void Application::update(float deltaTime) {
                             // position could never actually change due to the tram moving, so
                             // riding appeared to "float" in place no matter how far the tram
                             // traveled underneath.
+                            const bool isDeeprunTram =
+                                tr->displayId == 3831u ||
+                                (tr->entry >= 176080u && tr->entry <= 176085u) ||
+                                (tr->pathId >= 176080u && tr->pathId <= 176085u);
                             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
                             glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                             if (hasM2RideLock_) {
                                 glm::vec3 walkDelta = tentativeCanonical - lastM2RideLockedCanonical_;
                                 localOffset.x += walkDelta.x;
                                 localOffset.y += walkDelta.y;
+                                // Backstop against a runaway feedback loop: there's no real floor
+                                // under a moving M2 car, so gravity keeps trying to pull the
+                                // character down each frame; since Z is locked below, that fall
+                                // shows up as horizontal drift once combined with normal collision
+                                // sliding, and walkDelta reads it as "the player walked this far"
+                                // and bakes it into localOffset permanently. Next frame gravity
+                                // pulls again from the now-corrected position, compounding forever -
+                                // live data showed horizontal drift growing into the hundreds of
+                                // units over ~9 seconds with no WASD input, eventually carrying the
+                                // player far enough to disembark far from the car ("I still got
+                                // kicked off a ways down the path" reported live, no longer a fall
+                                // to the death thanks to the disembark sanity guard, but still a
+                                // real bug). Clamp the accumulated horizontal offset to a generous
+                                // bound - well beyond real walking range so normal deck movement is
+                                // untouched, but tight enough to stop this specific runaway before
+                                // it can carry the player far from the car.
+                                if (isDeeprunTram) {
+                                    constexpr float kMaxRideOffsetDist = 60.0f;
+                                    const float offsetLen = std::sqrt(localOffset.x * localOffset.x + localOffset.y * localOffset.y);
+                                    if (offsetLen > kMaxRideOffsetDist) {
+                                        const float scale = kMaxRideOffsetDist / offsetLen;
+                                        localOffset.x *= scale;
+                                        localOffset.y *= scale;
+                                    }
+                                }
                             }
                             // Thunder Bluff lifts have real floor at both ends of their travel,
                             // so letting Z track physics while airborne (jumping) is recoverable -
@@ -1629,10 +1658,6 @@ void Application::update(float deltaTime) {
                             // the tram with nothing to land on - reported live as falling through
                             // the tram/tunnel and dying. Keep Z fully locked for the tram; only
                             // lifts get the airborne exception.
-                            const bool isDeeprunTram =
-                                tr->displayId == 3831u ||
-                                (tr->entry >= 176080u && tr->entry <= 176085u) ||
-                                (tr->pathId >= 176080u && tr->pathId <= 176085u);
                             if (!isDeeprunTram && renderer->getCameraController() &&
                                 !renderer->getCameraController()->isGrounded()) {
                                 // While airborne (jump/fall), let vertical offset track normal
