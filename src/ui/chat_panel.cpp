@@ -86,7 +86,9 @@ namespace {
                 const std::string& target = !msg.receiverName.empty() ? msg.receiverName : resolvedSenderName;
                 return tsPrefix + "To " + target + ": " + processedMessage;
             }
-            if (msg.type == CT::EMOTE || msg.type == CT::MONSTER_EMOTE || msg.type == CT::RAID_BOSS_EMOTE)
+            if (msg.type == CT::MONSTER_EMOTE || msg.type == CT::RAID_BOSS_EMOTE)
+                return tsPrefix + processedMessage;
+            if (msg.type == CT::EMOTE)
                 return tsPrefix + tagPrefix + resolvedSenderName + " " + processedMessage;
             if (msg.type == CT::CHANNEL && !msg.channelName.empty()) {
                 int chIdx = gameHandler.getChannelIndex(msg.channelName);
