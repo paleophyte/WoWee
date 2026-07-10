@@ -1512,18 +1512,17 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
             }
         }
         if (bestGuid == 0 && nearestDeeprunGuid != 0) {
-            // WARNING (not DEBUG) so this shows up in a plain run without needing
-            // WOWEE_LOG_LEVEL=debug set - the boarding radius has already been re-tuned
-            // blind three times (18/18, 7/6, 9.5/8) purely from "it didn't work" reports,
-            // and the last two rounds of live logs came back at the default WARN level
-            // with none of this diagnostic in them. Throttled to ~1/sec since this runs
+            // Boarding/disembark are now on a well-tested oriented-footprint check
+            // (verified live) rather than the blind-tuned isotropic radius this was
+            // originally added to debug. Routine while just walking around Deeprun not
+            // boarded - demoted to DEBUG. Still throttled to ~1/sec since this runs
             // every frame while not boarded.
             static double lastLogTime = -1000.0;
             const double now = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count()) / 1000.0;
             if (now - lastLogTime >= 1.0) {
                 lastLogTime = now;
-                LOG_WARNING("Deeprun tram boarding: no candidate in range, nearest car guid=0x",
+                LOG_DEBUG("Deeprun tram boarding: no candidate in range, nearest car guid=0x",
                             std::hex, nearestDeeprunGuid, std::dec,
                             " localX=", nearestDeeprunLocalX,
                             " localY=", nearestDeeprunLocalY,
@@ -1541,7 +1540,7 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
                 setPlayerOnTransport(bestGuid, offset);
                 if (isDeeprunTram) {
                     const bool attached = getPlayerTransportGuid() == bestGuid;
-                    LOG_WARNING("Deeprun tram boarding candidate ", (attached ? "accepted" : "rejected"),
+                    LOG_INFO("Deeprun tram boarding candidate ", (attached ? "accepted" : "rejected"),
                                 ": guid=0x", std::hex, bestGuid, std::dec,
                                 " entry=", tr->entry,
                                 " pathId=", tr->pathId,
@@ -1612,7 +1611,7 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         if (std::abs(local.x) > kDeeprunTramDisembarkHalfLength ||
             std::abs(local.y) > kDeeprunTramDisembarkHalfWidth ||
             std::abs(diff.z) > kDeeprunTramDisembarkVertDist) {
-            LOG_WARNING("Deeprun tram disembark: guid=0x", std::hex, getPlayerTransportGuid(), std::dec,
+            LOG_INFO("Deeprun tram disembark: guid=0x", std::hex, getPlayerTransportGuid(), std::dec,
                         " localX=", local.x, " localY=", local.y, " vertDist=", std::abs(diff.z),
                         " player=(", playerCanonical.x, ",", playerCanonical.y, ",", playerCanonical.z, ")",
                         " tram=(", tr->position.x, ",", tr->position.y, ",", tr->position.z, ")");

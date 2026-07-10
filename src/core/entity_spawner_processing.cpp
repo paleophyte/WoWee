@@ -1095,7 +1095,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
 
         if (auto* tr = transportManager->getTransport(pending.guid); tr) {
             if (pending.displayId == 3831u) {
-                LOG_WARNING("Deeprun tram registration complete: guid=0x", std::hex, pending.guid, std::dec,
+                LOG_DEBUG("Deeprun tram registration complete: guid=0x", std::hex, pending.guid, std::dec,
                             " entry=", pending.entry,
                             " displayId=", pending.displayId,
                             " pathId=", tr->pathId,
@@ -1587,7 +1587,7 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
                     (transport->entry >= 176080u && transport->entry <= 176085u) ||
                     (transport->pathId >= 176080u && transport->pathId <= 176085u);
                 if (transport->isM2 && isDeeprunTram) {
-                    LOG_WARNING("Keeping Deeprun tram render instance through server despawn: guid=0x",
+                    LOG_DEBUG("Keeping Deeprun tram render instance through server despawn: guid=0x",
                                 std::hex, guid, std::dec,
                                 " entry=", transport->entry,
                                 " displayId=", transport->displayId,
