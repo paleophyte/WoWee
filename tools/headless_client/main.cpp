@@ -568,8 +568,9 @@ uint32_t hp = 0, maxHp = 0;
         json entities = json::array();
         size_t total = 0;
         size_t included = 0;
-        for (const auto& [guid, entity] : game_.getEntityManager().getEntities()) {
+        for (const auto& entity : game_.getEntityManager().snapshotEntities()) {
             if (!entity) continue;
+            const uint64_t guid = entity->getGuid();
             ++total;
             const float dx = entity->getX() - move.x;
             const float dy = entity->getY() - move.y;

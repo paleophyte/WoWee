@@ -337,7 +337,7 @@ class FleetConfig:
         return self.route_state_dir / f"{leader_id}.json"
 
 
-def runtime_env(config: FleetConfig | None = None) -> dict[str, str]:
+def runtime_env(config: FleetConfig | None = None, leader: dict[str, Any] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     path_entries: list[str] = []
     msys_ucrt = Path("C:/msys64/ucrt64/bin")
@@ -347,6 +347,19 @@ def runtime_env(config: FleetConfig | None = None) -> dict[str, str]:
         env["PATH"] = os.pathsep.join(path_entries + [env.get("PATH", "")])
     if config and config.integrity_dir:
         env["WOWEE_INTEGRITY_DIR"] = str(resolve_path(config.integrity_dir))
+    if config:
+        # wowee_headless is built with WOWEE_HEADLESS_DEFAULT=1, which makes the
+        # client skip SMSG_UPDATE_OBJECT/SMSG_COMPRESSED_UPDATE_OBJECT (and other
+        # world-simulation packets) entirely, so it never learns about nearby
+        # entities - other players, NPCs, or GameObjects like the Deeprun Tram.
+        # Setting fullWorldSimulation: true on a leader (or in defaults.automation)
+        # opts that leader back into full object tracking, at the cost of the
+        # per-bot CPU savings the skip exists for. Needed for anything that has to
+        # see/board a transport, not just walk to fixed coordinates.
+        automation_defaults = config.defaults.get("automation", {})
+        full_sim_default = bool(automation_defaults.get("fullWorldSimulation", False))
+        full_sim = bool(leader.get("fullWorldSimulation", full_sim_default)) if leader else full_sim_default
+        env["WOWEE_HEADLESS"] = "0" if full_sim else "1"
     return env
 
 
@@ -422,7 +435,7 @@ class ManagedLeader:
         separator = f"\n[{run_stamp}] --- {self.leader_id} run start restart={self.restart_count} ---\n"
         self.log_handle.write(separator)
         self.log_handle.flush()
-        child_env = runtime_env(self.config)
+        child_env = runtime_env(self.config, self.leader)
         child_env["WOWEE_CRASH_LOG"] = str(self.crash_log_path)
         print(f"Starting {self.leader_id} with {self.settings_path}; log={self.log_path}; crashLog={self.crash_log_path}")
         self.process = subprocess.Popen(
@@ -513,7 +526,7 @@ def cmd_start(config: FleetConfig) -> int:
             [str(config.headless), str(settings_path)],
             cwd=str(ROOT),
             creationflags=creation_flags(),
-            env=runtime_env(config),
+            env=runtime_env(config, leader),
         )
         time.sleep(config.launch_delay)
     return 0
@@ -1587,7 +1600,34 @@ def cmd_travel_node_execute(
                     })
                     continue
 
-                if mode == "ride_tram" or mode == "ride_boat":
+                if mode == "ride_tram":
+                    print(f"    waiting for a Deeprun tram car (timeout {leg_timeout}s)")
+                    try:
+                        _board_and_ride_tram(
+                            config, leader, index, api_base, to_node,
+                            poll_interval=poll_interval,
+                            board_timeout=leg_timeout,
+                            ride_timeout=leg_timeout,
+                            prefix="    ",
+                        )
+                    except TimeoutError as exc:
+                        print(f"    tram transit timeout: {exc}")
+                        ok = False
+                        complete = False
+                        save_route_state(config, leader_id, "failed", {}, {
+                            **detail,
+                            "failedAt": utc_timestamp(),
+                            "error": str(exc),
+                        })
+                        break
+
+                    save_route_state(config, leader_id, "running", {}, {
+                        **detail,
+                        "completedAt": utc_timestamp(),
+                    })
+                    continue
+
+                if mode == "ride_boat":
                     print(f"    waiting for transit (map change to target map, timeout {leg_timeout}s)")
                     target_pos = travel_node_position(to_node)
                     target_map = int(target_pos.get("mapId", 369)) if target_pos else 369
@@ -1708,6 +1748,201 @@ def _wait_map_change(
             return current_map
         time.sleep(poll_interval)
     raise TimeoutError(f"map did not change to {expected_map_id} within {timeout_seconds:.1f}s")
+
+
+def _nearby_deeprun_trams(entities_response: dict[str, Any], entries: "range") -> list[dict[str, Any]]:
+    trams = [
+        item for item in entities_response.get("entities", [])
+        if item.get("isTransport") and int(item.get("entry", -1)) in entries
+    ]
+    trams.sort(key=lambda item: float(item.get("distance", 1e9)))
+    return trams
+
+
+def _tram_exit_walk_target(node: dict[str, Any]) -> dict[str, Any] | None:
+    # The verified platform surveys record a walk-off point just past the boarding
+    # radius (the spot used to approach the exit AreaTrigger). Standing still on a
+    # docked tram never disembarks you client-side, so we need somewhere else to walk.
+    at = node.get("areaTrigger", {})
+    required = ("exitSourceX", "exitSourceY", "exitSourceZ")
+    if not isinstance(at, dict) or not all(key in at for key in required):
+        return None
+    return {
+        "mapId": int(node.get("mapId", 0)),
+        "x": float(at["exitSourceX"]),
+        "y": float(at["exitSourceY"]),
+        "z": float(at["exitSourceZ"]),
+    }
+
+
+def _board_and_ride_tram(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    api_base: str,
+    to_node: dict[str, Any],
+    poll_interval: float,
+    board_timeout: float,
+    ride_timeout: float,
+    scan_radius: float = 80.0,
+    prefix: str = "",
+) -> None:
+    """Watch for a live Deeprun tram car, walk the leader onto it, ride to
+    to_node, then walk off. Raises TimeoutError if boarding or transit stalls.
+
+    Boarding on this client is proximity-triggered (see application.cpp's M2
+    transport boarding check): once the leader is within ~12 horizontal /
+    ~15 vertical yards of the tram's live position, /world/self reports
+    transport.onTransport without any extra command. So instead of relying on
+    the offline DBC cycle prediction, we just keep walking the leader onto
+    whatever tram car /world/entities reports nearby until that flag flips.
+    """
+    try:
+        from deeprun_tram import DEEPRUN_TRAM_ENTRIES
+    except ImportError:
+        from bot_fleet_manager.deeprun_tram import DEEPRUN_TRAM_ENTRIES
+
+    boarded = False
+    deadline = time.monotonic() + board_timeout
+    while time.monotonic() < deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+        if self_info.get("transport", {}).get("onTransport"):
+            boarded = True
+            break
+        try:
+            entities = request_json("GET", api_base + f"/world/entities?radius={scan_radius}&transports=1")
+        except Exception:
+            entities = {}
+        trams = _nearby_deeprun_trams(entities, DEEPRUN_TRAM_ENTRIES)
+        if trams:
+            nearest = trams[0]
+            pos = nearest["position"]
+            print(f"{prefix}tram entry={nearest.get('entry')} {float(nearest.get('distance', 0.0)):.1f}y away — walking onto it")
+            try:
+                request_json("POST", api_base + "/movement/goto", {
+                    "mapId": int(self_info.get("mapId", 0)),
+                    "x": pos["x"], "y": pos["y"], "z": pos["z"],
+                    "arrivalRadius": 2.0,
+                })
+            except Exception as exc:
+                print(f"{prefix}goto onto tram failed: {exc}")
+        else:
+            print(f"{prefix}no tram car in range yet")
+        time.sleep(poll_interval)
+
+    if not boarded:
+        raise TimeoutError(f"did not board a tram car within {board_timeout:.1f}s")
+    print(f"{prefix}boarded tram")
+
+    to_pos = travel_node_position(to_node)
+    if not to_pos:
+        return
+
+    _wait_node_arrival(config, leader, index, to_pos, float(to_node.get("radius", 12.0)), ride_timeout, poll_interval)
+
+    walk_off = _tram_exit_walk_target(to_node) or to_pos
+    print(f"{prefix}walking off the tram")
+    try:
+        request_json("POST", api_base + "/movement/goto", {
+            "mapId": walk_off["mapId"], "x": walk_off["x"], "y": walk_off["y"], "z": walk_off["z"],
+            "arrivalRadius": 2.0,
+        })
+    except Exception as exc:
+        print(f"{prefix}disembark goto failed: {exc}")
+
+    disembark_deadline = time.monotonic() + min(ride_timeout, 20.0)
+    while time.monotonic() < disembark_deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+        if not self_info.get("transport", {}).get("onTransport"):
+            print(f"{prefix}disembarked")
+            return
+        time.sleep(poll_interval)
+    raise TimeoutError("did not disembark after walking off the tram")
+
+
+def cmd_board_tram(
+    config: FleetConfig,
+    registry_path: Path | None,
+    from_node_id: str,
+    to_node_id: str,
+    scan_radius: float,
+    arrival_radius: float,
+    poll_interval: float,
+    board_timeout: float,
+    ride_timeout: float,
+    fleet: str = "",
+    leader_ids: list[str] | None = None,
+) -> int:
+    registry = load_travel_registry(registry_path) if (from_node_id or to_node_id) else None
+    from_pos = None
+    to_node = None
+    to_pos = None
+    to_label = ""
+    if from_node_id:
+        _, from_node = resolve_travel_node(registry, from_node_id)
+        from_pos = travel_node_position(from_node)
+        if not from_pos:
+            print(f"travel node '{from_node_id}' has no coordinates")
+            return 1
+    if to_node_id:
+        to_key, to_node = resolve_travel_node(registry, to_node_id)
+        to_pos = travel_node_position(to_node)
+        to_label = travel_node_label(to_key, to_node)
+        if not to_pos:
+            print(f"travel node '{to_node_id}' has no coordinates")
+            return 1
+
+    selected = config.selected_leaders(fleet, leader_ids)
+    if not selected:
+        print("No matching leaders")
+        return 1
+
+    ok = True
+    for index, leader in selected:
+        leader_id = leader.get("id", f"leader-{index + 1}")
+        api_base = config.api_base_for(leader, index)
+
+        if from_pos:
+            print(f"{leader_id}: walking to boarding platform")
+            try:
+                request_json("POST", api_base + "/movement/goto", {
+                    "mapId": from_pos["mapId"], "x": from_pos["x"], "y": from_pos["y"], "z": from_pos["z"],
+                    "arrivalRadius": arrival_radius,
+                })
+                _wait_node_arrival(config, leader, index, from_pos, arrival_radius, board_timeout, poll_interval)
+            except Exception as exc:
+                print(f"{leader_id}: failed to reach boarding platform ({exc})")
+                ok = False
+                continue
+
+        print(f"{leader_id}: watching for a Deeprun tram car")
+        try:
+            _board_and_ride_tram(
+                config, leader, index, api_base,
+                to_node or {},
+                poll_interval=poll_interval,
+                board_timeout=board_timeout,
+                ride_timeout=ride_timeout,
+                scan_radius=scan_radius,
+                prefix=f"{leader_id}: ",
+            )
+        except TimeoutError as exc:
+            print(f"{leader_id}: {exc}")
+            ok = False
+            continue
+
+        if to_pos:
+            print(f"{leader_id}: arrived at {to_label}")
+
+    return 0 if ok else 1
 
 
 def cmd_resume_travel_plan(
@@ -2093,6 +2328,20 @@ def main(argv: list[str]) -> int:
     tram_state_parser.add_argument("--watch", type=float, default=0.0, help="Seconds to continuously print predictions")
     tram_state_parser.add_argument("--interval", type=float, default=1.0, help="Seconds between watch samples")
     tram_state_parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
+    board_tram_parser = sub.add_parser(
+        "board-tram",
+        help="Wait for a live Deeprun tram car, walk the leader onto it, ride, and disembark",
+    )
+    board_tram_parser.add_argument("--fleet", default="")
+    board_tram_parser.add_argument("--leader", action="append", default=[])
+    board_tram_parser.add_argument("--registry", type=Path, default=None, help="Travel node registry path")
+    board_tram_parser.add_argument("--from", dest="from_node", default="", help="Travel node id to walk to before boarding, e.g. deeprun-tram-stormwind-platform")
+    board_tram_parser.add_argument("--to", dest="to_node", default="", help="Travel node id to ride to and disembark at, e.g. deeprun-tram-ironforge-platform")
+    board_tram_parser.add_argument("--scan-radius", type=float, default=80.0, help="Radius to search for live tram gameobjects")
+    board_tram_parser.add_argument("--arrival-radius", type=float, default=8.0, help="Arrival radius for the --from walk")
+    board_tram_parser.add_argument("--poll-interval", type=float, default=1.0)
+    board_tram_parser.add_argument("--board-timeout", type=float, default=180.0, help="Max seconds to wait for a boardable tram car")
+    board_tram_parser.add_argument("--ride-timeout", type=float, default=90.0, help="Max seconds to wait for arrival + disembark after boarding")
 
     args = parser.parse_args(argv)
     config = FleetConfig(resolve_path(str(args.config)))
@@ -2261,6 +2510,20 @@ def main(argv: list[str]) -> int:
             args.watch,
             args.interval,
             args.json,
+            args.fleet,
+            args.leader,
+        )
+    if args.command == "board-tram":
+        return cmd_board_tram(
+            config,
+            args.registry,
+            args.from_node,
+            args.to_node,
+            args.scan_radius,
+            args.arrival_radius,
+            args.poll_interval,
+            args.board_timeout,
+            args.ride_timeout,
             args.fleet,
             args.leader,
         )

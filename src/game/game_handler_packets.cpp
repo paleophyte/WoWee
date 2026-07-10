@@ -136,22 +136,34 @@ bool headlessTracePackets() {
 
 bool headlessMode() {
     static const bool enabled = []() {
+        // WOWEE_HEADLESS lets an individual leader opt back into full world-object
+        // simulation (SMSG_UPDATE_OBJECT et al, see shouldSkipHeadlessWorldSimulationPacket
+        // below) even in a WOWEE_HEADLESS_DEFAULT build. Without this, entities
+        // (other players, NPCs, GameObjects like transports) are never created
+        // client-side, so anything that needs to see/board them - e.g. the Deeprun
+        // Tram - is impossible no matter what automation code sits on top.
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        if (raw && *raw) {
+            return raw[0] != '0';
+        }
 #ifdef WOWEE_HEADLESS_DEFAULT
         return true;
 #else
-        const char* raw = std::getenv("WOWEE_HEADLESS");
-        return raw && *raw && raw[0] != '0';
+        return false;
 #endif
     }();
     return enabled;
 }
 
-bool shouldSkipHeadlessWorldSimulationPacket(LogicalOpcode op) {
+// Cosmetic/animation packets whose handlers assume a fully initialized rendering
+// pipeline (AnimationController, spell visual system, etc). These are skipped
+// unconditionally in every headless build, even when WOWEE_HEADLESS=0 opts a
+// leader back into object tracking: SMSG_EMOTE's handler was observed to SIGSEGV
+// the first time it actually ran under a headless leader, since nothing in this
+// build's startup path had wired up whatever it dereferences. None of them are
+// needed to track entities/transports, so there's no upside to risking it.
+bool shouldAlwaysSkipHeadlessPacket(LogicalOpcode op) {
     switch (op) {
-        case Opcode::SMSG_UPDATE_OBJECT:
-        case Opcode::SMSG_COMPRESSED_UPDATE_OBJECT:
-        case Opcode::SMSG_DESTROY_OBJECT:
-        case Opcode::SMSG_MONSTER_MOVE:
         case Opcode::MSG_MOVE_HEARTBEAT:
         case Opcode::SMSG_EMOTE:
         case Opcode::SMSG_SPELL_START:
@@ -159,6 +171,22 @@ bool shouldSkipHeadlessWorldSimulationPacket(LogicalOpcode op) {
         case Opcode::SMSG_SET_EXTRA_AURA_INFO_OBSOLETE:
         case Opcode::SMSG_INIT_EXTRA_AURA_INFO_OBSOLETE:
         case Opcode::SMSG_SET_EXTRA_AURA_INFO_NEED_UPDATE_OBSOLETE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Object-lifecycle packets that populate EntityManager (see entity.hpp). Skipped
+// by default for lightweight bot fleets; WOWEE_HEADLESS=0 (see headlessMode()
+// above) re-enables these for a leader that needs to see nearby entities, e.g.
+// to board a transport like the Deeprun Tram.
+bool shouldSkipHeadlessWorldSimulationPacket(LogicalOpcode op) {
+    switch (op) {
+        case Opcode::SMSG_UPDATE_OBJECT:
+        case Opcode::SMSG_COMPRESSED_UPDATE_OBJECT:
+        case Opcode::SMSG_DESTROY_OBJECT:
+        case Opcode::SMSG_MONSTER_MOVE:
         case Opcode::SMSG_CREATURE_QUERY_RESPONSE:
         case Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE:
         case Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE:
@@ -2865,6 +2893,17 @@ void GameHandler::handlePacket(network::Packet& packet) {
     }
 
     // Dispatch via the opcode handler table
+    if (state == WorldState::IN_WORLD && shouldAlwaysSkipHeadlessPacket(*logicalOp)) {
+        const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+        wowee::core::setCrashBreadcrumb("world_packet:headless_skip",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
+        packet.skipAll();
+        return;
+    }
     if (headlessMode() && state == WorldState::IN_WORLD &&
         shouldSkipHeadlessWorldSimulationPacket(*logicalOp)) {
         const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
