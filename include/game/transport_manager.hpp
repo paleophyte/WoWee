@@ -3,6 +3,7 @@
 #include "game/transport_path_repository.hpp"
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_animator.hpp"
+#include <chrono>
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
@@ -73,14 +74,24 @@ public:
     // Absolute wall-clock ms. Used to seed a client-animated transport's starting phase
     // so it's deterministic across clients/restarts instead of depending on when this
     // process happened to launch or first see a given transport - see the seed call
-    // sites in transport_manager.cpp and TransportClockSync::processServerUpdate() for
-    // the full explanation of why that matters.
-    static uint64_t nowEpochMs();
+    // sites in transport_clock_sync.cpp for the full explanation of why that matters.
+    // Inline (not in transport_manager.cpp): kept dependency-free of the renderer
+    // headers that file pulls in, so lightweight callers (and the transport unit
+    // tests, which link transport_clock_sync.cpp/transport_animator.cpp without the
+    // rest of TransportManager) can use it without linking the renderer subsystem.
+    static uint64_t nowEpochMs() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    }
 
     // True for any GameObject/path identity belonging to the Deeprun Tram (both trains,
     // all 6 car entries). Shared by callers in other translation units (transport_clock_sync.cpp,
     // transport_animator.cpp, application.cpp) that need Deeprun-specific behavior.
-    static bool isDeeprunTramTransport(const ActiveTransport& transport);
+    static bool isDeeprunTramTransport(const ActiveTransport& transport) {
+        return transport.displayId == 3831u ||
+               (transport.entry >= 176080u && transport.entry <= 176085u) ||
+               (transport.pathId >= 176080u && transport.pathId <= 176085u);
+    }
 
     // Round a path duration to the nearest 500ms for seed-modulo purposes only. Deeprun
     // Tram cars are meant to move as one rigid train, but their individual
@@ -92,7 +103,10 @@ public:
     // divisors to the same 500ms bucket before the modulo keeps sibling cars' seeds
     // correlated by real elapsed registration time, the way they're meant to be, without
     // needing to hardcode any specific entry's duration as "the" canonical one.
-    static uint32_t deeprunTramSeedDurationMs(uint32_t durationMs);
+    static uint32_t deeprunTramSeedDurationMs(uint32_t durationMs) {
+        constexpr uint32_t kRoundTo = 500;
+        return ((durationMs + kRoundTo / 2) / kRoundTo) * kRoundTo;
+    }
 
     void setWMORenderer(rendering::WMORenderer* renderer) { wmoRenderer_ = renderer; }
     void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
