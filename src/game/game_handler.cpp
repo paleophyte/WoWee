@@ -1421,8 +1421,16 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         constexpr float kM2BoardVertDist = 15.0f;
         constexpr float kTbLiftBoardHorizDistSq = 22.0f * 22.0f;
         constexpr float kTbLiftBoardVertDist = 14.0f;
-        constexpr float kDeeprunTramBoardHorizDistSq = 18.0f * 18.0f;
-        constexpr float kDeeprunTramBoardVertDist = 18.0f;
+        // Deeprun's wider capture radius (previously 18/18, wider than even the base
+        // M2 default) let boarding trigger from far enough away that the fixed
+        // boarding-time offset put the rider well outside the visible car - "floating
+        // in midair off to the side of the tram" reported live, confirmed by observed
+        // offsets like (-17.9, 0.4, -10.4). That widening was very likely compensating
+        // for the registration/attach bugs fixed earlier in this branch (nothing was
+        // reliably registering close enough to board at all), not a real need for a
+        // bigger capture volume. Use the plain M2 defaults instead.
+        constexpr float kDeeprunTramBoardHorizDistSq = kM2BoardHorizDistSq;
+        constexpr float kDeeprunTramBoardVertDist = kM2BoardVertDist;
 
         uint64_t bestGuid = 0;
         float bestScore = 1e30f;
