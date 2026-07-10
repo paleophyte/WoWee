@@ -180,6 +180,14 @@ private:
     float taxiStreamCooldown_ = 0.0f;
     bool idleYawned_ = false;
 
+    // M2 transport riding: last frame's locked (canonical) render position, used to
+    // detect how far the player tried to walk this frame so that delta can be applied
+    // on top of the fixed ride offset instead of either fully locking movement or
+    // recomputing the offset from an absolute position (see application.cpp's "M2
+    // transport riding" block for why the latter is a no-op identity).
+    glm::vec3 lastM2RideLockedCanonical_ = glm::vec3(0.0f);
+    bool hasM2RideLock_ = false;
+
     bool wasAutoAttacking_ = false;
 
     // Quest marker billboard sprites (above NPCs)

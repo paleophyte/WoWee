@@ -1599,29 +1599,44 @@ void Application::update(float deltaTime) {
                             gameHandler->getPlayerTransportGuid());
                         if (tr) {
                             // Ride along at a fixed offset from the transport's current position
-                            // (set once at boarding - see GameHandler::updateM2TransportBoarding).
-                            // This used to recompute offset.x/y every frame as
-                            // (current render pos - tr->position), which is a no-op identity once
-                            // fed back into lockedCanonical = tr->position + offset: the character's
-                            // render position could never actually change due to the tram moving,
-                            // so riding appeared to "float" in place no matter how far the tram
+                            // (set once at boarding - see GameHandler::updateM2TransportBoarding),
+                            // plus whatever the player has walked on the deck since then. WASD
+                            // input runs earlier in the frame and moves renderer's character
+                            // position directly; comparing that (tentativeCanonical) against
+                            // where *we* locked it last frame isolates just that walked delta,
+                            // so standing still holds a fixed deck position while active input
+                            // still moves the player, instead of either (a) fully locking
+                            // movement or (b) recomputing offset from the absolute position,
+                            // which is a no-op identity once fed back into
+                            // lockedCanonical = tr->position + offset: the character's render
+                            // position could never actually change due to the tram moving, so
+                            // riding appeared to "float" in place no matter how far the tram
                             // traveled underneath.
                             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+                            glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
+                            if (hasM2RideLock_) {
+                                glm::vec3 walkDelta = tentativeCanonical - lastM2RideLockedCanonical_;
+                                localOffset.x += walkDelta.x;
+                                localOffset.y += walkDelta.y;
+                            }
                             if (renderer->getCameraController() &&
                                 !renderer->getCameraController()->isGrounded()) {
                                 // While airborne (jump/fall), let vertical offset track normal
                                 // physics instead of staying pinned to the boarding-time value.
                                 // Without this, floor clamping can hold world-Z static unless the
                                 // player is jumping, which makes lifts appear to not move vertically.
-                                glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                                 localOffset.z = tentativeCanonical.z - tr->position.z;
-                                gameHandler->setPlayerTransportOffset(localOffset);
                             }
+                            gameHandler->setPlayerTransportOffset(localOffset);
 
                             glm::vec3 lockedCanonical = tr->position + localOffset;
                             renderPos = core::coords::canonicalToRender(lockedCanonical);
                             renderer->getCharacterPosition() = renderPos;
+                            lastM2RideLockedCanonical_ = lockedCanonical;
+                            hasM2RideLock_ = true;
                         }
+                    } else {
+                        hasM2RideLock_ = false;
                     }
 
                     glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
