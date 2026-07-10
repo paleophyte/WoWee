@@ -70,6 +70,13 @@ public:
     TransportManager();
     ~TransportManager();
 
+    // Absolute wall-clock ms. Used to seed a client-animated transport's starting phase
+    // so it's deterministic across clients/restarts instead of depending on when this
+    // process happened to launch or first see a given transport - see the seed call
+    // sites in transport_manager.cpp and TransportClockSync::processServerUpdate() for
+    // the full explanation of why that matters.
+    static uint64_t nowEpochMs();
+
     void setWMORenderer(rendering::WMORenderer* renderer) { wmoRenderer_ = renderer; }
     void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
 
