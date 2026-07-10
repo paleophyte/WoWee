@@ -200,11 +200,11 @@ void CameraController::update(float deltaTime) {
                 actualCam = pivot + camDir * actualDist;
             }
 
-            // Smooth camera position
+            // Smooth camera position (1:1 while actively dragging, see main update()).
             if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f) {
                 smoothedCamPos = actualCam;
             }
-            float camLerp = 1.0f - std::exp(-camSmoothSpeed_ * deltaTime);
+            float camLerp = mouseButtonDown ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
             smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
             camera->setPosition(smoothedCamPos);
@@ -491,6 +491,12 @@ void CameraController::update(float deltaTime) {
     if (nowBackward) movement -= forward;
     if (nowStrafeLeft) movement += right;
     if (nowStrafeRight) movement -= right;
+
+    if (glm::dot(movement, movement) > 0.0001f) {
+        travelYaw_ = glm::degrees(std::atan2(movement.y, movement.x));
+    } else {
+        travelYaw_ = facingYaw;
+    }
 
     // Third-person orbit camera mode
     if (thirdPerson && followTarget) {
@@ -1580,7 +1586,8 @@ void CameraController::update(float deltaTime) {
         if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f) {
             smoothedCamPos = actualCam;  // Initialize
         }
-        float camLerp = 1.0f - std::exp(-camSmoothSpeed_ * deltaTime);
+        bool activelyRotating = mouseButtonDown || nowTurnLeft || nowTurnRight;
+        float camLerp = activelyRotating ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
         smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
         // ===== Final floor clearance check =====
@@ -1961,6 +1968,8 @@ void CameraController::update(float deltaTime) {
     moveBackwardActive = nowBackward;
     strafeLeftActive = nowStrafeLeft;
     strafeRightActive = nowStrafeRight;
+    turningLeftActive = nowTurnLeft;
+    turningRightActive = nowTurnRight;
     wasTurningLeft = nowTurnLeft;
     wasTurningRight = nowTurnRight;
     wasJumping = nowJump;
@@ -2084,6 +2093,8 @@ void CameraController::reset() {
     moveBackwardActive = false;
     strafeLeftActive = false;
     strafeRightActive = false;
+    turningLeftActive = false;
+    turningRightActive = false;
 
     glm::vec3 spawnPos = defaultPosition;
 
@@ -2357,6 +2368,8 @@ void CameraController::clearMovementInputs() {
     moveBackwardActive = false;
     strafeLeftActive = false;
     strafeRightActive = false;
+    turningLeftActive = false;
+    turningRightActive = false;
     autoRunning = false;
 }
 

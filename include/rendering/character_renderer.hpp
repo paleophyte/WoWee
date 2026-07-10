@@ -77,6 +77,7 @@ public:
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
+    void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad);
     void moveInstanceTo(uint32_t instanceId, const glm::vec3& destination, float durationSeconds);
     void startFadeIn(uint32_t instanceId, float durationSeconds);
     void setInstanceOpacity(uint32_t instanceId, float opacity);
@@ -148,6 +149,9 @@ private:
         // batch metadata, so doing it per-instance per-frame in render() was
         // pure overhead.
         std::vector<size_t> sortedBatchIndices;
+
+        // Pre-classified at load time to avoid per-batch string ops in render loop
+        bool isKoboldFlame = false;
     };
 
     // Character instance
@@ -159,6 +163,7 @@ private:
         glm::vec3 rotation;
         float scale;
         bool visible = true;  // For first-person camera hiding
+        float torsoYawOverrideRad = 0.0f;
 
         // Animation state
         uint32_t currentAnimationId = 0;
@@ -307,6 +312,11 @@ private:
         bool normalMapPending = false;  // deferred normal map generation
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
+    struct NormalMapInfo {
+        VkTexture* normalMap = nullptr;
+        float heightMapVariance = 0.0f;
+    };
+    std::unordered_map<VkTexture*, NormalMapInfo> normalMapByTexPtr_;
     struct TextureProperties {
         bool hasAlpha = false;
         bool colorKeyBlack = false;
@@ -364,6 +374,7 @@ private:
     static constexpr int MAX_BONES = 240;
     uint32_t numAnimThreads_ = 1;
     std::vector<std::future<void>> animFutures_;
+    std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;

@@ -90,9 +90,9 @@ uint32_t MountFSM::resolveGroundOrFlyAnim(const Input& in) const {
             // (the original code used pickMountAnim with mount-specific swim IDs)
             return anims_.run ? anims_.run : anim::RUN;
         } else if (anyStrafeLeft) {
-            return anims_.run ? anims_.run : anim::RUN;
+            return anims_.runLeft ? anims_.runLeft : (anims_.run ? anims_.run : anim::RUN);
         } else if (anyStrafeRight) {
-            return anims_.run ? anims_.run : anim::RUN;
+            return anims_.runRight ? anims_.runRight : (anims_.run ? anims_.run : anim::RUN);
         } else if (in.movingBackward) {
             return anims_.run ? anims_.run : anim::RUN;
         } else {

@@ -19,7 +19,7 @@ Protocol Compatible with **Vanilla (Classic) 1.12 + TBC 2.4.3 + WotLK 3.3.5a**.
 
 > **Legal Disclaimer**: This is an educational/research project. It does not include any Blizzard Entertainment assets, data files, or proprietary code. World of Warcraft and all related assets are the property of Blizzard Entertainment, Inc. This project is not affiliated with or endorsed by Blizzard Entertainment. Users are responsible for supplying their own legally obtained game data files and for ensuring compliance with all applicable laws in their jurisdiction.
 
-## Status & Direction (2026-05-13)
+## Status & Direction (2026-07-09)
 
 - **Compatibility**: **Vanilla (Classic) 1.12 + TBC 2.4.3 + WotLK 3.3.5a** are all supported via expansion profiles and per-expansion packet parsers. All three expansions are roughly on par.
 - **Tested against**: AzerothCore/ChromieCraft, TrinityCore, Mangos, and Turtle WoW (1.18).
@@ -27,7 +27,7 @@ Protocol Compatible with **Vanilla (Classic) 1.12 + TBC 2.4.3 + WotLK 3.3.5a**.
 - **Warden**: Full module execution via Unicorn Engine CPU emulation. Decrypts (RC4→RSA→zlib), parses and relocates the PE module, executes via x86 emulation with Windows API interception. Module cache at `~/.local/share/wowee/warden_cache/`.
 - **CI**: GitHub Actions builds for Linux (x86-64, ARM64), Windows (MSYS2 x86-64 + ARM64), and macOS (ARM64). Security scans via CodeQL, Semgrep, and sanitizers. 31 unit-test suites covering protocol parsers, animation FSMs, world-map state, chat markup, macro evaluator, and editor units.
 - **Container builds**: Multi-platform Docker build system for Linux, macOS (arm64/x86_64 via osxcross), and Windows (LLVM-MinGW) cross-compilation.
-- **Release**: v1.9.1-preview — 530+ WoW API functions, 140+ events, broad opcode coverage across Classic / TBC / WotLK / Turtle.
+- **Release**: v1.9.7-preview — 530+ WoW API functions, 140+ events, broad opcode coverage across Classic / TBC / WotLK / Turtle.
 
 ## World Editor
 
@@ -58,7 +58,7 @@ Exported zones auto-load in the wowee client from `custom_zones/` or `output/` d
 ### Rendering Engine
 - **Terrain** -- Multi-tile streaming with async loading, texture splatting (4 layers), frustum culling, expanded load radius during taxi flights
 - **Atmosphere** -- Procedural clouds (FBM noise), lens flare with chromatic aberration, cloud/fog star occlusion
-- **Characters** -- Skeletal animation with GPU vertex skinning (256 bones), race-aware textures, per-instance NPC hair/skin textures
+- **Characters** -- Skeletal animation with GPU vertex skinning (256 bones), per-bone torso twist for strafing, race-aware textures, per-instance NPC hair/skin textures
 - **Buildings** -- WMO renderer with multi-material batches, frustum culling, collision (wall/floor classification, slope sliding), interior glass transparency
 - **Instances** -- WDT parser for WMO-only dungeon maps, area trigger portals with glow/spin effects, seamless zone transitions
 - **Water & Lava** -- Terrain and WMO water with refraction/reflection, magma/slime rendering with multi-octave FBM noise flow, Beer-Lambert absorption, M2 lava waterfalls with UV scroll
@@ -75,7 +75,7 @@ Exported zones auto-load in the wowee client from `custom_zones/` or `output/` d
 ### Gameplay Systems
 - **Authentication** -- Full SRP6a implementation with RC4 header encryption
 - **Character System** -- Creation (with nonbinary gender option), selection, 3D preview, stats panel, race/class support
-- **Movement** -- WASD movement, camera orbit, spline path following, transport riding (trams, ships, zeppelins), movement ACK responses
+- **Movement** -- WASD movement, camera orbit, torso-twist strafing (SpineLow bone rotation), spline path following, transport riding (trams, ships, zeppelins), movement ACK responses
 - **Combat** -- Auto-attack, spell casting with cooldowns, damage calculation, death handling, spirit healer resurrection
 - **Targeting** -- Tab-cycling with hostility filtering, click-to-target, faction-based hostility (using Faction.dbc)
 - **Inventory** -- 23 equipment slots, 16 backpack slots, drag-drop, auto-equip, item tooltips with weapon damage/speed, server-synced bag sort (quality/type/stack), independent bag windows
@@ -373,7 +373,7 @@ This project does not include any Blizzard Entertainment proprietary data, asset
 ## Known Issues
 
 This is a work in progress and the bug list is non-trivial. Current known
-gaps (as of v1.9.1-preview):
+gaps (as of v1.9.7-preview):
 
 - **Warden RSA modulus** is a placeholder; full anti-cheat parity needs
   the modulus extracted from a real WoW.exe. Module execution itself

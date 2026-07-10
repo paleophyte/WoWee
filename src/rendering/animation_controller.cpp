@@ -715,6 +715,8 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
     mountAnims.jumpEnd   = discoveredEnd > 0 ? discoveredEnd : findFirst({anim::JUMP_END});
     mountAnims.rearUp    = findFirst({anim::MOUNT_SPECIAL, anim::RUN_RIGHT, anim::FALL});
     mountAnims.run       = findFirst({anim::RUN, anim::WALK});
+    mountAnims.runLeft   = findFirst({anim::MOUNT_RUN_LEFT, anim::RUN_LEFT});
+    mountAnims.runRight  = findFirst({anim::MOUNT_RUN_RIGHT, anim::RUN_RIGHT});
     mountAnims.stand     = findFirst({anim::STAND});
     // Discover flight animations (flying mounts only — may all be 0 for ground mounts)
     mountAnims.flyIdle      = findFirst({anim::FLY_IDLE});
@@ -1132,7 +1134,10 @@ void AnimationController::updateCharacterAnimation() {
                   " reqChanged=", requestChanged, " drifted=", drifted, " shouldPlay=", shouldPlay,
                   " lastReq=", lastPlayerAnimRequest_,
                   " locoState=", static_cast<int>(characterAnimator_.getLocomotion().getState()),
-                  " actState=", static_cast<int>(characterAnimator_.getActivity().getState()));
+                  " actState=", static_cast<int>(characterAnimator_.getActivity().getState()),
+                  " fwd=", fi.movingForward, " back=", fi.movingBackward,
+                  " strafeL=", fi.strafeLeft, " strafeR=", fi.strafeRight,
+                  " moving=", fi.moving, " sprinting=", fi.sprinting);
         dbgLastAnim = animId;
     }
 
