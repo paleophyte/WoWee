@@ -1598,19 +1598,25 @@ void Application::update(float deltaTime) {
                         auto* tr = gameHandler->getTransportManager()->getTransport(
                             gameHandler->getPlayerTransportGuid());
                         if (tr) {
-                            // Keep passenger locked to elevator vertical motion while grounded.
-                            // Without this, floor clamping can hold world-Z static unless the
-                            // player is jumping, which makes lifts appear to not move vertically.
-                            glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
+                            // Ride along at a fixed offset from the transport's current position
+                            // (set once at boarding - see GameHandler::updateM2TransportBoarding).
+                            // This used to recompute offset.x/y every frame as
+                            // (current render pos - tr->position), which is a no-op identity once
+                            // fed back into lockedCanonical = tr->position + offset: the character's
+                            // render position could never actually change due to the tram moving,
+                            // so riding appeared to "float" in place no matter how far the tram
+                            // traveled underneath.
                             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
-                            localOffset.x = tentativeCanonical.x - tr->position.x;
-                            localOffset.y = tentativeCanonical.y - tr->position.y;
                             if (renderer->getCameraController() &&
                                 !renderer->getCameraController()->isGrounded()) {
-                                // While airborne (jump/fall), allow local Z offset to change.
+                                // While airborne (jump/fall), let vertical offset track normal
+                                // physics instead of staying pinned to the boarding-time value.
+                                // Without this, floor clamping can hold world-Z static unless the
+                                // player is jumping, which makes lifts appear to not move vertically.
+                                glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                                 localOffset.z = tentativeCanonical.z - tr->position.z;
+                                gameHandler->setPlayerTransportOffset(localOffset);
                             }
-                            gameHandler->setPlayerTransportOffset(localOffset);
 
                             glm::vec3 lockedCanonical = tr->position + localOffset;
                             renderPos = core::coords::canonicalToRender(lockedCanonical);
