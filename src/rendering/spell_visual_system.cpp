@@ -262,6 +262,7 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
         }
         LOG_INFO("SpellVisual: precast M2 data read OK, size=", m2Data.size(), " bytes");
         pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+        if (model.name.empty()) model.name = modelPath;
         LOG_INFO("SpellVisual: precast M2 parsed: verts=", model.vertices.size(),
                  " bones=", model.bones.size(), " particles=", model.particleEmitters.size(),
                  " ribbons=", model.ribbonEmitters.size(),
@@ -414,6 +415,7 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
         }
         LOG_INFO("SpellVisual: cast/impact M2 data read OK, size=", m2Data.size(), " bytes");
         pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+        if (model.name.empty()) model.name = modelPath;
         LOG_INFO("SpellVisual: M2 parsed: verts=", model.vertices.size(),
                  " bones=", model.bones.size(), " particles=", model.particleEmitters.size(),
                  " ribbons=", model.ribbonEmitters.size());

@@ -428,8 +428,10 @@ void GameHandler::registerOpcodeHandlers() {
         /*uint64_t binderGuid =*/ packet.readUInt64();
         uint32_t mapId  = packet.readUInt32();
         uint32_t zoneId = packet.readUInt32();
+        bool changed = !hasHomeBind_ || homeBindMapId_ != mapId || homeBindZoneId_ != zoneId;
         homeBindMapId_  = mapId;
         homeBindZoneId_ = zoneId;
+        if (!changed) return;
         std::string pbMsg = "Your home location has been set";
         std::string zoneName = getAreaName(zoneId);
         if (!zoneName.empty()) pbMsg += " to " + zoneName;
@@ -685,13 +687,18 @@ void GameHandler::registerOpcodeHandlers() {
             glm::vec3 canonical = core::coords::serverToCanonical(
                 glm::vec3(data.x, data.y, data.z));
             bool wasSet = hasHomeBind_;
+            bool changed =
+                !hasHomeBind_ ||
+                homeBindMapId_ != data.mapId ||
+                homeBindZoneId_ != data.zoneId ||
+                glm::length(homeBindPos_ - canonical) > 0.5f;
             hasHomeBind_ = true;
             homeBindMapId_ = data.mapId;
             homeBindZoneId_ = data.zoneId;
             homeBindPos_ = canonical;
             if (bindPointCallback_)
                 bindPointCallback_(data.mapId, canonical.x, canonical.y, canonical.z);
-            if (wasSet) {
+            if (wasSet && changed) {
                 std::string bindMsg = "Your home has been set";
                 std::string zoneName = getAreaName(data.zoneId);
                 if (!zoneName.empty()) bindMsg += " to " + zoneName;

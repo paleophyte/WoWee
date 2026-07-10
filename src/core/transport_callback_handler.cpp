@@ -230,11 +230,22 @@ void TransportCallbackHandler::setupCallbacks() {
                                  " displayId=", displayId, " wmoInstance=", wmoInstanceId);
                     }
 
-                    transportManager->registerTransport(guid, wmoInstanceId, pathId, canonicalSpawnPos, entry);
-                    // Keep type in sync with the spawned instance; needed for M2 lift boarding/motion.
-                    if (!it->second.isWmo) {
+                    const bool isM2Transport = !it->second.isWmo;
+                    transportManager->registerTransport(guid,
+                                                        wmoInstanceId,
+                                                        pathId,
+                                                        canonicalSpawnPos,
+                                                        entry,
+                                                        displayId,
+                                                        isM2Transport);
+                    if (displayId == 3831u) {
                         if (auto* tr = transportManager->getTransport(guid)) {
-                            tr->isM2 = true;
+                            LOG_WARNING("Auto-spawned Deeprun tram transport: guid=0x",
+                                        std::hex, guid, std::dec,
+                                        " entry=", entry,
+                                        " pathId=", tr->pathId,
+                                        " isM2=", tr->isM2,
+                                        " mode=", (tr->useClientAnimation ? "client" : "server"));
                         }
                     }
                 } else {

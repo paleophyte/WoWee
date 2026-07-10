@@ -37,10 +37,84 @@
 #include <fstream>
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <glm/gtc/quaternion.hpp>
 
 namespace wowee {
 namespace core {
+
+namespace {
+
+struct DeeprunPortalVisual {
+    uint32_t mapId;
+    glm::vec3 canonicalPos;
+    float canonicalYaw;
+};
+
+void spawnDeeprunPortalVisuals(uint32_t mapId,
+                               rendering::Renderer* renderer,
+                               pipeline::AssetManager* assetManager) {
+    if (!renderer || !assetManager || !assetManager->isInitialized()) return;
+    auto* m2Renderer = renderer->getM2Renderer();
+    if (!m2Renderer) return;
+
+    static constexpr const char* kPortalPath =
+        "World\\GENERIC\\ACTIVEDOODADS\\INSTANCEPORTAL\\InstancePortal.m2";
+    static constexpr const char* kPortalModelName =
+        "World\\GENERIC\\ACTIVEDOODADS\\INSTANCEPORTAL\\InstancePortal.m2#deeprun-glow";
+    static const uint32_t kPortalModelId =
+        static_cast<uint32_t>(std::hash<std::string>{}(kPortalModelName));
+
+    if (!m2Renderer->hasModel(kPortalModelId)) {
+        auto m2Data = assetManager->readFile(kPortalPath);
+        if (m2Data.empty()) {
+            LOG_WARNING("Deeprun portal visual unavailable: ", kPortalPath);
+            return;
+        }
+
+        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+        model.name = kPortalModelName;
+
+        std::string skinPath = std::string(kPortalPath);
+        size_t dotPos = skinPath.rfind('.');
+        if (dotPos != std::string::npos) skinPath = skinPath.substr(0, dotPos);
+        skinPath += "00.skin";
+        auto skinData = assetManager->readFile(skinPath);
+        if (!skinData.empty() && model.version >= 264) {
+            pipeline::M2Loader::loadSkin(skinData, model);
+        }
+
+        if (!m2Renderer->loadModel(model, kPortalModelId)) {
+            LOG_WARNING("Failed to load Deeprun portal visual model: ", kPortalPath);
+            return;
+        }
+        m2Renderer->markModelAsSpellEffect(kPortalModelId);
+    }
+
+    static const DeeprunPortalVisual kPortals[] = {
+        // Ironforge station -> Deeprun Tram
+        {0,   glm::vec3(-1330.46f, -4840.26f, 503.85f), 3.10f},
+        // Deeprun Tram -> Ironforge station
+        {369, glm::vec3(10.50f, 76.03f, -2.30f),       3.12f},
+    };
+
+    for (const auto& portal : kPortals) {
+        if (portal.mapId != mapId) continue;
+
+        glm::vec3 renderPos = core::coords::canonicalToRender(portal.canonicalPos);
+        float renderYaw = portal.canonicalYaw + glm::radians(90.0f);
+        uint32_t instanceId = m2Renderer->createInstance(
+            kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 2.75f);
+        if (instanceId) {
+            m2Renderer->setSkipCollision(instanceId, true);
+            LOG_INFO("Spawned Deeprun portal visual map=", mapId,
+                     " canonical=(", portal.canonicalPos.x, ", ",
+                     portal.canonicalPos.y, ", ", portal.canonicalPos.z, ")");
+        }
+    }
+}
+
+} // namespace
 
 WorldLoader::WorldLoader(Application& app,
                          rendering::Renderer* renderer,
@@ -365,16 +439,17 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     glm::vec3 spawnRender = core::coords::canonicalToRender(spawnCanonical);
 
     // Set camera position and facing from server orientation
+    float spawnYawDeg = 0.0f;
+    if (gameHandler_) {
+        float canonicalYaw = gameHandler_->getMovementInfo().orientation;
+        spawnYawDeg = 180.0f - glm::degrees(canonicalYaw);
+    }
     if (renderer_->getCameraController()) {
-        float yawDeg = 0.0f;
-        if (gameHandler_) {
-            float canonicalYaw = gameHandler_->getMovementInfo().orientation;
-            yawDeg = 180.0f - glm::degrees(canonicalYaw);
-        }
         renderer_->getCameraController()->setOnlineMode(true);
-        renderer_->getCameraController()->setDefaultSpawn(spawnRender, yawDeg, -15.0f);
+        renderer_->getCameraController()->setDefaultSpawn(spawnRender, spawnYawDeg, -15.0f);
         renderer_->getCameraController()->reset();
     }
+    renderer_->setCharacterYaw(spawnYawDeg);
 
     // Set map name for WMO renderer and reset instance mode
     if (renderer_->getWMORenderer()) {
@@ -867,6 +942,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     if (renderer_->getCameraController()) {
         renderer_->getCameraController()->reset();
     }
+    renderer_->setCharacterYaw(spawnYawDeg);
+    spawnDeeprunPortalVisuals(mapId, renderer_, assetManager_);
 
     // Test transport disabled — real transports come from server via UPDATEFLAG_TRANSPORT
     showProgress("Finalizing world...", 0.94f);

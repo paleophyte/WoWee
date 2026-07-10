@@ -13,7 +13,9 @@
 #include "pipeline/asset_manager.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
+#include <string>
 
 namespace wowee { namespace core {
 
@@ -83,6 +85,12 @@ void WorldEntryCallbackHandler::syncTeleportedPositionToServer(const glm::vec3& 
 
 // Force server-side teleport via GM command
 void WorldEntryCallbackHandler::forceServerTeleportCommand(const glm::vec3& renderPos) {
+    const char* allowGmUnstuck = std::getenv("WOWEE_ALLOW_GM_UNSTUCK");
+    if (!allowGmUnstuck || std::string(allowGmUnstuck) != "1") {
+        LOG_WARNING("GM unstuck command suppressed. Set WOWEE_ALLOW_GM_UNSTUCK=1 to send .revive/.dismount/.go xyz.");
+        return;
+    }
+
     // Server-authoritative reset first, then teleport.
     gameHandler_.sendChatMessage(game::ChatType::SAY, ".revive", "");
     gameHandler_.sendChatMessage(game::ChatType::SAY, ".dismount", "");
@@ -362,6 +370,11 @@ void WorldEntryCallbackHandler::setupCallbacks() {
     // Auto-unstuck: falling for > 5 seconds = void fall, teleport to map entry
     if (renderer_.getCameraController()) {
         renderer_.getCameraController()->setAutoUnstuckCallback([this]() {
+            const char* allowAutoUnstuck = std::getenv("WOWEE_ALLOW_AUTO_UNSTUCK");
+            if (!allowAutoUnstuck || std::string(allowAutoUnstuck) != "1") {
+                LOG_WARNING("Auto-unstuck suppressed. Set WOWEE_ALLOW_AUTO_UNSTUCK=1 to teleport to the map entry point after long falls.");
+                return;
+            }
             if (!renderer_.getCameraController()) return;
             auto* cc = renderer_.getCameraController();
 

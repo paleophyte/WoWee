@@ -495,6 +495,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                     }
 
                     auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
+                    if (model->name.empty()) model->name = m2Path;
                     if (model->vertices.empty()) {
                         result.permanent_failure = true;
                         return result;
@@ -986,6 +987,8 @@ void EntitySpawner::processPendingTransportRegistrations() {
         }
 
         if (transportManager->getTransport(pending.guid)) {
+            transportManager->rebindTransportInstance(
+                pending.guid, goIt->second.instanceId, !goIt->second.isWmo, pending.displayId);
             transportManager->updateServerTransport(
                 pending.guid, glm::vec3(pending.x, pending.y, pending.z), pending.orientation);
             it = pendingTransportRegistrations_.erase(it);
@@ -1054,13 +1057,15 @@ void EntitySpawner::processPendingTransportRegistrations() {
             LOG_WARNING("Using real transport path from TransportAnimation.dbc for entry ", pending.entry);
         }
 
-        transportManager->registerTransport(pending.guid, wmoInstanceId, pathId, canonicalSpawnPos, pending.entry);
+        const bool isM2Transport = !goIt->second.isWmo;
 
-        if (!goIt->second.isWmo) {
-            if (auto* tr = transportManager->getTransport(pending.guid)) {
-                tr->isM2 = true;
-            }
-        }
+        transportManager->registerTransport(pending.guid,
+                                            wmoInstanceId,
+                                            pathId,
+                                            canonicalSpawnPos,
+                                            pending.entry,
+                                            pending.displayId,
+                                            isM2Transport);
 
         transportManager->updateServerTransport(
             pending.guid, glm::vec3(pending.x, pending.y, pending.z), pending.orientation);
@@ -1089,11 +1094,21 @@ void EntitySpawner::processPendingTransportRegistrations() {
         }
 
         if (auto* tr = transportManager->getTransport(pending.guid); tr) {
-            LOG_DEBUG("Transport registered: guid=0x", std::hex, pending.guid, std::dec,
-                     " entry=", pending.entry, " displayId=", pending.displayId,
-                     " pathId=", tr->pathId,
-                     " mode=", (tr->useClientAnimation ? "client" : "server"),
-                     " serverUpdates=", tr->serverUpdateCount);
+            if (pending.displayId == 3831u) {
+                LOG_WARNING("Deeprun tram registration complete: guid=0x", std::hex, pending.guid, std::dec,
+                            " entry=", pending.entry,
+                            " displayId=", pending.displayId,
+                            " pathId=", tr->pathId,
+                            " isM2=", tr->isM2,
+                            " mode=", (tr->useClientAnimation ? "client" : "server"),
+                            " serverUpdates=", tr->serverUpdateCount);
+            } else {
+                LOG_DEBUG("Transport registered: guid=0x", std::hex, pending.guid, std::dec,
+                         " entry=", pending.entry, " displayId=", pending.displayId,
+                         " pathId=", tr->pathId,
+                         " mode=", (tr->useClientAnimation ? "client" : "server"),
+                         " serverUpdates=", tr->serverUpdateCount);
+            }
         } else {
             LOG_DEBUG("Transport registered: guid=0x", std::hex, pending.guid, std::dec,
                      " entry=", pending.entry, " displayId=", pending.displayId,
@@ -1159,6 +1174,7 @@ void EntitySpawner::processPendingTransportDoodads() {
             if (m2Data.empty()) continue;
 
             pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+            if (m2Model.name.empty()) m2Model.name = doodadTemplate.m2Path;
             std::string skinPath = doodadTemplate.m2Path.substr(0, doodadTemplate.m2Path.size() - 3) + "00.skin";
             std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
             if (!skinData.empty() && m2Model.version >= 264) {
@@ -1225,6 +1241,7 @@ void EntitySpawner::processPendingMount() {
         }
 
         pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+        if (model.name.empty()) model.name = m2Path;
         if (model.vertices.empty()) {
             LOG_WARNING("Failed to parse mount M2: ", m2Path);
             return;
@@ -1561,6 +1578,26 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
 
     auto it = gameObjectInstances_.find(guid);
     if (it == gameObjectInstances_.end()) return;
+
+    if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+        if (auto* transportManager = gameHandler_->getTransportManager()) {
+            if (auto* transport = transportManager->getTransport(guid)) {
+                const bool isDeeprunTram =
+                    transport->displayId == 3831u ||
+                    (transport->entry >= 176080u && transport->entry <= 176085u) ||
+                    (transport->pathId >= 176080u && transport->pathId <= 176085u);
+                if (transport->isM2 && isDeeprunTram) {
+                    LOG_WARNING("Keeping Deeprun tram render instance through server despawn: guid=0x",
+                                std::hex, guid, std::dec,
+                                " entry=", transport->entry,
+                                " displayId=", transport->displayId,
+                                " pathId=", transport->pathId,
+                                " instanceId=", it->second.instanceId);
+                    return;
+                }
+            }
+        }
+    }
 
     if (renderer_) {
         if (it->second.isWmo) {

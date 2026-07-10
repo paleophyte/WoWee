@@ -26,6 +26,7 @@ struct ActiveTransport {
     uint32_t wmoInstanceId;     // WMO renderer instance ID
     uint32_t pathId;            // Current path
     uint32_t entry = 0;         // GameObject entry (for MO_TRANSPORT path updates)
+    uint32_t displayId = 0;     // GameObject display id, used for model-family-specific behavior
     glm::vec3 basePosition;     // Spawn position (base offset for path)
     glm::vec3 position;         // Current world position
     glm::quat rotation;         // Current world rotation
@@ -72,7 +73,13 @@ public:
     void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
 
     void update(float deltaTime);
-    void registerTransport(uint64_t guid, uint32_t wmoInstanceId, uint32_t pathId, const glm::vec3& spawnWorldPos, uint32_t entry = 0);
+    void registerTransport(uint64_t guid,
+                           uint32_t wmoInstanceId,
+                           uint32_t pathId,
+                           const glm::vec3& spawnWorldPos,
+                           uint32_t entry = 0,
+                           uint32_t displayId = 0,
+                           bool isM2 = false);
     void unregisterTransport(uint64_t guid);
 
     ActiveTransport* getTransport(uint64_t guid);
@@ -118,6 +125,11 @@ public:
 
     // Update server-controlled transport position/rotation directly (bypasses path movement)
     void updateServerTransport(uint64_t guid, const glm::vec3& position, float orientation);
+
+    // Reconnect an existing transport to a newly spawned render instance. Servers can
+    // despawn/respawn transports around visibility boundaries while the logical route
+    // remains the same.
+    void rebindTransportInstance(uint64_t guid, uint32_t instanceId, bool isM2, uint32_t displayId = 0);
 
     // Enable/disable client-side animation for transports without server updates
     void setClientSideAnimation(bool enabled) { clientSideAnimation_ = enabled; }

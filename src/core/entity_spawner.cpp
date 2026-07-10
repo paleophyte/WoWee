@@ -854,6 +854,7 @@ pipeline::M2Model EntitySpawner::loadCreatureM2Sync(const std::string& m2Path) {
     }
 
     pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+    if (model.name.empty()) model.name = m2Path;
     if (model.vertices.empty()) {
         LOG_WARNING("Failed to parse creature M2: ", m2Path);
         return {};
@@ -1786,6 +1787,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
 
                         if (!helmData.empty()) {
                             auto helmModel = pipeline::M2Loader::load(helmData);
+                            if (helmModel.name.empty()) helmModel.name = helmPath;
                             // Load skin (only for WotLK M2s)
                             std::string skinPath = helmPath.substr(0, helmPath.size() - 3) + "00.skin";
                             auto skinData = assetManager_->readFile(skinPath);
@@ -1865,6 +1867,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         }
                         if (!leftData.empty()) {
                             auto leftModel = pipeline::M2Loader::load(leftData);
+                            if (leftModel.name.empty()) leftModel.name = leftPath;
                             std::string skinPath = leftPath.substr(0, leftPath.size() - 3) + "00.skin";
                             auto skinData = assetManager_->readFile(skinPath);
                             if (!skinData.empty() && leftModel.version >= 264) {
@@ -1909,6 +1912,7 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         }
                         if (!rightData.empty()) {
                             auto rightModel = pipeline::M2Loader::load(rightData);
+                            if (rightModel.name.empty()) rightModel.name = rightPath;
                             std::string skinPath = rightPath.substr(0, rightPath.size() - 3) + "00.skin";
                             auto skinData = assetManager_->readFile(skinPath);
                             if (!skinData.empty() && rightModel.version >= 264) {

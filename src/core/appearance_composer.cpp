@@ -312,6 +312,7 @@ bool AppearanceComposer::loadWeaponM2(const std::string& m2Path, pipeline::M2Mod
     auto m2Data = assetManager_->readFile(m2Path);
     if (m2Data.empty()) return false;
     outModel = pipeline::M2Loader::load(m2Data);
+    if (outModel.name.empty()) outModel.name = m2Path;
     // Load skin (WotLK+ M2 format): strip .m2, append 00.skin
     std::string skinPath = m2Path;
     size_t dotPos = skinPath.rfind('.');

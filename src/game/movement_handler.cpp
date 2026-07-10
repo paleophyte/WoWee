@@ -23,6 +23,50 @@
 namespace wowee {
 namespace game {
 
+namespace {
+
+struct KnownAreaTriggerDestination {
+    uint32_t triggerId;
+    uint32_t mapId;
+    float serverX;
+    float serverY;
+    float serverZ;
+    float serverO;
+};
+
+constexpr KnownAreaTriggerDestination kKnownAreaTriggerDestinations[] = {
+    {2166, 0,   -4838.95f, -1318.46f, 501.868f, 1.42372f}, // Deeprun Tram -> Ironforge
+    {2171, 0,   -8364.57f,   535.981f, 91.7969f, 2.24619f}, // Deeprun Tram -> Stormwind
+    {2173, 369,    68.3006f, 2490.91f, -4.29647f, 3.12192f}, // Stormwind -> Deeprun Tram
+    {2175, 369,    69.2542f,   10.257f, -4.29664f, 3.09832f}, // Ironforge -> Deeprun Tram
+};
+
+const KnownAreaTriggerDestination* findKnownAreaTriggerDestination(uint32_t triggerId, uint32_t mapId) {
+    for (const auto& dest : kKnownAreaTriggerDestinations) {
+        if (dest.triggerId == triggerId && dest.mapId == mapId) return &dest;
+    }
+    return nullptr;
+}
+
+const KnownAreaTriggerDestination* findKnownAreaTriggerDestinationByTrigger(uint32_t triggerId) {
+    for (const auto& dest : kKnownAreaTriggerDestinations) {
+        if (dest.triggerId == triggerId) return &dest;
+    }
+    return nullptr;
+}
+
+uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
+    switch (triggerId) {
+        case 2166: return 2175; // Deeprun Tram -> Ironforge, return via Ironforge portal
+        case 2171: return 2173; // Deeprun Tram -> Stormwind, return via Stormwind portal
+        case 2173: return 2171; // Stormwind -> Deeprun Tram, exit on Stormwind side
+        case 2175: return 2166; // Ironforge -> Deeprun Tram, exit on Ironforge side
+        default: return 0;
+    }
+}
+
+} // namespace
+
 MovementHandler::MovementHandler(GameHandler& owner)
     : owner_(owner), movementInfo(owner.movementInfoRef()) {}
 
@@ -328,6 +372,39 @@ uint32_t MovementHandler::nextMovementTimestampMs() {
     return candidate;
 }
 
+bool MovementHandler::restoreWorldTransferFallbackIfNearOrigin(const char* context) {
+    if (!worldTransferFallbackValid_ || owner_.getCurrentMapId() != worldTransferFallbackMapId_) {
+        return false;
+    }
+    if (owner_.getCurrentMapId() != 0 ||
+        std::abs(movementInfo.x) >= 1000.0f || std::abs(movementInfo.y) >= 1000.0f) {
+        return false;
+    }
+
+    LOG_WARNING(context,
+                ": correcting near-origin map 0 position using area trigger ",
+                worldTransferFallbackTriggerId_,
+                " fallback canonical=(",
+                worldTransferFallbackCanonicalPos_.x, ", ",
+                worldTransferFallbackCanonicalPos_.y, ", ",
+                worldTransferFallbackCanonicalPos_.z, ")");
+
+    movementInfo.x = worldTransferFallbackCanonicalPos_.x;
+    movementInfo.y = worldTransferFallbackCanonicalPos_.y;
+    movementInfo.z = worldTransferFallbackCanonicalPos_.z;
+    movementInfo.orientation = worldTransferFallbackCanonicalO_;
+    movementInfo.transportGuid = 0;
+    movementInfo.transportSeat = -1;
+    movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ONTRANSPORT);
+    owner_.clearPlayerTransport();
+
+    if (auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
+        player->setPosition(movementInfo.x, movementInfo.y, movementInfo.z, movementInfo.orientation);
+    }
+
+    return true;
+}
+
 // ============================================================
 // sendMovement
 // ============================================================
@@ -619,12 +696,14 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // the bad position across sessions and creates a teleport loop.
     if (owner_.getCurrentMapId() == 0 &&
         std::abs(movementInfo.x) < 1000.0f && std::abs(movementInfo.y) < 1000.0f) {
-        LOG_WARNING("sendMovement: BLOCKED near-origin heartbeat canonical=(",
-                    movementInfo.x, ", ", movementInfo.y, ", ", movementInfo.z,
-                    ") onTransport=", owner_.isOnTransport(),
-                    " transportGuid=0x", std::hex, owner_.playerTransportGuidRef(), std::dec,
-                    " flags=0x", std::hex, movementInfo.flags, std::dec);
-        return;
+        if (!restoreWorldTransferFallbackIfNearOrigin("sendMovement")) {
+            LOG_WARNING("sendMovement: BLOCKED near-origin heartbeat canonical=(",
+                        movementInfo.x, ", ", movementInfo.y, ", ", movementInfo.z,
+                        ") onTransport=", owner_.isOnTransport(),
+                        " transportGuid=0x", std::hex, owner_.playerTransportGuidRef(), std::dec,
+                        " flags=0x", std::hex, movementInfo.flags, std::dec);
+            return;
+        }
     }
 
     // Convert canonical → server coordinates for the wire
@@ -1690,13 +1769,16 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     // Clear cast bar on teleport — SpellHandler owns the casting_ flag
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->resetCastState();
 
-    // Suppress area triggers for 10s after teleport. A one-shot flag is not
+    // Suppress area triggers briefly after teleport. A one-shot flag is not
     // enough — the player can leave and re-enter a trigger within seconds and
-    // get teleported again before the world has finished loading.
+    // get teleported again before the world has finished loading. Deeprun Tram
+    // (map 369) is a narrow hallway with portal triggers close to the spawn,
+    // so keep its grace window short enough that exits remain usable.
+    const bool deeprunTram = owner_.getCurrentMapId() == 369;
     owner_.activeAreaTriggersRef().clear();
-    owner_.areaTriggerCheckTimerRef() = -5.0f;
+    owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
     owner_.areaTriggerSuppressFirstRef() = true;
-    owner_.areaTriggerCooldownRef() = 10.0f;
+    owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
 
     if (owner_.getSocket()) {
         network::Packet ack(wireOpcode(Opcode::MSG_MOVE_TELEPORT_ACK));
@@ -1734,17 +1816,93 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
     float orientation = packet.readFloat();
+    const uint32_t transferAreaTriggerId = lastAreaTriggerId_;
+    lastAreaTriggerId_ = 0;
+    postTransferReturnAreaTriggerId_ = findKnownReturnAreaTrigger(transferAreaTriggerId);
+    postTransferReturnAreaTriggerSawNear_ = false;
+    const bool hasPendingAreaTriggerDestination = pendingAreaTriggerDestinationValid_;
+    const uint32_t pendingAreaTriggerDestinationMapId = pendingAreaTriggerDestinationMapId_;
+    const glm::vec3 pendingAreaTriggerDestinationServerPos = pendingAreaTriggerDestinationServerPos_;
+    const float pendingAreaTriggerDestinationServerO = pendingAreaTriggerDestinationServerO_;
+    pendingAreaTriggerDestinationValid_ = false;
+    const auto* knownTransferDestination = findKnownAreaTriggerDestination(transferAreaTriggerId, mapId);
+
+    bool transferFallbackValid = false;
+    glm::vec3 transferFallbackServerPos(0.0f);
+    float transferFallbackServerO = orientation;
+    if (hasPendingAreaTriggerDestination && pendingAreaTriggerDestinationMapId == mapId) {
+        transferFallbackValid = true;
+        transferFallbackServerPos = pendingAreaTriggerDestinationServerPos;
+        transferFallbackServerO = pendingAreaTriggerDestinationServerO;
+    } else if (knownTransferDestination) {
+        transferFallbackValid = true;
+        transferFallbackServerPos =
+            glm::vec3(knownTransferDestination->serverX,
+                      knownTransferDestination->serverY,
+                      knownTransferDestination->serverZ);
+        transferFallbackServerO = knownTransferDestination->serverO;
+    }
+    if (transferFallbackValid) {
+        worldTransferFallbackValid_ = true;
+        worldTransferFallbackMapId_ = mapId;
+        worldTransferFallbackTriggerId_ = transferAreaTriggerId;
+        worldTransferFallbackCanonicalPos_ = core::coords::serverToCanonical(transferFallbackServerPos);
+        worldTransferFallbackCanonicalO_ = core::coords::serverToCanonicalYaw(transferFallbackServerO);
+        orientation = transferFallbackServerO;
+        LOG_WARNING("World transfer fallback armed: trigger=", transferAreaTriggerId,
+                    " map=", mapId,
+                    " canonical=(",
+                    worldTransferFallbackCanonicalPos_.x, ", ",
+                    worldTransferFallbackCanonicalPos_.y, ", ",
+                    worldTransferFallbackCanonicalPos_.z, ")");
+    } else {
+        worldTransferFallbackValid_ = false;
+    }
 
     LOG_INFO("SMSG_NEW_WORLD: mapId=", mapId,
              " pos=(", serverX, ", ", serverY, ", ", serverZ, ")",
              " orient=", orientation);
+
+    glm::vec3 receivedCanonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+    const bool badEasternKingdomsNearOrigin =
+        mapId == 0 && std::abs(receivedCanonical.x) < 1000.0f && std::abs(receivedCanonical.y) < 1000.0f;
+    if (badEasternKingdomsNearOrigin) {
+        if (hasPendingAreaTriggerDestination && pendingAreaTriggerDestinationMapId == mapId) {
+            LOG_WARNING("Correcting bad SMSG_NEW_WORLD near-origin destination for area trigger ",
+                        transferAreaTriggerId,
+                        ": received server=(", serverX, ", ", serverY, ", ", serverZ,
+                        ") using pending server=(", pendingAreaTriggerDestinationServerPos.x, ", ",
+                        pendingAreaTriggerDestinationServerPos.y, ", ",
+                        pendingAreaTriggerDestinationServerPos.z, ")");
+            serverX = pendingAreaTriggerDestinationServerPos.x;
+            serverY = pendingAreaTriggerDestinationServerPos.y;
+            serverZ = pendingAreaTriggerDestinationServerPos.z;
+            orientation = pendingAreaTriggerDestinationServerO;
+            receivedCanonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+        } else if (knownTransferDestination) {
+            LOG_WARNING("Correcting bad SMSG_NEW_WORLD near-origin destination for area trigger ",
+                        transferAreaTriggerId,
+                        ": received server=(", serverX, ", ", serverY, ", ", serverZ,
+                        ") using server=(", knownTransferDestination->serverX, ", ",
+                        knownTransferDestination->serverY, ", ", knownTransferDestination->serverZ, ")");
+            serverX = knownTransferDestination->serverX;
+            serverY = knownTransferDestination->serverY;
+            serverZ = knownTransferDestination->serverZ;
+            orientation = knownTransferDestination->serverO;
+            receivedCanonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+        } else {
+            LOG_WARNING("SMSG_NEW_WORLD near-origin destination on map 0 without known area trigger fallback: trigger=",
+                        transferAreaTriggerId,
+                        " server=(", serverX, ", ", serverY, ", ", serverZ, ")");
+        }
+    }
 
     const bool isSameMap       = (mapId == owner_.currentMapIdRef());
     const bool isResurrection  = owner_.resurrectPendingRef();
     if (isSameMap && isResurrection) {
         LOG_INFO("SMSG_NEW_WORLD same-map resurrection — skipping world reload");
 
-        glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+        glm::vec3 canonical = receivedCanonical;
         movementInfo.x = canonical.x;
         movementInfo.y = canonical.y;
         movementInfo.z = canonical.z;
@@ -1766,10 +1924,11 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         owner_.tabCycleStaleRef() = true;
         owner_.resetCastState();
 
+        const bool deeprunTram = owner_.getCurrentMapId() == 369;
         owner_.activeAreaTriggersRef().clear();
-        owner_.areaTriggerCheckTimerRef() = -5.0f;
+        owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
         owner_.areaTriggerSuppressFirstRef() = true;
-        owner_.areaTriggerCooldownRef() = 10.0f;
+        owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
 
         if (owner_.getSocket()) {
             network::Packet ack(wireOpcode(Opcode::MSG_MOVE_WORLDPORT_ACK));
@@ -1788,7 +1947,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
         owner_.getSocket()->tracePacketsFor(std::chrono::seconds(12), "new_world");
     }
 
-    glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+    glm::vec3 canonical = receivedCanonical;
     movementInfo.x = canonical.x;
     movementInfo.y = canonical.y;
     movementInfo.z = canonical.z;
@@ -1834,9 +1993,10 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     owner_.worldStateMapIdRef() = mapId;
     owner_.worldStateZoneIdRef() = 0;
     owner_.activeAreaTriggersRef().clear();
-    owner_.areaTriggerCheckTimerRef() = -5.0f;
+    const bool deeprunTram = mapId == 369;
+    owner_.areaTriggerCheckTimerRef() = deeprunTram ? -1.0f : -5.0f;
     owner_.areaTriggerSuppressFirstRef() = true;
-    owner_.areaTriggerCooldownRef() = 10.0f;
+    owner_.areaTriggerCooldownRef() = deeprunTram ? 1.5f : 10.0f;
     owner_.stopAutoAttack();
     owner_.resetCastState();
 
@@ -2598,12 +2758,18 @@ void MovementHandler::checkAreaTriggers() {
     // avoid firing Alterac/Hillsbrad triggers and causing a rogue teleport.
     if (owner_.getCurrentMapId() == 0 &&
         std::abs(px) < 1000.0f && std::abs(py) < 1000.0f) {
-        LOG_WARNING("checkAreaTriggers: position near map origin (", px, ", ", py, ", ", pz,
-                    ") on map 0 — skipping to avoid rogue teleport. onTransport=",
-                    owner_.isOnTransport(), " transportGuid=0x", std::hex,
-                    owner_.playerTransportGuidRef(), std::dec);
-        return;
+        if (!restoreWorldTransferFallbackIfNearOrigin("checkAreaTriggers")) {
+            LOG_WARNING("checkAreaTriggers: position near map origin (", px, ", ", py, ", ", pz,
+                        ") on map 0 — skipping to avoid rogue teleport. onTransport=",
+                        owner_.isOnTransport(), " transportGuid=0x", std::hex,
+                        owner_.playerTransportGuidRef(), std::dec);
+            return;
+        }
     }
+
+    const float checkedPx = movementInfo.x;
+    const float checkedPy = movementInfo.y;
+    const float checkedPz = movementInfo.z;
 
     // Time-based cooldown after teleport/world entry — suppress ALL trigger
     // firing (not just the first check) to prevent re-entry from immediately
@@ -2623,26 +2789,28 @@ void MovementHandler::checkAreaTriggers() {
         bool inside = false;
         if (at.radius > 0.0f) {
             // Sphere trigger — use actual DBC radius
-            float dx = px - at.x;
-            float dy = py - at.y;
-            float dz = pz - at.z;
+            float dx = checkedPx - at.x;
+            float dy = checkedPy - at.y;
+            float dz = checkedPz - at.z;
             float distSq = dx * dx + dy * dy + dz * dz;
             inside = (distSq <= at.radius * at.radius);
         } else if (at.boxLength > 0.0f || at.boxWidth > 0.0f || at.boxHeight > 0.0f) {
-            // Box trigger — use actual DBC dimensions
+            // Box trigger. AreaTrigger.dbc stores box axes in server-space
+            // X/Y. The trigger center is cached in canonical space, so swap
+            // deltas back to server-space before applying length/width/yaw.
             float effLength = at.boxLength;
             float effWidth = at.boxWidth;
             float effHeight = at.boxHeight;
 
-            float dx = px - at.x;
-            float dy = py - at.y;
-            float dz = pz - at.z;
+            float serverDx = checkedPy - at.y;
+            float serverDy = checkedPx - at.x;
+            float dz = checkedPz - at.z;
 
             // Rotate into box-local space
             float cosYaw = std::cos(-at.boxYaw);
             float sinYaw = std::sin(-at.boxYaw);
-            float localX = dx * cosYaw - dy * sinYaw;
-            float localY = dx * sinYaw + dy * cosYaw;
+            float localX = serverDx * cosYaw - serverDy * sinYaw;
+            float localY = serverDx * sinYaw + serverDy * cosYaw;
 
             inside = (std::abs(localX) <= effLength * 0.5f &&
                       std::abs(localY) <= effWidth * 0.5f &&
@@ -2651,21 +2819,108 @@ void MovementHandler::checkAreaTriggers() {
 
         if (inside) {
             if (owner_.activeAreaTriggersRef().count(at.id) == 0) {
-                owner_.activeAreaTriggersRef().insert(at.id);
-
-                if (suppressFirst || cooldownActive) {
-                    LOG_WARNING("AreaTrigger suppressed (post-transfer): AT", at.id,
+                const bool suppressCurrentTrigger =
+                    suppressFirst || cooldownActive || postTransferReturnAreaTriggerId_ == at.id;
+                if (suppressFirst) {
+                    // If we spawn already inside a portal trigger, arm it as
+                    // active so cooldown expiry cannot immediately bounce us
+                    // back through the destination portal. The player must
+                    // leave and re-enter before it can fire.
+                    if (postTransferReturnAreaTriggerId_ == at.id) {
+                        postTransferReturnAreaTriggerSawNear_ = true;
+                    }
+                    owner_.activeAreaTriggersRef().insert(at.id);
+                    LOG_WARNING("AreaTrigger armed on post-transfer spawn: AT", at.id,
                                 " cooldown=", owner_.areaTriggerCooldownRef());
+                } else if (postTransferReturnAreaTriggerId_ == at.id) {
+                    // After a map transfer, the destination can place or
+                    // nudge the player into the paired return trigger after
+                    // the normal grace window has elapsed. Arm that trigger
+                    // until the player leaves it once; a later re-entry can
+                    // then intentionally fire it.
+                    postTransferReturnAreaTriggerSawNear_ = true;
+                    owner_.activeAreaTriggersRef().insert(at.id);
+                    LOG_WARNING("AreaTrigger armed for post-transfer return portal: AT", at.id,
+                                " cooldown=", owner_.areaTriggerCooldownRef());
+                } else if (cooldownActive) {
+                    // Do not mark ordinary cooldown-suppressed triggers active.
+                    // If the player walks into a trigger during the cooldown,
+                    // it should fire once the grace window ends.
+                    LOG_DEBUG("AreaTrigger cooldown suppressed: AT", at.id,
+                              " cooldown=", owner_.areaTriggerCooldownRef());
+                } else {
+                    owner_.activeAreaTriggersRef().insert(at.id);
+                }
+
+                if (suppressCurrentTrigger) {
+                    // Suppressed above; if suppressFirst inserted the trigger,
+                    // it will not fire until the player leaves/re-enters.
                 } else {
                     network::Packet pkt(wireOpcode(Opcode::CMSG_AREATRIGGER));
                     pkt.writeUInt32(at.id);
+                    lastAreaTriggerId_ = at.id;
+                    if (const auto* dest = findKnownAreaTriggerDestinationByTrigger(at.id)) {
+                        pendingAreaTriggerDestinationValid_ = true;
+                        pendingAreaTriggerDestinationMapId_ = dest->mapId;
+                        pendingAreaTriggerDestinationServerPos_ =
+                            glm::vec3(dest->serverX, dest->serverY, dest->serverZ);
+                        pendingAreaTriggerDestinationServerO_ = dest->serverO;
+                    }
                     owner_.getSocket()->send(pkt);
+                    const float dx = checkedPx - at.x;
+                    const float dy = checkedPy - at.y;
                     LOG_WARNING("Fired CMSG_AREATRIGGER: id=", at.id,
-                                " pos=(", px, ", ", py, ", ", pz, ")",
-                                " trigger=(", at.x, ", ", at.y, ", ", at.z, ")");
+                                " pos=(", checkedPx, ", ", checkedPy, ", ", checkedPz, ")",
+                                " trigger=(", at.x, ", ", at.y, ", ", at.z, ")",
+                                " dist2d=", std::sqrt(dx * dx + dy * dy));
                 }
             }
         } else {
+            if (postTransferReturnAreaTriggerId_ == at.id) {
+                const float dx = checkedPx - at.x;
+                const float dy = checkedPy - at.y;
+                const float dz = checkedPz - at.z;
+                const float distSq = dx * dx + dy * dy + dz * dz;
+                const float triggerExtent = std::max({
+                    at.radius,
+                    at.boxLength * 0.5f,
+                    at.boxWidth * 0.5f,
+                    at.boxHeight * 0.5f,
+                    12.0f
+                });
+                const float clearDistance = triggerExtent + 8.0f;
+                if (distSq <= clearDistance * clearDistance) {
+                    postTransferReturnAreaTriggerSawNear_ = true;
+                    // A single outside sample near a destination portal is not
+                    // enough to prove the player intentionally left it. Deeprun
+                    // can report one outside tick and then drift back inside,
+                    // which causes an immediate bounce. Keep the return portal
+                    // armed until the player is comfortably clear.
+                    owner_.activeAreaTriggersRef().insert(at.id);
+                    LOG_DEBUG("AreaTrigger post-transfer return portal retained near trigger: AT", at.id,
+                              " dist=", std::sqrt(distSq),
+                              " clear=", clearDistance);
+                    continue;
+                }
+
+                if (!postTransferReturnAreaTriggerSawNear_ && distSq > 1000.0f * 1000.0f) {
+                    // During map transfer there can be a tick where the current
+                    // map has switched but movementInfo still contains the old
+                    // map's coordinates. That looks thousands of yards away
+                    // from the destination trigger and must not clear the guard
+                    // before the destination position arrives.
+                    owner_.activeAreaTriggersRef().insert(at.id);
+                    LOG_WARNING("AreaTrigger post-transfer return portal waiting for destination position: AT",
+                                at.id, " dist=", std::sqrt(distSq));
+                    continue;
+                }
+
+                postTransferReturnAreaTriggerId_ = 0;
+                postTransferReturnAreaTriggerSawNear_ = false;
+                LOG_WARNING("AreaTrigger post-transfer return portal cleared after leaving: AT", at.id,
+                            " dist=", std::sqrt(distSq));
+            }
+
             // Player left the trigger — allow re-fire on re-entry
             owner_.activeAreaTriggersRef().erase(at.id);
         }

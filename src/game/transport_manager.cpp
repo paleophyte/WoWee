@@ -13,6 +13,73 @@
 
 namespace wowee::game {
 
+namespace {
+
+bool isDeeprunTramTransport(const ActiveTransport& transport) {
+    return transport.displayId == 3831u ||
+           (transport.entry >= 176080u && transport.entry <= 176085u) ||
+           (transport.pathId >= 176080u && transport.pathId <= 176085u);
+}
+
+bool seedDeeprunTramStationPhase(ActiveTransport& transport,
+                                 const PathEntry& pathEntry,
+                                 const glm::vec3& serverPosition,
+                                 float orientation) {
+    const auto& spline = pathEntry.spline;
+    const auto& keys = spline.keys();
+    if (!pathEntry.fromDBC || spline.durationMs() == 0 || keys.empty()) {
+        return false;
+    }
+
+    size_t maxOffsetIdx = 0;
+    float maxAbsX = 0.0f;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const float absX = std::abs(keys[i].position.x);
+        if (absX > maxAbsX) {
+            maxAbsX = absX;
+            maxOffsetIdx = i;
+        }
+    }
+
+    if (maxAbsX < 100.0f) {
+        return false;
+    }
+
+    const bool pathMaxIsPositive = keys[maxOffsetIdx].position.x > 0.0f;
+    const bool serverAtPositiveEnd = serverPosition.x > 1000.0f;
+    const bool useMaxOffsetStation = (pathMaxIsPositive == serverAtPositiveEnd);
+
+    size_t stationIdx = maxOffsetIdx;
+    if (!useMaxOffsetStation) {
+        stationIdx = 0;
+        for (size_t step = 1; step < keys.size(); ++step) {
+            const size_t idx = (maxOffsetIdx + step) % keys.size();
+            if (std::abs(keys[idx].position.x) < 1.0f) {
+                stationIdx = idx;
+                break;
+            }
+        }
+    }
+
+    const glm::vec3 stationOffset = keys[stationIdx].position;
+    transport.basePosition = serverPosition - stationOffset;
+    transport.position = serverPosition;
+    transport.localClockMs = keys[stationIdx].timeMs % spline.durationMs();
+    transport.hasServerYaw = false;
+    transport.rotation = glm::angleAxis(orientation, glm::vec3(0.0f, 0.0f, 1.0f));
+
+    LOG_WARNING("Deeprun tram station phase seeded: guid=0x", std::hex, transport.guid, std::dec,
+                " entry=", transport.entry,
+                " pathId=", transport.pathId,
+                " phaseMs=", transport.localClockMs,
+                " stationOffset=(", stationOffset.x, ",", stationOffset.y, ",", stationOffset.z, ")",
+                " base=(", transport.basePosition.x, ",", transport.basePosition.y, ",", transport.basePosition.z, ")",
+                " serverPos=(", serverPosition.x, ",", serverPosition.y, ",", serverPosition.z, ")");
+    return true;
+}
+
+} // namespace
+
 TransportManager::TransportManager() = default;
 TransportManager::~TransportManager() = default;
 
@@ -26,7 +93,13 @@ void TransportManager::update(float deltaTime) {
     }
 }
 
-void TransportManager::registerTransport(uint64_t guid, uint32_t wmoInstanceId, uint32_t pathId, const glm::vec3& spawnWorldPos, uint32_t entry) {
+void TransportManager::registerTransport(uint64_t guid,
+                                         uint32_t wmoInstanceId,
+                                         uint32_t pathId,
+                                         const glm::vec3& spawnWorldPos,
+                                         uint32_t entry,
+                                         uint32_t displayId,
+                                         bool isM2) {
     auto* pathEntry = pathRepo_.findPath(pathId);
     if (!pathEntry) {
         LOG_ERROR("TransportManager: Path ", pathId, " not found for transport ", guid);
@@ -44,6 +117,8 @@ void TransportManager::registerTransport(uint64_t guid, uint32_t wmoInstanceId, 
     transport.wmoInstanceId = wmoInstanceId;
     transport.pathId = pathId;
     transport.entry = entry;
+    transport.displayId = displayId;
+    transport.isM2 = isM2;
     transport.allowBootstrapVelocity = false;
 
     // CRITICAL: Set basePosition from spawn position and t=0 offset
@@ -115,9 +190,24 @@ void TransportManager::registerTransport(uint64_t guid, uint32_t wmoInstanceId, 
     LOG_INFO("TransportManager: Registered transport 0x", std::hex, guid, std::dec,
              " at path ", pathId, " with ", (pathEntry ? pathEntry->spline.keyCount() : 0u), " waypoints",
              " wmoInstanceId=", wmoInstanceId,
+             " entry=", entry,
+             " displayId=", displayId,
+             " isM2=", isM2,
              " spawnPos=(", spawnWorldPos.x, ", ", spawnWorldPos.y, ", ", spawnWorldPos.z, ")",
              " basePos=(", transport.basePosition.x, ", ", transport.basePosition.y, ", ", transport.basePosition.z, ")",
              " initialRenderPos=(", renderPos.x, ", ", renderPos.y, ", ", renderPos.z, ")");
+
+    if (isDeeprunTramTransport(transport)) {
+        LOG_WARNING("Deeprun tram registered: guid=0x", std::hex, guid, std::dec,
+                    " entry=", entry,
+                    " displayId=", displayId,
+                    " pathId=", pathId,
+                    " instanceId=", wmoInstanceId,
+                    " isM2=", isM2,
+                    " mode=", (transport.useClientAnimation ? "client" : "server"),
+                    " spawn=(", spawnWorldPos.x, ",", spawnWorldPos.y, ",", spawnWorldPos.z, ")",
+                    " base=(", transport.basePosition.x, ",", transport.basePosition.y, ",", transport.basePosition.z, ")");
+    }
 }
 
 void TransportManager::unregisterTransport(uint64_t guid) {
@@ -277,11 +367,70 @@ void TransportManager::updateServerTransport(uint64_t guid, const glm::vec3& pos
         return;
     }
 
+    if (transport->isM2 && isDeeprunTramTransport(*transport) && pathEntry->fromDBC) {
+        // CMangos sends occasional position echoes for Deeprun subway cars, but the client
+        // owns the TransportAnimation.dbc path phase. Treat those samples as presence/yaw
+        // hints rather than switching the M2 tram into stationary server-driven mode.
+        const bool firstUpdate = transport->serverUpdateCount == 0;
+        transport->serverUpdateCount++;
+        transport->lastServerUpdate = elapsedTime_;
+        transport->useClientAnimation = true;
+        transport->clientAnimationReverse = false;
+        transport->hasServerClock = false;
+        const glm::vec3 baseDelta = position - transport->basePosition;
+        const bool stationEcho = glm::dot(baseDelta, baseDelta) < 4.0f;
+        if (firstUpdate || stationEcho) {
+            if (!seedDeeprunTramStationPhase(*transport, *pathEntry, position, orientation)) {
+                transport->basePosition = position;
+                transport->position = position;
+                transport->localClockMs = 0;
+                transport->hasServerYaw = false;
+                transport->rotation = glm::angleAxis(orientation, glm::vec3(0.0f, 0.0f, 1.0f));
+            }
+        }
+        if (transport->serverUpdateCount <= 3) {
+            LOG_WARNING("Deeprun tram server update kept client-driven: guid=0x", std::hex, guid, std::dec,
+                        " entry=", transport->entry,
+                        " displayId=", transport->displayId,
+                        " pathId=", transport->pathId,
+                        " pos=(", position.x, ",", position.y, ",", position.z, ")",
+                        " orientation=", orientation);
+        }
+        updateTransformMatrices(*transport);
+        pushTransform(*transport);
+        return;
+    }
+
     // Delegate clock sync, yaw correction, and velocity bootstrap to ClockSync.
     clockSync_.processServerUpdate(*transport, pathEntry, position, orientation, elapsedTime_);
 
     updateTransformMatrices(*transport);
     pushTransform(*transport);
+}
+
+void TransportManager::rebindTransportInstance(uint64_t guid, uint32_t instanceId, bool isM2, uint32_t displayId) {
+    auto* transport = getTransport(guid);
+    if (!transport) return;
+
+    const bool changed = transport->wmoInstanceId != instanceId ||
+                         transport->isM2 != isM2 ||
+                         (displayId != 0 && transport->displayId != displayId);
+    transport->wmoInstanceId = instanceId;
+    transport->isM2 = isM2;
+    if (displayId != 0) {
+        transport->displayId = displayId;
+    }
+
+    updateTransformMatrices(*transport);
+    pushTransform(*transport);
+
+    if (changed && isDeeprunTramTransport(*transport)) {
+        LOG_WARNING("Deeprun tram rebound to render instance: guid=0x", std::hex, guid, std::dec,
+                    " instanceId=", instanceId,
+                    " isM2=", isM2,
+                    " displayId=", transport->displayId,
+                    " pathId=", transport->pathId);
+    }
 }
 
 bool TransportManager::loadTransportAnimationDBC(pipeline::AssetManager* assetMgr) {

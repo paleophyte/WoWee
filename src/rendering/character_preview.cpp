@@ -506,6 +506,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     auto model = pipeline::M2Loader::load(m2Data);
+    if (model.name.empty()) model.name = m2Path;
 
     // M2 version 264+ (WotLK) stores submesh/bone data in external .skin files.
     // Earlier versions (Classic ≤256, TBC ≤263) have skin data embedded in the M2.

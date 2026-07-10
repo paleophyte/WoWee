@@ -67,6 +67,7 @@
 #include "rendering/overlay_system.hpp"
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -1710,16 +1711,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 float minimapPlayerOrientation = 0.0f;
                 bool hasMinimapPlayerOrientation = false;
                 if (cameraController) {
-                    float facingRad = glm::radians(characterYaw);
-                    glm::vec3 facingFwd(std::cos(facingRad), std::sin(facingRad), 0.0f);
-                    // atan2(-x,y) = canonical yaw (0=North); negate for shader convention.
-                    minimapPlayerOrientation = -std::atan2(-facingFwd.x, facingFwd.y);
+                    // Render-space character yaw faces north at 180 degrees; the
+                    // minimap shader arrow faces north at 0. Match the mirrored
+                    // minimap texture by flipping the visual arrow vertically.
+                    minimapPlayerOrientation = glm::radians(characterYaw);
                     hasMinimapPlayerOrientation = true;
                 } else if (gameHandler) {
-                    // movementInfo.orientation is canonical yaw: 0=North, π/2=East.
-                    // Minimap shader: arrowRotation=0 points up (North), positive rotates CW
-                    // (π/2=West, -π/2=East). Correct mapping: arrowRotation = -canonical_yaw.
-                    minimapPlayerOrientation = -gameHandler->getMovementInfo().orientation;
+                    // movementInfo.orientation is canonical yaw: north is 0, east is +pi/2.
+                    // Match the mirrored minimap texture by flipping the visual
+                    // arrow vertically.
+                    minimapPlayerOrientation = glm::pi<float>() - gameHandler->getMovementInfo().orientation;
                     hasMinimapPlayerOrientation = true;
                 }
                 minimap->render(cmd, *camera, minimapCenter,
@@ -1864,16 +1865,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             float minimapPlayerOrientation = 0.0f;
             bool hasMinimapPlayerOrientation = false;
             if (cameraController) {
-                float facingRad = glm::radians(characterYaw);
-                glm::vec3 facingFwd(std::cos(facingRad), std::sin(facingRad), 0.0f);
-                // atan2(-x,y) = canonical yaw (0=North); negate for shader convention.
-                minimapPlayerOrientation = -std::atan2(-facingFwd.x, facingFwd.y);
+                // Render-space character yaw faces north at 180 degrees; the
+                // minimap shader arrow faces north at 0. Match the mirrored
+                // minimap texture by flipping the visual arrow vertically.
+                minimapPlayerOrientation = glm::radians(characterYaw);
                 hasMinimapPlayerOrientation = true;
             } else if (gameHandler) {
-                // movementInfo.orientation is canonical yaw: 0=North, π/2=East.
-                // Minimap shader: arrowRotation=0 points up (North), positive rotates CW
-                // (π/2=West, -π/2=East). Correct mapping: arrowRotation = -canonical_yaw.
-                minimapPlayerOrientation = -gameHandler->getMovementInfo().orientation;
+                // movementInfo.orientation is canonical yaw: north is 0, east is +pi/2.
+                // Match the mirrored minimap texture by flipping the visual
+                // arrow vertically.
+                minimapPlayerOrientation = glm::pi<float>() - gameHandler->getMovementInfo().orientation;
                 hasMinimapPlayerOrientation = true;
             }
             minimap->render(currentCmd, *camera, minimapCenter,

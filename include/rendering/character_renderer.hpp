@@ -283,6 +283,8 @@ private:
     // Descriptor pool
     VkDescriptorPool materialDescPools_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
+    std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
+        std::make_shared<std::atomic<uint64_t>>(0);
     uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
 
     // Material UBO ring buffer — pre-allocated per frame slot, sub-allocated each draw

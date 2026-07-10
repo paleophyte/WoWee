@@ -896,7 +896,11 @@ void M2Renderer::shutdown() {
         megaBoneSet_[i] = VK_NULL_HANDLE;
     }
     if (materialDescPool_) { vkDestroyDescriptorPool(device, materialDescPool_, nullptr); materialDescPool_ = VK_NULL_HANDLE; }
-    if (boneDescPool_) { vkDestroyDescriptorPool(device, boneDescPool_, nullptr); boneDescPool_ = VK_NULL_HANDLE; }
+    if (boneDescPool_) {
+        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
+        vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
+        boneDescPool_ = VK_NULL_HANDLE;
+    }
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         if (instanceBuffer_[i]) { vmaDestroyBuffer(alloc, instanceBuffer_[i], instanceAlloc_[i]); instanceBuffer_[i] = VK_NULL_HANDLE; }
@@ -985,8 +989,12 @@ void M2Renderer::destroyInstanceBones(M2Instance& inst, bool defer) {
             // slots, so the other slot's command buffer may still be in flight.
             // Must wait for all fences, not just the current frame's.
             VkDescriptorPool pool = boneDescPool_;
-            vkCtx_->deferAfterAllFrameFences([device, alloc, pool, boneSet, boneBuf, boneAlloc]() {
-                if (boneSet != VK_NULL_HANDLE) {
+            auto poolGeneration = boneDescPoolGeneration_;
+            uint64_t generation = poolGeneration ? poolGeneration->load(std::memory_order_relaxed) : 0;
+            vkCtx_->deferAfterAllFrameFences([device, alloc, pool, poolGeneration, generation, boneSet, boneBuf, boneAlloc]() {
+                const bool poolStillValid =
+                    poolGeneration && poolGeneration->load(std::memory_order_relaxed) == generation;
+                if (boneSet != VK_NULL_HANDLE && pool != VK_NULL_HANDLE && poolStillValid) {
                     VkDescriptorSet s = boneSet;
                     vkFreeDescriptorSets(device, pool, 1, &s);
                 }
@@ -1168,7 +1176,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     bool hasParticles = !model.particleEmitters.empty();
     bool hasRibbons   = !model.ribbonEmitters.empty();
     if (!hasGeometry && !hasParticles && !hasRibbons) {
-        LOG_WARNING("M2 model has no renderable content: ", model.name);
+        LOG_WARNING("M2 model has no renderable content: id=", modelId,
+                    " name=", model.name.empty() ? "<unnamed>" : model.name);
         return false;
     }
 

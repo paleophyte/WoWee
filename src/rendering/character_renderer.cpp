@@ -480,7 +480,11 @@ void CharacterRenderer::shutdown() {
             materialDescPools_[i] = VK_NULL_HANDLE;
         }
     }
-    if (boneDescPool_) { vkDestroyDescriptorPool(device, boneDescPool_, nullptr); boneDescPool_ = VK_NULL_HANDLE; }
+    if (boneDescPool_) {
+        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
+        vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
+        boneDescPool_ = VK_NULL_HANDLE;
+    }
     if (materialSetLayout_) { vkDestroyDescriptorSetLayout(device, materialSetLayout_, nullptr); materialSetLayout_ = VK_NULL_HANDLE; }
     if (boneSetLayout_) { vkDestroyDescriptorSetLayout(device, boneSetLayout_, nullptr); boneSetLayout_ = VK_NULL_HANDLE; }
 
@@ -560,6 +564,7 @@ void CharacterRenderer::clear() {
         }
     }
     if (boneDescPool_) {
+        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
         vkResetDescriptorPool(device, boneDescPool_, 0);
     }
 }
@@ -639,8 +644,12 @@ void CharacterRenderer::destroyInstanceBones(CharacterInstance& inst, bool defer
             // Loop destroys bone sets for ALL frame slots — the other slot's
             // command buffer may still be in flight. Wait for all fences.
             VkDescriptorPool pool = boneDescPool_;
-            vkCtx_->deferAfterAllFrameFences([device, alloc, pool, boneSet, boneBuf, boneAlloc]() {
-                if (boneSet != VK_NULL_HANDLE && pool != VK_NULL_HANDLE) {
+            auto poolGeneration = boneDescPoolGeneration_;
+            uint64_t generation = poolGeneration ? poolGeneration->load(std::memory_order_relaxed) : 0;
+            vkCtx_->deferAfterAllFrameFences([device, alloc, pool, poolGeneration, generation, boneSet, boneBuf, boneAlloc]() {
+                const bool poolStillValid =
+                    poolGeneration && poolGeneration->load(std::memory_order_relaxed) == generation;
+                if (boneSet != VK_NULL_HANDLE && pool != VK_NULL_HANDLE && poolStillValid) {
                     VkDescriptorSet s = boneSet;
                     vkFreeDescriptorSets(device, pool, 1, &s);
                 }
@@ -2207,6 +2216,7 @@ glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, floa
 
 void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     if (instances.empty() || !opaquePipeline_) return;
+    if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
     for (auto& [id, instance] : instances) {
@@ -2221,8 +2231,13 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
             aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo allocInfo{};
-            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                            &instance.boneBuffer[frameIndex], &instance.boneAlloc[frameIndex], &allocInfo);
+            if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
+                            &instance.boneBuffer[frameIndex], &instance.boneAlloc[frameIndex], &allocInfo) != VK_SUCCESS) {
+                instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
+                instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
+                instance.boneMapped[frameIndex] = nullptr;
+                continue;
+            }
             instance.boneMapped[frameIndex] = allocInfo.pMappedData;
 
             // Initialize all bone slots to identity so out-of-range indices
@@ -3019,8 +3034,10 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                                      const glm::vec3& shadowCenter, float shadowRadius) {
     if (!shadowPipeline_ || !shadowParamsSet_) return;
     if (instances.empty() || models.empty()) return;
+    if (boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
     uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (frameIndex >= 2) return;
     VkDevice device = vkCtx_->getDevice();
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
@@ -3056,8 +3073,13 @@ void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& light
                 aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
                 aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 VmaAllocationInfo ai{};
-                vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                    &inst.boneBuffer[frameIndex], &inst.boneAlloc[frameIndex], &ai);
+                if (vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
+                    &inst.boneBuffer[frameIndex], &inst.boneAlloc[frameIndex], &ai) != VK_SUCCESS) {
+                    inst.boneBuffer[frameIndex] = VK_NULL_HANDLE;
+                    inst.boneAlloc[frameIndex] = VK_NULL_HANDLE;
+                    inst.boneMapped[frameIndex] = nullptr;
+                    continue;
+                }
                 inst.boneMapped[frameIndex] = ai.pMappedData;
 
                 // Initialize all bone slots to identity so out-of-range indices

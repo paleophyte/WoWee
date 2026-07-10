@@ -322,6 +322,7 @@ void M2Renderer::clear() {
             }
         }
         if (boneDescPool_) {
+            if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
             vkResetDescriptorPool(device, boneDescPool_, 0);
             // Re-allocate the dummy bone set (invalidated by pool reset)
             dummyBoneSet_ = allocateBoneSet();

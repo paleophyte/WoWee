@@ -12,6 +12,27 @@
 
 namespace wowee::game {
 
+namespace {
+
+bool isDeeprunTramPath(uint32_t transportEntry) {
+    return transportEntry >= 176080u && transportEntry <= 176085u;
+}
+
+glm::vec3 transportAnimationOffsetToCanonical(uint32_t transportEntry, const glm::vec3& pos) {
+    if (isDeeprunTramPath(transportEntry)) {
+        // Deeprun's TransportAnimation rows are local subway-car offsets, not
+        // server/world coordinates. Raw X is the tunnel travel axis; swapping it
+        // through serverToCanonical makes the cars drive perpendicular to the rails.
+        return glm::vec3(pos.x, pos.y, pos.z);
+    }
+
+    // TransportAnimation.dbc local offsets use a coordinate system where the travel
+    // axis is negated relative to server world coords for ship/zeppelin-style paths.
+    return core::coords::serverToCanonical(glm::vec3(-pos.x, -pos.y, pos.z));
+}
+
+} // namespace
+
 // ── Simple lookup methods ──────────────────────────────────────
 
 const PathEntry* TransportPathRepository::findPath(uint32_t pathId) const {
@@ -116,6 +137,22 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
     auto itMapped = kEntryRemap.find(entry);
     if (itMapped != kEntryRemap.end() && isUsableMovingPath(itMapped->second)) {
         return itMapped->second;
+    }
+
+    if (displayId == 3831u) {
+        static constexpr uint32_t kDeeprunTramCandidates[] = {
+            176080u, 176081u, 176082u, 176083u, 176084u, 176085u
+        };
+        for (uint32_t id : kDeeprunTramCandidates) {
+            if (id == entry && isUsableMovingPath(id)) return id;
+        }
+        for (uint32_t id : kDeeprunTramCandidates) {
+            if (isUsableMovingPath(id)) {
+                LOG_WARNING("TransportPathRepository: remapped Deeprun tram displayId 3831 entry ",
+                            entry, " to DBC path ", id);
+                return id;
+            }
+        }
     }
 
     // Fallback by display model family.
@@ -310,10 +347,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
         for (size_t idx = 0; idx < sortedWaypoints.size(); idx++) {
             const auto& [tMs, pos] = sortedWaypoints[idx];
 
-            // TransportAnimation.dbc local offsets use a coordinate system where
-            // the travel axis is negated relative to server world coords.
-            // Negate X and Y before converting to canonical (Z=height stays the same).
-            glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(-pos.x, -pos.y, pos.z));
+            glm::vec3 canonical = transportAnimationOffsetToCanonical(transportEntry, pos);
 
             // Skip waypoints where serverToCanonical zeroes nonzero inputs
             if ((pos.x != 0.0f || pos.y != 0.0f || pos.z != 0.0f) &&
@@ -360,7 +394,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
         // Add duplicate first point at end with wrap duration
         // This makes the wrap segment (last → first) have proper duration
         const auto& fp = sortedWaypoints.front().second;
-        glm::vec3 firstCanonical = core::coords::serverToCanonical(glm::vec3(-fp.x, -fp.y, fp.z));
+        glm::vec3 firstCanonical = transportAnimationOffsetToCanonical(transportEntry, fp);
         keys.push_back({lastTimeMs + wrapMs, firstCanonical});
 
         // Build the spline (time-closed=false because we added explicit wrap point)

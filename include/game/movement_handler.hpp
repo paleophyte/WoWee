@@ -201,6 +201,7 @@ private:
     // --- Private helpers ---
     void buildTaxiCostMap();
     void startClientTaxiPath(const std::vector<uint32_t>& pathNodes);
+    bool restoreWorldTransferFallbackIfNearOrigin(const char* context);
 
     GameHandler& owner_;
 
@@ -219,6 +220,18 @@ private:
 
     // Heartbeat timing
     int heartbeatLogCount_ = 0;  // periodic position audit counter
+    uint32_t lastAreaTriggerId_ = 0;
+    uint32_t postTransferReturnAreaTriggerId_ = 0;
+    bool postTransferReturnAreaTriggerSawNear_ = false;
+    bool pendingAreaTriggerDestinationValid_ = false;
+    uint32_t pendingAreaTriggerDestinationMapId_ = 0;
+    glm::vec3 pendingAreaTriggerDestinationServerPos_{0.0f};
+    float pendingAreaTriggerDestinationServerO_ = 0.0f;
+    bool worldTransferFallbackValid_ = false;
+    uint32_t worldTransferFallbackMapId_ = 0;
+    uint32_t worldTransferFallbackTriggerId_ = 0;
+    glm::vec3 worldTransferFallbackCanonicalPos_{0.0f};
+    float worldTransferFallbackCanonicalO_ = 0.0f;
     float timeSinceLastMoveHeartbeat_ = 0.0f;
     float moveHeartbeatInterval_ = 0.5f;
     uint32_t lastHeartbeatSendTimeMs_ = 0;

@@ -896,6 +896,21 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         int32_t instanceDataOffset; // Base index into instance SSBO for this draw group
     };
 
+    auto appendInstancePortalGlow = [&](const M2Instance& instance, float distSq) {
+        if (distSq >= 400.0f * 400.0f) return;
+        glm::vec3 center = glm::vec3(instance.modelMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        GlowSprite core;
+        core.worldPos = center;
+        core.color = glm::vec4(0.35f, 0.55f, 1.0f, 1.25f);
+        core.size = instance.scale * 7.0f;
+        glowSprites_.push_back(core);
+
+        GlowSprite halo = core;
+        halo.color.a *= 0.35f;
+        halo.size *= 2.4f;
+        glowSprites_.push_back(halo);
+    };
+
     // Validate per-frame descriptor set before any Vulkan commands
     if (!perFrameSet) {
         LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE — skipping M2 render");
@@ -964,6 +979,15 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 continue;
             }
             const M2ModelGPU& model = *instances[firstEntry.index].cachedModel;
+            if (model.isInstancePortal) {
+                for (size_t vi = visStart; vi < groupEnd; vi++) {
+                    const auto& entry = sortedVisible_[vi];
+                    if (entry.index >= instances.size()) continue;
+                    appendInstancePortalGlow(instances[entry.index], entry.distSq);
+                }
+                visStart = groupEnd;
+                continue;
+            }
             if (!model.vertexBuffer || !model.indexBuffer) {
                 visStart = groupEnd;
                 continue;
@@ -991,21 +1015,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 }
                 float instanceFadeAlpha = fadeAlpha;
                 if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
-                if (model.isInstancePortal) {
-                    instanceFadeAlpha *= 0.12f;
-                    if (entry.distSq < 400.0f * 400.0f) {
-                        glm::vec3 center = glm::vec3(instance.modelMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
-                        GlowSprite gs;
-                        gs.worldPos = center;
-                        gs.color = glm::vec4(0.35f, 0.5f, 1.0f, 1.1f);
-                        gs.size = instance.scale * 5.0f;
-                        glowSprites_.push_back(gs);
-                        GlowSprite halo = gs;
-                        halo.color.a *= 0.3f;
-                        halo.size *= 2.2f;
-                        glowSprites_.push_back(halo);
-                    }
-                }
 
                 // Bone readiness check
                 if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;
@@ -1257,6 +1266,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             currentModelValid = false;
             currentModel = instance.cachedModel;
             if (!currentModel) continue;
+            if (currentModel->isInstancePortal) continue;
             if (!currentModel->hasTransparentBatches && !currentModel->isSpellEffect) continue;
             if (!currentModel->vertexBuffer || !currentModel->indexBuffer) continue;
             currentModelValid = true;
@@ -1278,7 +1288,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         }
         float instanceFadeAlpha = fadeAlpha;
         if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
-        if (model.isInstancePortal) instanceFadeAlpha *= 0.12f;
+        if (model.isInstancePortal) instanceFadeAlpha *= 0.72f;
 
         bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
         if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;

@@ -453,6 +453,8 @@ private:
     // Descriptor pools
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
+    std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
+        std::make_shared<std::atomic<uint64_t>>(0);
     static constexpr uint32_t MAX_MATERIAL_SETS = 16384;
     static constexpr uint32_t MAX_BONE_SETS = 16384;
 

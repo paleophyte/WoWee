@@ -70,7 +70,16 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     auto itCache = playerModelCache_.find(cacheKey);
     if (itCache != playerModelCache_.end()) {
         modelId = itCache->second;
-    } else {
+        if (!charRenderer->getModelData(modelId)) {
+            LOG_WARNING("spawnOnlinePlayer: cached player model missing after world reload, reloading modelId=",
+                        modelId, " race=", static_cast<int>(raceId),
+                        " gender=", static_cast<int>(genderId));
+            playerTextureSlotsByModelId_.erase(modelId);
+            playerModelCache_.erase(itCache);
+            modelId = 0;
+        }
+    }
+    if (modelId == 0) {
         game::Race race = static_cast<game::Race>(raceId);
         game::Gender gender = (genderId == 1) ? game::Gender::FEMALE : game::Gender::MALE;
         std::string m2Path = game::getPlayerModelPath(race, gender);
@@ -945,6 +954,22 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
 
     auto goIt = gameObjectInstances_.find(guid);
     if (goIt != gameObjectInstances_.end()) {
+        if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
+            if (auto* transportManager = gameHandler_->getTransportManager()) {
+                if (transportManager->getTransport(guid)) {
+                    transportManager->rebindTransportInstance(
+                        guid, goIt->second.instanceId, !goIt->second.isWmo, displayId);
+                    transportManager->updateServerTransport(
+                        guid, glm::vec3(x, y, z), orientation);
+                } else {
+                    gameHandler_->notifyTransportSpawned(guid, entry, displayId, x, y, z, orientation);
+                }
+            } else {
+                gameHandler_->notifyTransportSpawned(guid, entry, displayId, x, y, z, orientation);
+            }
+            return;
+        }
+
         // Already have a render instance — update its position (e.g. transport re-creation)
         auto& info = goIt->second;
         glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
@@ -1194,6 +1219,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             }
 
             pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+            if (model.name.empty()) model.name = modelPath;
             if (model.vertices.empty()) {
                 LOG_WARNING("Failed to parse gameobject M2: ", modelPath);
                 gameObjectDisplayIdFailedCache_.insert(displayId);
