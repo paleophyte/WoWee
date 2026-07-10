@@ -1428,9 +1428,13 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         // offsets like (-17.9, 0.4, -10.4). That widening was very likely compensating
         // for the registration/attach bugs fixed earlier in this branch (nothing was
         // reliably registering close enough to board at all), not a real need for a
-        // bigger capture volume. Use the plain M2 defaults instead.
-        constexpr float kDeeprunTramBoardHorizDistSq = kM2BoardHorizDistSq;
-        constexpr float kDeeprunTramBoardVertDist = kM2BoardVertDist;
+        // bigger capture volume. Even the plain M2 default (12/15) still reached into
+        // the corridor below/beside the tram platform, capturing players who were only
+        // walking past - "grab box is still a little large" reported live. The subway
+        // car itself is a small model; use a tighter, Deeprun-specific radius rather
+        // than shrinking the shared M2 default other transports rely on.
+        constexpr float kDeeprunTramBoardHorizDistSq = 7.0f * 7.0f;
+        constexpr float kDeeprunTramBoardVertDist = 6.0f;
 
         uint64_t bestGuid = 0;
         float bestScore = 1e30f;

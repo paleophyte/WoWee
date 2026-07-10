@@ -36,7 +36,22 @@ void TransportAnimator::evaluateAndApply(
         transport.rotation = glm::angleAxis(effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
     } else {
         auto result = spline.evaluate(pathTimeMs);
-        transport.rotation = math::CatmullRomSpline::orientationFromTangent(result.tangent);
+        glm::vec3 tangent = result.tangent;
+        // orientationFromTangent orients along the full 3D tangent, pitching/banking to
+        // match vertical slope - correct for something like a boat cresting swells, but
+        // a subway car shouldn't nose-dive on a downhill grade the way this made it look
+        // ("angling downwards instead of staying flat" reported live). Flatten the
+        // vertical component so the Deeprun Tram only yaws to face its horizontal
+        // heading and stays level regardless of grade; other transports keep full
+        // tangent-based orientation.
+        const bool isDeeprunTram =
+            transport.displayId == 3831u ||
+            (transport.entry >= 176080u && transport.entry <= 176085u) ||
+            (transport.pathId >= 176080u && transport.pathId <= 176085u);
+        if (isDeeprunTram) {
+            tangent.z = 0.0f;
+        }
+        transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
     }
 }
 

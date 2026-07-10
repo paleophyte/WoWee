@@ -14,24 +14,23 @@
 
 namespace wowee::game {
 
-namespace {
-
-// Absolute wall-clock ms, used (only) to seed a freshly-registered client-animated
-// transport's starting phase. elapsedTime_ is time-since-this-process-started, so
-// seeding from it makes localClockMs depend on when each client happened to log in
-// or first see a given transport GUID - unrelated clients (or the same client
-// restarted) compute unrelated phases for the same entry, and there's nothing tying
-// two GUIDs that are meant to move in lockstep (e.g. Deeprun Tram's two cars, which
-// should always be roughly opposite each other) into any particular relationship.
-// Once seeded, localClockMs only ever advances by real per-frame deltaTime (see
-// TransportClockSync::computePathTime), so anchoring the seed to absolute time is
-// enough to make it deterministic and consistent across clients/restarts - matching
-// how tools/bot_fleet_manager/deeprun_tram.py already predicts these positions using
-// time.time()*1000 rather than time-since-launch.
-uint64_t nowEpochMs() {
+uint64_t TransportManager::nowEpochMs() {
+    // elapsedTime_ is time-since-this-process-started, so seeding a client-animated
+    // transport's phase from it makes localClockMs depend on when each client happened
+    // to log in or first see a given transport GUID - unrelated clients (or the same
+    // client restarted) compute unrelated phases for the same entry, and there's
+    // nothing tying two GUIDs that are meant to move in lockstep (e.g. Deeprun Tram
+    // cars that belong to the same 3-car train) into any particular relationship.
+    // Once seeded, localClockMs only ever advances by real per-frame deltaTime (see
+    // TransportClockSync::computePathTime), so anchoring the seed to absolute time is
+    // enough to make it deterministic and consistent across clients/restarts - matching
+    // how tools/bot_fleet_manager/deeprun_tram.py already predicts these positions
+    // using time.time()*1000 rather than time-since-launch.
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
+
+namespace {
 
 bool isDeeprunTramTransport(const ActiveTransport& transport) {
     return transport.displayId == 3831u ||

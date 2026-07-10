@@ -1619,7 +1619,21 @@ void Application::update(float deltaTime) {
                                 localOffset.x += walkDelta.x;
                                 localOffset.y += walkDelta.y;
                             }
-                            if (renderer->getCameraController() &&
+                            // Thunder Bluff lifts have real floor at both ends of their travel,
+                            // so letting Z track physics while airborne (jumping) is recoverable -
+                            // the player lands back on the platform. The Deeprun Tram tunnel has
+                            // no floor at all except at the two station platforms; if this ran for
+                            // it, isGrounded() ever reporting false mid-tunnel (e.g. because M2
+                            // collision for a moving instance isn't recognized as ground the same
+                            // way static terrain is) would let gravity pull the player away from
+                            // the tram with nothing to land on - reported live as falling through
+                            // the tram/tunnel and dying. Keep Z fully locked for the tram; only
+                            // lifts get the airborne exception.
+                            const bool isDeeprunTram =
+                                tr->displayId == 3831u ||
+                                (tr->entry >= 176080u && tr->entry <= 176085u) ||
+                                (tr->pathId >= 176080u && tr->pathId <= 176085u);
+                            if (!isDeeprunTram && renderer->getCameraController() &&
                                 !renderer->getCameraController()->isGrounded()) {
                                 // While airborne (jump/fall), let vertical offset track normal
                                 // physics instead of staying pinned to the boarding-time value.
