@@ -1500,6 +1500,9 @@ void GameScreen::saveSettings() {
     out << "chat_active_tab=" << chatPanel_.activeChatTab << "\n";
     out << "chat_timestamps=" << (chatPanel_.chatShowTimestamps ? 1 : 0) << "\n";
     out << "chat_font_size=" << chatPanel_.chatFontSize << "\n";
+    out << "chat_bg_alpha=" << chatPanel_.settings.backgroundAlpha << "\n";
+    out << "chat_fade_messages=" << (chatPanel_.settings.fadeMessages ? 1 : 0) << "\n";
+    out << "chat_fade_time=" << chatPanel_.settings.messageFadeTime << "\n";
     out << "chat_autojoin_general=" << (chatPanel_.chatAutoJoinGeneral ? 1 : 0) << "\n";
     out << "chat_autojoin_trade=" << (chatPanel_.chatAutoJoinTrade ? 1 : 0) << "\n";
     out << "chat_autojoin_localdefense=" << (chatPanel_.chatAutoJoinLocalDefense ? 1 : 0) << "\n";
@@ -1681,6 +1684,9 @@ void GameScreen::loadSettings() {
             else if (key == "chat_active_tab") chatPanel_.activeChatTab = std::clamp(std::stoi(val), 0, 3);
             else if (key == "chat_timestamps") chatPanel_.chatShowTimestamps = (std::stoi(val) != 0);
             else if (key == "chat_font_size") chatPanel_.chatFontSize = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "chat_bg_alpha") chatPanel_.settings.backgroundAlpha = std::clamp(std::stof(val), 0.0f, 1.0f);
+            else if (key == "chat_fade_messages") chatPanel_.settings.fadeMessages = (std::stoi(val) != 0);
+            else if (key == "chat_fade_time") chatPanel_.settings.messageFadeTime = std::clamp(std::stof(val), 5.0f, 120.0f);
             else if (key == "chat_autojoin_general") chatPanel_.chatAutoJoinGeneral = (std::stoi(val) != 0);
             else if (key == "chat_autojoin_trade") chatPanel_.chatAutoJoinTrade = (std::stoi(val) != 0);
             else if (key == "chat_autojoin_localdefense") chatPanel_.chatAutoJoinLocalDefense = (std::stoi(val) != 0);
@@ -1692,19 +1698,9 @@ void GameScreen::loadSettings() {
     // Load keybindings from the same config file
     KeybindingManager::getInstance().loadFromConfigFile(path);
 
-    // Apply loaded controls settings to the runtime camera controller.
-    // loadSettings() runs at startup before settingsInit fires, so without
-    // this the camera uses default values until the settings window is opened.
-    if (auto* renderer = services_.renderer) {
-        if (auto* cam = renderer->getCameraController()) {
-            cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
-            cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
-            cam->setExtendedZoom(settingsPanel_.pendingExtendedZoom);
-            cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
-            cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
-            cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
-        }
-    }
+    // Apply immediately if services are already wired. The constructor loads
+    // settings before renderer injection, so setServices() applies them again.
+    applyCameraControlSettings();
 
     LOG_INFO("Settings loaded from ", path);
 }

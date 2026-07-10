@@ -464,6 +464,19 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
         return;
     }
 
+    // Server monster messages use %s as a placeholder for the creature's name.
+    if (!data.senderName.empty() && (
+            data.type == ChatType::MONSTER_SAY || data.type == ChatType::MONSTER_YELL ||
+            data.type == ChatType::MONSTER_EMOTE || data.type == ChatType::MONSTER_WHISPER ||
+            data.type == ChatType::MONSTER_PARTY ||
+            data.type == ChatType::RAID_BOSS_EMOTE || data.type == ChatType::RAID_BOSS_WHISPER)) {
+        size_t pos = data.message.find("%s");
+        while (pos != std::string::npos) {
+            data.message.replace(pos, 2, data.senderName);
+            pos = data.message.find("%s", pos + data.senderName.size());
+        }
+    }
+
     // Filter BG/Arena queue announcer spam (server-side modules on
     // ChromieCraft/AzerothCore). Common formats:
     //   |cffff0000[BG Queue Announcer]:|r ...

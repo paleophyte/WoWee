@@ -145,6 +145,21 @@ void GameScreen::setServices(const UIServices& services) {
     socialPanel_.setServices(services);
     actionBarPanel_.setServices(services);
     windowManager_.setServices(services);
+    applyCameraControlSettings();
+}
+
+void GameScreen::applyCameraControlSettings() {
+    auto* renderer = services_.renderer;
+    if (!renderer) return;
+
+    if (auto* cam = renderer->getCameraController()) {
+        cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
+        cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
+        cam->setExtendedZoom(settingsPanel_.pendingExtendedZoom);
+        cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
+        cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
+        cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
+    }
 }
 
 void GameScreen::render(game::GameHandler& gameHandler) {
@@ -1032,24 +1047,6 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 gameHandler.closeQuestRequestItems();
             } else if (gameHandler.isTradeOpen()) {
                 gameHandler.cancelTrade();
-            } else if (socialPanel_.showWhoWindow_) {
-                socialPanel_.showWhoWindow_ = false;
-            } else if (combatUI_.showCombatLog_) {
-                combatUI_.showCombatLog_ = false;
-            } else if (socialPanel_.showSocialFrame_) {
-                socialPanel_.showSocialFrame_ = false;
-            } else if (talentScreen.isOpen()) {
-                talentScreen.setOpen(false);
-            } else if (spellbookScreen.isOpen()) {
-                spellbookScreen.setOpen(false);
-            } else if (questLogScreen.isOpen()) {
-                questLogScreen.setOpen(false);
-            } else if (inventoryScreen.isCharacterOpen()) {
-                inventoryScreen.toggleCharacter();
-            } else if (inventoryScreen.isOpen()) {
-                inventoryScreen.setOpen(false);
-            } else if (showWorldMap_) {
-                showWorldMap_ = false;
             } else {
                 windowManager_.showEscapeMenu = true;
             }

@@ -1744,6 +1744,17 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
                 " pos=(", serverX, ", ", serverY, ", ", serverZ, ")",
                 " currentPos=(", movementInfo.x, ", ", movementInfo.y, ", ", movementInfo.z, ")");
 
+    if (guid != owner_.getPlayerGuid()) {
+        glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
+        auto entity = owner_.getEntityManager().getEntity(guid);
+        if (entity) {
+            entity->setPosition(canonical.x, canonical.y, canonical.z,
+                                core::coords::serverToCanonicalYaw(orientation));
+        }
+        LOG_INFO("MSG_MOVE_TELEPORT_ACK for remote entity 0x", std::hex, guid, std::dec, " — ignored for local player");
+        return;
+    }
+
     glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
 
     // Reject teleports to a near-origin position on Eastern Kingdoms (map 0).
