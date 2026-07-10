@@ -2804,13 +2804,36 @@ void GameHandler::handlePacket(network::Packet& packet) {
     auto logicalOp = opcodeTable_.fromWire(opcode);
 
     if (!logicalOp) {
-        static std::unordered_set<uint16_t> loggedUnknownWireOpcodes;
-        if (loggedUnknownWireOpcodes.insert(opcode).second) {
-            LOG_WARNING("Unhandled world opcode: 0x", std::hex, opcode, std::dec,
-                        " state=", static_cast<int>(state),
-                        " size=", packet.getSize());
+        // Login-critical opcodes share the same wire values across all expansions.
+        // Fall back to hardcoded mapping so the auth/char pipeline works even when
+        // the expansion opcode table failed to load (wrong CWD, missing Data/, etc.).
+        switch (opcode) {
+            case 0x1EC: logicalOp = Opcode::SMSG_AUTH_CHALLENGE; break;
+            case 0x1EE: logicalOp = Opcode::SMSG_AUTH_RESPONSE;  break;
+            case 0x03B: logicalOp = Opcode::SMSG_CHAR_ENUM;      break;
+            case 0x03A: logicalOp = Opcode::SMSG_CHAR_CREATE;     break;
+            case 0x03C: logicalOp = Opcode::SMSG_CHAR_DELETE;     break;
+            case 0x2E6: logicalOp = Opcode::SMSG_WARDEN_DATA;     break;
+            default: break;
         }
-        return;
+        if (logicalOp) {
+            static bool loggedFallback = false;
+            if (!loggedFallback) {
+                loggedFallback = true;
+                LOG_WARNING("Opcode table lookup failed for login-critical opcode 0x",
+                            std::hex, opcode, std::dec,
+                            " (table has ", opcodeTable_.size(), " entries). "
+                            "Using hardcoded fallback. Check that Data/expansions/<id>/opcodes.json is loadable.");
+            }
+        } else {
+            static std::unordered_set<uint16_t> loggedUnknownWireOpcodes;
+            if (loggedUnknownWireOpcodes.insert(opcode).second) {
+                LOG_WARNING("Unhandled world opcode: 0x", std::hex, opcode, std::dec,
+                            " state=", static_cast<int>(state),
+                            " size=", packet.getSize());
+            }
+            return;
+        }
     }
 
     // Dispatch via the opcode handler table
