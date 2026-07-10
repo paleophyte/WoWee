@@ -1620,24 +1620,31 @@ void Application::update(float deltaTime) {
                             glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                             if (hasM2RideLock_) {
                                 glm::vec3 walkDelta = tentativeCanonical - lastM2RideLockedCanonical_;
-                                localOffset.x += walkDelta.x;
-                                localOffset.y += walkDelta.y;
-                                // Backstop against a runaway feedback loop: there's no real floor
-                                // under a moving M2 car, so gravity keeps trying to pull the
-                                // character down each frame; since Z is locked below, that fall
-                                // shows up as horizontal drift once combined with normal collision
-                                // sliding, and walkDelta reads it as "the player walked this far"
-                                // and bakes it into localOffset permanently. Next frame gravity
-                                // pulls again from the now-corrected position, compounding forever -
-                                // live data showed horizontal drift growing into the hundreds of
-                                // units over ~9 seconds with no WASD input, eventually carrying the
-                                // player far enough to disembark far from the car ("I still got
-                                // kicked off a ways down the path" reported live, no longer a fall
-                                // to the death thanks to the disembark sanity guard, but still a
-                                // real bug). Clamp the accumulated horizontal offset to a generous
-                                // bound - well beyond real walking range so normal deck movement is
-                                // untouched, but tight enough to stop this specific runaway before
-                                // it can carry the player far from the car.
+                                // Root cause found: the 60-unit clamp added last round was a backstop
+                                // that treated the symptom, not the cause - live data showed it
+                                // getting maxed out exactly (horizDist=60.0 at the eventual disembark),
+                                // meaning the runaway drift reaches whatever ceiling is set as long as
+                                // that ceiling is above the 18-unit disembark threshold, so it still
+                                // ended the ride ("I still got kicked off... but at least I didn't die
+                                // this time" reported live). The actual bug: there's no real floor
+                                // under a moving M2 car, so gravity keeps trying to pull the character
+                                // down every frame even while standing still; since Z is locked, that
+                                // shows up as horizontal render-position drift, and this code
+                                // previously couldn't tell that apart from real WASD input - it baked
+                                // ANY frame-to-frame position change into localOffset, compounding
+                                // forever. Gate on genuine movement input (the same signal driving the
+                                // walking animation) so gravity noise while stationary is ignored
+                                // instead of accumulated; only apply the delta when the player is
+                                // actually pressing a movement key.
+                                const bool hasMovementInput = renderer->getCameraController() &&
+                                    renderer->getCameraController()->isMoving();
+                                if (hasMovementInput) {
+                                    localOffset.x += walkDelta.x;
+                                    localOffset.y += walkDelta.y;
+                                }
+                                // Keep a generous distance clamp as a secondary backstop for any
+                                // other source of drift (e.g. knockback, server-forced movement)
+                                // this input gate doesn't cover.
                                 if (isDeeprunTram) {
                                     constexpr float kMaxRideOffsetDist = 60.0f;
                                     const float offsetLen = std::sqrt(localOffset.x * localOffset.x + localOffset.y * localOffset.y);
