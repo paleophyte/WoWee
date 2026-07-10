@@ -77,6 +77,23 @@ public:
     // the full explanation of why that matters.
     static uint64_t nowEpochMs();
 
+    // True for any GameObject/path identity belonging to the Deeprun Tram (both trains,
+    // all 6 car entries). Shared by callers in other translation units (transport_clock_sync.cpp,
+    // transport_animator.cpp, application.cpp) that need Deeprun-specific behavior.
+    static bool isDeeprunTramTransport(const ActiveTransport& transport);
+
+    // Round a path duration to the nearest 500ms for seed-modulo purposes only. Deeprun
+    // Tram cars are meant to move as one rigid train, but their individual
+    // TransportAnimation.dbc entries don't all report the exact same durationMs (observed:
+    // two of the six cars are ~102ms longer than the other four). nowEpochMs() % durationMs
+    // takes a huge wall-clock dividend, so even a ~100ms divisor mismatch between sibling
+    // cars produces effectively uncorrelated remainders - cars seeded seconds apart end up
+    // on opposite sides of the loop instead of near each other ("solo cars"). Rounding both
+    // divisors to the same 500ms bucket before the modulo keeps sibling cars' seeds
+    // correlated by real elapsed registration time, the way they're meant to be, without
+    // needing to hardcode any specific entry's duration as "the" canonical one.
+    static uint32_t deeprunTramSeedDurationMs(uint32_t durationMs);
+
     void setWMORenderer(rendering::WMORenderer* renderer) { wmoRenderer_ = renderer; }
     void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
 

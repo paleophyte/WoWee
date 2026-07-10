@@ -158,7 +158,10 @@ void TransportClockSync::processServerUpdate(
                 // TransportManager::registerTransport()/resolveAndRegisterSpawn()
                 // didn't already classify into the Deeprun-specific early-return
                 // branch in updateServerTransport()).
-                transport.localClockMs = static_cast<uint32_t>(TransportManager::nowEpochMs() % pathEntry->spline.durationMs());
+                const uint32_t seedDurationMs = TransportManager::isDeeprunTramTransport(transport)
+                    ? TransportManager::deeprunTramSeedDurationMs(pathEntry->spline.durationMs())
+                    : pathEntry->spline.durationMs();
+                transport.localClockMs = static_cast<uint32_t>(TransportManager::nowEpochMs() % seedDurationMs);
             } else {
                 // Nearest-waypoint seed is legitimate here: this transport is
                 // genuinely server-position-driven (e.g. a boat), so "which point on

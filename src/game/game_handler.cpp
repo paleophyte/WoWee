@@ -1421,23 +1421,25 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         constexpr float kM2BoardVertDist = 15.0f;
         constexpr float kTbLiftBoardHorizDistSq = 22.0f * 22.0f;
         constexpr float kTbLiftBoardVertDist = 14.0f;
-        // Deeprun's wider capture radius (previously 18/18, wider than even the base
-        // M2 default) let boarding trigger from far enough away that the fixed
-        // boarding-time offset put the rider well outside the visible car - "floating
-        // in midair off to the side of the tram" reported live, confirmed by observed
-        // offsets like (-17.9, 0.4, -10.4). That widening was very likely compensating
-        // for the registration/attach bugs fixed earlier in this branch (nothing was
-        // reliably registering close enough to board at all), not a real need for a
-        // bigger capture volume. Even the plain M2 default (12/15) still reached into
-        // the corridor below/beside the tram platform, capturing players who were only
-        // walking past - "grab box is still a little large" reported live. The subway
-        // car itself is a small model; use a tighter, Deeprun-specific radius rather
-        // than shrinking the shared M2 default other transports rely on.
-        constexpr float kDeeprunTramBoardHorizDistSq = 7.0f * 7.0f;
-        constexpr float kDeeprunTramBoardVertDist = 6.0f;
+        // Deeprun's capture radius has swung twice already: 18/18 (way too wide - let
+        // boarding trigger far enough away that the rider ended up floating off to the
+        // side of the car) down to 7/6 (too tight - stopped attaching at all, "not
+        // sticking to the train/tram cars at all again" reported live). Settle on a
+        // middle value between that and the plain M2 default (12/15, which was itself
+        // too wide - it reached into the corridor below/beside the platform and grabbed
+        // players just walking past).
+        constexpr float kDeeprunTramBoardHorizDistSq = 9.5f * 9.5f;
+        constexpr float kDeeprunTramBoardVertDist = 8.0f;
 
         uint64_t bestGuid = 0;
         float bestScore = 1e30f;
+        // Tracks the closest Deeprun tram car even when it's outside the capture
+        // radius, purely so a rejection can be logged with real distance numbers -
+        // the capture radius has been re-tuned blind twice already (18/18, then 7/6)
+        // from user reports alone with no actual miss-distance data to tune against.
+        uint64_t nearestDeeprunGuid = 0;
+        float nearestDeeprunHorizDistSq = 1e30f;
+        float nearestDeeprunVertDist = 0.0f;
         for (auto& [guid, transport] : tm->getTransports()) {
             if (!transport.isM2) continue;
             const bool isThunderBluffLift =
@@ -1457,6 +1459,11 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
             glm::vec3 diff = playerCanonical - transport.position;
             float horizDistSq = diff.x * diff.x + diff.y * diff.y;
             float vertDist = std::abs(diff.z);
+            if (isDeeprunTram && horizDistSq < nearestDeeprunHorizDistSq) {
+                nearestDeeprunHorizDistSq = horizDistSq;
+                nearestDeeprunVertDist = vertDist;
+                nearestDeeprunGuid = guid;
+            }
             if (horizDistSq < maxHorizDistSq && vertDist < maxVertDist) {
                 float score = horizDistSq + vertDist * vertDist;
                 if (score < bestScore) {
@@ -1464,6 +1471,12 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
                     bestGuid = guid;
                 }
             }
+        }
+        if (bestGuid == 0 && nearestDeeprunGuid != 0) {
+            LOG_DEBUG("Deeprun tram boarding: no candidate in range, nearest car guid=0x",
+                      std::hex, nearestDeeprunGuid, std::dec,
+                      " horizDist=", std::sqrt(nearestDeeprunHorizDistSq),
+                      " vertDist=", nearestDeeprunVertDist);
         }
         if (bestGuid != 0) {
             auto* tr = tm->getTransport(bestGuid);
