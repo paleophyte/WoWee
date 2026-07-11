@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 
 namespace wowee {
@@ -611,7 +612,14 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                     }
                 }
                 if (!tracksItem) continue;
-                quest.itemCounts[itemId] = count;
+                // SMSG_QUESTUPDATE_ADD_ITEM carries the amount added by this
+                // loot operation, not the new absolute objective count.
+                const uint32_t required = quest.requiredItemCounts.count(itemId) != 0
+                    ? quest.requiredItemCounts[itemId] : std::numeric_limits<uint32_t>::max();
+                const uint32_t current = quest.itemCounts[itemId];
+                quest.itemCounts[itemId] = current >= required - std::min(required, count)
+                    ? required
+                    : current + count;
                 updatedAny = true;
             }
             owner_.addSystemChatMessage("Quest item: " + buildItemLink(itemId, questItemQuality, itemLabel) + " (" + std::to_string(count) + ")");

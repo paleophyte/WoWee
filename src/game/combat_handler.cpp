@@ -1429,7 +1429,8 @@ void CombatHandler::releaseSpirit() {
 }
 
 bool CombatHandler::canReclaimCorpse() const {
-    if (!owner_.releasedSpiritRef() || owner_.corpseGuidRef() == 0 || owner_.corpseMapIdRef() == 0) return false;
+    if (!owner_.releasedSpiritRef() || owner_.corpseGuidRef() == 0 ||
+        !owner_.corpsePositionValidRef()) return false;
     if (owner_.currentMapIdRef() != owner_.corpseMapIdRef()) return false;
     float dx = owner_.movementInfoRef().x - owner_.corpseYRef();
     float dy = owner_.movementInfoRef().y - owner_.corpseXRef();

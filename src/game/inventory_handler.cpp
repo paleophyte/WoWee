@@ -486,6 +486,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                     default: break;
                 }
         std::string msg = errMsg ? errMsg : "Inventory error (" + std::to_string(error) + ").";
+        if (error == 50 && currentLoot_.lootGuid != 0) {
+            msg = "Cannot loot item: Inventory is full.";
+        }
         owner_.addUIError(msg);
         owner_.addSystemChatMessage(msg);
         if (auto* ac = owner_.services().audioCoordinator) {
@@ -793,8 +796,8 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
     const bool wotlkLoot = isActiveExpansion("wotlk");
     if (!LootResponseParser::parse(packet, currentLoot_, wotlkLoot)) return;
     const bool hasLoot = !currentLoot_.items.empty() || currentLoot_.gold > 0;
-    LOG_DEBUG("SMSG_LOOT_RESPONSE: guid=0x", std::hex, currentLoot_.lootGuid, std::dec,
-              " items=", currentLoot_.items.size(), " gold=", currentLoot_.gold);
+    LOG_INFO("SMSG_LOOT_RESPONSE: guid=0x", std::hex, currentLoot_.lootGuid, std::dec,
+             " items=", currentLoot_.items.size(), " gold=", currentLoot_.gold);
     auto& lastInteractedGoGuid = owner_.lastInteractedGoGuidRef();
     const bool isLastInteractedGoLoot =
         lastInteractedGoGuid != 0 && currentLoot_.lootGuid == lastInteractedGoGuid;
@@ -837,8 +840,18 @@ void InventoryHandler::handleLootResponse(network::Packet& packet) {
         }
     }
 
-    if (autoLoot_ && owner_.getState() == WorldState::IN_WORLD && owner_.getSocket() && !localLoot.itemAutoLootSent) {
+    // Game-object quest containers are single-action pickups in normal play.
+    // Autostore their returned items even when general creature auto-loot is off;
+    // otherwise right-click opens server loot but never grants the objective item.
+    const bool autoStoreGameObjectLoot = isLastInteractedGoLoot;
+    if ((autoLoot_ || autoStoreGameObjectLoot) &&
+        owner_.getState() == WorldState::IN_WORLD && owner_.getSocket() &&
+        !localLoot.itemAutoLootSent) {
         for (const auto& item : currentLoot_.items) {
+            LOG_INFO("Autostoring loot slot=", static_cast<int>(item.slotIndex),
+                     " item=", item.itemId, " count=", item.count,
+                     " fromGuid=0x", std::hex, currentLoot_.lootGuid, std::dec,
+                     " gameObject=", autoStoreGameObjectLoot);
             auto pkt = AutostoreLootItemPacket::build(item.slotIndex);
             owner_.getSocket()->send(pkt);
         }

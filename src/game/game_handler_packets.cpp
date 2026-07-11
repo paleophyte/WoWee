@@ -545,6 +545,11 @@ void GameHandler::registerOpcodeHandlers() {
     };
     dispatchTable_[Opcode::SMSG_FORCED_DEATH_UPDATE] = [this](network::Packet& packet) {
         playerDead_ = true;
+        corpseX_ = movementInfo.y;
+        corpseY_ = movementInfo.x;
+        corpseZ_ = movementInfo.z;
+        corpseMapId_ = currentMapId_;
+        corpsePositionValid_ = true;
         if (ghostStateCallback_) ghostStateCallback_(false);
         fireAddonEvent("PLAYER_DEAD", {});
         addSystemChatMessage("You have been killed.");
@@ -591,6 +596,7 @@ void GameHandler::registerOpcodeHandlers() {
             corpseY_ = cy;
             corpseZ_ = cz;
             corpseMapId_ = corpseMapId;
+            corpsePositionValid_ = true;
             LOG_INFO("MSG_CORPSE_QUERY: corpse at (", cx, ",", cy, ",", cz, ") map=", corpseMapId);
         }
     };

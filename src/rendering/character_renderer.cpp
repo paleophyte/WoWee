@@ -188,7 +188,8 @@ struct CharMaterialUBO {
     int32_t pomMaxSamples;
     float heightMapVariance;
     float normalMapStrength;
-    float _pad[2]; // pad to 64 bytes
+    int32_t hairMaterial;
+    float _pad[1];
 };
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
@@ -2552,6 +2553,21 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 return whiteTexture_.get();
             };
 
+            auto batchUsesTextureType = [](const M2ModelGPU& gm, const pipeline::M2Batch& b, uint32_t wantedType) {
+                if (b.textureIndex == 0xFFFF || gm.data.textureLookup.empty()) return false;
+
+                uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
+                comboCount = std::min<uint32_t>(comboCount, 8u);
+                for (uint32_t i = 0; i < comboCount; ++i) {
+                    uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + i;
+                    if (lookupPos >= gm.data.textureLookup.size()) break;
+                    uint16_t texSlot = gm.data.textureLookup[lookupPos];
+                    if (texSlot < gm.data.textures.size() && gm.data.textures[texSlot].type == wantedType)
+                        return true;
+                }
+                return false;
+            };
+
             const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
                                           !instance.hasOverrideModelMatrix;
 
@@ -2601,26 +2617,18 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     materialFlags = gpuModel.data.materials[batch.materialIndex].flags;
                 }
 
+                const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
+                const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
+                const bool hairGeoset = (submeshGroup == 1) ||
+                                        (submeshGroup == 0 && batch.submeshId > 0 && batch.submeshId <= 99);
+                const bool hairMaterial = hairTexture ||
+                                          (hairGeoset && (blendMode != 0 || batch.textureCount > 1));
+
                 // Attached weapon models can include additive FX/card batches that
                 // appear as detached flat quads for some swords. Keep core geometry
                 // and drop FX-style passes for weapon attachments.
                 if (instance.hasOverrideModelMatrix && blendMode >= 3) {
                     continue;
-                }
-
-                // Select pipeline based on blend mode
-                VkPipeline desiredPipeline;
-                switch (blendMode) {
-                    case 0: desiredPipeline = opaquePipeline_; break;
-                    case 1: desiredPipeline = alphaTestPipeline_; break;
-                    case 2: desiredPipeline = alphaPipeline_; break;
-                    case 3:
-                    case 6: desiredPipeline = additivePipeline_; break;
-                    default: desiredPipeline = alphaPipeline_; break;
-                }
-                if (desiredPipeline != currentPipeline) {
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                    currentPipeline = desiredPipeline;
                 }
 
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
@@ -2668,8 +2676,29 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 }
                 const bool blendNeedsCutout = (blendMode == 1) ||
                                               (blendMode == 0 && alphaCutout) ||
-                                              (blendMode >= 2 && !alphaCutout);
+                                              (blendMode >= 2 && !alphaCutout) ||
+                                              hairMaterial;
                 const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3);
+
+                // Hair textures are authored as alpha-cut cards. If they use the
+                // translucent pipeline they form a soft shell around the head.
+                VkPipeline desiredPipeline;
+                if (hairMaterial) {
+                    desiredPipeline = alphaTestPipeline_;
+                } else {
+                    switch (blendMode) {
+                        case 0: desiredPipeline = opaquePipeline_; break;
+                        case 1: desiredPipeline = alphaTestPipeline_; break;
+                        case 2: desiredPipeline = alphaPipeline_; break;
+                        case 3:
+                        case 6: desiredPipeline = additivePipeline_; break;
+                        default: desiredPipeline = alphaPipeline_; break;
+                    }
+                }
+                if (desiredPipeline != currentPipeline) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+                    currentPipeline = desiredPipeline;
+                }
 
                 float emissiveBoost = 1.0f;
                 glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
@@ -2721,7 +2750,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 CharMaterialUBO matData{};
                 matData.opacity = instance.opacity;
                 matData.alphaTest = blendNeedsCutout ? 1 : 0;
-                matData.colorKeyBlack = (blendNeedsCutout || colorKeyBlack) ? 1 : 0;
+                matData.colorKeyBlack = colorKeyBlack ? 1 : 0;
                 matData.unlit = unlit ? 1 : 0;
                 matData.emissiveBoost = emissiveBoost;
                 matData.emissiveTintR = emissiveTint.r;
@@ -2734,6 +2763,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.pomMaxSamples = pomSamples;
                 matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
                 matData.normalMapStrength = normalMapStrength_;
+                matData.hairMaterial = hairMaterial ? 1 : 0;
                 if (usePreviewSimpleShader) {
                     matData.enableNormalMap = 0;
                     matData.enablePOM = kPreviewSimpleTextureMode;
@@ -2832,6 +2862,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             matData.pomMaxSamples = pomSamples2;
             matData.heightMapVariance = 0.0f;
             matData.normalMapStrength = normalMapStrength_;
+            matData.hairMaterial = 0;
             if (usePreviewSimpleShader) {
                 matData.enableNormalMap = 0;
                 matData.enablePOM = kPreviewSimpleTextureMode;
@@ -3193,6 +3224,11 @@ void CharacterRenderer::setInstancePosition(uint32_t instanceId, const glm::vec3
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
         it->second.position = position;
+        it->second.moveStart = position;
+        it->second.moveEnd = position;
+        it->second.moveElapsed = 0.0f;
+        it->second.moveDuration = 0.0f;
+        it->second.isMoving = false;
     }
 }
 
@@ -3278,6 +3314,12 @@ const pipeline::M2Model* CharacterRenderer::getModelData(uint32_t modelId) const
     auto it = models.find(modelId);
     if (it == models.end()) return nullptr;
     return &it->second.data;
+}
+
+const pipeline::M2Model* CharacterRenderer::getInstanceModelData(uint32_t instanceId) const {
+    auto instIt = instances.find(instanceId);
+    if (instIt == instances.end()) return nullptr;
+    return getModelData(instIt->second.modelId);
 }
 
 void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) {

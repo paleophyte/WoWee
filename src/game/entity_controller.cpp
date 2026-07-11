@@ -334,6 +334,8 @@ void EntityController::processOutOfRangeObjects(const std::vector<uint64_t>& gui
             pendingNameQueries.erase(guid);
         } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
             owner_.gameObjectDespawnCallbackRef()(guid);
+        } else if (entity->getType() == ObjectType::CORPSE && owner_.playerDespawnCallbackRef()) {
+            owner_.playerDespawnCallbackRef()(guid);
         }
         transportGuids_.erase(guid);
         serverUpdatedTransportGuids_.erase(guid);
@@ -850,6 +852,7 @@ void EntityController::markPlayerDead(const char* source) {
     owner_.corpseYRef()     = owner_.movementInfoRef().x;
     owner_.corpseZRef()     = owner_.movementInfoRef().z;
     owner_.corpseMapIdRef() = owner_.currentMapIdRef();
+    owner_.corpsePositionValidRef() = true;
     LOG_INFO("Player died (", source, "). Corpse cached at server=(",
              owner_.corpseXRef(), ",", owner_.corpseYRef(), ",", owner_.corpseZRef(),
              ") map=", owner_.corpseMapIdRef());
@@ -1157,6 +1160,7 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 owner_.resurrectPendingRef() = false;
                 owner_.selfResAvailableRef() = false;
                 owner_.corpseMapIdRef() = 0;  // corpse reclaimed
+                owner_.corpsePositionValidRef() = false;
                 owner_.corpseGuidRef() = 0;
                 owner_.corpseReclaimAvailableMsRef() = 0;
                 LOG_INFO("Player resurrected (PLAYER_FLAGS ghost cleared)");
@@ -1671,6 +1675,39 @@ void EntityController::onCreateCorpse(const UpdateBlock& block) {
             owner_.corpseYRef()     = block.y;
             owner_.corpseZRef()     = block.z;
             owner_.corpseMapIdRef() = owner_.currentMapIdRef();
+            owner_.corpsePositionValidRef() = true;
+
+            // Corpse objects carry ownership and position but not a standalone
+            // render model. Reuse the owning character's appearance and equipment
+            // under the corpse GUID, then force the queued instance into DEATH.
+            auto characterIt = std::find_if(owner_.charactersRef().begin(), owner_.charactersRef().end(),
+                [&](const Character& character) { return character.guid == owner_.getPlayerGuid(); });
+            if (characterIt != owner_.charactersRef().end() && owner_.playerSpawnCallbackRef()) {
+                glm::vec3 canonical = core::coords::serverToCanonical(
+                    glm::vec3(block.x, block.y, block.z));
+                float orientation = core::coords::serverToCanonicalYaw(block.orientation);
+                owner_.playerSpawnCallbackRef()(
+                    block.guid, 0,
+                    static_cast<uint8_t>(characterIt->race),
+                    static_cast<uint8_t>(characterIt->gender),
+                    characterIt->appearanceBytes,
+                    characterIt->facialFeatures,
+                    canonical.x, canonical.y, canonical.z, orientation);
+
+                if (owner_.playerEquipmentCallbackRef()) {
+                    std::array<uint32_t, 19> displayInfoIds{};
+                    std::array<uint8_t, 19> inventoryTypes{};
+                    const size_t count = std::min<size_t>(19, characterIt->equipment.size());
+                    for (size_t i = 0; i < count; ++i) {
+                        displayInfoIds[i] = characterIt->equipment[i].displayModel;
+                        inventoryTypes[i] = characterIt->equipment[i].inventoryType;
+                    }
+                    owner_.playerEquipmentCallbackRef()(block.guid, displayInfoIds, inventoryTypes);
+                }
+            }
+            if (owner_.npcDeathCallbackRef()) {
+                owner_.npcDeathCallbackRef()(block.guid);
+            }
             LOG_INFO("Corpse object detected: guid=0x", std::hex, owner_.corpseGuidRef(), std::dec,
                      " server=(", block.x, ", ", block.y, ", ", block.z,
                      ") map=", owner_.corpseMapIdRef());
@@ -2039,6 +2076,8 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
                 pendingNameQueries.erase(data.guid);
             } else if (entity->getType() == ObjectType::GAMEOBJECT && owner_.gameObjectDespawnCallbackRef()) {
                 owner_.gameObjectDespawnCallbackRef()(data.guid);
+            } else if (entity->getType() == ObjectType::CORPSE && owner_.playerDespawnCallbackRef()) {
+                owner_.playerDespawnCallbackRef()(data.guid);
             }
         }
         if (transportGuids_.count(data.guid) > 0) {
