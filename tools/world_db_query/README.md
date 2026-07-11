@@ -9,7 +9,9 @@ Originally built to scrape road signpost `gameobject`/`gameobject_template`
 rows for road-network mapping (see BOT_PLAN.md), but usable for any
 read-only investigative query against the world DB.
 
-## Deploy (manual, on the server - not done by the agent)
+## Deploy
+
+Initial setup (manual, on the server - not done by the agent):
 
 1. Copy `query_world_db.sh` to the server, e.g.:
    ```
@@ -21,10 +23,19 @@ read-only investigative query against the world DB.
    sudo chmod 750 /home/josh/mangos-tbc/tools/query_world_db.sh
    ```
 3. Install the sudoers grant (see `mangos-helper.sudoers` in the repo root,
-   `PROJECT_WORLD_DB_QUERY` alias):
+   `PROJECT_WORLD_DB_QUERY` and `PROJECT_INSTALL` aliases):
    ```
    sudo visudo -f /etc/sudoers.d/mangos-helper
    ```
+
+After that initial setup, `mangos-helper` can redeploy this one script on
+its own (fixes, tweaks) via the scoped `PROJECT_INSTALL` grant:
+```
+scp query_world_db.sh mangos-helper@server:/tmp/query_world_db.sh
+ssh mangos-helper@server "sudo install -m 0750 -o root -g root /tmp/query_world_db.sh /home/josh/mangos-tbc/tools/query_world_db.sh"
+```
+Only this exact source/destination pair is permitted - not a general
+file-install grant.
 
 ## Usage
 

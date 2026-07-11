@@ -88,7 +88,8 @@ Cmnd_Alias PROJECT_INSTALL = \
     /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/config/*.php, \
     /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/controllers/*.php, \
     /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/views/*.php, \
-    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/views/*/*.php
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/views/*/*.php, \
+    /usr/bin/install -m 0750 -o root -g root /tmp/query_world_db.sh /home/josh/mangos-tbc/tools/query_world_db.sh
 
 Cmnd_Alias PROJECT_BACKUP = \
     /usr/bin/cp /home/josh/mangos-tbc/run/etc/*.conf /home/josh/mangos-tbc/run/etc/*.codex-backup, \
