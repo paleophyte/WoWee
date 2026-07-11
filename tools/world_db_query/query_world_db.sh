@@ -36,7 +36,10 @@ if echo "$NORMALIZED" | grep -qE '\b(insert|update|delete|drop|alter|create|gran
     echo "ERROR: query contains a disallowed keyword" >&2
     exit 1
 fi
-SEMI_COUNT=$(echo "$QUERY" | grep -o ';' | wc -l)
+# tr, not grep -o|wc -l, so a query with zero semicolons (the common case)
+# doesn't trip grep's "no match" exit 1 and silently kill the script under
+# set -e before this check ever runs.
+SEMI_COUNT=$(tr -dc ';' <<< "$QUERY" | wc -c)
 if [ "$SEMI_COUNT" -gt 1 ]; then
     echo "ERROR: only a single statement is allowed" >&2
     exit 1
@@ -47,7 +50,7 @@ if [ ! -r "$CONF" ]; then
     exit 1
 fi
 
-LINE=$(grep -E '^\s*WorldDatabaseInfo\s*=' "$CONF" | head -1)
+LINE=$(grep -E '^\s*WorldDatabaseInfo\s*=' "$CONF" | head -1 || true)
 if [ -z "$LINE" ]; then
     echo "ERROR: WorldDatabaseInfo not found in $CONF" >&2
     exit 1
