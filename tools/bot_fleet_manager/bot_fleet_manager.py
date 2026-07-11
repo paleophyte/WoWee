@@ -144,6 +144,118 @@ def landmark_key(name: str) -> str:
     return name.strip().lower().replace(" ", "-").replace("_", "-")
 
 
+# Rough approximation of live aggro-radius scaling by level gap (creature
+# level minus player level): higher-level mobs notice from farther away,
+# mobs well below the player's level barely register at all. Not exact -
+# real aggro radius also depends on creature type/rank - but good enough to
+# stay well clear of anything that could plausibly aggro, which is the goal.
+HOSTILE_BASE_RADIUS_YARDS = 20.0
+HOSTILE_LEVEL_GAP_YARDS_PER_LEVEL = 2.5
+HOSTILE_MIN_RADIUS_YARDS = 8.0
+HOSTILE_MAX_RADIUS_YARDS = 60.0
+HOSTILE_IGNORE_BELOW_LEVEL_GAP = -8  # mobs this far below player level: not a threat
+
+
+def hostile_danger_radius(mob_level: int, player_level: int, distance_adjuster: float = 1.0) -> float | None:
+    """Returns the effective aggro-avoidance radius for a hostile at mob_level
+    against a player_level character, or None if the level gap makes it a
+    non-threat (safely gray/trivial)."""
+    level_gap = mob_level - player_level
+    if level_gap <= HOSTILE_IGNORE_BELOW_LEVEL_GAP:
+        return None
+    radius = HOSTILE_BASE_RADIUS_YARDS + HOSTILE_LEVEL_GAP_YARDS_PER_LEVEL * level_gap
+    radius = max(HOSTILE_MIN_RADIUS_YARDS, min(HOSTILE_MAX_RADIUS_YARDS, radius))
+    return radius * distance_adjuster
+
+
+def scan_hostile_threats(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    player_level: int,
+    scan_radius: float,
+    distance_adjuster: float = 1.0,
+) -> list[dict[str, Any]]:
+    """Poll /world/entities and return hostile units (excluding the leader's
+    own entity) as threat circles: {x, y, z, dangerRadius, level, name}."""
+    api_base = config.api_base_for(leader, index)
+    result = request_json("GET", f"{api_base}/world/entities?radius={scan_radius}")
+    self_guid = result.get("selfGuid")
+    threats: list[dict[str, Any]] = []
+    for entity in result.get("entities", []):
+        if entity.get("type") != "PLAYER" and entity.get("type") != "UNIT":
+            continue
+        if not entity.get("hostile"):
+            continue
+        if self_guid is not None and entity.get("guid") == self_guid:
+            continue
+        # Our own character has shown up hostile=true against itself (a
+        # faction-reaction self-reference quirk) - exclude by name as a
+        # backstop even if selfGuid isn't present in the response.
+        if entity.get("name") == leader.get("character"):
+            continue
+        mob_level = entity.get("level")
+        if not isinstance(mob_level, int):
+            continue
+        radius = hostile_danger_radius(mob_level, player_level, distance_adjuster)
+        if radius is None:
+            continue
+        pos = entity.get("position", {})
+        if "x" not in pos or "y" not in pos:
+            continue
+        threats.append({
+            "x": float(pos["x"]), "y": float(pos["y"]), "z": float(pos.get("z", 0.0)),
+            "dangerRadius": radius, "level": mob_level, "name": entity.get("name", "?"),
+        })
+    return threats
+
+
+def nudge_waypoints_around_threats(
+    waypoints: list[dict[str, Any]],
+    threats: list[dict[str, Any]],
+    clearance_margin: float = 5.0,
+    max_passes: int = 6,
+) -> tuple[list[dict[str, Any]], int]:
+    """Push any waypoint that falls inside a threat's danger radius directly
+    away from that threat until it clears the radius plus a margin. Threats
+    act like repulsive circles - the path bends around them without needing
+    a fresh pathfinding query. Runs multiple passes since pushing clear of
+    one threat can land inside another's radius when threats cluster (a
+    dense mob camp) - single-pass nudging left waypoints still inside
+    overlapping circles. Returns (adjusted_waypoints, nudged_count)."""
+    if not threats:
+        return waypoints, 0
+    adjusted: list[dict[str, Any]] = []
+    nudged_count = 0
+    for wp in waypoints:
+        wx, wy = float(wp["x"]), float(wp["y"])
+        wp_nudged = False
+        for _ in range(max_passes):
+            still_inside = False
+            for threat in threats:
+                dx = wx - threat["x"]
+                dy = wy - threat["y"]
+                dist = (dx * dx + dy * dy) ** 0.5
+                target_clear = threat["dangerRadius"] + clearance_margin
+                if dist < target_clear:
+                    if dist < 0.01:
+                        dx, dy, dist = 1.0, 0.0, 1.0
+                    push = target_clear - dist
+                    wx += (dx / dist) * push
+                    wy += (dy / dist) * push
+                    still_inside = True
+                    wp_nudged = True
+            if not still_inside:
+                break
+        if wp_nudged:
+            nudged_count += 1
+        new_wp = dict(wp)
+        new_wp["x"] = wx
+        new_wp["y"] = wy
+        adjusted.append(new_wp)
+    return adjusted, nudged_count
+
+
 def resolve_landmark(name: str) -> dict[str, Any]:
     key = landmark_key(name)
     if key not in LANDMARKS:
@@ -1022,6 +1134,9 @@ def cmd_route_goto(
     min_progress_yards: float,
     fleet: str = "",
     leader_ids: list[str] | None = None,
+    avoid_hostiles: bool = False,
+    hostile_distance_adjuster: float = 1.0,
+    hostile_scan_radius: float = 100.0,
 ) -> int:
     selected = config.selected_leaders(fleet, leader_ids)
     if not selected:
@@ -1087,6 +1202,20 @@ def cmd_route_goto(
                     raise RuntimeError(f"planner returned no executable legs; status={route_status}")
                 if not isinstance(waypoints, list) or not waypoints:
                     raise RuntimeError(f"planner returned no executable waypoints; status={route_status}")
+
+                if avoid_hostiles:
+                    player_level = self_info.get("character", {}).get("level")
+                    if isinstance(player_level, int):
+                        threats = scan_hostile_threats(
+                            config, leader, index, player_level,
+                            hostile_scan_radius, hostile_distance_adjuster,
+                        )
+                        if threats:
+                            waypoints, nudged_count = nudge_waypoints_around_threats(waypoints, threats)
+                            if nudged_count:
+                                names = ", ".join(f"{t['name']}(lvl{t['level']})" for t in threats)
+                                print(f"{leader_id}: rerouting around {len(threats)} threat(s) [{names}], "
+                                      f"nudged {nudged_count}/{len(waypoints)} waypoints")
 
                 leg = legs[0]
                 progress = float(leg.get("progressYards", 0.0))
@@ -2667,6 +2796,12 @@ def main(argv: list[str]) -> int:
     route_goto_parser.add_argument("--leg-timeout", type=float, default=180.0)
     route_goto_parser.add_argument("--poll-interval", type=float, default=1.0)
     route_goto_parser.add_argument("--min-progress-yards", type=float, default=15.0)
+    route_goto_parser.add_argument("--avoid-hostiles", action="store_true",
+                                    help="Reroute around hostile creatures using a level-gap-scaled danger radius")
+    route_goto_parser.add_argument("--hostile-distance-adjuster", type=float, default=1.0,
+                                    help="Multiplier on the computed danger radius (>1 = more cautious)")
+    route_goto_parser.add_argument("--hostile-scan-radius", type=float, default=100.0,
+                                    help="How far out to scan for hostiles each leg")
     route_demo_parser = sub.add_parser("route-demo", help="Run a named route demo using built-in landmarks")
     route_demo_parser.add_argument("--fleet", default="")
     route_demo_parser.add_argument("--leader", action="append", default=[])
@@ -2858,6 +2993,9 @@ def main(argv: list[str]) -> int:
             args.min_progress_yards,
             args.fleet,
             args.leader,
+            args.avoid_hostiles,
+            args.hostile_distance_adjuster,
+            args.hostile_scan_radius,
         )
     if args.command == "route-demo":
         return cmd_route_demo(
