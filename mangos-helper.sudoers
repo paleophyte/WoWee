@@ -132,5 +132,14 @@ Cmnd_Alias PROJECT_PROCESS = \
 Cmnd_Alias PROJECT_MMAP_GEN = \
     /home/josh/mangos-tbc/build/contrib/mmap/MoveMapGen *
 
-mangos-helper ALL=(root) NOPASSWD: PROJECT_SYSTEMCTL, PROJECT_JOURNAL, PROJECT_DB, PROJECT_EDIT, PROJECT_INSTALL, PROJECT_BACKUP, PROJECT_PROCESS, PROJECT_MMAP_GEN, MINIMANAGER_IRC_USER
+# Lets mangos-helper run a single read-only SELECT against the world DB
+# (see tools/world_db_query/ in the WoWee repo) without ever being handed
+# the DB credentials in mangosd.conf directly - the wrapper script reads
+# them internally (it must run as root since mangosd.conf isn't readable
+# by mangos-helper) and enforces SELECT-only, single-statement queries.
+# Scoped to this one script path only - not a general mysql/root grant.
+Cmnd_Alias PROJECT_WORLD_DB_QUERY = \
+    /home/josh/mangos-tbc/tools/query_world_db.sh *
+
+mangos-helper ALL=(root) NOPASSWD: PROJECT_SYSTEMCTL, PROJECT_JOURNAL, PROJECT_DB, PROJECT_EDIT, PROJECT_INSTALL, PROJECT_BACKUP, PROJECT_PROCESS, PROJECT_MMAP_GEN, PROJECT_WORLD_DB_QUERY, MINIMANAGER_IRC_USER
 www-data ALL=(root) NOPASSWD: MINIMANAGER_IRC_USER
