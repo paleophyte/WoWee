@@ -264,6 +264,30 @@
       "verified": false,
       "source": "Data/dbfilesclient/taxinodes.json"
     },
+    "ironforge-gate-south": {
+      "type": "walk",
+      "mapId": 0,
+      "x": -1004.7667236328125,
+      "y": -5148.51806640625,
+      "z": 500.18768310546875,
+      "radius": 15.0,
+      "name": "Dun Morogh, south of the Ironforge gate",
+      "description": "Live-surveyed waypoint. The navmesh has a narrow connectivity gap right at the Ironforge gate threshold (indoor-WMO-to-outdoor-terrain seam) - polyCount collapses to 5 and the pathfinder can't make progress from inside/right at the gate, but works fine (polyCount 124+) from here onward. Direct-walked here successfully; not a tile data gap, just a local navmesh stitching issue at the threshold.",
+      "verified": true,
+      "source": "Live survey, 2026-07-11"
+    },
+    "thelsamar": {
+      "type": "walk",
+      "mapId": 0,
+      "x": -2930.010009765625,
+      "y": -5421.91015625,
+      "z": 347.25,
+      "radius": 20.0,
+      "name": "Thelsamar, Loch Modan",
+      "description": "Midpoint waypoint for Ironforge -> Menethil Harbor: splits a route the pathfinding service couldn't handle as one giant leg (spans Dun Morogh + Loch Modan) into two shorter, more tractable legs.",
+      "verified": false,
+      "source": "Data/dbfilesclient/taxinodes.json"
+    },
     "menethil-harbor": {
       "type": "walk",
       "mapId": 0,
@@ -348,6 +372,16 @@
     }
   },
   "routes": {
+    "ironforge-to-menethil": {
+      "name": "Ironforge -> Dun Morogh -> Loch Modan -> Wetlands -> Menethil Harbor",
+      "description": "Overland road leg of the Grand Expedition route. Split at Thelsamar since Ironforge -> Menethil as one giant leg stalled the pathfinding service, and routed through ironforge-gate-south to hop past a narrow navmesh connectivity gap right at the Ironforge gate threshold.",
+      "nodes": [
+        "ironforge-city",
+        "ironforge-gate-south",
+        "thelsamar",
+        "menethil-harbor"
+      ]
+    },
     "deeprun-prototype": {
       "name": "Deeprun Tram Prototype",
       "description": "Goldshire to Ironforge via Stormwind and the Deeprun Tram. Read-only until tram nodes are surveyed.",
