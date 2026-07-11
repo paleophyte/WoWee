@@ -1444,11 +1444,13 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         ImGui::TextColored(color, "Free");
                     }
 
-                    // Train button - only enabled if available, affordable, prereqs met
+                    // The server-computed trainer state is authoritative for level,
+                    // skill, class, race, and prerequisite requirements.  Do not
+                    // veto an available offer using the client's incomplete spell
+                    // cache (weapon proficiencies in particular may not appear there).
                     ImGui::TableSetColumnIndex(4);
-                    // Use effectiveState so newly available spells (after learning prereqs) can be trained
+                    // Keep the local money check for immediate UI feedback.
                     bool canTrain = !alreadyKnown && effectiveState == 0
-                                  && prereqsMet && levelMet
                                   && (money >= spell->spellCost);
 
                     // Debug logging for first 3 spells to see why buttons are disabled
@@ -1459,7 +1461,7 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         lastTrainerGuid = trainer.trainerGuid;
                     }
                     if (logCount < 3) {
-                        LOG_INFO("Trainer button debug: spellId=", spell->spellId,
+                        LOG_INFO("Trainer button state: spellId=", spell->spellId,
                                 " alreadyKnown=", alreadyKnown, " state=", static_cast<int>(spell->state),
                                 " prereqsMet=", prereqsMet, " (", prereq1Met, ",", prereq2Met, ",", prereq3Met, ")",
                                 " levelMet=", levelMet,
@@ -1482,9 +1484,18 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         if (isCasting) ImGui::EndDisabled();
                     } else {
                         if (!canTrain) ImGui::BeginDisabled();
-                        if (ImGui::SmallButton("Train")) {
+                        if (canTrain) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.48f, 0.20f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.62f, 0.27f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.38f, 0.16f, 1.0f));
+                        }
+                        // Fill the action column so the enabled control has a clear,
+                        // reliable hit target instead of SmallButton's text-sized box.
+                        const char* actionLabel = alreadyKnown ? "Known" : "Train";
+                        if (ImGui::Button(actionLabel, ImVec2(-1.0f, 0.0f))) {
                             gameHandler.trainSpell(spell->spellId);
                         }
+                        if (canTrain) ImGui::PopStyleColor(3);
                         if (!canTrain) ImGui::EndDisabled();
                     }
 

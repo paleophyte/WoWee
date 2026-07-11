@@ -1618,7 +1618,9 @@ void InventoryHandler::handleTrainerList(network::Packet& packet) {
 }
 
 void InventoryHandler::trainSpell(uint32_t spellId) {
-    LOG_INFO("trainSpell called: spellId=", spellId, " state=", (int)owner_.getState(), " socket=", (owner_.getSocket() ? "yes" : "no"));
+    LOG_INFO("Trainer purchase requested: spellId=", spellId,
+             " state=", (int)owner_.getState(),
+             " socket=", (owner_.getSocket() ? "yes" : "no"));
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) {
         LOG_WARNING("trainSpell: Not in world or no socket connection");
         return;
