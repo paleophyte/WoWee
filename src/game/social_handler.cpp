@@ -1306,6 +1306,7 @@ void SocialHandler::requestLogout() {
     auto packet = LogoutRequestPacket::build();
     owner_.getSocket()->send(packet);
     loggingOut_ = true;
+    logoutComplete_ = false;
     LOG_INFO("Sent logout request");
 }
 
@@ -2440,6 +2441,7 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
 void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
     owner_.addSystemChatMessage("Logout complete.");
     loggingOut_ = false; logoutCountdown_ = 0.0f;
+    logoutComplete_ = true;
 }
 
 // ============================================================

@@ -493,6 +493,7 @@ public:
     // Instance difficulty
     void sendSetDifficulty(uint32_t difficulty);
     bool  isLoggingOut() const;
+    bool  isLogoutComplete() const;
     float getLogoutCountdown() const;
 
     // Stand state

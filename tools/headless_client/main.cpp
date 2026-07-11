@@ -1657,6 +1657,15 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
         } else if (method == "POST" && path == "/reclaim-corpse") {
             const auto result = session.reclaimCorpseAction();
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/logout") {
+            // Requests a clean CMSG_LOGOUT_REQUEST and lets the process exit
+            // on its own once the server confirms logout (or a timeout
+            // elapses) - see updateLogoutExit(). Same mechanism the ESC key
+            // already used interactively, just reachable over the API so
+            // fleet tooling doesn't have to force-kill the process to stop
+            // a leader.
+            session.requestGracefulLogout();
+            sendHttp(client, 200, {{"ok", true}, {"status", "logout requested"}});
         } else {
             sendHttp(client, 404, {{"ok", false}, {"error", "not found"}});
         }

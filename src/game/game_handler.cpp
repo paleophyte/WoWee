@@ -2279,6 +2279,10 @@ bool GameHandler::isLoggingOut() const {
     return socialHandler_ ? socialHandler_->isLoggingOut() : false;
 }
 
+bool GameHandler::isLogoutComplete() const {
+    return socialHandler_ ? socialHandler_->isLogoutComplete() : false;
+}
+
 float GameHandler::getLogoutCountdown() const {
     return socialHandler_ ? socialHandler_->getLogoutCountdown() : 0.0f;
 }
