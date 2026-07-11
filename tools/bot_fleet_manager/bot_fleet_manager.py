@@ -2072,6 +2072,143 @@ def _board_and_ride_tram(
         raise
 
 
+def _recover_from_death(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    poll_interval: float,
+    timeout_seconds: float,
+    prefix: str = "",
+) -> bool:
+    """If the leader is dead, release spirit (if needed), walk the ghost back
+    to its corpse, and reclaim it. Returns True once alive again (or if it
+    was never dead), False if recovery didn't complete within
+    timeout_seconds.
+
+    Deliberately does not use _wait_node_arrival/cmd_route_goto or their
+    LeaderDiedError check: a ghost is isPlayerDead=true for the entire
+    recovery, which every other wait loop in this file correctly treats as
+    fatal. Polls death.canReclaimCorpse directly instead of waiting for a
+    movement task to reach "arrived", since that's the actual distance/
+    readiness signal we need.
+    """
+    api_base = config.api_base_for(leader, index)
+    deadline = time.monotonic() + timeout_seconds
+
+    try:
+        self_info = leader_position(config, leader, index)
+    except Exception as exc:
+        print(f"{prefix}could not read leader state: {exc}")
+        return False
+
+    if not self_info.get("health", {}).get("isPlayerDead"):
+        return True
+
+    if not self_info.get("death", {}).get("isGhost"):
+        print(f"{prefix}releasing spirit")
+        try:
+            request_json("POST", api_base + "/release-spirit", {})
+        except Exception as exc:
+            print(f"{prefix}release-spirit failed: {exc}")
+            return False
+        while time.monotonic() < deadline:
+            try:
+                self_info = leader_position(config, leader, index)
+            except Exception:
+                time.sleep(poll_interval)
+                continue
+            if self_info.get("death", {}).get("isGhost"):
+                break
+            time.sleep(poll_interval)
+        else:
+            print(f"{prefix}never became a ghost after releasing spirit")
+            return False
+
+    corpse = self_info.get("death", {}).get("corpse")
+    while not corpse and time.monotonic() < deadline:
+        time.sleep(poll_interval)
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            continue
+        corpse = self_info.get("death", {}).get("corpse")
+    if not corpse:
+        print(f"{prefix}no corpse position known; cannot recover")
+        return False
+
+    print(f"{prefix}walking to corpse at ({corpse['x']:.1f}, {corpse['y']:.1f}), {corpse.get('distance', 0):.0f}y away")
+    try:
+        request_json("POST", api_base + "/movement/goto", {
+            "mapId": corpse["mapId"], "x": corpse["x"], "y": corpse["y"], "z": corpse["z"],
+            "arrivalRadius": 15.0,
+        })
+    except Exception as exc:
+        print(f"{prefix}goto corpse failed: {exc}")
+        return False
+
+    while time.monotonic() < deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+        death = self_info.get("death", {})
+        if death.get("canReclaimCorpse"):
+            break
+        time.sleep(poll_interval)
+    else:
+        print(f"{prefix}never got close enough to reclaim the corpse")
+        return False
+
+    delay = float(death.get("reclaimDelaySec", 0.0) or 0.0)
+    if delay > 0:
+        print(f"{prefix}waiting out reclaim delay ({delay:.1f}s)")
+        time.sleep(delay + 0.5)
+
+    print(f"{prefix}reclaiming corpse")
+    try:
+        result = request_json("POST", api_base + "/reclaim-corpse", {})
+    except Exception as exc:
+        print(f"{prefix}reclaim-corpse failed: {exc}")
+        return False
+    if not result.get("ok", False):
+        print(f"{prefix}reclaim-corpse rejected: {result.get('error')}")
+        return False
+
+    while time.monotonic() < deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+        if not self_info.get("health", {}).get("isPlayerDead"):
+            print(f"{prefix}resurrected")
+            return True
+        time.sleep(poll_interval)
+
+    print(f"{prefix}did not confirm resurrection within timeout")
+    return False
+
+
+def cmd_recover_death(
+    config: FleetConfig,
+    poll_interval: float,
+    timeout_seconds: float,
+    fleet: str = "",
+    leader_ids: list[str] | None = None,
+) -> int:
+    selected = config.selected_leaders(fleet, leader_ids)
+    if not selected:
+        print("No matching leaders")
+        return 1
+    ok = True
+    for index, leader in selected:
+        leader_id = leader.get("id", f"leader-{index + 1}")
+        if not _recover_from_death(config, leader, index, poll_interval, timeout_seconds, prefix=f"{leader_id}: "):
+            ok = False
+    return 0 if ok else 1
+
+
 def cmd_board_tram(
     config: FleetConfig,
     registry_path: Path | None,
@@ -2549,6 +2686,15 @@ def main(argv: list[str]) -> int:
     board_tram_parser.add_argument("--board-timeout", type=float, default=180.0, help="Max seconds to wait for a boardable tram car")
     board_tram_parser.add_argument("--ride-timeout", type=float, default=90.0, help="Max seconds to wait for arrival + disembark after boarding")
 
+    recover_death_parser = sub.add_parser(
+        "recover-death",
+        help="If the leader is dead, release spirit, walk to the corpse, and reclaim it",
+    )
+    recover_death_parser.add_argument("--fleet", default="")
+    recover_death_parser.add_argument("--leader", action="append", default=[])
+    recover_death_parser.add_argument("--poll-interval", type=float, default=1.5)
+    recover_death_parser.add_argument("--timeout", type=float, default=300.0, help="Max seconds for the whole release/walk/reclaim sequence")
+
     args = parser.parse_args(argv)
     config = FleetConfig(resolve_path(str(args.config)))
 
@@ -2730,6 +2876,14 @@ def main(argv: list[str]) -> int:
             args.poll_interval,
             args.board_timeout,
             args.ride_timeout,
+            args.fleet,
+            args.leader,
+        )
+    if args.command == "recover-death":
+        return cmd_recover_death(
+            config,
+            args.poll_interval,
+            args.timeout,
             args.fleet,
             args.leader,
         )
