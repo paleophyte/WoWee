@@ -649,6 +649,46 @@ def post_all(
     return 0 if ok else 1
 
 
+def cmd_logout(
+    config: FleetConfig,
+    timeout_seconds: float,
+    fleet: str = "",
+    leader_ids: list[str] | None = None,
+) -> int:
+    """Request a clean CMSG_LOGOUT_REQUEST for each leader and wait for its
+    process to exit on its own (see updateLogoutExit() in main.cpp), instead
+    of force-killing it - avoids the unclean-disconnect position/save issues
+    force-kills can cause."""
+    selected = config.selected_leaders(fleet, leader_ids)
+    if not selected:
+        print("No matching leaders")
+        return 1
+    ok = True
+    for index, leader in selected:
+        leader_id = leader.get("id", f"leader-{index + 1}")
+        api_base = config.api_base_for(leader, index)
+        try:
+            request_json("POST", api_base + "/logout", {})
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            print(f"{leader_id}: logout request failed ({exc})")
+            ok = False
+            continue
+        print(f"{leader_id}: logout requested, waiting for process to exit")
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                request_json("GET", api_base + "/status", timeout=2.0)
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                print(f"{leader_id}: exited cleanly")
+                break
+            time.sleep(1.0)
+        else:
+            print(f"{leader_id}: still responding after {timeout_seconds:.0f}s; "
+                  f"process may need a manual stop")
+            ok = False
+    return 0 if ok else 1
+
+
 def leader_position(config: FleetConfig, leader: dict[str, Any], index: int) -> dict[str, Any]:
     return request_json("GET", config.api_base_for(leader, index) + "/world/self")
 
@@ -2101,7 +2141,7 @@ def _recover_from_death(
         print(f"{prefix}could not read leader state: {exc}")
         return False
 
-    if not self_info.get("health", {}).get("isPlayerDead"):
+    if not self_info.get("health", {}).get("isPlayerDead") and not self_info.get("death", {}).get("isGhost"):
         return True
 
     if not self_info.get("death", {}).get("isGhost"):
@@ -2181,7 +2221,13 @@ def _recover_from_death(
         except Exception:
             time.sleep(poll_interval)
             continue
-        if not self_info.get("health", {}).get("isPlayerDead"):
+        # isPlayerDead alone isn't enough here - it flips false as soon as you
+        # release spirit (a ghost isn't "dead", just not resurrected yet).
+        # Live-observed this falsely reporting "resurrected" while still a
+        # ghost, well before the corpse was ever reached.
+        health = self_info.get("health", {})
+        death = self_info.get("death", {})
+        if not health.get("isPlayerDead") and not death.get("isGhost"):
             print(f"{prefix}resurrected")
             return True
         time.sleep(poll_interval)
@@ -2196,6 +2242,11 @@ def cmd_recover_death(
     timeout_seconds: float,
     fleet: str = "",
     leader_ids: list[str] | None = None,
+    resume_route: bool = True,
+    resume_arrival_radius: float = 5.0,
+    resume_max_legs: int = 8,
+    resume_leg_timeout: float = 180.0,
+    resume_min_progress_yards: float = 15.0,
 ) -> int:
     selected = config.selected_leaders(fleet, leader_ids)
     if not selected:
@@ -2204,7 +2255,33 @@ def cmd_recover_death(
     ok = True
     for index, leader in selected:
         leader_id = leader.get("id", f"leader-{index + 1}")
-        if not _recover_from_death(config, leader, index, poll_interval, timeout_seconds, prefix=f"{leader_id}: "):
+        prefix = f"{leader_id}: "
+        if not _recover_from_death(config, leader, index, poll_interval, timeout_seconds, prefix=prefix):
+            ok = False
+            continue
+        if not resume_route:
+            continue
+        try:
+            state = load_route_state(config, leader_id)
+        except FileNotFoundError:
+            continue
+        target = state.get("target") or {}
+        if not all(k in target for k in ("mapId", "x", "y", "z")):
+            print(f"{prefix}no resumable route-goto target in saved state; not resuming")
+            continue
+        print(f"{prefix}resuming route-goto toward {target}")
+        resume_ok = cmd_route_goto(
+            config,
+            int(target["mapId"]), float(target["x"]), float(target["y"]), float(target["z"]),
+            float(target.get("arrivalRadius", resume_arrival_radius)),
+            resume_max_legs,
+            resume_leg_timeout,
+            poll_interval,
+            resume_min_progress_yards,
+            fleet="",
+            leader_ids=[leader_id],
+        )
+        if resume_ok != 0:
             ok = False
     return 0 if ok else 1
 
@@ -2537,6 +2614,14 @@ def main(argv: list[str]) -> int:
     stop_parser = sub.add_parser("stop")
     stop_parser.add_argument("--fleet", default="")
     stop_parser.add_argument("--leader", action="append", default=[])
+    logout_parser = sub.add_parser(
+        "logout",
+        help="Request a clean logout and wait for the leader process to exit on its own, instead of force-killing it",
+    )
+    logout_parser.add_argument("--fleet", default="")
+    logout_parser.add_argument("--leader", action="append", default=[])
+    logout_parser.add_argument("--timeout", type=float, default=20.0,
+                                help="Max seconds to wait for the process to exit before giving up")
     command_parser = sub.add_parser("command")
     command_parser.add_argument("--fleet", default="")
     command_parser.add_argument("--leader", action="append", default=[])
@@ -2694,6 +2779,12 @@ def main(argv: list[str]) -> int:
     recover_death_parser.add_argument("--leader", action="append", default=[])
     recover_death_parser.add_argument("--poll-interval", type=float, default=1.5)
     recover_death_parser.add_argument("--timeout", type=float, default=300.0, help="Max seconds for the whole release/walk/reclaim sequence")
+    recover_death_parser.add_argument("--no-resume-route", action="store_true",
+                                       help="Don't automatically resume the interrupted route-goto after resurrecting")
+    recover_death_parser.add_argument("--resume-arrival-radius", type=float, default=5.0)
+    recover_death_parser.add_argument("--resume-max-legs", type=int, default=8)
+    recover_death_parser.add_argument("--resume-leg-timeout", type=float, default=180.0)
+    recover_death_parser.add_argument("--resume-min-progress-yards", type=float, default=15.0)
 
     args = parser.parse_args(argv)
     config = FleetConfig(resolve_path(str(args.config)))
@@ -2716,6 +2807,8 @@ def main(argv: list[str]) -> int:
         return cmd_status(config, args.fleet, args.leader)
     if args.command == "stop":
         return post_all(config, "/movement/stop", {"reason": "fleet stop"}, args.fleet, args.leader)
+    if args.command == "logout":
+        return cmd_logout(config, args.timeout, args.fleet, args.leader)
     if args.command == "command":
         return post_all(config, "/commands", {"command": args.text}, args.fleet, args.leader)
     if args.command == "area-trigger":
@@ -2886,6 +2979,11 @@ def main(argv: list[str]) -> int:
             args.timeout,
             args.fleet,
             args.leader,
+            not args.no_resume_route,
+            args.resume_arrival_radius,
+            args.resume_max_legs,
+            args.resume_leg_timeout,
+            args.resume_min_progress_yards,
         )
     return 2
 
