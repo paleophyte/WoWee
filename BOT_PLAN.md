@@ -65,6 +65,8 @@ Turn `wowee_headless` into a bot automation foundation that can supervise multip
 
 The aspirational route for the next pathfinding phase is a low-level Alliance "Grand Expedition" from Goldshire to Darnassus. It is intentionally bigger than one navmesh query: it forces the automation stack to handle city navigation, transports, continent transitions, and route resumption.
 
+**Definition of done:** create a brand-new Human character, issue one command ("go to Darnassus"), and the automation layer plans and executes the entire route unattended - city navigation, transports, and continent transitions all self-detected and self-resumed, no manual coordinate tuning, no watching-and-reacting to catch a timing window. If a step needs a human to babysit it in real time to work, that step isn't done yet, no matter how many times it's been made to work manually.
+
 Target route:
 
 - [ ] Northshire -> Goldshire -> Stormwind City -> Dwarven District tram entrance.
@@ -83,7 +85,7 @@ Implementation roadmap:
 - [x] Add planner output that distinguishes `walk`, `board_transport`, `wait_transport`, `disembark`, `use_portal`, and `use_flight` steps.
 - [x] Add survey tooling to record live map/position/orientation/movement flags while manually walking transport areas.
 - [x] Add a capture command that writes surveyed leader positions back into the travel node registry.
-- [ ] Add execution state for travel-node steps so `resume-route` can continue after a crash, disconnect, death, or manual intervention.
+- [ ] Add execution state for travel-node steps so `resume-route` can continue after a crash, disconnect, death, or manual intervention. Resume must re-verify progress against the specific target step, not just any plausible-looking signal that a step completed - live-confirmed this matters: an early tram dwell-detector treated "the car stopped" as arrival without checking *which* platform it stopped at, and falsely reported success ~2400 yards from the actual destination. Every arrival/completion check needs to know what it's actually trying to reach.
 - [ ] Prototype with Deeprun Tram first because it directly addresses the current Goldshire/Stormwind -> Ironforge stall.
   - [x] Verify Stormwind tram entrance AreaTrigger `2173` and target landing on map `369`.
   - [x] Add an explicit headless `/area-trigger` API and fleet `area-trigger` command for validated transition prototyping.
