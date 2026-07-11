@@ -715,6 +715,9 @@ uint32_t hp = 0, maxHp = 0;
                 item["entry"] = unit->getEntry();
                 item["displayId"] = unit->getDisplayId();
                 item["level"] = unit->getLevel();
+                item["hostile"] = unit->isHostile();
+                item["factionTemplate"] = unit->getFactionTemplate();
+                item["npcFlags"] = unit->getNpcFlags();
             } else if (entity->getType() == game::ObjectType::GAMEOBJECT) {
                 const auto* go = static_cast<const game::GameObject*>(entity.get());
                 item["name"] = go->getName();
@@ -743,6 +746,7 @@ uint32_t hp = 0, maxHp = 0;
             {"onlyTransports", onlyTransports},
             {"entityCount", total},
             {"included", included},
+            {"selfGuid", game_.getPlayerGuid()},
             {"entities", entities}
         };
     }
@@ -916,6 +920,48 @@ uint32_t hp = 0, maxHp = 0;
         }
         game_.reclaimCorpse();
         return {{"ok", true}};
+    }
+
+    // Resurrects a ghost at the nearest Spirit Healer instead of walking back
+    // to the corpse - CMSG_SPIRIT_HEALER_ACTIVATE/activateSpiritHealer()
+    // already existed for the GUI client's manual interaction; this just
+    // finds the NPC and triggers it headlessly. Identified by
+    // UNIT_NPC_FLAG_SPIRITHEALER (0x4000, see CMaNGOS Unit.h) rather than
+    // name - live-observed that this NPC's name field often isn't populated
+    // client-side (no completed name query), so name matching missed it
+    // entirely even standing right next to it. Comes with the usual WoW
+    // tradeoff: resurrection sickness and gear durability loss, but skips
+    // the ghost-walk-to-corpse entirely.
+    json resurrectAtGraveyardAction(float searchRadius) {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (!game_.isPlayerGhost()) {
+            return {{"ok", false}, {"error", "not a ghost"}};
+        }
+        constexpr uint32_t kNpcFlagSpiritHealer = 0x4000;
+        const auto& move = game_.getMovementInfo();
+        uint64_t bestGuid = 0;
+        float bestDist = -1.0f;
+        for (const auto& entity : game_.getEntityManager().snapshotEntities()) {
+            if (!entity || !entity->isUnit()) continue;
+            const auto* unit = static_cast<const game::Unit*>(entity.get());
+            if ((unit->getNpcFlags() & kNpcFlagSpiritHealer) == 0) continue;
+            const float dx = entity->getX() - move.x;
+            const float dy = entity->getY() - move.y;
+            const float dz = entity->getZ() - move.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > searchRadius) continue;
+            if (bestDist < 0.0f || dist < bestDist) {
+                bestDist = dist;
+                bestGuid = entity->getGuid();
+            }
+        }
+        if (bestGuid == 0) {
+            return {{"ok", false}, {"error", "no Spirit Healer found nearby"}, {"searchRadius", searchRadius}};
+        }
+        game_.activateSpiritHealer(bestGuid);
+        return {{"ok", true}, {"npcGuid", bestGuid}, {"distance", bestDist}};
     }
 
     void requestGracefulLogout() {
@@ -1656,6 +1702,11 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else if (method == "POST" && path == "/reclaim-corpse") {
             const auto result = session.reclaimCorpseAction();
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/resurrect-at-graveyard") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const float searchRadius = payload.value("searchRadius", 40.0f);
+            const auto result = session.resurrectAtGraveyardAction(searchRadius);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else if (method == "POST" && path == "/logout") {
             // Requests a clean CMSG_LOGOUT_REQUEST and lets the process exit
