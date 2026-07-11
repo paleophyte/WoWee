@@ -67,7 +67,7 @@ The aspirational route for the next pathfinding phase is a low-level Alliance "G
 
 Target route:
 
-- [ ] Goldshire -> Stormwind City -> Dwarven District tram entrance.
+- [ ] Northshire -> Goldshire -> Stormwind City -> Dwarven District tram entrance.
 - [ ] Deeprun Tram: enter tram instance/area, board tram car, wait for transit, exit at Ironforge side.
 - [ ] Ironforge -> Dun Morogh -> Loch Modan -> Wetlands -> Menethil Harbor, favoring roads for low-level safety.
 - [ ] Menethil Harbor -> Auberdine boat: navigate onto boat, detect departure/transit/arrival, navigate off boat.
@@ -172,14 +172,43 @@ Known unknowns:
 
 ## Future Work
 
-- [ ] Hostile detection and target selection.
-- [ ] Combat behavior for party leaders.
-- [ ] Loot handling.
-- [ ] Patrol routes and behavior trees.
 - [ ] Event streaming for lower-latency automation.
 - [ ] Optional server-side bot takeover hooks.
 - [ ] Lua automation examples.
 - [ ] Runtime tests for `/movement/goto` against a live local CMaNGOS server.
+
+## Phase 6: Combat, Loot, and Progression Automation
+
+The prerequisite for most of the fun stuff: leader characters can navigate but can't fight, loot, or run quests yet. Follower bots (CMaNGOS playerbots) already have their own combat AI, so the real gap is getting the *leader* characters (the actual headless client) to target, attack, loot, and handle quests.
+
+- [ ] Add hostile target selection for leader characters (nearest hostile in range, or explicit target-by-guid via the API).
+- [ ] Detect when a follower bot enters combat (party/bot status) and have the leader assist instead of continuing to navigate away and leaving the bot to fight alone.
+- [ ] Add auto-attack / basic ability usage triggering for leader characters.
+- [ ] Add loot handling: auto-loot on kill, or a queued loot command.
+- [ ] Add quest automation: detect quest giver, accept, track objectives, turn in.
+- [ ] Add a leveling-assembly-line mode: chain quest-accept -> navigate -> kill/loot -> turn-in cycles to level a character (target 1->60 or 1->70).
+- [ ] Add a repeatable gold-farming circuit mode: fixed route, kill + loot + vendor + repeat, report gold/hour.
+- [ ] Add gathering-profession automation: detect nearby herb/mining/skinning nodes and run a farming route.
+- [ ] Add crafting-profession automation: buy mats from the AH, craft for skill-ups.
+
+## Phase 7: Fleet-Scale Group Content Demo
+
+A flagship stress test once Phase 6 lands: exercises fleet scale, travel automation, quest automation, and coordinated combat together in one scenario. 8 leaders x 5 characters (1 leader + 4 playerbot followers each) = 40 total, which fits inside the existing "10 leaders x 4 followers" scale target.
+
+- [ ] Provision 8 accounts x 5 Human characters using the existing batch provisioning tooling.
+- [ ] Configure the fleet manager to operate all 8 party leaders simultaneously.
+- [ ] Navigate all parties to Westbrook Garrison.
+- [ ] Automate accepting "Wanted: Hogger" for each party.
+- [ ] Navigate to Hogger and coordinate group engagement (depends on Phase 6 combat automation).
+- [ ] Return to Westbrook Garrison and turn in the quest.
+
+## Phase 8: Social and Observability Automation
+
+Doesn't depend on Phase 6 - these only need chat, `/who`, and existing slash commands, so they can ship independently and probably sooner.
+
+- [ ] Server census: log in on each faction/realm, poll `/who` periodically, and build a population timeline (peak hours, faction balance).
+- [ ] Guild management bot: automate invites, MOTD updates, event postings, and guild bank deposit/withdrawal tracking.
+- [ ] Achievement/level-up celebrations: parse chat for level-up/achievement events, then trigger a synchronized fleet-wide emote chain, mount parade, or fireworks display.
 
 ## Notes
 
