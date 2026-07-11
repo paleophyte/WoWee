@@ -1,0 +1,136 @@
+# Project sudo rules for the Codex MaNGOS helper account.
+# Install with:
+#   sudo visudo -f /etc/sudoers.d/mangos-helper
+#
+# Scope: CMaNGOS services, LLM bridge service, project config files,
+# MiniManager PHP files, project logs, and MaNGOS/MySQL maintenance.
+
+Defaults:mangos-helper !requiretty
+Defaults:www-data !requiretty
+
+Cmnd_Alias MINIMANAGER_IRC_USER = /usr/local/sbin/minimanager-irc-user *
+
+Cmnd_Alias PROJECT_SYSTEMCTL = \
+    /bin/systemctl daemon-reload, \
+    /bin/systemctl status cmangos-mangosd, \
+    /bin/systemctl start cmangos-mangosd, \
+    /bin/systemctl stop cmangos-mangosd, \
+    /bin/systemctl restart cmangos-mangosd, \
+    /bin/systemctl status cmangos-realmd, \
+    /bin/systemctl start cmangos-realmd, \
+    /bin/systemctl stop cmangos-realmd, \
+    /bin/systemctl restart cmangos-realmd, \
+    /bin/systemctl status mysql, \
+    /bin/systemctl restart mysql, \
+    /bin/systemctl status llm-bridge.service, \
+    /bin/systemctl start llm-bridge.service, \
+    /bin/systemctl stop llm-bridge.service, \
+    /bin/systemctl restart llm-bridge.service, \
+    /bin/systemctl enable llm-bridge.service, \
+    /bin/systemctl disable llm-bridge.service, \
+    /bin/systemctl status thelounge.service, \
+    /bin/systemctl start thelounge.service, \
+    /bin/systemctl stop thelounge.service, \
+    /bin/systemctl restart thelounge.service, \
+    /bin/systemctl enable thelounge.service, \
+    /bin/systemctl disable thelounge.service, \
+    /bin/systemctl status ergo.service, \
+    /bin/systemctl start ergo.service, \
+    /bin/systemctl stop ergo.service, \
+    /bin/systemctl restart ergo.service, \
+    /bin/systemctl enable ergo.service, \
+    /bin/systemctl disable ergo.service, \
+    /bin/systemctl status nginx.service, \
+    /bin/systemctl reload nginx.service, \
+    /bin/systemctl restart nginx.service
+
+Cmnd_Alias PROJECT_JOURNAL = \
+    /usr/bin/journalctl
+
+Cmnd_Alias PROJECT_DB = \
+    /usr/bin/mysql, \
+    /usr/bin/mysqladmin, \
+    /usr/bin/mysqlcheck, \
+    /usr/bin/myisamchk
+
+Cmnd_Alias PROJECT_EDIT = \
+    sudoedit /home/josh/mangos-tbc/run/etc/*.conf, \
+    sudoedit /etc/systemd/system/llm-bridge.service, \
+    sudoedit /etc/systemd/system/ergo.service, \
+    sudoedit /etc/systemd/system/thelounge.service.d/*.conf, \
+    sudoedit /var/www/minimanager/*.php, \
+    sudoedit /var/www/minimanager/*/*.php, \
+    sudoedit /var/www/minimanager/config/*.php, \
+    sudoedit /var/www/minimanager/config/*.dist, \
+    sudoedit /var/www/minimanager/lang/*.php, \
+    sudoedit /var/www/minimanager/core/themes/*/*.css, \
+    sudoedit /etc/nginx/sites-available/blizzcms.conf, \
+    sudoedit /var/www/blizzcms/application/config/*.php, \
+    sudoedit /var/www/blizzcms/application/controllers/*.php, \
+    sudoedit /var/www/blizzcms/application/views/*.php, \
+    sudoedit /var/www/blizzcms/application/views/*/*.php
+
+Cmnd_Alias PROJECT_INSTALL = \
+    /usr/bin/install -m 0644 -o josh -g josh /tmp/*.conf /home/josh/mangos-tbc/run/etc/*.conf, \
+    /usr/bin/install -m 0644 -o mangos-helper -g mangos-helper /tmp/llm_bridge.py /home/mangos-helper/llm-bridge/llm_bridge.py, \
+    /usr/bin/install -m 0644 -o root -g root /tmp/llm-bridge.service /etc/systemd/system/llm-bridge.service, \
+    /usr/bin/install -m 0644 -o root -g root /tmp/ergo.service /etc/systemd/system/ergo.service, \
+    /usr/bin/install -m 0755 -o root -g root /tmp/minimanager-irc-user /usr/local/sbin/minimanager-irc-user, \
+    /usr/bin/install -d -m 0755 -o root -g root /etc/systemd/system/thelounge.service.d, \
+    /usr/bin/install -m 0644 -o root -g root /tmp/thelounge-override.conf /etc/systemd/system/thelounge.service.d/override.conf, \
+    /usr/bin/install -d -m 0755 -o www-data -g www-data /var/www/minimanager/img/zone, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.png /var/www/minimanager/img/zone/*.png, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/minimanager/*.php, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/minimanager/*/*.php, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.dist /var/www/minimanager/config/*.dist, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.css /var/www/minimanager/core/themes/*/*.css, \
+    /usr/bin/install -m 0644 -o root -g root /tmp/blizzcms.conf /etc/nginx/sites-available/blizzcms.conf, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/config/*.php, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/controllers/*.php, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/views/*.php, \
+    /usr/bin/install -m 0644 -o www-data -g www-data /tmp/*.php /var/www/blizzcms/application/views/*/*.php
+
+Cmnd_Alias PROJECT_BACKUP = \
+    /usr/bin/cp /home/josh/mangos-tbc/run/etc/*.conf /home/josh/mangos-tbc/run/etc/*.codex-backup, \
+    /usr/bin/cp /home/mangos-helper/llm-bridge/llm_bridge.py /home/mangos-helper/llm-bridge/llm_bridge.py.codex-backup, \
+    /usr/bin/cp /etc/systemd/system/llm-bridge.service /etc/systemd/system/llm-bridge.service.codex-backup, \
+    /usr/bin/cp /etc/nginx/sites-available/blizzcms.conf /etc/nginx/sites-available/blizzcms.conf.codex-backup, \
+    /usr/bin/cp /var/www/blizzcms/application/config/*.php /var/www/blizzcms/application/config/*.codex-backup, \
+    /usr/bin/cp /var/www/blizzcms/application/controllers/*.php /var/www/blizzcms/application/controllers/*.codex-backup, \
+    /usr/bin/cp /var/www/blizzcms/application/views/*.php /var/www/blizzcms/application/views/*.codex-backup, \
+    /usr/bin/cp /var/www/blizzcms/application/views/*/*.php /var/www/blizzcms/application/views/*/*.codex-backup, \
+    /usr/bin/cp /var/www/minimanager/core/themes/*/*.css /var/www/minimanager/core/themes/*/*.codex-backup, \
+    /usr/bin/cp /var/www/minimanager/*.php /var/www/minimanager/*.codex-backup, \
+    /usr/bin/cp /var/www/minimanager/*/*.php /var/www/minimanager/*/*.codex-backup, \
+    /usr/sbin/nginx -t, \
+    /usr/bin/sha256sum /home/josh/mangos-tbc/run/etc/*.conf, \
+    /usr/bin/sha256sum /home/mangos-helper/llm-bridge/llm_bridge.py, \
+    /usr/bin/sha256sum /etc/systemd/system/llm-bridge.service, \
+    /usr/bin/sha256sum /etc/systemd/system/ergo.service, \
+    /usr/bin/sha256sum /etc/systemd/system/thelounge.service.d/override.conf, \
+    /usr/bin/sha256sum /usr/local/sbin/minimanager-irc-user, \
+    /usr/bin/sha256sum /etc/nginx/sites-available/blizzcms.conf, \
+    /usr/bin/sha256sum /var/www/blizzcms/application/config/*.php, \
+    /usr/bin/sha256sum /var/www/blizzcms/application/controllers/*.php, \
+    /usr/bin/sha256sum /var/www/blizzcms/application/views/*.php, \
+    /usr/bin/sha256sum /var/www/blizzcms/application/views/*/*.php, \
+    /usr/bin/sha256sum /var/www/minimanager/core/themes/*/*.css, \
+    /usr/bin/sha256sum /var/www/minimanager/*.php, \
+    /usr/bin/sha256sum /var/www/minimanager/*/*.php
+
+Cmnd_Alias PROJECT_PROCESS = \
+    /usr/bin/fuser -k 5001/tcp, \
+    /usr/bin/fuser -k 8765/tcp, \
+    /usr/bin/fuser -k 6667/tcp, \
+    /usr/bin/fuser -k 6697/tcp, \
+    /usr/bin/fuser -k 8097/tcp
+
+# MoveMapGen writes into /home/josh/mangos-tbc/run/{mmaps,vmaps}, which are
+# owned by josh:josh and not group-writable by mangos-helper. Runs as root so
+# ownership doesn't matter. Scoped to this one purpose-built binary only -
+# not a general file-write grant.
+Cmnd_Alias PROJECT_MMAP_GEN = \
+    /home/josh/mangos-tbc/build/contrib/mmap/MoveMapGen *
+
+mangos-helper ALL=(root) NOPASSWD: PROJECT_SYSTEMCTL, PROJECT_JOURNAL, PROJECT_DB, PROJECT_EDIT, PROJECT_INSTALL, PROJECT_BACKUP, PROJECT_PROCESS, PROJECT_MMAP_GEN, MINIMANAGER_IRC_USER
+www-data ALL=(root) NOPASSWD: MINIMANAGER_IRC_USER
