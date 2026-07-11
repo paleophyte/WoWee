@@ -1121,6 +1121,56 @@ def post_waypoint_movement(
     raise RuntimeError(f"movement command failed after retries: {last_error}")
 
 
+def execute_waypoints_with_avoidance(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    api_base: str,
+    map_id: int,
+    waypoints: list[dict[str, Any]],
+    arrival_radius: float,
+    leg_timeout: float,
+    poll_interval: float,
+    player_level: int,
+    hostile_distance_adjuster: float,
+    hostile_scan_radius: float,
+    leader_id: str,
+    chunk_size: int = 15,
+) -> dict[str, Any]:
+    """Walk a leg's waypoints in small chunks, rescanning for hostile
+    threats and nudging the upcoming (not-yet-walked) waypoints between each
+    chunk. A single leg can span a thousand-plus yards - scanning only once
+    at the start missed threats far down the path entirely (live-observed:
+    walked straight into a second, more dangerous mob cluster ~350y past
+    where the leg began, since it was never within the initial scan
+    radius). Chunking makes the scan follow the leader instead of only
+    firing once at the leg's starting point."""
+    remaining = list(waypoints)
+    final_status: dict[str, Any] = {}
+    while remaining:
+        chunk = remaining[:chunk_size]
+        remaining = remaining[chunk_size:]
+        movement = post_waypoint_movement(api_base, map_id, chunk, arrival_radius)
+        if not movement.get("ok", False):
+            raise RuntimeError(movement.get("error", "movement command failed"))
+        final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
+        movement_status = final_status.get("movement", {})
+        state = movement_status.get("state", "unknown")
+        if state != "arrived":
+            raise RuntimeError(f"movement ended as {state}: {movement_status.get('error', '')}")
+        if remaining:
+            threats = scan_hostile_threats(
+                config, leader, index, player_level, hostile_scan_radius, hostile_distance_adjuster,
+            )
+            if threats:
+                remaining, nudged_count = nudge_waypoints_around_threats(remaining, threats)
+                if nudged_count:
+                    names = ", ".join(f"{t['name']}(lvl{t['level']})" for t in threats)
+                    print(f"    mid-leg rescan: rerouting around {len(threats)} threat(s) [{names}], "
+                          f"nudged {nudged_count}/{len(remaining)} upcoming waypoints")
+    return final_status
+
+
 def cmd_route_goto(
     config: FleetConfig,
     map_id: int,
@@ -1241,15 +1291,25 @@ def cmd_route_goto(
                         f"planner stalled: progress {progress:.1f}y below {min_progress_yards:.1f}y"
                     )
 
-                movement = post_waypoint_movement(api_base, map_id, waypoints, arrival_radius)
-                if not movement.get("ok", False):
-                    raise RuntimeError(movement.get("error", "movement command failed"))
+                if avoid_hostiles:
+                    player_level = self_info.get("character", {}).get("level")
+                    if not isinstance(player_level, int):
+                        player_level = 1
+                    final_status = execute_waypoints_with_avoidance(
+                        config, leader, index, api_base, map_id, waypoints, arrival_radius,
+                        leg_timeout, poll_interval, player_level,
+                        hostile_distance_adjuster, hostile_scan_radius, leader_id,
+                    )
+                else:
+                    movement = post_waypoint_movement(api_base, map_id, waypoints, arrival_radius)
+                    if not movement.get("ok", False):
+                        raise RuntimeError(movement.get("error", "movement command failed"))
 
-                final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
-                movement_status = final_status.get("movement", {})
-                state = movement_status.get("state", "unknown")
-                if state != "arrived":
-                    raise RuntimeError(f"movement ended as {state}: {movement_status.get('error', '')}")
+                    final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
+                    movement_status = final_status.get("movement", {})
+                    state = movement_status.get("state", "unknown")
+                    if state != "arrived":
+                        raise RuntimeError(f"movement ended as {state}: {movement_status.get('error', '')}")
             else:
                 raise RuntimeError(f"route-goto used all {max_legs} legs without arriving")
             save_route_state(config, leader_id, "complete", {
