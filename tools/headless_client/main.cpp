@@ -620,7 +620,31 @@ uint32_t hp = 0, maxHp = 0;
             }},
             {"movement", movementTaskToJsonLocked()},
             {"combat", {{"inCombat", game_.isInCombat()}}},
-            {"health", {{"current", hp}, {"max", maxHp}, {"isDead", game_.isDead()}, {"isPlayerDead", game_.isPlayerDead()}}}
+            {"health", {{"current", hp}, {"max", maxHp}, {"isDead", game_.isDead()}, {"isPlayerDead", game_.isPlayerDead()}}},
+            {"death", deathJsonLocked()}
+        };
+    }
+
+    // Requires stateMutex_ already held (called from worldSelf() while locked).
+    json deathJsonLocked() const {
+        float corpseX = 0.0f, corpseY = 0.0f;
+        const bool hasCorpse = game_.getCorpseCanonicalPos(corpseX, corpseY);
+        json corpse = nullptr;
+        if (hasCorpse) {
+            corpse = {
+                {"mapId", game_.getCorpseMapId()},
+                {"x", corpseX},
+                {"y", corpseY},
+                {"z", game_.getCorpseZ()},
+                {"distance", game_.getCorpseDistance()}
+            };
+        }
+        return {
+            {"isPlayerDead", game_.isPlayerDead()},
+            {"isGhost", game_.isPlayerGhost()},
+            {"canReclaimCorpse", game_.canReclaimCorpse()},
+            {"reclaimDelaySec", game_.getCorpseReclaimDelaySec()},
+            {"corpse", corpse}
         };
     }
 
@@ -858,6 +882,40 @@ uint32_t hp = 0, maxHp = 0;
             {"mapId", game_.getCurrentMapId()},
             {"position", {{"x", game_.getMovementInfo().x}, {"y", game_.getMovementInfo().y}, {"z", game_.getMovementInfo().z}}}
         };
+    }
+
+    json releaseSpiritAction() {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (!game_.isPlayerDead()) {
+            return {{"ok", false}, {"error", "not dead"}};
+        }
+        if (game_.isPlayerGhost()) {
+            return {{"ok", true}, {"alreadyGhost", true}};
+        }
+        game_.releaseSpirit();
+        return {{"ok", true}};
+    }
+
+    json reclaimCorpseAction() {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (!game_.isPlayerGhost()) {
+            return {{"ok", false}, {"error", "not a ghost"}};
+        }
+        if (!game_.canReclaimCorpse()) {
+            const float delay = game_.getCorpseReclaimDelaySec();
+            return {
+                {"ok", false},
+                {"error", delay > 0.0f ? "reclaim delay not yet elapsed" : "not close enough to corpse"},
+                {"reclaimDelaySec", delay},
+                {"corpseDistance", game_.getCorpseDistance()}
+            };
+        }
+        game_.reclaimCorpse();
+        return {{"ok", true}};
     }
 
     void requestGracefulLogout() {
@@ -1592,6 +1650,12 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             json payload = json::parse(body.empty() ? "{}" : body);
             const uint32_t triggerId = static_cast<uint32_t>(std::max(0, payload.value("id", payload.value("triggerId", 0))));
             const auto result = session.fireAreaTrigger(triggerId);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/release-spirit") {
+            const auto result = session.releaseSpiritAction();
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/reclaim-corpse") {
+            const auto result = session.reclaimCorpseAction();
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else {
             sendHttp(client, 404, {{"ok", false}, {"error", "not found"}});

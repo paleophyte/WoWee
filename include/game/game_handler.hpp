@@ -1297,6 +1297,10 @@ public:
         outY = corpseX_;  // server X = canonical Y (west)
         return true;
     }
+    /** Corpse Z (up); only meaningful when getCorpseCanonicalPos() returns true. */
+    float getCorpseZ() const { return corpseZ_; }
+    /** Map the corpse is on, or 0 if no corpse data yet. */
+    uint32_t getCorpseMapId() const { return corpseMapId_; }
     /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
     void reclaimCorpse();
     void releaseSpirit();
