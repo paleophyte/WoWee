@@ -118,6 +118,21 @@ def request_json(method: str, url: str, payload: dict[str, Any] | None = None, t
         return json.loads(response.read().decode("utf-8"))
 
 
+class LeaderDiedError(TimeoutError):
+    """Raised mid-wait when the leader's health reports isDead/isPlayerDead,
+    so route execution stops cleanly with a clear reason instead of
+    continuing to issue movement commands for a dead character until
+    something else times out confusingly. Subclasses TimeoutError (not
+    RuntimeError) so it's automatically caught by every existing "this leg
+    failed" handler in this file without having to touch each one."""
+
+
+def _raise_if_dead(self_info: dict[str, Any]) -> None:
+    health = self_info.get("health", {})
+    if health.get("isDead") or health.get("isPlayerDead"):
+        raise LeaderDiedError("leader died")
+
+
 def point_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
     dx = float(b["x"]) - float(a["x"])
     dy = float(b["y"]) - float(a["y"])
@@ -901,6 +916,13 @@ def wait_for_movement(
                 print(f"    transient status poll failure #{transient_errors}: {exc}")
             time.sleep(poll_interval)
             continue
+        if status.get("health", {}).get("isDead") or status.get("health", {}).get("isPlayerDead"):
+            print("    leader died mid-movement")
+            try:
+                request_json("POST", api_base + "/movement/stop", {"reason": "leader died"})
+            except Exception:
+                pass
+            raise LeaderDiedError("leader died")
         movement = status.get("movement", {})
         state = str(movement.get("state", "idle"))
         waypoint = int(movement.get("waypointIndex", 0) or 0)
@@ -982,6 +1004,7 @@ def cmd_route_goto(
         try:
             for leg_number in range(1, max_legs + 1):
                 self_info = leader_position(config, leader, index)
+                _raise_if_dead(self_info)
                 position = self_info.get("position", {})
                 current_map = int(self_info.get("mapId", map_id))
                 if current_map != map_id:
@@ -1580,18 +1603,33 @@ def cmd_travel_node_execute(
                         break
 
                     target_pos = travel_node_position(to_node)
-                    if target_pos and int(target_pos["mapId"]) == int(from_node.get("mapId", 0)):
-                        print(f"    waiting for position arrival at {to_label}")
-                        try:
-                            _wait_node_arrival(config, leader, index, target_pos, arrival_radius, leg_timeout, poll_interval)
-                        except TimeoutError as exc:
-                            print(f"    {exc}")
-                    else:
-                        print(f"    waiting for map change to {target_pos.get('mapId', '?')} (up to {leg_timeout}s)")
-                        try:
-                            _wait_map_change(config, leader, index, target_pos.get("mapId"), leg_timeout, poll_interval)
-                        except TimeoutError as exc:
-                            print(f"    {exc}")
+                    try:
+                        if target_pos and int(target_pos["mapId"]) == int(from_node.get("mapId", 0)):
+                            print(f"    waiting for position arrival at {to_label}")
+                            try:
+                                _wait_node_arrival(config, leader, index, target_pos, arrival_radius, leg_timeout, poll_interval)
+                            except LeaderDiedError:
+                                raise
+                            except TimeoutError as exc:
+                                print(f"    {exc}")
+                        else:
+                            print(f"    waiting for map change to {target_pos.get('mapId', '?')} (up to {leg_timeout}s)")
+                            try:
+                                _wait_map_change(config, leader, index, target_pos.get("mapId"), leg_timeout, poll_interval)
+                            except LeaderDiedError:
+                                raise
+                            except TimeoutError as exc:
+                                print(f"    {exc}")
+                    except LeaderDiedError as exc:
+                        print(f"    {exc}")
+                        ok = False
+                        complete = False
+                        save_route_state(config, leader_id, "failed", {}, {
+                            **detail,
+                            "failedAt": utc_timestamp(),
+                            "error": str(exc),
+                        })
+                        break
 
                     save_route_state(config, leader_id, "running", {}, {
                         **detail,
@@ -1719,6 +1757,7 @@ def _wait_node_arrival(
         except Exception:
             time.sleep(poll_interval)
             continue
+        _raise_if_dead(self_info)
         position = self_info.get("position", {})
         remaining = point_distance(position, target_pos)
         print(f"    distance to {target_pos.get('name', 'target')}: {remaining:.1f}y")
@@ -1743,6 +1782,7 @@ def _wait_map_change(
         except Exception:
             time.sleep(poll_interval)
             continue
+        _raise_if_dead(self_info)
         current_map = int(self_info.get("mapId", 0))
         print(f"    current map: {current_map}")
         if expected_map_id is not None and current_map == int(expected_map_id):
@@ -1796,6 +1836,7 @@ def _wait_tram_dwell(
             time.sleep(poll_interval)
             continue
 
+        _raise_if_dead(self_info)
         if not self_info.get("transport", {}).get("onTransport"):
             raise TimeoutError("disembarked unexpectedly before the tram stopped")
 
@@ -1947,6 +1988,7 @@ def _board_and_ride_tram(
         except Exception:
             time.sleep(poll_interval)
             continue
+        _raise_if_dead(self_info)
         if self_info.get("transport", {}).get("onTransport"):
             boarded = True
             break
@@ -2012,6 +2054,7 @@ def _board_and_ride_tram(
             except Exception:
                 time.sleep(poll_interval)
                 continue
+            _raise_if_dead(self_info)
             if not self_info.get("transport", {}).get("onTransport"):
                 print(f"{prefix}disembarked")
                 return

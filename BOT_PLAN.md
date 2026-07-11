@@ -96,6 +96,8 @@ Implementation roadmap:
   - [ ] Wire calibrated tram state into `ride_tram` execution: wait for car, board at platform, ride, disembark, then trigger the destination exit.
   - [ ] Move the Deeprun ElevatorTransport math into shared C++ client code so the regular WoWee client and headless automation agree on tram car placement.
 - [ ] Add same-continent landmark routing polish after tram prototype: clearer map-mismatch messages, route feasibility labels, and better named demos.
+- [ ] Make route execution death-aware: check `health.isDead`/`isPlayerDead` (already exposed by `/world/self`) during `route-goto`/`travel-node-execute` and stop cleanly with a clear reported reason instead of continuing to issue movement commands for a dead character until it times out confusingly. Prompted by the low-level Wetlands road crossing on the Grand Expedition route, where mobs stray close enough to the road to be a real risk.
+- [ ] Add passive hostile-proximity awareness: poll `/world/entities` for nearby hostile creatures during a walk leg (position/distance already available) and pause movement if one gets within a danger radius, resuming once clear. Not smart avoidance-routing or combat, just "don't blindly walk into an aggro radius" - cheap because it reuses existing entity polling. Smart routing-around-danger and any combat fallback are Phase 6 territory, not this.
 - [ ] Add surveyed road/handoff waypoints for Ironforge -> Dun Morogh -> Loch Modan -> Wetlands -> Menethil; the first `grand-expedition-v0` dry run stalls when asking for Ironforge -> Menethil as one giant leg.
 - [ ] Survey and capture `stormwind-dwarven-district`, `stormwind-tram-entrance`, `deeprun-tram-stormwind-platform`, `deeprun-tram-ironforge-platform`, and `ironforge-tram-exit`.
   - [x] Seed Stormwind entrance and Deeprun/Ironforge platform nodes from `AreaTrigger.dbc` plus live CMaNGOS `areatrigger_teleport`.
@@ -111,7 +113,7 @@ Known unknowns:
   - [x] Confirm simply moving onto the floor-projected predicted tram position does not attach the headless client to a Deeprun transport; `onTransport` remains false and the character stays at the static floor position.
 - [ ] Determine how to interact with portals and flight masters through available packets/Gossip APIs.
 - [ ] Confirm whether Darkshore <-> Rut'theran flight is available to the test characters or if boat/portal flow should be the canonical Darnassus route.
-- [ ] Decide how aggressive low-level road-following should be around Wetlands deaths: pure road route, spirit-resume support, or escort/guard behavior.
+- [ ] Decide how aggressive low-level road-following should be around Wetlands deaths: pure road route, spirit-resume support, or escort/guard behavior. Near-term plan is death-awareness + hostile-proximity pause (see implementation roadmap above) to fail loud and clean rather than avoid death entirely - actual death recovery (spirit walk back, corpse run, or just re-resurrect and resume-route) is a distinct, harder problem to solve later, not blocking the travel planner work now.
 
 ## Phase 3: Bot Fleet Manager
 
