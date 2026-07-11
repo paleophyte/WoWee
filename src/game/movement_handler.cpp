@@ -2723,10 +2723,16 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
 
 void MovementHandler::loadAreaTriggerDbc() {
     if (owner_.areaTriggerDbcLoadedRef()) return;
-    owner_.areaTriggerDbcLoadedRef() = true;
 
     auto* am = owner_.services().assetManager;
+    // Don't latch "loaded" until the asset manager is actually ready - the
+    // first checkAreaTriggers() tick can land well before asset manager
+    // init finishes (observed in headless mode), and latching here first
+    // would permanently strand areaTriggersRef() empty with no retry and
+    // no warning, silently disabling every area trigger for the process's
+    // lifetime.
     if (!am || !am->isInitialized()) return;
+    owner_.areaTriggerDbcLoadedRef() = true;
 
     auto dbc = am->loadDBC("AreaTrigger.dbc");
     if (!dbc || !dbc->isLoaded()) {
