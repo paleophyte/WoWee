@@ -984,7 +984,7 @@ void WindowManager::renderVendorWindow(game::GameHandler& gameHandler,
                 ImGui::TableSetupColumn("Price", ImGuiTableColumnFlags_WidthFixed, 110.0f);
                 ImGui::TableSetupColumn("Buy", ImGuiTableColumnFlags_WidthFixed, 62.0f);
                 ImGui::TableHeadersRow();
-                // Show all buyback items (most recently sold first)
+                // Show all buyback items (oldest sold first, matching server slot order)
                 for (int i = 0; i < static_cast<int>(buyback.size()); ++i) {
                     const auto& entry = buyback[i];
                     gameHandler.ensureItemInfo(entry.item.itemId);

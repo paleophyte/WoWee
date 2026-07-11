@@ -352,9 +352,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 }
                 if (!removedPending) {
                     if (!buybackItems_.empty()) {
-                        uint64_t frontGuid = buybackItems_.front().itemGuid;
-                        if (pendingSellToBuyback_.erase(frontGuid) > 0) {
-                            buybackItems_.pop_front();
+                        uint64_t backGuid = buybackItems_.back().itemGuid;
+                        if (pendingSellToBuyback_.erase(backGuid) > 0) {
+                            buybackItems_.pop_back();
                             removedPending = true;
                         }
                     }
@@ -1055,8 +1055,8 @@ void InventoryHandler::sellItemBySlot(int backpackIndex) {
         sold.itemGuid = itemGuid;
         sold.item = slot.item;
         sold.count = 1;
-        buybackItems_.push_front(sold);
-        if (buybackItems_.size() > 12) buybackItems_.pop_back();
+        buybackItems_.push_back(sold);
+        if (buybackItems_.size() > 12) buybackItems_.pop_front();
         pendingSellToBuyback_[itemGuid] = sold;
         sellItem(currentVendorItems_.vendorGuid, itemGuid, 1);
     } else if (itemGuid == 0) {
@@ -1101,8 +1101,8 @@ void InventoryHandler::sellItemInBag(int bagIndex, int slotIndex) {
         sold.itemGuid = itemGuid;
         sold.item = slot.item;
         sold.count = 1;
-        buybackItems_.push_front(sold);
-        if (buybackItems_.size() > 12) buybackItems_.pop_back();
+        buybackItems_.push_back(sold);
+        if (buybackItems_.size() > 12) buybackItems_.pop_front();
         pendingSellToBuyback_[itemGuid] = sold;
         sellItem(currentVendorItems_.vendorGuid, itemGuid, 1);
     } else if (itemGuid == 0) {
