@@ -648,14 +648,25 @@ uint32_t hp = 0, maxHp = 0;
             if (!entity) continue;
             const uint64_t guid = entity->getGuid();
             ++total;
-            const float dx = entity->getX() - move.x;
-            const float dy = entity->getY() - move.y;
-            const float dz = entity->getZ() - move.z;
-            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (radius >= 0.0f && distance > radius) continue;
 
             const bool isTransport = game_.isTransportGuid(guid);
             if (onlyTransports && !isTransport) continue;
+
+            // Transports report a static presence-echo position (see the class
+            // comment above) - the live simulated position, when available, is
+            // what callers actually need for proximity/boarding checks. Using
+            // the stale static field here made every distance/radius decision
+            // for a moving tram car wrong regardless of where it actually was.
+            const auto liveIt = isTransport ? liveTransports.find(guid) : liveTransports.end();
+            const bool hasLive = liveIt != liveTransports.end();
+            const float refX = hasLive ? liveIt->second.position.x : entity->getX();
+            const float refY = hasLive ? liveIt->second.position.y : entity->getY();
+            const float refZ = hasLive ? liveIt->second.position.z : entity->getZ();
+            const float dx = refX - move.x;
+            const float dy = refY - move.y;
+            const float dz = refZ - move.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (radius >= 0.0f && distance > radius) continue;
 
             json item = {
                 {"guid", guid},
@@ -667,13 +678,11 @@ uint32_t hp = 0, maxHp = 0;
                 {"distance", distance}
             };
 
-            if (isTransport) {
-                if (auto it = liveTransports.find(guid); it != liveTransports.end()) {
-                    const auto& t = it->second;
-                    item["livePosition"] = {{"x", t.position.x}, {"y", t.position.y}, {"z", t.position.z}};
-                    item["localPathTimeMs"] = t.localClockMs;
-                    item["playerOnBoard"] = t.playerOnBoard;
-                }
+            if (isTransport && hasLive) {
+                const auto& t = liveIt->second;
+                item["livePosition"] = {{"x", t.position.x}, {"y", t.position.y}, {"z", t.position.z}};
+                item["localPathTimeMs"] = t.localClockMs;
+                item["playerOnBoard"] = t.playerOnBoard;
             }
 
             if (entity->isUnit()) {
@@ -943,6 +952,12 @@ private:
 
         if (assetManager_.initialize(dataPath.string()) || assetManager_.initializeDbcOnly(dataPath.string())) {
             assetManager_.setExpansionDataPath(expansionPath.string());
+            // Without this, GameHandler::services().assetManager stays null for the
+            // whole process, and anything gated on it (e.g. MovementHandler's
+            // AreaTrigger.dbc load) silently never runs - headless has its own
+            // assetManager_ member but nothing previously wired it into the shared
+            // GameServices struct GameHandler was constructed with.
+            services_.assetManager = &assetManager_;
             rendering::EmoteRegistry::instance().loadFromDbc(&assetManager_);
             // Without this, TransportManager::hasPathForEntry() never finds a real
             // moving path for any transport (Deeprun Tram, boats, elevators) - they

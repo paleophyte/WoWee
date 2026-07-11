@@ -1609,6 +1609,7 @@ def cmd_travel_node_execute(
                             board_timeout=leg_timeout,
                             ride_timeout=leg_timeout,
                             prefix="    ",
+                            from_node=from_node,
                         )
                     except TimeoutError as exc:
                         print(f"    tram transit timeout: {exc}")
@@ -1786,6 +1787,7 @@ def _board_and_ride_tram(
     ride_timeout: float,
     scan_radius: float = 80.0,
     prefix: str = "",
+    from_node: dict[str, Any] | None = None,
 ) -> None:
     """Watch for a live Deeprun tram car, walk the leader onto it, ride to
     to_node, then walk off. Raises TimeoutError if boarding or transit stalls.
@@ -1801,6 +1803,26 @@ def _board_and_ride_tram(
         from deeprun_tram import DEEPRUN_TRAM_ENTRIES
     except ImportError:
         from bot_fleet_manager.deeprun_tram import DEEPRUN_TRAM_ENTRIES
+
+    # The AreaTrigger landing spot (a platform node's own x/y/z) can be tens of
+    # yards from where the tram actually runs - live-observed on both ends of
+    # the Stormwind<->Ironforge crossing, where the trigger lands you 30-63
+    # yards from the real dwell point on the track. If the boarding node
+    # records a separate trackPosition, stage there first so the scan-and-
+    # chase loop below starts close enough to actually catch a car.
+    track_position = (from_node or {}).get("trackPosition")
+    if track_position:
+        api = config.api_base_for(leader, index)
+        try:
+            self_info = leader_position(config, leader, index)
+            request_json("POST", api + "/movement/goto", {
+                "mapId": int(self_info.get("mapId", 0)),
+                "x": float(track_position["x"]), "y": float(track_position["y"]), "z": float(track_position["z"]),
+                "arrivalRadius": 3.0,
+            })
+            _wait_node_arrival(config, leader, index, track_position, 3.0, board_timeout, poll_interval)
+        except TimeoutError as exc:
+            print(f"{prefix}failed to reach tram boarding position: {exc}")
 
     boarded = False
     deadline = time.monotonic() + board_timeout
@@ -1820,7 +1842,10 @@ def _board_and_ride_tram(
         trams = _nearby_deeprun_trams(entities, DEEPRUN_TRAM_ENTRIES)
         if trams:
             nearest = trams[0]
-            pos = nearest["position"]
+            # position is the static GameObject spawn/presence-echo field, which
+            # never moves - livePosition (when the server has sent us an update
+            # for this transport) is where the car actually is right now.
+            pos = nearest.get("livePosition") or nearest["position"]
             print(f"{prefix}tram entry={nearest.get('entry')} {float(nearest.get('distance', 0.0)):.1f}y away — walking onto it")
             try:
                 request_json("POST", api_base + "/movement/goto", {
@@ -1838,7 +1863,14 @@ def _board_and_ride_tram(
         raise TimeoutError(f"did not board a tram car within {board_timeout:.1f}s")
     print(f"{prefix}boarded tram")
 
-    to_pos = travel_node_position(to_node)
+    # Same track/landing-spot gap as the boarding side: ride to the real dwell
+    # point when we know it, not the (possibly tens-of-yards-off) AreaTrigger
+    # landing coordinate, or arrival will never register within a sane radius.
+    to_track = to_node.get("trackPosition")
+    to_pos = (
+        {"mapId": int(to_node.get("mapId", 0)), "x": float(to_track["x"]), "y": float(to_track["y"]), "z": float(to_track["z"])}
+        if to_track else travel_node_position(to_node)
+    )
     if not to_pos:
         return
 
@@ -1882,6 +1914,7 @@ def cmd_board_tram(
     leader_ids: list[str] | None = None,
 ) -> int:
     registry = load_travel_registry(registry_path) if (from_node_id or to_node_id) else None
+    from_node = None
     from_pos = None
     to_node = None
     to_pos = None
@@ -1931,6 +1964,7 @@ def cmd_board_tram(
                 poll_interval=poll_interval,
                 board_timeout=board_timeout,
                 ride_timeout=ride_timeout,
+                from_node=from_node,
                 scan_radius=scan_radius,
                 prefix=f"{leader_id}: ",
             )

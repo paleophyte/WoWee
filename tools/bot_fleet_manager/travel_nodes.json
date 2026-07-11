@@ -88,6 +88,12 @@
       "radius": 12.0,
       "name": "Deeprun Tram Stormwind Platform",
       "description": "Deeprun arrival from Stormwind AreaTrigger 2173; exit trigger 2171 is nearby",
+      "trackPosition": {
+        "x": 2460.06,
+        "y": 4.58,
+        "z": 5.9,
+        "note": "The AreaTrigger 2173 landing spot (this node's own x/y/z) is ~63 yards from the actual tram dwell point on the track - live-observed during headless testing on 2026-07-11. Used both to stage before boarding and as the ride arrival target."
+      },
       "verified": true,
       "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
       "areaTrigger": {
@@ -107,8 +113,37 @@
           "to": "deeprun-tram-ironforge-platform",
           "mode": "ride_tram",
           "description": "Board tram, wait for transit, disembark on the Ironforge side"
+        },
+        {
+          "to": "stormwind-tram-exit",
+          "mode": "exit_instance",
+          "description": "Exit Deeprun Tram into Stormwind (return leg)"
         }
       ]
+    },
+    "stormwind-tram-exit": {
+      "type": "tram_entrance",
+      "mapId": 0,
+      "x": 524.0679931640625,
+      "y": -8354.23046875,
+      "z": 91.7970962524414,
+      "radius": 12.0,
+      "name": "Stormwind Deeprun Tram Exit",
+      "description": "AreaTrigger 2171 target: Deeprun Tram to Stormwind (return leg landing spot, mirrors ironforge-tram-exit)",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "id": 2171,
+        "sourceMapId": 369,
+        "sourceX": 2490.8798828125,
+        "sourceY": 80.16329956054688,
+        "sourceZ": -1.8569300174713135,
+        "targetMapId": 0,
+        "targetX": 524.0679931640625,
+        "targetY": -8354.23046875,
+        "targetZ": 91.7970962524414,
+        "targetOrientation": 2.35619
+      }
     },
     "deeprun-tram-ironforge-platform": {
       "type": "tram_platform",
@@ -119,6 +154,12 @@
       "radius": 12.0,
       "name": "Deeprun Tram Ironforge Platform",
       "description": "Surveyed Ironforge-side Deeprun Tram platform near the portal instance; AreaTrigger 2175 lands nearby but not on this platform",
+      "trackPosition": {
+        "x": -21.59,
+        "y": 4.58,
+        "z": 6.84,
+        "note": "This node's own x/y/z (from AreaTrigger survey) is ~32 yards from the actual tram dwell point on the track - live-observed during headless testing on 2026-07-11. Used both to stage before boarding and as the ride arrival target."
+      },
       "verified": true,
       "source": "live Codexvale survey after real-client placement + Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
       "areaTrigger": {
@@ -141,6 +182,11 @@
           "to": "ironforge-tram-exit",
           "mode": "exit_instance",
           "description": "Exit Deeprun Tram into Ironforge"
+        },
+        {
+          "to": "deeprun-tram-stormwind-platform",
+          "mode": "ride_tram",
+          "description": "Board tram, wait for transit, disembark on the Stormwind side (return leg)"
         }
       ]
     },
@@ -167,6 +213,33 @@
         "targetZ": 501.8680114746094,
         "targetOrientation": 1.48353
       }
+    },
+    "ironforge-tram-entrance": {
+      "type": "tram_entrance",
+      "mapId": 0,
+      "x": -1330.4599609375,
+      "y": -4840.259765625,
+      "z": 508.1719970703125,
+      "radius": 10.0,
+      "name": "Ironforge Deeprun Tram Entrance",
+      "description": "AreaTrigger 2175: Ironforge to Deeprun Tram (return leg boarding approach, mirrors stormwind-tram-entrance)",
+      "verified": true,
+      "source": "Data/dbfilesclient/areatrigger.json + live tbcmangos.areatrigger_teleport",
+      "areaTrigger": {
+        "id": 2175,
+        "targetMapId": 369,
+        "targetX": 10.393199920654297,
+        "targetY": 69.22769927978516,
+        "targetZ": -4.296649932861328,
+        "targetOrientation": 3.14159
+      },
+      "links": [
+        {
+          "to": "deeprun-tram-ironforge-platform",
+          "mode": "enter_instance",
+          "description": "Enter Deeprun Tram from Ironforge"
+        }
+      ]
     },
     "ironforge-city": {
       "type": "walk",
@@ -309,6 +382,36 @@
         "ruttheran-dock",
         "ruttheran-darnassus-portal",
         "darnassus"
+      ]
+    },
+    "tram-stormwind-to-ironforge": {
+      "name": "Deeprun Tram: Stormwind FM -> Ironforge FM",
+      "description": "Round-trip test cycle leg. Stormwind Flight Master to Ironforge Flight Master via the Deeprun Tram.",
+      "nodes": [
+        "stormwind-flight-master",
+        "stormwind-city",
+        "stormwind-dwarven-district",
+        "stormwind-tram-entrance",
+        "deeprun-tram-stormwind-platform",
+        "deeprun-tram-ironforge-platform",
+        "ironforge-tram-exit",
+        "ironforge-city",
+        "ironforge-flight-master"
+      ]
+    },
+    "tram-ironforge-to-stormwind": {
+      "name": "Deeprun Tram: Ironforge FM -> Stormwind FM",
+      "description": "Round-trip test cycle leg. Ironforge Flight Master to Stormwind Flight Master via the Deeprun Tram.",
+      "nodes": [
+        "ironforge-flight-master",
+        "ironforge-city",
+        "ironforge-tram-entrance",
+        "deeprun-tram-ironforge-platform",
+        "deeprun-tram-stormwind-platform",
+        "stormwind-tram-exit",
+        "stormwind-dwarven-district",
+        "stormwind-city",
+        "stormwind-flight-master"
       ]
     },
     "alliance-flight-nodes-v0": {
