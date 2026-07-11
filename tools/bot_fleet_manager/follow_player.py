@@ -1,14 +1,18 @@
-"""Have a headless leader trail a live player around, logging waypoints as it goes.
+"""Have a headless leader trail a live player around, cataloging the walked
+path as a reusable survey file.
 
 Polls the leader's own /world/entities for a PLAYER by name, and re-issues
 /movement/goto toward that player's live position whenever they've moved far
-enough away. Each commanded position is appended to a JSON waypoint log so a
-survey run can be turned into travel_nodes.json entries afterward.
+enough away. Each commanded position is appended to a catalog file at
+<catalog-dir>/<map-name>/<route-name>.json, which `bot_fleet_manager.py
+replay-survey` can walk a leader through later - a human-verified path
+sidesteps whatever the automated pathfinder struggles with (navmesh gaps,
+mob-dense corridors), at the cost of needing a live human to walk it once.
 
 Usage:
-    python follow_player.py <api_base> <player_name> [--follow-distance 12]
-                             [--repath-threshold 15] [--poll-interval 2.0]
-                             [--log <path>]
+    python follow_player.py <api_base> <player_name> <map_name> <route_name>
+                             [--follow-distance 12] [--repath-threshold 15]
+                             [--poll-interval 2.0] [--catalog-dir ...]
 """
 
 import argparse
@@ -40,24 +44,46 @@ def point_distance(a: dict, b: dict) -> float:
     return ((a["x"] - b["x"]) ** 2 + (a["y"] - b["y"]) ** 2 + (a["z"] - b["z"]) ** 2) ** 0.5
 
 
+def catalog_path(catalog_dir: str, map_name: str, route_name: str) -> Path:
+    return Path(catalog_dir) / map_name / f"{route_name}.json"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("api_base")
     parser.add_argument("player_name")
+    parser.add_argument("map_name", help="Catalog subdirectory, e.g. 'dun-morogh', 'wetlands'")
+    parser.add_argument("route_name", help="Catalog file name, e.g. 'ironforge-to-menethil'")
     parser.add_argument("--follow-distance", type=float, default=12.0,
                          help="arrivalRadius for each goto - how close the leader stops behind the target")
     parser.add_argument("--repath-threshold", type=float, default=15.0,
-                         help="minimum player movement (yards) before issuing a new goto")
+                         help="minimum player movement (yards) before issuing a new goto "
+                              "(also the effective waypoint spacing in the saved catalog)")
     parser.add_argument("--poll-interval", type=float, default=2.0)
-    parser.add_argument("--log", default="tools/bot_fleet_manager/runtime/follow_waypoints.json")
+    parser.add_argument("--catalog-dir", default="tools/bot_fleet_manager/road_surveys")
+    parser.add_argument("--description", default="", help="Free-text note saved with the catalog entry")
     parser.add_argument("--search-radius", type=float, default=150.0)
     args = parser.parse_args()
 
-    log_path = Path(args.log)
+    log_path = catalog_path(args.catalog_dir, args.map_name, args.route_name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     waypoints: list[dict] = []
+    started_at = time.time()
+
+    def save():
+        catalog = {
+            "mapName": args.map_name,
+            "routeName": args.route_name,
+            "playerName": args.player_name,
+            "description": args.description,
+            "capturedAt": started_at,
+            "mapId": waypoints[0]["mapId"] if waypoints else None,
+            "waypoints": [{"x": w["x"], "y": w["y"], "z": w["z"]} for w in waypoints],
+        }
+        log_path.write_text(json.dumps(catalog, indent=2))
 
     print(f"waiting to spot {args.player_name} within {args.search_radius}y...")
+    print(f"catalog: {log_path}")
     last_target: dict | None = None
     last_map_id = None
 
@@ -109,12 +135,8 @@ def main() -> int:
                 print(f"goto failed: {exc}")
                 time.sleep(args.poll_interval)
                 continue
-            entry = {
-                "t": time.time(), "mapId": map_id,
-                "x": pos["x"], "y": pos["y"], "z": pos["z"],
-            }
-            waypoints.append(entry)
-            log_path.write_text(json.dumps(waypoints, indent=2))
+            waypoints.append({"mapId": map_id, "x": pos["x"], "y": pos["y"], "z": pos["z"]})
+            save()
             print(f"-> following to ({pos['x']:.1f},{pos['y']:.1f},{pos['z']:.1f}) mapId={map_id} "
                   f"[{len(waypoints)} waypoints logged]")
             last_target = pos
@@ -122,6 +144,7 @@ def main() -> int:
 
         time.sleep(args.poll_interval)
 
+    print(f"stopped with {len(waypoints)} waypoints saved to {log_path}")
     return 0
 
 

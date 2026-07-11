@@ -1332,6 +1332,92 @@ def cmd_route_goto(
     return 0 if ok else 1
 
 
+def load_survey_catalog(path: Path) -> dict[str, Any]:
+    catalog = load_json(path)
+    if not isinstance(catalog.get("waypoints"), list) or not catalog["waypoints"]:
+        raise ValueError(f"{path}: no waypoints in catalog")
+    if catalog.get("mapId") is None:
+        raise ValueError(f"{path}: catalog has no mapId")
+    return catalog
+
+
+def cmd_replay_survey(
+    config: FleetConfig,
+    catalog_path_str: str,
+    arrival_radius: float,
+    leg_timeout: float,
+    poll_interval: float,
+    chunk_size: int,
+    start_index: int,
+    avoid_hostiles: bool,
+    hostile_distance_adjuster: float,
+    hostile_scan_radius: float,
+    fleet: str = "",
+    leader_ids: list[str] | None = None,
+) -> int:
+    """Walk a leader through a human-captured route catalog (see
+    follow_player.py) instead of the automated pathfinding service - a
+    human-verified path sidesteps whatever the pathfinder struggles with."""
+    catalog = load_survey_catalog(Path(catalog_path_str))
+    map_id = int(catalog["mapId"])
+    waypoints = catalog["waypoints"][start_index:]
+    if not waypoints:
+        print(f"start_index {start_index} is past the end of the catalog "
+              f"({len(catalog['waypoints'])} waypoints)")
+        return 1
+    print(f"replaying '{catalog.get('routeName')}' ({catalog.get('mapName')}): "
+          f"{len(waypoints)} waypoints starting at index {start_index}, "
+          f"captured from {catalog.get('playerName')}")
+
+    selected = config.selected_leaders(fleet, leader_ids)
+    if not selected:
+        print("No matching leaders")
+        return 1
+    ok = True
+    for index, leader in selected:
+        leader_id = leader.get("id", f"leader-{index + 1}")
+        api_base = config.api_base_for(leader, index)
+        try:
+            self_info = leader_position(config, leader, index)
+            _raise_if_dead(self_info)
+            current_map = int(self_info.get("mapId", map_id))
+            if current_map != map_id:
+                raise ValueError(f"leader is on map {current_map}, survey is for map {map_id}")
+
+            player_level = self_info.get("character", {}).get("level")
+            if not isinstance(player_level, int):
+                player_level = 1
+
+            wp_payload = [{"x": w["x"], "y": w["y"], "z": w["z"]} for w in waypoints]
+            if avoid_hostiles:
+                execute_waypoints_with_avoidance(
+                    config, leader, index, api_base, map_id, wp_payload, arrival_radius,
+                    leg_timeout, poll_interval, player_level,
+                    hostile_distance_adjuster, hostile_scan_radius, leader_id,
+                    chunk_size=chunk_size,
+                )
+            else:
+                for start in range(0, len(wp_payload), chunk_size):
+                    chunk = wp_payload[start:start + chunk_size]
+                    movement = post_waypoint_movement(api_base, map_id, chunk, arrival_radius)
+                    if not movement.get("ok", False):
+                        raise RuntimeError(movement.get("error", "movement command failed"))
+                    final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
+                    state = final_status.get("movement", {}).get("state", "unknown")
+                    if state != "arrived":
+                        raise RuntimeError(f"movement ended as {state}")
+                    print(f"{leader_id}: reached waypoint {start + len(chunk)}/{len(wp_payload)}")
+            print(f"{leader_id}: survey replay complete")
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, ValueError, RuntimeError) as exc:
+            ok = False
+            print(f"{leader_id}: survey replay failed ({exc})")
+            try:
+                request_json("POST", api_base + "/movement/stop", {"reason": "survey replay failed"})
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+                pass
+    return 0 if ok else 1
+
+
 def cmd_landmarks() -> int:
     for name in sorted(LANDMARKS):
         target = LANDMARKS[name]
@@ -2862,6 +2948,22 @@ def main(argv: list[str]) -> int:
                                     help="Multiplier on the computed danger radius (>1 = more cautious)")
     route_goto_parser.add_argument("--hostile-scan-radius", type=float, default=100.0,
                                     help="How far out to scan for hostiles each leg")
+    replay_survey_parser = sub.add_parser(
+        "replay-survey",
+        help="Walk a leader through a human-captured route catalog (see follow_player.py) instead of the automated pathfinder",
+    )
+    replay_survey_parser.add_argument("--fleet", default="")
+    replay_survey_parser.add_argument("--leader", action="append", default=[])
+    replay_survey_parser.add_argument("catalog_path")
+    replay_survey_parser.add_argument("--arrival-radius", type=float, default=8.0)
+    replay_survey_parser.add_argument("--leg-timeout", type=float, default=180.0)
+    replay_survey_parser.add_argument("--poll-interval", type=float, default=1.0)
+    replay_survey_parser.add_argument("--chunk-size", type=int, default=15)
+    replay_survey_parser.add_argument("--start-index", type=int, default=0,
+                                       help="Resume from this waypoint index instead of the start")
+    replay_survey_parser.add_argument("--avoid-hostiles", action="store_true")
+    replay_survey_parser.add_argument("--hostile-distance-adjuster", type=float, default=1.0)
+    replay_survey_parser.add_argument("--hostile-scan-radius", type=float, default=100.0)
     route_demo_parser = sub.add_parser("route-demo", help="Run a named route demo using built-in landmarks")
     route_demo_parser.add_argument("--fleet", default="")
     route_demo_parser.add_argument("--leader", action="append", default=[])
@@ -3056,6 +3158,21 @@ def main(argv: list[str]) -> int:
             args.avoid_hostiles,
             args.hostile_distance_adjuster,
             args.hostile_scan_radius,
+        )
+    if args.command == "replay-survey":
+        return cmd_replay_survey(
+            config,
+            args.catalog_path,
+            args.arrival_radius,
+            args.leg_timeout,
+            args.poll_interval,
+            args.chunk_size,
+            args.start_index,
+            args.avoid_hostiles,
+            args.hostile_distance_adjuster,
+            args.hostile_scan_radius,
+            args.fleet,
+            args.leader,
         )
     if args.command == "route-demo":
         return cmd_route_demo(
