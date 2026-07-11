@@ -1751,6 +1751,79 @@ def _wait_map_change(
     raise TimeoutError(f"map did not change to {expected_map_id} within {timeout_seconds:.1f}s")
 
 
+def _wait_tram_dwell(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    timeout_seconds: float,
+    poll_interval: float,
+    destination_hint: dict[str, Any] | None = None,
+    destination_radius_yards: float = 400.0,
+    min_travel_yards: float = 150.0,
+    dwell_epsilon_yards: float = 1.0,
+    dwell_polls_required: int = 3,
+    prefix: str = "",
+) -> None:
+    """Wait for the tram the leader just boarded to stop at the destination end.
+
+    "The car stopped" alone isn't enough: a Deeprun car dwells at *both*
+    ends of its loop, and if this wait starts mid-cycle (e.g. resuming an
+    in-progress ride), the first stop it observes can be back at the
+    origin, not the destination - confirmed live, where this function
+    without the destination check happily reported "arrived" 2400+ yards
+    from the actual target. destination_hint doesn't need to be precise
+    (an AreaTrigger-derived survey coordinate is fine): the two ends of the
+    tunnel are ~2500 yards apart, so even a loose few-hundred-yard radius
+    reliably tells the platforms apart without needing an exact dwell spot.
+
+    Requires the leader to have moved at least min_travel_yards from where
+    this wait started before any stop counts, so the pre-departure dwell at
+    the boarding platform can't be mistaken for arrival either. Raises
+    TimeoutError if the leader is no longer on a transport (unexpected
+    early disembark) or the car never stops at the destination end within
+    timeout_seconds.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    start_pos: dict[str, Any] | None = None
+    last_pos: dict[str, Any] | None = None
+    moved_away = False
+    dwell_count = 0
+
+    while time.monotonic() < deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+
+        if not self_info.get("transport", {}).get("onTransport"):
+            raise TimeoutError("disembarked unexpectedly before the tram stopped")
+
+        pos = self_info.get("position", {})
+        if start_pos is None:
+            start_pos = pos
+
+        if not moved_away:
+            if point_distance(pos, start_pos) >= min_travel_yards:
+                moved_away = True
+                print(f"{prefix}under way, watching for the car to stop")
+        elif last_pos is not None and point_distance(pos, last_pos) <= dwell_epsilon_yards:
+            dwell_count += 1
+            if dwell_count >= dwell_polls_required:
+                if destination_hint is None or point_distance(pos, destination_hint) <= destination_radius_yards:
+                    print(f"{prefix}car has stopped at the destination")
+                    return
+                print(f"{prefix}car stopped, but not at the destination end - waiting for it to depart and come back")
+                dwell_count = 0
+        else:
+            dwell_count = 0
+
+        last_pos = pos
+        time.sleep(poll_interval)
+
+    raise TimeoutError(f"tram never stopped at the destination within {timeout_seconds:.1f}s")
+
+
 def _nearby_deeprun_trams(entities_response: dict[str, Any], entries: "range") -> list[dict[str, Any]]:
     trams = [
         item for item in entities_response.get("entities", [])
@@ -1774,6 +1847,48 @@ def _tram_exit_walk_target(node: dict[str, Any]) -> dict[str, Any] | None:
         "y": float(at["exitSourceY"]),
         "z": float(at["exitSourceZ"]),
     }
+
+
+def _recover_stranded_in_deeprun_tunnel(
+    config: FleetConfig,
+    leader: dict[str, Any],
+    index: int,
+    to_node: dict[str, Any],
+    leg_timeout: float,
+    poll_interval: float,
+    prefix: str = "",
+) -> bool:
+    """Best-effort recovery when a tram ride/disembark doesn't resolve cleanly.
+
+    Headless has no local terrain collision, so there's no way to "snap to
+    ground" a leader left stranded mid-tunnel (e.g. an unexpected disembark
+    with no floor underneath - see the wrong-end-dwell bug this was written
+    for). But the Deeprun Tram is a real instance with real navmesh data, so
+    the mundane fix works: just walk the rest of the way to the destination
+    platform like any other leg, using the same pathfinding already used
+    everywhere else. Returns True if it got there.
+    """
+    try:
+        self_info = leader_position(config, leader, index)
+    except Exception:
+        return False
+    if int(self_info.get("mapId", -1)) != 369:
+        return False  # not in the tunnel (or somewhere worse) - this can't help
+    if self_info.get("transport", {}).get("onTransport"):
+        return False  # still riding, not actually stranded
+
+    to_pos = travel_node_position(to_node)
+    if not to_pos:
+        return False
+    dist = point_distance(self_info.get("position", {}), to_pos)
+    print(f"{prefix}stranded in the tunnel, {dist:.0f}y from {to_node.get('name', 'the platform')} — walking the rest of the way")
+    leader_id = leader.get("id", f"leader-{index + 1}")
+    result = cmd_route_goto(
+        config, int(to_pos["mapId"]), float(to_pos["x"]), float(to_pos["y"]), float(to_pos["z"]),
+        arrival_radius=10.0, max_legs=8, leg_timeout=leg_timeout, poll_interval=poll_interval,
+        min_progress_yards=5.0, leader_ids=[leader_id],
+    )
+    return result == 0
 
 
 def _board_and_ride_tram(
@@ -1863,41 +1978,55 @@ def _board_and_ride_tram(
         raise TimeoutError(f"did not board a tram car within {board_timeout:.1f}s")
     print(f"{prefix}boarded tram")
 
-    # Same track/landing-spot gap as the boarding side: ride to the real dwell
-    # point when we know it, not the (possibly tens-of-yards-off) AreaTrigger
-    # landing coordinate, or arrival will never register within a sane radius.
-    to_track = to_node.get("trackPosition")
-    to_pos = (
-        {"mapId": int(to_node.get("mapId", 0)), "x": float(to_track["x"]), "y": float(to_track["y"]), "z": float(to_track["z"])}
-        if to_track else travel_node_position(to_node)
-    )
-    if not to_pos:
-        return
-
-    _wait_node_arrival(config, leader, index, to_pos, float(to_node.get("radius", 12.0)), ride_timeout, poll_interval)
-
-    walk_off = _tram_exit_walk_target(to_node) or to_pos
-    print(f"{prefix}walking off the tram")
+    # A precise fixed target coordinate + tight radius turned out to be
+    # fragile: the real dwell point where a car actually stops varies by
+    # tens of yards run to run (even for the same physical platform), so a
+    # tight arrival check either times out on a wide pass or requires a
+    # radius so loose it can trigger mid-transit. The car genuinely
+    # stopping is a directly observable fact - the leader's own reported
+    # position holds still while onTransport - so wait for that instead of
+    # guessing an exact coordinate. Still pass the node's approximate
+    # position as a loose destination check: the two ends of the tunnel are
+    # ~2500 yards apart, so this reliably tells them apart without needing
+    # precision, and without it a dwell at the *wrong* end (e.g. this wait
+    # starting mid-cycle, already heading back toward the origin) gets
+    # mistaken for arrival.
+    to_pos = travel_node_position(to_node)
     try:
-        request_json("POST", api_base + "/movement/goto", {
-            "mapId": walk_off["mapId"], "x": walk_off["x"], "y": walk_off["y"], "z": walk_off["z"],
-            "arrivalRadius": 2.0,
-        })
-    except Exception as exc:
-        print(f"{prefix}disembark goto failed: {exc}")
+        _wait_tram_dwell(config, leader, index, ride_timeout, poll_interval, destination_hint=to_pos, prefix=prefix)
 
-    disembark_deadline = time.monotonic() + min(ride_timeout, 20.0)
-    while time.monotonic() < disembark_deadline:
+        walk_off = _tram_exit_walk_target(to_node) or to_pos
+        print(f"{prefix}walking off the tram")
         try:
-            self_info = leader_position(config, leader, index)
-        except Exception:
+            request_json("POST", api_base + "/movement/goto", {
+                "mapId": walk_off["mapId"], "x": walk_off["x"], "y": walk_off["y"], "z": walk_off["z"],
+                "arrivalRadius": 2.0,
+            })
+        except Exception as exc:
+            print(f"{prefix}disembark goto failed: {exc}")
+
+        disembark_deadline = time.monotonic() + min(ride_timeout, 20.0)
+        while time.monotonic() < disembark_deadline:
+            try:
+                self_info = leader_position(config, leader, index)
+            except Exception:
+                time.sleep(poll_interval)
+                continue
+            if not self_info.get("transport", {}).get("onTransport"):
+                print(f"{prefix}disembarked")
+                return
             time.sleep(poll_interval)
-            continue
-        if not self_info.get("transport", {}).get("onTransport"):
-            print(f"{prefix}disembarked")
+        raise TimeoutError("did not disembark after walking off the tram")
+    except TimeoutError as exc:
+        # Covers both "disembarked unexpectedly before the tram stopped" (the
+        # wrong-end-dwell/no-floor bug) and "did not disembark" - in either
+        # case, if the leader ended up off the transport somewhere in the
+        # tunnel, walking the rest of the way beats leaving it stranded.
+        print(f"{prefix}ride did not complete cleanly ({exc}); attempting recovery")
+        if _recover_stranded_in_deeprun_tunnel(config, leader, index, to_node, ride_timeout, poll_interval, prefix=prefix):
+            print(f"{prefix}recovered on foot")
             return
-        time.sleep(poll_interval)
-    raise TimeoutError("did not disembark after walking off the tram")
+        raise
 
 
 def cmd_board_tram(
