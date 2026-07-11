@@ -1246,8 +1246,19 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         if (owner_.addonEventCallbackRef())
             owner_.addonEventCallbackRef()("UNIT_SPELLCAST_STOP", {"player", std::to_string(data.spellId)});
 
+        // Craft queue: re-cast if more crafts remaining
+        if (craftQueueRemaining_ > 0 && craftQueueSpellId_ == data.spellId) {
+            --craftQueueRemaining_;
+            if (craftQueueRemaining_ > 0) {
+                LOG_INFO("Craft queue: re-casting spell=", craftQueueSpellId_,
+                         " remaining=", craftQueueRemaining_);
+                castSpell(craftQueueSpellId_, 0);
+            } else {
+                craftQueueSpellId_ = 0;
+            }
+        }
         // Spell queue: fire the next queued spell
-        if (queuedSpellId_ != 0) {
+        else if (queuedSpellId_ != 0) {
             uint32_t nextSpell  = queuedSpellId_;
             uint64_t nextTarget = queuedSpellTarget_;
             queuedSpellId_     = 0;
@@ -3333,15 +3344,6 @@ void SpellHandler::parseEffectCreateItem(network::Packet& packet, uint32_t effec
         owner_.addSystemChatMessage(msg);
         LOG_DEBUG("SMSG_SPELLLOGEXECUTE CREATE_ITEM: spell=", spellId,
                   " item=", itemEntry, " name=", itemName);
-
-        // Repeat-craft queue: re-cast if more crafts remaining
-        if (craftQueueRemaining_ > 0 && craftQueueSpellId_ == spellId) {
-            --craftQueueRemaining_;
-            if (craftQueueRemaining_ > 0)
-                castSpell(craftQueueSpellId_, 0);
-            else
-                craftQueueSpellId_ = 0;
-        }
     }
 }
 
