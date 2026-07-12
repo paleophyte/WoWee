@@ -1250,6 +1250,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     backdropInstanceId_ = charRenderer_->createInstance(PREVIEW_BACKDROP_MODEL_ID, glm::vec3(0.0f));
     if (backdropInstanceId_ == 0) return;
     charRenderer_->setInstanceIgnoreCulling(backdropInstanceId_, true);
+    charRenderer_->setInstanceUnlit(backdropInstanceId_, true);
 
     // loadCharacter() has already framed the camera on the character: it sits on
     // +Y at (0, distance, centerZ). Keep that framing distance and height, but move

@@ -131,6 +131,9 @@ public:
     /** Exempt an instance from distance/frustum culling (scene backdrops). */
     void setInstanceIgnoreCulling(uint32_t instanceId, bool ignore);
 
+    /** Render an instance with its texture colours as authored, unlit (scene backdrops). */
+    void setInstanceUnlit(uint32_t instanceId, bool unlit);
+
     /** Get the world-space transform of an attachment point on an instance. */
     bool getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform);
 
@@ -236,6 +239,11 @@ private:
         // coordinates, so their origin can sit hundreds of units from the geometry
         // and from the camera. Distance culling would drop them on that basis alone.
         bool ignoreCulling = false;
+
+        // Glue scenes carry their lighting baked into their textures. Running them
+        // through the portrait light rig, which exists to light a character, tints
+        // the whole of Stormwind the wrong colour.
+        bool renderUnlit = false;
 
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
