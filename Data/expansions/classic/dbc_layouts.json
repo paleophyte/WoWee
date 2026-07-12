@@ -167,6 +167,7 @@
     "SpellID": 2
   },
   "Spell": {
+    "Targets": 13,
     "Attributes": 5,
     "AttributesEx": 6,
     "CastingTimeIndex": 15,

@@ -2096,6 +2096,14 @@ void SpellHandler::loadSpellNameCache() const {
         if (f != 0xFFFFFFFF && f < dbc->getFieldCount()) tooltipField = f;
     }
 
+    // Targets: SpellCastTargets mask the spell demands. Item-enhancement spells
+    // (sharpening stones, weightstones, weapon oils) set TARGET_FLAG_ITEM here.
+    uint32_t targetsField = 0xFFFFFFFF;
+    if (spellL) {
+        uint32_t f = spellL->field("Targets");
+        if (f != 0xFFFFFFFF && f < dbc->getFieldCount()) targetsField = f;
+    }
+
     // Cache field indices before the loop to avoid repeated layout lookups
     const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
     const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
@@ -2136,6 +2144,9 @@ void SpellHandler::loadSpellNameCache() const {
             }
             if (hasAttrExField) {
                 entry.attrEx = dbc->getUInt32(i, attrExField);
+            }
+            if (targetsField != 0xFFFFFFFF) {
+                entry.targetFlags = dbc->getUInt32(i, targetsField);
             }
             // Load effect base points for $s1/$s2/$s3 tooltip substitution
             if (ebp0Field != 0xFFFFFFFF) entry.effectBasePoints[0] = static_cast<int32_t>(dbc->getUInt32(i, ebp0Field));
@@ -2339,6 +2350,13 @@ uint32_t SpellHandler::getSpellSchoolMask(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.schoolMask : 0;
+}
+
+uint32_t SpellHandler::getSpellTargetFlags(uint32_t spellId) const {
+    if (spellId == 0) return 0;
+    loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    return (it != owner_.spellNameCacheRef().end()) ? it->second.targetFlags : 0;
 }
 
 const std::string& SpellHandler::getSkillLineName(uint32_t spellId) const {

@@ -222,6 +222,7 @@
     "SpellID": 2
   },
   "Spell": {
+    "Targets": 16,
     "Attributes": 4,
     "AttributesEx": 5,
     "CasterAuraState": 20,

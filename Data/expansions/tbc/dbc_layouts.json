@@ -206,6 +206,7 @@
     "SpellID": 2
   },
   "Spell": {
+    "Targets": 14,
     "Attributes": 5,
     "AttributesEx": 6,
     "RecoveryTime": 23,

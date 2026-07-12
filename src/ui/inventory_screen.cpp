@@ -701,6 +701,51 @@ void InventoryScreen::cancelPickup(game::Inventory& inv) {
     inventoryDirty = true;
 }
 
+void InventoryScreen::renderItemTargetCursor() {
+    if (!gameHandler_ || !gameHandler_->isAwaitingItemTarget()) {
+        itemTargetArmedFrame_ = -1;
+        return;
+    }
+    if (itemTargetArmedFrame_ < 0) itemTargetArmedFrame_ = ImGui::GetFrameCount();
+
+    // Escape or right-click abandons the pending use. Skipped on the arming frame,
+    // where the right-click that used the item is still being handled.
+    if (itemTargetArmedFrame_ != ImGui::GetFrameCount() && !ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+            core::Input::getInstance().isKeyPressed(SDL_SCANCODE_ESCAPE)) {
+            gameHandler_->cancelItemTargeting();
+            itemTargetArmedFrame_ = -1;
+            return;
+        }
+    }
+
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    constexpr float size = 36.0f;
+    ImVec2 pos(mousePos.x - size * 0.5f, mousePos.y - size * 0.5f);
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+
+    uint32_t displayInfoId = 0;
+    const auto* info = gameHandler_->getItemInfo(gameHandler_->getPendingItemTargetSourceItemId());
+    if (info && info->valid) displayInfoId = info->displayInfoId;
+
+    VkDescriptorSet iconTex = displayInfoId ? getItemIcon(displayInfoId) : VK_NULL_HANDLE;
+    if (iconTex) {
+        drawList->AddImage((ImTextureID)(uintptr_t)iconTex, pos, ImVec2(pos.x + size, pos.y + size));
+    } else {
+        drawList->AddRectFilled(pos, ImVec2(pos.x + size, pos.y + size), IM_COL32(40, 35, 30, 200));
+    }
+    // Green frame marks the cursor as armed for an item target.
+    drawList->AddRect(pos, ImVec2(pos.x + size, pos.y + size), IM_COL32(0, 220, 0, 230), 0.0f, 0, 2.0f);
+
+    const char* hint = "Select an item";
+    ImVec2 hintSize = ImGui::CalcTextSize(hint);
+    ImVec2 hintPos(mousePos.x - hintSize.x * 0.5f, pos.y + size + 4.0f);
+    drawList->AddRectFilled(ImVec2(hintPos.x - 3.0f, hintPos.y - 2.0f),
+                            ImVec2(hintPos.x + hintSize.x + 3.0f, hintPos.y + hintSize.y + 2.0f),
+                            IM_COL32(0, 0, 0, 180));
+    drawList->AddText(hintPos, IM_COL32(0, 255, 0, 255), hint);
+}
+
 void InventoryScreen::renderHeldItem() {
     if (!holdingItem) return;
 
@@ -2553,8 +2598,26 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
 
         ImGui::InvisibleButton("slot", ImVec2(size, size));
 
+        // A used sharpening stone / weightstone / oil arms an item-target cursor:
+        // this slot becomes the item it is applied to, and normal slot clicks are
+        // suppressed until a target is chosen or the cursor is cancelled.
+        const bool targetingItem = gameHandler_ && gameHandler_->isAwaitingItemTarget();
+
         // Left mouse: hold to pick up, release to drop/swap
-        if (!holdingItem) {
+        if (targetingItem && !holdingItem) {
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                uint64_t targetGuid = 0;
+                if (kind == SlotKind::BACKPACK && backpackIndex >= 0) {
+                    targetGuid = gameHandler_->getBackpackItemGuid(backpackIndex);
+                } else if (kind == SlotKind::BACKPACK && isBagSlot) {
+                    targetGuid = gameHandler_->getBagItemGuid(bagIndex, bagSlotIndex);
+                } else if (kind == SlotKind::EQUIPMENT) {
+                    targetGuid = gameHandler_->getEquipSlotGuid(static_cast<int>(equipSlot));
+                }
+                // Empty slots are not targets — leave the cursor armed.
+                if (targetGuid != 0) gameHandler_->completeItemUseOnItem(targetGuid);
+            }
+        } else if (!holdingItem) {
             // Start pickup tracking on mouse press
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                 pickupPending_ = true;
@@ -2603,7 +2666,7 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
 
         // Shift+right-click: split stack (if stackable >1) or destroy confirmation
         if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
-            !holdingItem && ImGui::GetIO().KeyShift && item.itemId != 0) {
+            !holdingItem && !targetingItem && ImGui::GetIO().KeyShift && item.itemId != 0) {
             if (item.stackCount > 1 && item.maxStack > 1) {
                 // Open split popup for stackable items
                 splitConfirmOpen_ = true;
@@ -2639,7 +2702,7 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
 
         // Right-click: bank deposit (if bank open), vendor sell (if vendor mode), or auto-equip/use
         // Note: InvisibleButton only tracks left-click by default, so use IsItemHovered+IsMouseClicked
-        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !holdingItem && !ImGui::GetIO().KeyShift && gameHandler_) {
+        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !holdingItem && !targetingItem && !ImGui::GetIO().KeyShift && gameHandler_) {
             LOG_DEBUG("Right-click slot: kind=", static_cast<int>(kind),
                      " backpackIndex=", backpackIndex,
                      " bagIndex=", bagIndex, " bagSlotIndex=", bagSlotIndex,
@@ -2707,7 +2770,7 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
         }
 
         // Shift+left-click: insert item link into chat input
-        if (ImGui::IsItemHovered() && !holdingItem &&
+        if (ImGui::IsItemHovered() && !holdingItem && !targetingItem &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
             ImGui::GetIO().KeyShift &&
             item.itemId != 0 && !item.name.empty()) {

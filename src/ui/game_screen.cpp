@@ -545,6 +545,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Character screen (C key toggle handled inside render())
     inventoryScreen.renderCharacterScreen(gameHandler);
 
+    // Item-target cursor (sharpening stone / oil awaiting the item it applies to)
+    inventoryScreen.renderItemTargetCursor();
+
     // Insert item link into chat if player shift-clicked any inventory/equipment slot
     {
         std::string pendingLink = inventoryScreen.getAndClearPendingChatLink();

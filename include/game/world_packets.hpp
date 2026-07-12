@@ -2060,7 +2060,7 @@ class UseItemPacket {
 public:
     static network::Packet build(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
-                                 uint64_t targetGuid = 0);
+                                 uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0);
 };
 
 /** CMSG_OPEN_ITEM packet builder (for locked containers / lockboxes) */
