@@ -1411,7 +1411,8 @@ def cmd_replay_survey(
                     if deaths > max_death_recoveries:
                         raise RuntimeError(f"exceeded {max_death_recoveries} death recoveries")
                     print(f"{prefix}died (death #{deaths}), recovering")
-                    if not _recover_from_death(config, leader, index, poll_interval, death_recovery_timeout, prefix=prefix):
+                    if not _recover_from_death(config, leader, index, poll_interval, death_recovery_timeout,
+                                                prefix=prefix, resume_targets=waypoints):
                         raise RuntimeError("death recovery did not complete")
                     self_info = leader_position(config, leader, index)
                     pos = self_info.get("position", {})
@@ -2446,6 +2447,57 @@ def _board_and_ride_tram(
         raise
 
 
+# Below this factor, spirit-healer resurrection isn't worth its cost
+# (25% durability loss + resurrection sickness) even if it's nominally
+# faster - only take it when it's clearly, not marginally, better.
+SPIRIT_HEALER_PREFERENCE_MARGIN = 0.7
+
+
+def _estimate_ghost_reclaim_seconds(ghost_pos: dict, corpse: dict, reclaim_delay: float, run_speed: float) -> float:
+    """Estimated wall-clock seconds until alive again via ghost-walk +
+    reclaim. Ghost movement speed equals normal run speed in TBC (no
+    penalty), so run_speed serves for both. The reclaim delay counts down in
+    parallel with the walk, not after it, so the total is whichever is
+    longer, not their sum."""
+    if run_speed <= 0:
+        return float("inf")
+    travel = point_distance(ghost_pos, corpse) / run_speed
+    return max(travel, reclaim_delay)
+
+
+def _estimate_spirit_healer_seconds(ghost_pos: dict, resume_targets: list[dict], run_speed: float) -> float:
+    """Estimated wall-clock seconds until alive again via spirit-healer
+    resurrection (treated as ~instant) plus walking from the graveyard to
+    the nearest resume target (remaining survey waypoints, or the
+    route-goto destination)."""
+    if not resume_targets or run_speed <= 0:
+        return float("inf")
+    nearest = min(point_distance(ghost_pos, t) for t in resume_targets)
+    return nearest / run_speed
+
+
+def _wait_until_alive(config: FleetConfig, leader: dict[str, Any], index: int,
+                       poll_interval: float, deadline: float, prefix: str) -> bool:
+    while time.monotonic() < deadline:
+        try:
+            self_info = leader_position(config, leader, index)
+        except Exception:
+            time.sleep(poll_interval)
+            continue
+        # isPlayerDead alone isn't enough here - it flips false as soon as you
+        # release spirit (a ghost isn't "dead", just not resurrected yet).
+        # Live-observed this falsely reporting "resurrected" while still a
+        # ghost, well before the corpse was ever reached.
+        health = self_info.get("health", {})
+        death = self_info.get("death", {})
+        if not health.get("isPlayerDead") and not death.get("isGhost"):
+            print(f"{prefix}resurrected")
+            return True
+        time.sleep(poll_interval)
+    print(f"{prefix}did not confirm resurrection within timeout")
+    return False
+
+
 def _recover_from_death(
     config: FleetConfig,
     leader: dict[str, Any],
@@ -2453,11 +2505,24 @@ def _recover_from_death(
     poll_interval: float,
     timeout_seconds: float,
     prefix: str = "",
+    resume_targets: list[dict] | None = None,
 ) -> bool:
-    """If the leader is dead, release spirit (if needed), walk the ghost back
-    to its corpse, and reclaim it. Returns True once alive again (or if it
-    was never dead), False if recovery didn't complete within
-    timeout_seconds.
+    """If the leader is dead, release spirit (if needed) and get back to
+    alive by whichever of two paths is more efficient:
+
+    1. Ghost-walk to the corpse and reclaim it - free, but gated by a real
+       server-side reclaim delay (observed 72-100s per death, scaling with
+       repeated deaths) that runs regardless of how close the ghost gets.
+    2. Resurrect at the nearest Spirit Healer - effectively instant, but
+       costs 25% durability and resurrection sickness, and still requires
+       walking (alive, exposed to mobs) from the graveyard to wherever we
+       actually need to be.
+
+    resume_targets (remaining survey waypoints, or a single route-goto
+    destination) lets the comparison account for where we're trying to go,
+    not just the corpse - both paths start from the same graveyard spawn
+    point, so the real question is which finish line is closer. Falls back
+    to ghost-walk-only (the original behavior) when resume_targets is None.
 
     Deliberately does not use _wait_node_arrival/cmd_route_goto or their
     LeaderDiedError check: a ghost is isPlayerDead=true for the entire
@@ -2510,6 +2575,24 @@ def _recover_from_death(
         print(f"{prefix}no corpse position known; cannot recover")
         return False
 
+    if resume_targets:
+        ghost_pos = self_info.get("position", {})
+        run_speed = float(self_info.get("runSpeed", 7.0) or 7.0)
+        reclaim_delay = float(self_info.get("death", {}).get("reclaimDelaySec", 0.0) or 0.0)
+        corpse_time = _estimate_ghost_reclaim_seconds(ghost_pos, corpse, reclaim_delay, run_speed)
+        healer_time = _estimate_spirit_healer_seconds(ghost_pos, resume_targets, run_speed)
+        print(f"{prefix}recovery estimate: corpse-walk ~{corpse_time:.0f}s vs spirit-healer+walk ~{healer_time:.0f}s")
+        if healer_time < corpse_time * SPIRIT_HEALER_PREFERENCE_MARGIN:
+            try:
+                result = request_json("POST", api_base + "/resurrect-at-graveyard", {"searchRadius": 60.0})
+            except Exception as exc:
+                print(f"{prefix}resurrect-at-graveyard failed: {exc}, falling back to corpse walk")
+                result = {"ok": False}
+            if result.get("ok", False):
+                print(f"{prefix}using spirit healer (clearly closer to the destination than the corpse)")
+                return _wait_until_alive(config, leader, index, poll_interval, deadline, prefix)
+            print(f"{prefix}spirit-healer resurrection unavailable ({result.get('error', 'unknown')}), falling back to corpse walk")
+
     print(f"{prefix}walking to corpse at ({corpse['x']:.1f}, {corpse['y']:.1f}), {corpse.get('distance', 0):.0f}y away")
     try:
         request_json("POST", api_base + "/movement/goto", {
@@ -2549,25 +2632,7 @@ def _recover_from_death(
         print(f"{prefix}reclaim-corpse rejected: {result.get('error')}")
         return False
 
-    while time.monotonic() < deadline:
-        try:
-            self_info = leader_position(config, leader, index)
-        except Exception:
-            time.sleep(poll_interval)
-            continue
-        # isPlayerDead alone isn't enough here - it flips false as soon as you
-        # release spirit (a ghost isn't "dead", just not resurrected yet).
-        # Live-observed this falsely reporting "resurrected" while still a
-        # ghost, well before the corpse was ever reached.
-        health = self_info.get("health", {})
-        death = self_info.get("death", {})
-        if not health.get("isPlayerDead") and not death.get("isGhost"):
-            print(f"{prefix}resurrected")
-            return True
-        time.sleep(poll_interval)
-
-    print(f"{prefix}did not confirm resurrection within timeout")
-    return False
+    return _wait_until_alive(config, leader, index, poll_interval, deadline, prefix)
 
 
 def cmd_recover_death(
@@ -2590,16 +2655,22 @@ def cmd_recover_death(
     for index, leader in selected:
         leader_id = leader.get("id", f"leader-{index + 1}")
         prefix = f"{leader_id}: "
-        if not _recover_from_death(config, leader, index, poll_interval, timeout_seconds, prefix=prefix):
+        # Load the saved route-goto target up front (if any) so the recovery
+        # efficiency comparison can weigh the spirit-healer's walk-back
+        # distance against it, not just guess blind.
+        target: dict[str, Any] = {}
+        if resume_route:
+            try:
+                target = load_route_state(config, leader_id).get("target") or {}
+            except FileNotFoundError:
+                pass
+        resume_targets = [target] if all(k in target for k in ("mapId", "x", "y", "z")) else None
+        if not _recover_from_death(config, leader, index, poll_interval, timeout_seconds,
+                                    prefix=prefix, resume_targets=resume_targets):
             ok = False
             continue
         if not resume_route:
             continue
-        try:
-            state = load_route_state(config, leader_id)
-        except FileNotFoundError:
-            continue
-        target = state.get("target") or {}
         if not all(k in target for k in ("mapId", "x", "y", "z")):
             print(f"{prefix}no resumable route-goto target in saved state; not resuming")
             continue
