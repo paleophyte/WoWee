@@ -2665,11 +2665,11 @@ void GameHandler::registerOpcodeHandlers() {
 }
 
 void GameHandler::handlePacket(network::Packet& packet) {
-    if (packet.getSize() < 1) {
-        LOG_DEBUG("Received empty world packet (ignored)");
-        return;
-    }
-
+    // Do NOT drop packets with an empty body. getSize() is the payload length and the
+    // opcode is carried separately, so for the many opcodes that have no payload the
+    // opcode *is* the message. Dropping them here silently swallowed
+    // SMSG_LOGOUT_COMPLETE — the server logged the character out and moved on while
+    // the client waited forever, so the countdown ended and nothing happened.
     uint16_t opcode = packet.getOpcode();
 
     try {
@@ -2855,15 +2855,6 @@ void GameHandler::handlePacket(network::Packet& packet) {
             }
             return;
         }
-    }
-
-    // TEMP: the logout countdown expires and SMSG_LOGOUT_COMPLETE never reaches its
-    // handler, so trace everything the server sends while a logout is pending.
-    if (isLoggingOut()) {
-        LOG_WARNING("RX during logout: wire=0x", std::hex, opcode, std::dec,
-                    " logical=", static_cast<int>(*logicalOp),
-                    " size=", packet.getSize(),
-                    " handled=", (dispatchTable_.count(*logicalOp) ? 1 : 0));
     }
 
     // Dispatch via the opcode handler table
