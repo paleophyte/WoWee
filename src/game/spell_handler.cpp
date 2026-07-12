@@ -3564,18 +3564,33 @@ void SpellHandler::handleClearExtraAuraInfo(network::Packet& packet) {
 }
 
 void SpellHandler::handleItemEnchantTimeUpdate(network::Packet& packet) {
-    // Format: uint64 itemGuid + uint32 slot + uint32 durationSec + uint64 playerGuid
-    // slot: 0=main-hand, 1=off-hand, 2=ranged
+    // Format: uint64 itemGuid + uint32 enchantmentSlot + uint32 durationSec + uint64 playerGuid
+    //
+    // The slot here is the item's *enchantment* slot (TEMP_ENCHANTMENT_SLOT = 1),
+    // not the equipment slot — reading it as one labels every temporary enchant
+    // "Off Hand", even on a two-hander. The item GUID is what says where it sits.
     if (!packet.hasRemaining(24)) {
         packet.skipAll(); return;
     }
-    /*uint64_t itemGuid =*/ packet.readUInt64();
-    uint32_t enchSlot    = packet.readUInt32();
+    uint64_t itemGuid    = packet.readUInt64();
+    /*uint32_t enchantmentSlot =*/ packet.readUInt32();
     uint32_t durationSec = packet.readUInt32();
     /*uint64_t playerGuid =*/ packet.readUInt64();
 
-    // Clamp to known slots (0-2)
-    if (enchSlot > 2) { return; }
+    if (itemGuid == 0) return;
+
+    // Map the enchanted item to the weapon slot it is equipped in.
+    static constexpr EquipSlot kWeaponSlots[] = {
+        EquipSlot::MAIN_HAND, EquipSlot::OFF_HAND, EquipSlot::RANGED
+    };
+    uint32_t enchSlot = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < 3; ++i) {
+        if (owner_.getEquipSlotGuid(static_cast<int>(kWeaponSlots[i])) == itemGuid) {
+            enchSlot = i;
+            break;
+        }
+    }
+    if (enchSlot > 2) return;  // enchanted item is not an equipped weapon
 
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
