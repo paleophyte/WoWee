@@ -1093,9 +1093,14 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
 }
 
 void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
-    const bool otherMoveTbc = isPreWotlk();
-    uint64_t moverGuid = otherMoveTbc
-        ? packet.readUInt64() : packet.readPackedGuid();
+    // Same packed-guid mismatch found and fixed for MSG_MOVE_TELEPORT_ACK:
+    // CMaNGOS sends a packed guid here on TBC too, not a raw UInt64. Reading
+    // it as raw corrupted moverGuid, so getEntity(moverGuid) below always
+    // missed - the entity still existed (created fine), but its position
+    // never updated from these packets. Live-observed as another player's
+    // tracked position staying frozen at wherever they were first spotted,
+    // even while they kept walking.
+    uint64_t moverGuid = packet.readPackedGuid();
     if (moverGuid == owner_.getPlayerGuid() || moverGuid == 0) {
         return;
     }
