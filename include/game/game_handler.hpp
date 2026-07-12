@@ -2519,6 +2519,7 @@ public:
         uint8_t remainingRetries = 0;
         bool sendLoot = false;
     };
+    struct SpellReagent { uint32_t itemId = 0; uint32_t count = 0; };
     struct SpellNameEntry {
         std::string name; std::string rank; std::string description;
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
@@ -2527,6 +2528,8 @@ public:
         uint32_t spellVisualId = 0;
         uint32_t recoveryMs = 0;
         uint32_t categoryRecoveryMs = 0;
+        uint32_t createdItemId = 0;
+        SpellReagent reagents[8] = {};
     };
     static constexpr size_t PLAYER_EXPLORED_ZONES_COUNT = 128;
     std::string getAreaName(uint32_t areaId) const;

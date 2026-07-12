@@ -446,7 +446,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     windowManager_.renderQuestOfferRewardWindow(gameHandler, chatPanel_, inventoryScreen);
     windowManager_.renderVendorWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderTrainerWindow(gameHandler,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
+        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
+        inventoryScreen);
     windowManager_.renderBarberShopWindow(gameHandler);
     windowManager_.renderStableWindow(gameHandler);
     windowManager_.renderTaxiWindow(gameHandler);

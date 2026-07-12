@@ -2062,6 +2062,9 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t idField   = spellL ? (*spellL)["ID"]   : 0;
     const uint32_t nameField = spellL ? (*spellL)["Name"] : 136;
     const uint32_t rankField = spellL ? (*spellL)["Rank"] : 153;
+    const uint32_t fieldCount = dbc->getFieldCount();
+    const bool hasEffectFields = (fieldCount > 109);
+    const bool hasReagentFields = (fieldCount > 67);
     const uint32_t ebp0Field = spellL ? spellL->field("EffectBasePoints0") : 0xFFFFFFFF;
     const uint32_t ebp1Field = spellL ? spellL->field("EffectBasePoints1") : 0xFFFFFFFF;
     const uint32_t ebp2Field = spellL ? spellL->field("EffectBasePoints2") : 0xFFFFFFFF;
@@ -2106,10 +2109,24 @@ void SpellHandler::loadSpellNameCache() const {
             // SpellVisualID: references SpellVisual.dbc for cast/impact M2 effects
             if (spellVisualIdField != 0xFFFFFFFF && spellVisualIdField < dbc->getFieldCount())
                 entry.spellVisualId = dbc->getUInt32(i, spellVisualIdField);
-            if (recoveryField != 0xFFFFFFFF && recoveryField < dbc->getFieldCount())
+            if (recoveryField != 0xFFFFFFFF && recoveryField < fieldCount)
                 entry.recoveryMs = dbc->getUInt32(i, recoveryField);
-            if (categoryRecoveryField != 0xFFFFFFFF && categoryRecoveryField < dbc->getFieldCount())
+            if (categoryRecoveryField != 0xFFFFFFFF && categoryRecoveryField < fieldCount)
                 entry.categoryRecoveryMs = dbc->getUInt32(i, categoryRecoveryField);
+            if (hasEffectFields) {
+                for (int e = 0; e < 3; ++e) {
+                    if (dbc->getUInt32(i, 71 + e) == 24 || dbc->getUInt32(i, 71 + e) == 114) {
+                        entry.createdItemId = dbc->getUInt32(i, 107 + e);
+                        break;
+                    }
+                }
+            }
+            if (hasReagentFields) {
+                for (int r = 0; r < 8; ++r) {
+                    entry.reagents[r].itemId = dbc->getUInt32(i, 52 + r);
+                    entry.reagents[r].count  = dbc->getUInt32(i, 60 + r);
+                }
+            }
             owner_.spellNameCacheRef()[id] = std::move(entry);
         }
     }
