@@ -46,11 +46,23 @@ bool envFlagEnabled(const char* key, bool defaultValue = false) {
 }
 
 bool headlessModeEnabled() {
+    // WOWEE_HEADLESS must win over the compile-time default when set, same
+    // as headlessMode() in game_handler_packets.cpp - this copy previously
+    // checked WOWEE_HEADLESS_DEFAULT first and returned unconditionally,
+    // so fullWorldSimulation's WOWEE_HEADLESS=0 override never took effect
+    // here specifically. Live-observed: other players never got created as
+    // entities (skipped at CREATE_OBJECT), even standing right next to one,
+    // while regular units/NPCs worked fine (a different, correctly-gated
+    // code path).
     static const bool enabled = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        if (raw && *raw) {
+            return envFlagEnabled("WOWEE_HEADLESS", false);
+        }
 #ifdef WOWEE_HEADLESS_DEFAULT
         return true;
 #else
-        return envFlagEnabled("WOWEE_HEADLESS", false);
+        return false;
 #endif
     }();
     return enabled;
