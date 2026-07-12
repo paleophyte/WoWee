@@ -1093,9 +1093,14 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
 }
 
 void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
-    const bool otherMoveTbc = isPreWotlk();
-    uint64_t moverGuid = otherMoveTbc
-        ? packet.readUInt64() : packet.readPackedGuid();
+    // Same packed-guid mismatch found and fixed for MSG_MOVE_TELEPORT_ACK:
+    // CMaNGOS sends a packed guid here on TBC too, not a raw UInt64. Reading
+    // it as raw corrupted moverGuid, so getEntity(moverGuid) below always
+    // missed - the entity still existed (created fine), but its position
+    // never updated from these packets. Live-observed as another player's
+    // tracked position staying frozen at wherever they were first spotted,
+    // even while they kept walking.
+    uint64_t moverGuid = packet.readPackedGuid();
     if (moverGuid == owner_.getPlayerGuid() || moverGuid == 0) {
         return;
     }
@@ -1712,19 +1717,26 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 // ============================================================
 
 void MovementHandler::handleTeleportAck(network::Packet& packet) {
-    const bool taTbc = isPreWotlk();
-    if (packet.getRemainingSize() < (taTbc ? 8u : 4u)) {
+    if (packet.getRemainingSize() < 1u) {
         LOG_WARNING("MSG_MOVE_TELEPORT_ACK too short");
         return;
     }
 
-    uint64_t guid = taTbc
-        ? packet.readUInt64() : packet.readPackedGuid();
+    // CMaNGOS sends a packed guid here on every expansion, including TBC -
+    // confirmed by live packet capture: reading a raw UInt64 instead
+    // misaligned every field after it, so the guid never matched the local
+    // player and the position update was silently dropped as "remote entity".
+    uint64_t guid = packet.readPackedGuid();
     if (!packet.hasRemaining(4)) return;
     uint32_t counter = packet.readUInt32();
 
     const bool taNoFlags2 = isPreWotlk();
-    const size_t minMoveSz = taNoFlags2 ? (4 + 4 + 4 * 4) : (4 + 2 + 4 + 4 * 4);
+    // Pre-WotLK sends one extra byte here that isn't part of the documented
+    // MovementInfo layout - confirmed by live capture (byte value 0x04,
+    // constant across samples) and verified against a known ground-truth
+    // teleport target (.go xyz to ironforge-city decoded to the exact
+    // expected x/y/z only once this byte was accounted for).
+    const size_t minMoveSz = taNoFlags2 ? (4 + 4 + 1 + 4 * 4) : (4 + 2 + 4 + 4 * 4);
     if (packet.getRemainingSize() < minMoveSz) {
         LOG_WARNING("MSG_MOVE_TELEPORT_ACK: not enough data for movement info");
         return;
@@ -1734,6 +1746,8 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     if (!taNoFlags2)
         packet.readUInt16();  // moveFlags2 (WotLK only)
     uint32_t moveTime = packet.readUInt32();
+    if (taNoFlags2)
+        packet.readUInt8();  // unknown byte, pre-WotLK only (see comment above)
     float serverX = packet.readFloat();
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
@@ -3085,11 +3099,75 @@ void MovementHandler::cancelFollow() {
         return;
     }
     owner_.followTargetGuidRef() = 0;
+    if (followMoveMoving_) {
+        sendMovement(Opcode::MSG_MOVE_STOP);
+        followMoveMoving_ = false;
+    }
     if (owner_.autoFollowCallbackRef()) {
         owner_.autoFollowCallbackRef()(nullptr);
     }
     owner_.addSystemChatMessage("You stop following.");
     owner_.fireAddonEvent("AUTOFOLLOW_END", {});
+}
+
+// Same straight-line step used by the headless client's single-shot
+// /movement/goto (updateMovementTask() in tools/headless_client/main.cpp),
+// but the target position is read fresh from the live entity every call
+// instead of a stored waypoint, and stops at kFollowStopDistance rather
+// than snapping onto the target.
+void MovementHandler::updateFollowMovement(float deltaTime) {
+    const uint64_t guid = owner_.followTargetGuidRef();
+    if (guid == 0) {
+        return;
+    }
+    if (owner_.getState() != WorldState::IN_WORLD) {
+        return;
+    }
+    if (isPlayerRooted() || !isServerMovementAllowed() || isOnTaxiFlight()) {
+        if (followMoveMoving_) {
+            sendMovement(Opcode::MSG_MOVE_STOP);
+            followMoveMoving_ = false;
+        }
+        return;
+    }
+
+    auto target = owner_.getEntityManager().getEntity(guid);
+    if (!target) {
+        // cancelFollow() (called from GameHandler::update()'s
+        // followRenderPos_ refresh) handles the disappeared-target case;
+        // just stay quiet here rather than duplicate that check.
+        return;
+    }
+
+    constexpr float kFollowStopDistance = 1.0f;
+    const float dx = target->getX() - movementInfo.x;
+    const float dy = target->getY() - movementInfo.y;
+    const float dz = target->getZ() - movementInfo.z;
+    const float horizontalDist = std::sqrt(dx * dx + dy * dy);
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (distance <= kFollowStopDistance) {
+        if (followMoveMoving_) {
+            sendMovement(Opcode::MSG_MOVE_STOP);
+            followMoveMoving_ = false;
+        }
+        return;
+    }
+
+    if (horizontalDist > 0.001f) {
+        setOrientation(std::atan2(-dy, dx));
+        sendMovement(Opcode::MSG_MOVE_SET_FACING);
+    }
+    if (!followMoveMoving_) {
+        sendMovement(Opcode::MSG_MOVE_START_FORWARD);
+        followMoveMoving_ = true;
+    }
+
+    const float speed = std::max(0.1f, getServerRunSpeed());
+    const float step = std::min(distance - kFollowStopDistance, speed * std::max(0.0f, deltaTime));
+    const float t = distance > 0.001f ? (step / distance) : 0.0f;
+    setPosition(movementInfo.x + dx * t, movementInfo.y + dy * t, movementInfo.z + dz * t);
+    sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
 }
 
 } // namespace game

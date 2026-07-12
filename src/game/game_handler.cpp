@@ -809,6 +809,7 @@ void GameHandler::update(float deltaTime) {
         if (followEnt) {
             followRenderPos_ = core::coords::canonicalToRender(
                 glm::vec3(followEnt->getX(), followEnt->getY(), followEnt->getZ()));
+            if (movementHandler_) movementHandler_->updateFollowMovement(deltaTime);
         } else {
             cancelFollow();
         }
@@ -2661,6 +2662,14 @@ const std::unordered_map<uint32_t, GameHandler::TaxiNode>& GameHandler::getTaxiN
     if (movementHandler_) return movementHandler_->getTaxiNodes();
     static const std::unordered_map<uint32_t, TaxiNode> empty;
     return empty;
+}
+bool GameHandler::isKnownTaxiNode(uint32_t nodeId) const {
+    // Was reading a GameHandler-local knownTaxiMask_ that nothing ever wrote
+    // to (handleShowTaxiNodes only updates MovementHandler's own copy), so
+    // this always returned false - broke the world map's discovered-node
+    // display and the Lua IsTaxiNodeKnown-equivalent. Delegate like the
+    // other taxi accessors above.
+    return movementHandler_ && movementHandler_->isKnownTaxiNode(nodeId);
 }
 
 } // namespace game
