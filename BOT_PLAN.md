@@ -158,7 +158,7 @@ Known unknowns:
 - [ ] Add team filtering and a compact JSON endpoint suitable for external automation.
 - [ ] Add stale-data timestamps per endpoint so partial API failures are obvious.
 
-## Phase 3c: Map Viewer (Later)
+## Phase 3c: Map Viewer
 
 - [x] Review MiniManager's map/data approach and adapt the useful pieces into Python.
 - [x] Build on top of the textual dashboard once leader status data is stable.
