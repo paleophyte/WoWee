@@ -1463,9 +1463,11 @@ target_compile_definitions(wowee_headless PRIVATE WOWEE_HEADLESS_DEFAULT=1)
 if(TARGET opcodes-generate)
     add_dependencies(wowee_headless opcodes-generate)
 endif()
+add_dependencies(wowee_headless wowee_version)
 target_include_directories(wowee_headless PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
 )
 target_include_directories(wowee_headless SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
