@@ -48,6 +48,35 @@ bool isBandageItem(const ItemQueryResponseData* info) {
            info->subClass == kConsumableSubclassBandage;
 }
 
+bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
+    if (spellId == 0) return false;
+    for (const auto& [itemId, info] : owner.getItemInfoCache()) {
+        (void)itemId;
+        if (!isBandageItem(&info)) continue;
+        for (const auto& itemSpell : info.spells) {
+            if (itemSpell.spellId == spellId) return true;
+        }
+    }
+    return false;
+}
+
+std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
+                               uint8_t result, int powerType) {
+    // Bandages use a hidden target aura to enforce the Recently Bandaged
+    // lockout. Exposing the protocol label ("Target aurastate") gives the
+    // player no actionable information.
+    if (isBandageSpell(owner, spellId)) {
+        if (result == 111)
+            return "Cannot use another bandage while Recently Bandaged is active.";
+        if (result == 40 || result == 41)
+            return "Bandaging was interrupted. Remain still until it finishes.";
+    }
+
+    const char* reason = getSpellCastResultString(result, powerType);
+    return reason ? reason
+                  : ("Spell cast failed (error " + std::to_string(result) + ")");
+}
+
 uint64_t targetGuidForUseItem(GameHandler& owner, const ItemQueryResponseData* info) {
     if (!info || !info->valid || info->itemClass != kItemClassConsumable) return 0;
     if (isBandageItem(info)) {
@@ -66,6 +95,13 @@ bool isGatherSpellId(uint32_t spellId) {
         if (spellId == rankSpellId) return true;
     }
     return false;
+}
+
+bool isRangedWeaponAttackSpell(uint32_t spellId) {
+    // Client spell IDs shared by the supported legacy expansions.
+    return spellId == 75 ||    // Auto Shot
+           spellId == 5019 ||  // Shoot (wand)
+           spellId == 2764;    // Throw
 }
 
 bool shouldDespawnGatherTarget(uint8_t result) {
@@ -402,7 +438,9 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     if (!facingHandled) {
         owner_.loadSpellNameCache();
         auto cacheIt = owner_.spellNameCacheRef().find(spellId);
-        bool isMeleeAbility = (cacheIt != owner_.spellNameCacheRef().end() && cacheIt->second.schoolMask == 1);
+        bool isMeleeAbility = (cacheIt != owner_.spellNameCacheRef().end() &&
+                               cacheIt->second.schoolMask == 1 &&
+                               !isRangedWeaponAttackSpell(spellId));
         if (isMeleeAbility && target != 0) {
             auto entity = owner_.getEntityManager().getEntity(target);
             if (entity) {
@@ -1045,9 +1083,7 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (data.result == kSpellFailedNotReady) {
         seedCooldownFromSpellInfo(data.spellId);
     }
-    const char* reason = getSpellCastResultString(data.result, powerType);
-    std::string errMsg = reason ? reason
-                                : ("Spell cast failed (error " + std::to_string(data.result) + ")");
+    std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType);
     if (gatherCast) {
         errMsg = gatherCastFailureMessage(data.result, errMsg);
         if (shouldDespawnGatherTarget(data.result)) {
@@ -1176,7 +1212,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // casts and are NOT classified as instant melee abilities, so trigger the
         // ranged shot animation explicitly here.
         uint32_t sid = data.spellId;
-        if (sid == 75 || sid == 5019 || sid == 2764) {
+        if (isRangedWeaponAttackSpell(sid)) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(sid);
             owner_.suppressNextMeleeSwingAnim();
         }
@@ -1186,7 +1222,9 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         if (!owner_.isProfessionSpell(sid)) {
             owner_.loadSpellNameCache();
             auto cacheIt = owner_.spellNameCacheRef().find(sid);
-            if (cacheIt != owner_.spellNameCacheRef().end() && cacheIt->second.schoolMask == 1) {
+            if (cacheIt != owner_.spellNameCacheRef().end() &&
+                cacheIt->second.schoolMask == 1 &&
+                !isRangedWeaponAttackSpell(sid)) {
                 isMeleeAbility = (currentCastSpellId_ != sid);
             }
         }
@@ -2162,11 +2200,26 @@ void SpellHandler::loadSkillLineAbilityDbc() {
         const auto* slaL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("SkillLineAbility") : nullptr;
         const uint32_t slaSkillField = slaL ? (*slaL)["SkillLineID"] : 1;
         const uint32_t slaSpellField = slaL ? (*slaL)["SpellID"]     : 2;
+        const uint32_t slaFieldCount = slaDbc->getFieldCount();
+        const bool hasDiffFields = (slaFieldCount > 11);
         for (uint32_t i = 0; i < slaDbc->getRecordCount(); i++) {
             uint32_t skillLineId = slaDbc->getUInt32(i, slaSkillField);
             uint32_t spellId = slaDbc->getUInt32(i, slaSpellField);
             if (spellId > 0 && skillLineId > 0) {
                 owner_.spellToSkillLineRef()[spellId] = skillLineId;
+                if (hasDiffFields) {
+                    uint32_t trivHigh = slaDbc->getUInt32(i, 10);
+                    uint32_t trivLow  = slaDbc->getUInt32(i, 11);
+                    uint32_t minRank  = slaDbc->getUInt32(i, 7);
+                    if (trivHigh > 0 || trivLow > 0) {
+                        auto cit = owner_.spellNameCacheRef().find(spellId);
+                        if (cit != owner_.spellNameCacheRef().end()) {
+                            cit->second.trivialSkillHigh = trivHigh;
+                            cit->second.trivialSkillLow  = trivLow;
+                            cit->second.minSkillRank     = minRank;
+                        }
+                    }
+                }
             }
         }
         LOG_INFO("Trainer: Loaded ", owner_.spellToSkillLineRef().size(), " skill line abilities");
@@ -2451,12 +2504,11 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                 if (auto pu = std::dynamic_pointer_cast<Unit>(pe))
                     playerPowerType = static_cast<int>(pu->getPowerType());
             }
-            const char* reason = getSpellCastResultString(castResult, playerPowerType);
             if (castResult == kSpellFailedNotReady) {
                 seedCooldownFromSpellInfo(castResultSpellId);
             }
-            std::string errMsg = reason ? reason
-                                        : ("Spell cast failed (error " + std::to_string(castResult) + ")");
+            std::string errMsg = castFailureMessage(owner_, castResultSpellId,
+                                                     castResult, playerPowerType);
             if (gatherCast) {
                 errMsg = gatherCastFailureMessage(castResult, errMsg);
                 if (shouldDespawnGatherTarget(castResult)) {
@@ -2694,8 +2746,8 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
             if (auto pe = owner_.getEntityManager().getEntity(owner_.getPlayerGuid()))
                 if (auto pu = std::dynamic_pointer_cast<Unit>(pe))
                     pt = static_cast<int>(pu->getPowerType());
-            const char* reason = getSpellCastResultString(failReason, pt);
-            if (reason) {
+            std::string reason = castFailureMessage(owner_, failSpellId, failReason, pt);
+            if (!reason.empty()) {
                 // Prefix with spell name for context, e.g. "Fireball: Not in range"
                 const std::string& sName = owner_.getSpellName(failSpellId);
                 std::string fullMsg = sName.empty() ? reason
@@ -2851,17 +2903,11 @@ void SpellHandler::handleTotemCreated(network::Packet& packet) {
 }
 
 void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
-    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint32 count + effects
-    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint32 count + effects
-    // Classic/Vanilla: packed_guid (same as WotLK)
-    const bool periodicTbc = isActiveExpansion("tbc");
-    const size_t guidMinSz = periodicTbc ? 8u : 2u;
-    if (!packet.hasRemaining(guidMinSz)) return;
-    uint64_t victimGuid = periodicTbc
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (!packet.hasRemaining(guidMinSz)) return;
-    uint64_t casterGuid = periodicTbc
-        ? packet.readUInt64() : packet.readPackedGuid();
+    // Classic, TBC, and WotLK all serialize victim and caster as packed GUIDs.
+    if (!packet.hasFullPackedGuid()) return;
+    uint64_t victimGuid = packet.readPackedGuid();
+    if (!packet.hasFullPackedGuid()) return;
+    uint64_t casterGuid = packet.readPackedGuid();
     if (!packet.hasRemaining(8)) return;
     uint32_t spellId = packet.readUInt32();
     uint32_t count   = packet.readUInt32();
@@ -2871,8 +2917,15 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
         packet.skipAll();
         return;
     }
-    for (uint32_t i = 0; i < count && packet.hasRemaining(1); ++i) {
-        uint8_t auraType = packet.readUInt8();
+    // SpellPeriodicAuraLogInfo serializes AuraType as uint32 on the wire.
+    // Reading one byte leaves three zero bytes in front of the amount and
+    // turns ordinary poison ticks into corrupt multi-byte damage values.
+    if (count > 64) {
+        LOG_WARNING("SMSG_PERIODICAURALOG: unreasonable effect count ", count);
+        return;
+    }
+    for (uint32_t i = 0; i < count && packet.hasRemaining(4); ++i) {
+        uint32_t auraType = packet.readUInt32();
         if (auraType == 3 || auraType == 89) {
             // Classic/TBC: damage(4)+school(4)+absorbed(4)+resisted(4)  = 16 bytes
             // WotLK 3.3.5a: damage(4)+overkill(4)+school(4)+absorbed(4)+resisted(4)+isCrit(1) = 21 bytes
@@ -2896,18 +2949,17 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if (res > 0)
                 owner_.addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(res),
                               spellId, isPlayerCaster, 0, casterGuid, victimGuid);
-        } else if (auraType == 8 || auraType == 124 || auraType == 45) {
-            // Classic/TBC: heal(4)+maxHeal(4)+overHeal(4)                  = 12 bytes
-            // WotLK 3.3.5a: heal(4)+maxHeal(4)+overHeal(4)+absorbed(4)+isCrit(1) = 17 bytes
+        } else if (auraType == 8 || auraType == 20) {
+            // Classic/TBC: heal(4)
+            // WotLK: heal(4)+overheal(4)+absorbed(4)+isCrit(1)
             const bool healWotlk = isActiveExpansion("wotlk");
-            const size_t hotSz = healWotlk ? 17u : 12u;
+            const size_t hotSz = healWotlk ? 13u : 4u;
             if (!packet.hasRemaining(hotSz)) break;
             uint32_t heal    = packet.readUInt32();
-            /*uint32_t max=*/  packet.readUInt32();
-            /*uint32_t over=*/ packet.readUInt32();
             uint32_t hotAbs  = 0;
             bool hotCrit = false;
             if (healWotlk) {
+                /*uint32_t overheal=*/ packet.readUInt32();
                 hotAbs = packet.readUInt32();
                 hotCrit = (packet.readUInt8() != 0);
             }
@@ -2917,7 +2969,7 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if (hotAbs > 0)
                 owner_.addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(hotAbs),
                               spellId, isPlayerCaster, 0, casterGuid, victimGuid);
-        } else if (auraType == 46 || auraType == 91) {
+        } else if (auraType == 21 || auraType == 24) {
             // OBS_MOD_POWER / PERIODIC_ENERGIZE: miscValue(powerType) + amount
             // Common in WotLK: Replenishment, Mana Spring Totem, Divine Plea, etc.
             if (!packet.hasRemaining(8)) break;
@@ -2926,7 +2978,7 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
             if ((isPlayerVictim || isPlayerCaster) && amount > 0)
                 owner_.addCombatText(CombatTextEntry::ENERGIZE, static_cast<int32_t>(amount),
                               spellId, isPlayerCaster, periodicPowerType, casterGuid, victimGuid);
-        } else if (auraType == 98) {
+        } else if (auraType == 64) {
             // PERIODIC_MANA_LEECH: miscValue(powerType) + amount + float multiplier
             if (!packet.hasRemaining(12)) break;
             uint8_t powerType = static_cast<uint8_t>(packet.readUInt32());

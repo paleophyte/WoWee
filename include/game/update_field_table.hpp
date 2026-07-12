@@ -29,6 +29,7 @@ enum class UF : uint16_t {
     UNIT_FIELD_FACTIONTEMPLATE,
     UNIT_FIELD_FLAGS,
     UNIT_FIELD_FLAGS_2,
+    UNIT_FIELD_AURASTATE,      // Reactive combat opportunities (e.g. dodge/block/parry)
     UNIT_FIELD_DISPLAYID,
     UNIT_FIELD_MOUNTDISPLAYID,
     UNIT_FIELD_AURAS,           // Start of aura spell ID array (48 consecutive uint32 slots, pre-WotLK clients)

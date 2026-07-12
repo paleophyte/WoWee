@@ -173,7 +173,7 @@ private:
     // Cached field indices resolved once per handler call to avoid repeated lookups.
     struct UnitFieldIndices {
         uint16_t health, maxHealth, powerBase, maxPowerBase;
-        uint16_t level, faction, flags, dynFlags;
+        uint16_t level, faction, flags, dynFlags, auraState;
         uint16_t displayId, mountDisplayId, npcFlags, npcEmoteState;
         uint16_t bytes0, bytes1;
         static UnitFieldIndices resolve();

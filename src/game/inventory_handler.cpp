@@ -38,6 +38,28 @@ bool isBandageItem(const ItemQueryResponseData* info) {
            info->subClass == kConsumableSubclassBandage;
 }
 
+void synchronizeStationaryBandageCast(GameHandler& owner) {
+    // Bandages are cast through CMSG_USE_ITEM and therefore bypass
+    // SpellHandler::castSpell(), which normally sends a stop before a timed cast.
+    // Explicitly synchronize the stationary state so the server cannot retain a
+    // stale start-forward/strafe/turn state after the character has visually stopped.
+    auto& movement = owner.movementInfoRef();
+    const uint32_t horizontalMask =
+        static_cast<uint32_t>(MovementFlags::FORWARD) |
+        static_cast<uint32_t>(MovementFlags::BACKWARD) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
+    const uint32_t turnMask =
+        static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
+        static_cast<uint32_t>(MovementFlags::TURN_RIGHT);
+    movement.flags &= ~(horizontalMask | turnMask);
+
+    owner.sendMovement(Opcode::MSG_MOVE_STOP);
+    owner.sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
+    owner.sendMovement(Opcode::MSG_MOVE_STOP_TURN);
+    owner.sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+}
+
 bool usesVisibleItemDisplayIds() {
     return false;
 }
@@ -1236,6 +1258,7 @@ void InventoryHandler::useItemBySlot(int backpackIndex) {
                       " spellId=", useSpellId);
         }
         const auto* itemInfo = owner_.getItemInfo(slot.item.itemId);
+        if (isBandageItem(itemInfo)) synchronizeStationaryBandageCast(owner_);
         const uint64_t targetGuid = targetGuidForUseItem(owner_, itemInfo);
         auto packet = owner_.getPacketParsers()
             ? owner_.getPacketParsers()->buildUseItem(0xFF, static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + backpackIndex), itemGuid, useSpellId, targetGuid)
@@ -1281,6 +1304,7 @@ void InventoryHandler::useItemInBag(int bagIndex, int slotIndex) {
         }
         uint8_t wowBag = static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex);
         const auto* itemInfo = owner_.getItemInfo(slot.item.itemId);
+        if (isBandageItem(itemInfo)) synchronizeStationaryBandageCast(owner_);
         const uint64_t targetGuid = targetGuidForUseItem(owner_, itemInfo);
         auto packet = owner_.getPacketParsers()
             ? owner_.getPacketParsers()->buildUseItem(wowBag, static_cast<uint8_t>(slotIndex), itemGuid, useSpellId, targetGuid)

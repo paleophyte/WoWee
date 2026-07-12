@@ -196,8 +196,21 @@ static uint32_t readU32At(const std::vector<uint8_t>& d, size_t pos) {
          | (static_cast<uint32_t>(d[pos + 3]) << 24);
 }
 
+static int32_t decodeQuestNpcOrGo(uint32_t raw) {
+    if ((raw & 0x80000000u) != 0)
+        return -static_cast<int32_t>(raw & 0x7FFFFFFFu);
+    return static_cast<int32_t>(raw);
+}
+
+static bool plausibleQuestObjective(int32_t id, uint32_t required) {
+    const uint32_t magnitude = id < 0 ? static_cast<uint32_t>(-static_cast<int64_t>(id))
+                                      : static_cast<uint32_t>(id);
+    return magnitude <= 0x00FFFFFFu && required <= 0x0000FFFFu;
+}
+
 static QuestQueryObjectives tryParseQuestObjectivesAt(const std::vector<uint8_t>& data,
-                                                       size_t startPos, int nStrings) {
+                                                       size_t startPos, int nStrings,
+                                                       bool wotlkLayout) {
     QuestQueryObjectives out;
     size_t pos = startPos;
 
@@ -207,38 +220,56 @@ static QuestQueryObjectives tryParseQuestObjectivesAt(const std::vector<uint8_t>
         ++pos;
     }
 
-    for (int i = 0; i < 4; ++i) {
-        if (pos + 8 > data.size()) return out;
-        out.kills[i].npcOrGoId = static_cast<int32_t>(readU32At(data, pos));  pos += 4;
-        out.kills[i].required  = readU32At(data, pos);                         pos += 4;
-    }
-
-    for (int i = 0; i < 6; ++i) {
-        if (pos + 8 > data.size()) break;
-        out.items[i].itemId   = readU32At(data, pos);  pos += 4;
-        out.items[i].required = readU32At(data, pos);  pos += 4;
+    if (wotlkLayout) {
+        // Wrath: four {npc/go, count, sourceItem, sourceCount} records,
+        // followed by six {requiredItem, count} records.
+        for (int i = 0; i < 4; ++i) {
+            if (pos + 16 > data.size()) return out;
+            out.kills[i].npcOrGoId = decodeQuestNpcOrGo(readU32At(data, pos)); pos += 4;
+            out.kills[i].required  = readU32At(data, pos);                     pos += 4;
+            pos += 8; // ItemDrop + source count (not inventory objectives)
+            if (!plausibleQuestObjective(out.kills[i].npcOrGoId, out.kills[i].required))
+                return {};
+        }
+        for (int i = 0; i < 6; ++i) {
+            if (pos + 8 > data.size()) return out;
+            out.items[i].itemId   = readU32At(data, pos); pos += 4;
+            out.items[i].required = readU32At(data, pos); pos += 4;
+            if (!plausibleQuestObjective(static_cast<int32_t>(out.items[i].itemId),
+                                         out.items[i].required))
+                return {};
+        }
+    } else {
+        // Classic/TBC: four interleaved {npc/go, count, requiredItem, count} records.
+        for (int i = 0; i < 4; ++i) {
+            if (pos + 16 > data.size()) return out;
+            out.kills[i].npcOrGoId = decodeQuestNpcOrGo(readU32At(data, pos)); pos += 4;
+            out.kills[i].required  = readU32At(data, pos);                     pos += 4;
+            out.items[i].itemId    = readU32At(data, pos);                     pos += 4;
+            out.items[i].required  = readU32At(data, pos);                     pos += 4;
+            if (!plausibleQuestObjective(out.kills[i].npcOrGoId, out.kills[i].required) ||
+                !plausibleQuestObjective(static_cast<int32_t>(out.items[i].itemId),
+                                         out.items[i].required))
+                return {};
+        }
     }
 
     out.valid = true;
     return out;
 }
 
-static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_t>& data, bool classicHint) {
+static QuestQueryObjectives extractQuestQueryObjectives(const std::vector<uint8_t>& data,
+                                                         uint8_t questLogStride) {
     if (data.size() < 16) return {};
 
     const size_t base = 8;
-    const size_t classicStart = base + 40u * 4u;
-    const size_t wotlkStart   = base + 55u * 4u;
-
-    if (classicHint) {
-        auto r = tryParseQuestObjectivesAt(data, classicStart, 4);
-        if (r.valid) return r;
-        return tryParseQuestObjectivesAt(data, wotlkStart, 5);
-    } else {
-        auto r = tryParseQuestObjectivesAt(data, wotlkStart, 5);
-        if (r.valid) return r;
-        return tryParseQuestObjectivesAt(data, classicStart, 4);
-    }
+    // Fixed-width fields between questMethod and the first localized string.
+    // These counts come directly from each expansion's query response serializer.
+    if (questLogStride >= 5)
+        return tryParseQuestObjectivesAt(data, base + 63u * 4u, 5, true);  // WotLK
+    if (questLogStride == 4)
+        return tryParseQuestObjectivesAt(data, base + 41u * 4u, 4, false); // TBC
+    return tryParseQuestObjectivesAt(data, base + 37u * 4u, 4, false);     // Classic/Turtle
 }
 
 struct QuestQueryRewards {
@@ -771,9 +802,11 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
         uint32_t questId = packet.readUInt32();
         packet.readUInt32(); // questMethod
 
-        const bool isClassicLayout = owner_.getPacketParsers() && owner_.getPacketParsers()->questLogStride() <= 4;
+        const uint8_t questLogStride = owner_.getPacketParsers()
+                                           ? owner_.getPacketParsers()->questLogStride() : 5;
+        const bool isClassicLayout = questLogStride <= 4;
         const QuestQueryTextCandidate parsed = pickBestQuestQueryTexts(packet.getData(), isClassicLayout);
-        const QuestQueryObjectives objs = extractQuestQueryObjectives(packet.getData(), isClassicLayout);
+        const QuestQueryObjectives objs = extractQuestQueryObjectives(packet.getData(), questLogStride);
         const QuestQueryRewards rwds = tryParseQuestRewards(packet.getData(), isClassicLayout);
 
         for (auto& q : questLog_) {
@@ -801,14 +834,34 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
 
             // Store structured kill/item objectives for later kill-count restoration.
             if (objs.valid) {
+                std::unordered_set<uint32_t> validKillKeys;
+                std::unordered_set<uint32_t> validItemKeys;
                 for (int i = 0; i < 4; ++i) {
                     q.killObjectives[i].npcOrGoId = objs.kills[i].npcOrGoId;
                     q.killObjectives[i].required  = objs.kills[i].required;
+                    if (objs.kills[i].npcOrGoId != 0 && objs.kills[i].required != 0) {
+                        validKillKeys.insert(static_cast<uint32_t>(
+                            objs.kills[i].npcOrGoId > 0 ? objs.kills[i].npcOrGoId
+                                                       : -objs.kills[i].npcOrGoId));
+                    }
                 }
                 for (int i = 0; i < 6; ++i) {
                     q.itemObjectives[i].itemId   = objs.items[i].itemId;
                     q.itemObjectives[i].required = objs.items[i].required;
+                    if (objs.items[i].itemId != 0 && objs.items[i].required != 0)
+                        validItemKeys.insert(objs.items[i].itemId);
                 }
+                // Remove entries produced by an earlier malformed/heuristic decode while
+                // retaining live progress for objectives that are still part of the quest.
+                std::erase_if(q.killCounts, [&](const auto& value) {
+                    return validKillKeys.count(value.first) == 0;
+                });
+                std::erase_if(q.itemCounts, [&](const auto& value) {
+                    return validItemKeys.count(value.first) == 0;
+                });
+                std::erase_if(q.requiredItemCounts, [&](const auto& value) {
+                    return validItemKeys.count(value.first) == 0;
+                });
                 applyPackedKillCountsFromFields(q);
                 for (int i = 0; i < 4; ++i) {
                     int32_t id = objs.kills[i].npcOrGoId;

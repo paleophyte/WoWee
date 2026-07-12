@@ -323,6 +323,9 @@ public:
     uint8_t getPowerType() const { return powerType; }
     void setPowerType(uint8_t t) { powerType = t; }
 
+    uint32_t getAuraState() const { return auraState; }
+    void setAuraState(uint32_t state) { auraState = state; }
+
     // Level
     uint32_t getLevel() const { return level; }
     void setLevel(uint32_t l) { level = l; }
@@ -371,6 +374,7 @@ protected:
     uint32_t powers[7] = {};     // Indexed by power type (0=mana,1=rage,2=focus,3=energy,4=happiness,5=runes,6=runic)
     uint32_t maxPowers[7] = {};  // Max values per power type
     uint8_t powerType = 0;       // Active power type
+    uint32_t auraState = 0;      // UNIT_FIELD_AURASTATE reactive opportunity mask
     uint32_t level = 1;
     uint32_t entry = 0;
     uint32_t displayId = 0;

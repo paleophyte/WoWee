@@ -548,6 +548,7 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
         fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE),
         fieldIndex(UF::UNIT_FIELD_FLAGS),
         fieldIndex(UF::UNIT_DYNAMIC_FLAGS),
+        fieldIndex(UF::UNIT_FIELD_AURASTATE),
         fieldIndex(UF::UNIT_FIELD_DISPLAYID),
         fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID),
         fieldIndex(UF::UNIT_NPC_FLAGS),
@@ -714,6 +715,9 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                     pendingEvents_.emit("UNIT_FLAGS", {uid});
             }
         }
+        else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            unit->setAuraState(val);
+        }
         else if (key == ufi.bytes0) {
             unit->setPowerType(static_cast<uint8_t>((val >> 24) & 0xFF));
         } else if (key == ufi.displayId) {
@@ -846,6 +850,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stealthStateCallbackRef()(nowStealth);
                 }
             }
+        }
+        else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            unit->setAuraState(val);
         }
         else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1 && block.guid == owner_.getPlayerGuid()) {
             uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);

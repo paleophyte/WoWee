@@ -257,6 +257,7 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
         // Insufficient-power check: tint when player doesn't have enough power to cast.
         // Applies to SPELL and MACRO slots with a known power cost.
         bool insufficientPower = false;
+        bool reactiveUnavailable = false;
         {
             uint32_t powerCheckSpellId = 0;
             if (slot.type == game::ActionBarSlot::SPELL && slot.id != 0)
@@ -271,10 +272,35 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 if (playerEnt && (playerEnt->getType() == game::ObjectType::PLAYER ||
                                   playerEnt->getType() == game::ObjectType::UNIT)) {
                     auto unit = std::static_pointer_cast<game::Unit>(playerEnt);
-                    if (unit->getPowerType() == static_cast<uint8_t>(spellPowerType)) {
-                        if (unit->getPower() < spellCost)
-                            insufficientPower = true;
-                    }
+                    // Spell.dbc identifies the resource pool. Compare that pool directly
+                    // instead of assuming the character's currently displayed power type;
+                    // this is shared by mana, rage, focus, energy, runes and runic power.
+                    if (spellPowerType < 7 &&
+                        unit->getPowerByType(static_cast<uint8_t>(spellPowerType)) < spellCost)
+                        insufficientPower = true;
+                }
+            }
+
+            // Reactive combat abilities declare their opportunity through Spell.dbc's
+            // caster aura-state fields. The values are 1-based bit positions in
+            // UNIT_FIELD_AURASTATE (Overpower, Revenge, execute windows, etc.).
+            uint32_t requiredState = 0, forbiddenState = 0;
+            if (powerCheckSpellId != 0 && !onCooldown)
+                spellbookScreen.getSpellAuraStateInfo(powerCheckSpellId, assetMgr,
+                                                       requiredState, forbiddenState);
+            if ((requiredState > 0 && requiredState <= 32) ||
+                (forbiddenState > 0 && forbiddenState <= 32)) {
+                auto playerEnt = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
+                if (playerEnt && (playerEnt->getType() == game::ObjectType::PLAYER ||
+                                  playerEnt->getType() == game::ObjectType::UNIT)) {
+                    auto unit = std::static_pointer_cast<game::Unit>(playerEnt);
+                    const uint32_t states = unit->getAuraState();
+                    if (requiredState > 0 && requiredState <= 32 &&
+                        (states & (1u << (requiredState - 1))) == 0)
+                        reactiveUnavailable = true;
+                    if (forbiddenState > 0 && forbiddenState <= 32 &&
+                        (states & (1u << (forbiddenState - 1))) != 0)
+                        reactiveUnavailable = true;
                 }
             }
         }
@@ -409,12 +435,12 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                                   && barItemDef == nullptr && !onCooldown);
 
         // Ranged item out-of-range check (runs after barItemDef is populated above).
-        // invType 15=Ranged (bow/gun/crossbow), 26=Thrown, 28=RangedRight (wand/crossbow).
+        // InventoryType: 15=Ranged, 25=Thrown, 26=RangedRight.
         if (!outOfRange && slot.type == game::ActionBarSlot::ITEM && barItemDef
             && !onCooldown && gameHandler.hasTarget()) {
             constexpr uint8_t INVTYPE_RANGED      = 15;
-            constexpr uint8_t INVTYPE_THROWN      = 26;
-            constexpr uint8_t INVTYPE_RANGEDRIGHT = 28;
+            constexpr uint8_t INVTYPE_THROWN      = game::InvType::THROWN;
+            constexpr uint8_t INVTYPE_RANGEDRIGHT = game::InvType::RANGED_GUN;
             uint32_t itemMaxRange = 0;
             if (barItemDef->inventoryType == INVTYPE_RANGED ||
                 barItemDef->inventoryType == INVTYPE_RANGEDRIGHT)
@@ -442,7 +468,7 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             if (onCooldown)          { tintColor = ImVec4(0.4f, 0.4f, 0.4f, 0.8f); }
             else if (onGCD)          { tintColor = ImVec4(0.6f, 0.6f, 0.6f, 0.85f); }
             else if (outOfRange)     { tintColor = ImVec4(0.85f, 0.35f, 0.35f, 0.9f); }
-            else if (insufficientPower) { tintColor = ImVec4(0.6f, 0.5f, 0.9f, 0.85f); }
+            else if (insufficientPower || reactiveUnavailable) { tintColor = ImVec4(0.38f, 0.38f, 0.38f, 0.78f); }
             else if (itemMissing)    { tintColor = ImVec4(0.35f, 0.35f, 0.35f, 0.7f); }
             clicked = ImGui::ImageButton("##icon",
                 (ImTextureID)(uintptr_t)iconTex,
@@ -452,7 +478,8 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
         } else {
             if (onCooldown)            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.8f));
             else if (outOfRange)       ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.15f, 0.15f, 0.9f));
-            else if (insufficientPower)ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.15f, 0.4f, 0.9f));
+            else if (insufficientPower || reactiveUnavailable)
+                                             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.16f, 0.16f, 0.85f));
             else if (itemMissing)      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.12f, 0.7f));
             else if (slot.isEmpty())   ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.8f));
             else                       ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.5f, 0.9f));
@@ -620,6 +647,9 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 }
                 if (insufficientPower) {
                     ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "Not enough power");
+                }
+                if (reactiveUnavailable) {
+                    ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "Requires a combat opportunity");
                 }
                 if (onCooldown) {
                     float cd = slot.cooldownRemaining;

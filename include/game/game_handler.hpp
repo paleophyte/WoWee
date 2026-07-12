@@ -2530,6 +2530,9 @@ public:
         uint32_t categoryRecoveryMs = 0;
         uint32_t createdItemId = 0;
         SpellReagent reagents[8] = {};
+        uint32_t trivialSkillHigh = 0;
+        uint32_t trivialSkillLow = 0;
+        uint32_t minSkillRank = 0;
     };
     static constexpr size_t PLAYER_EXPLORED_ZONES_COUNT = 128;
     std::string getAreaName(uint32_t areaId) const;
