@@ -2813,8 +2813,7 @@ const std::unordered_map<uint32_t, std::string>& InventoryScreen::getEnchantment
         if (dbc && dbc->isLoaded()) {
             const auto* lay = pipeline::getActiveDBCLayout()
                 ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
-            uint32_t nf = lay ? lay->field("Name") : 8u;
-            if (nf == 0xFFFFFFFF) nf = 8;
+            uint32_t nf = pipeline::detectEnchantmentNameField(dbc.get(), lay);
             uint32_t fc = dbc->getFieldCount();
             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                 uint32_t eid = dbc->getUInt32(r, 0);

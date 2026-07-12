@@ -158,6 +158,7 @@ add_executable(test_dbc_loader
     test_dbc_loader.cpp
     ${TEST_COMMON_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
 )
 target_include_directories(test_dbc_loader PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_dbc_loader SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})

@@ -2323,9 +2323,12 @@ std::string SpellHandler::getEnchantName(uint32_t enchantId) const {
     if (!am || !am->isInitialized()) return {};
     auto dbc = am->loadDBC("SpellItemEnchantment.dbc");
     if (!dbc || !dbc->isLoaded()) return {};
+    const auto* sieL = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
+    const uint32_t nameField = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         if (dbc->getUInt32(i, 0) == enchantId) {
-            return dbc->getString(i, 14);
+            return dbc->getString(i, nameField);
         }
     }
     return {};

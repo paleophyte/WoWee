@@ -92,5 +92,19 @@ struct CharSectionsFields {
  */
 CharSectionsFields detectCharSectionsFields(const DBCFile* dbc, const DBCFieldMap* csL);
 
+/**
+ * Resolve the SpellItemEnchantment.dbc name (description) field index.
+ *
+ * The record grew across expansions, so the name sits at a different column in
+ * each: Vanilla/Turtle=10, TBC=13, WotLK=14. Reading the wrong column yields an
+ * integer that getString() treats as a string-block offset, which silently
+ * produces a garbled name ("Rockbiter 3" read as "ockbiter 3") instead of failing.
+ *
+ * @param dbc  Loaded SpellItemEnchantment.dbc (must not be null).
+ * @param sieL JSON-derived field map (may be null — field count decides).
+ * @return Name field index for this particular DBC binary.
+ */
+uint32_t detectEnchantmentNameField(const DBCFile* dbc, const DBCFieldMap* sieL);
+
 } // namespace pipeline
 } // namespace wowee

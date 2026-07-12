@@ -200,9 +200,9 @@
     "SpellID": 2
   },
   "Spell": {
-    "Targets": 13,
     "Attributes": 5,
     "AttributesEx": 6,
+    "Targets": 13,
     "CastingTimeIndex": 15,
     "DispelType": 4,
     "DurationIndex": 40,
@@ -226,7 +226,7 @@
   },
   "SpellItemEnchantment": {
     "ID": 0,
-    "Name": 8
+    "Name": 10
   },
   "SpellRange": {
     "MinRange": 1,

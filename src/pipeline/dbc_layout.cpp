@@ -160,5 +160,27 @@ CharSectionsFields detectCharSectionsFields(const DBCFile* dbc, const DBCFieldMa
     return f;
 }
 
+uint32_t detectEnchantmentNameField(const DBCFile* dbc, const DBCFieldMap* sieL) {
+    if (!dbc || dbc->getRecordCount() == 0) return 14;
+
+    const uint32_t fieldCount = dbc->getFieldCount();
+
+    // The record width identifies the expansion: Vanilla=21, TBC=34, WotLK=38.
+    // Each added effect/gem columns ahead of the localized name block.
+    uint32_t nameField;
+    if (fieldCount >= 38)      nameField = 14;  // WotLK 3.3.5a
+    else if (fieldCount >= 34) nameField = 13;  // TBC 2.4.3
+    else                       nameField = 10;  // Vanilla 1.12 / Turtle
+
+    // A layout override wins, but only when it is in range — a stale index here
+    // reads an integer column as a string offset and garbles every enchant name.
+    if (sieL) {
+        uint32_t f = sieL->field("Name");
+        if (f != 0xFFFFFFFF && f < fieldCount) nameField = f;
+    }
+    if (nameField >= fieldCount) nameField = 0;
+    return nameField;
+}
+
 } // namespace pipeline
 } // namespace wowee
