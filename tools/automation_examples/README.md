@@ -65,6 +65,23 @@ Available named routes: `stormwind_to_goldshire` (7 waypoints).
 
 The script polls `GET /status` every second and prints state transitions (`moving` to `arrived`, `failed`, or `movement_locked`) and waypoint progress. Press Ctrl-C to interrupt and stop the leader.
 
+## Taxi Flight Demo
+
+Take a flight and trace position + `taxi.onFlight` over time until landing:
+
+```bash
+# Learn the nearest flight master's node first (must be standing near one), then fly
+python tools/automation_examples/taxi_flight_demo.py --learn-first --dest-name Ironforge
+
+# Already know the node is learned - just activate and trace
+python tools/automation_examples/taxi_flight_demo.py --dest-name Ironforge
+
+# By exact node id, and save the full trace for later comparison
+python tools/automation_examples/taxi_flight_demo.py --dest-node-id 2 --csv ironforge_flight.csv
+```
+
+Polls `GET /world/self` every second (`--poll-interval` to change), printing position and distance moved since the last sample, and stops as soon as `taxi.onFlight` flips back to `false` (landing). Useful for getting ground-truth position data for a flight without any GUI rendering/animation noise in the way - e.g. confirming exactly where a flight actually lands.
+
 For fleet-level pathfinding, start the path service and use the manager's `pathfind-goto` command:
 
 ```bash
