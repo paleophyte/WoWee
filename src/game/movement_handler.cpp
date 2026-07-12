@@ -3133,7 +3133,7 @@ void MovementHandler::updateFollowMovement(float deltaTime) {
         return;
     }
 
-    constexpr float kFollowStopDistance = 4.0f;
+    constexpr float kFollowStopDistance = 1.0f;
     const float dx = target->getX() - movementInfo.x;
     const float dy = target->getY() - movementInfo.y;
     const float dz = target->getZ() - movementInfo.z;
