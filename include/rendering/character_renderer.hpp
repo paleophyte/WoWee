@@ -317,6 +317,10 @@ private:
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;
+    // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
+    // write kept on, so the faded model still self-occludes instead of showing
+    // backfaces and under-armor skin through the body.
+    VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts

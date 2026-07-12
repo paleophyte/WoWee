@@ -402,6 +402,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
     // Clean up shader modules
     charVert.destroy();
@@ -473,6 +474,7 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(translucentPipeline_);
 
     if (pipelineLayout_) { vkDestroyPipelineLayout(device, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
 
@@ -2722,6 +2724,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // declare Mod/alpha blending, which would composite that black
                     // background as an opaque quad — force additive so only the light adds.
                     desiredPipeline = additivePipeline_;
+                } else if (instance.opacity < 0.999f) {
+                    // Whole-instance fade (ghost form, spawn fade-in): the opaque and
+                    // alpha-test pipelines have blending disabled, so the shader's
+                    // texColor.a * opacity output is discarded and only hair (via
+                    // alpha-to-coverage) ever looked translucent. Route every batch
+                    // through the blend pipeline; the per-batch alphaTest UBO flag
+                    // still handles cutout materials in the shader.
+                    desiredPipeline = translucentPipeline_;
                 } else if (hairMaterial) {
                     desiredPipeline = alphaTestPipeline_;
                 } else {
@@ -2848,6 +2858,15 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             int pomSamples2 = 32;
             if (pomQuality_ == 0) pomSamples2 = 16;
             else if (pomQuality_ == 2) pomSamples2 = 64;
+
+            // Whole-model fallback inherits whatever pipeline was bound last;
+            // pick it explicitly so instance fades blend here too.
+            VkPipeline fallbackPipeline = (instance.opacity < 0.999f)
+                ? translucentPipeline_ : opaquePipeline_;
+            if (fallbackPipeline != currentPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
+                currentPipeline = fallbackPipeline;
+            }
 
             CharMaterialUBO matData{};
             matData.opacity = instance.opacity;
@@ -3774,6 +3793,7 @@ void CharacterRenderer::recreatePipelines() {
     if (alphaTestPipeline_) { vkDestroyPipeline(device, alphaTestPipeline_, nullptr); alphaTestPipeline_ = VK_NULL_HANDLE; }
     if (alphaPipeline_)     { vkDestroyPipeline(device, alphaPipeline_, nullptr); alphaPipeline_ = VK_NULL_HANDLE; }
     if (additivePipeline_)  { vkDestroyPipeline(device, additivePipeline_, nullptr); additivePipeline_ = VK_NULL_HANDLE; }
+    if (translucentPipeline_) { vkDestroyPipeline(device, translucentPipeline_, nullptr); translucentPipeline_ = VK_NULL_HANDLE; }
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
@@ -3830,11 +3850,13 @@ void CharacterRenderer::recreatePipelines() {
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
     charVert.destroy();
     charFrag.destroy();
 
-    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_) {
+    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
+        !translucentPipeline_) {
         LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
                   " alphaTest=", (void*)alphaTestPipeline_,
                   " alpha=", (void*)alphaPipeline_,
