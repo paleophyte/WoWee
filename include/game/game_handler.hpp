@@ -1508,6 +1508,10 @@ public:
     // NPC Gossip
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
+    // Sends CMSG_TAXIQUERYAVAILABLENODES directly (what a real client sends
+    // when clicking a flight master, instead of CMSG_GOSSIP_HELLO) - see
+    // queryTaxiNodes() usage in headless_client/main.cpp for why.
+    void queryTaxiNodes(uint64_t guid);
     void selectGossipOption(uint32_t optionId);
     void selectGossipQuest(uint32_t questId);
     void acceptQuest();
@@ -1958,11 +1962,7 @@ public:
     using TaxiPathEdge = MovementHandler::TaxiPathEdge;
     using TaxiPathNode = MovementHandler::TaxiPathNode;
     const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const;
-    bool isKnownTaxiNode(uint32_t nodeId) const {
-        if (nodeId == 0 || nodeId > 384) return false;
-        uint32_t idx = nodeId - 1;
-        return (knownTaxiMask_[idx / 32] & (1u << (idx % 32))) != 0;
-    }
+    bool isKnownTaxiNode(uint32_t nodeId) const;
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
@@ -3260,8 +3260,6 @@ private:
     bool taxiRecoverPending_ = false;
     uint32_t taxiRecoverMapId_ = 0;
     glm::vec3 taxiRecoverPos_{0.0f};
-    uint32_t knownTaxiMask_[12] = {};  // Track previously known nodes for discovery alerts
-    bool taxiMaskInitialized_ = false; // First SMSG_SHOWTAXINODES seeds mask without alerts
     std::unordered_map<uint32_t, uint32_t> taxiCostMap_; // destNodeId -> total cost in copper
     uint32_t nextMovementTimestampMs();
     void updateClientTaxi(float deltaTime);

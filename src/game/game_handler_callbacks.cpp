@@ -2121,6 +2121,12 @@ void GameHandler::interactWithNpc(uint64_t guid) {
     socket->send(packet);
 }
 
+void GameHandler::queryTaxiNodes(uint64_t guid) {
+    if (!isInWorld()) return;
+    auto packet = TaxiQueryAvailableNodesPacket::build(guid);
+    socket->send(packet);
+}
+
 void GameHandler::interactWithGameObject(uint64_t guid) {
     LOG_DEBUG("[GO-DIAG] interactWithGameObject called: guid=0x", std::hex, guid, std::dec);
     if (guid == 0) { LOG_DEBUG("[GO-DIAG] BLOCKED: guid==0"); return; }

@@ -621,7 +621,27 @@ uint32_t hp = 0, maxHp = 0;
             {"movement", movementTaskToJsonLocked()},
             {"combat", {{"inCombat", game_.isInCombat()}}},
             {"health", {{"current", hp}, {"max", maxHp}, {"isDead", game_.isDead()}, {"isPlayerDead", game_.isPlayerDead()}}},
-            {"death", deathJsonLocked()}
+            {"death", deathJsonLocked()},
+            {"taxi", taxiJson()}
+        };
+    }
+
+    // Surfaces enough taxi state to confirm a learn-flight-path call actually
+    // stuck server-side (SMSG_SHOWTAXINODES is fire-and-forget from the
+    // client's point of view, and the discovery chat message only fires on
+    // *repeat* visits - see handleShowTaxiNodes's taxiMaskInitialized_ guard
+    // - so on a character's very first flight master this is the only signal).
+    json taxiJson() const {
+        const uint32_t nearest = game_.getTaxiCurrentNode();
+        json nearestNodeName = nullptr;
+        const auto& nodes = game_.getTaxiNodes();
+        auto it = nodes.find(nearest);
+        if (it != nodes.end()) nearestNodeName = it->second.name;
+        return {
+            {"windowOpen", game_.isTaxiWindowOpen()},
+            {"nearestNode", nearest},
+            {"nearestNodeName", nearestNodeName},
+            {"nearestNodeKnown", nearest != 0 && game_.isKnownTaxiNode(nearest)}
         };
     }
 
@@ -962,6 +982,49 @@ uint32_t hp = 0, maxHp = 0;
         }
         game_.activateSpiritHealer(bestGuid);
         return {{"ok", true}, {"npcGuid", bestGuid}, {"distance", bestDist}};
+    }
+
+    // Discovers (learns) the flight point at the nearest Flight Master
+    // without actually taking a flight. A real client sends
+    // CMSG_TAXIQUERYAVAILABLENODES (not CMSG_GOSSIP_HELLO) when clicking a
+    // flight master; CMaNGOS's handler (TaxiHandler.cpp) learns the node as
+    // a side effect on the *first* query and returns early without sending
+    // SMSG_SHOWTAXINODES - only a *second* query (now-known node) falls
+    // through to SendTaxiMenu() and actually sends it. So we query twice:
+    // the first call is the real discovery, the second is purely to force
+    // SMSG_SHOWTAXINODES back so handleShowTaxiNodes() populates
+    // currentTaxiData_/knownTaxiMask_ and /world/self's "taxi" block can
+    // confirm success (nearestNodeKnown=true) instead of just hoping.
+    json learnFlightPathAction(float searchRadius) {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        constexpr uint32_t kNpcFlagFlightMaster = 0x2000;
+        const auto& move = game_.getMovementInfo();
+        uint64_t bestGuid = 0;
+        float bestDist = -1.0f;
+        for (const auto& entity : game_.getEntityManager().snapshotEntities()) {
+            if (!entity || !entity->isUnit()) continue;
+            const auto* unit = static_cast<const game::Unit*>(entity.get());
+            if ((unit->getNpcFlags() & kNpcFlagFlightMaster) == 0) continue;
+            const float dx = entity->getX() - move.x;
+            const float dy = entity->getY() - move.y;
+            const float dz = entity->getZ() - move.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > searchRadius) continue;
+            if (bestDist < 0.0f || dist < bestDist) {
+                bestDist = dist;
+                bestGuid = entity->getGuid();
+            }
+        }
+        if (bestGuid == 0) {
+            return {{"ok", false}, {"error", "no Flight Master found nearby"}, {"searchRadius", searchRadius}};
+        }
+        game_.queryTaxiNodes(bestGuid);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        game_.queryTaxiNodes(bestGuid);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return {{"ok", true}, {"npcGuid", bestGuid}, {"distance", bestDist}, {"taxi", taxiJson()}};
     }
 
     void requestGracefulLogout() {
@@ -1707,6 +1770,11 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             json payload = json::parse(body.empty() ? "{}" : body);
             const float searchRadius = payload.value("searchRadius", 40.0f);
             const auto result = session.resurrectAtGraveyardAction(searchRadius);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/learn-flight-path") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const float searchRadius = payload.value("searchRadius", 15.0f);
+            const auto result = session.learnFlightPathAction(searchRadius);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else if (method == "POST" && path == "/logout") {
             // Requests a clean CMSG_LOGOUT_REQUEST and lets the process exit
