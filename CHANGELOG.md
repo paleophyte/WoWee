@@ -1,5 +1,25 @@
 # Changelog
 
+## [v2.0.6-preview] — 2026-07-12
+
+### Networking
+- **Stop dropping every packet that has no payload.** `handlePacket()` ignored any packet whose body was empty, but `getSize()` is the payload length and the opcode is carried separately — for the many opcodes with no payload, the opcode *is* the message. All of them were swallowed before dispatch, which is also why no "unhandled opcode" warning ever fired for them. Eight registered opcodes were affected:
+  - `SMSG_LOGOUT_COMPLETE` — the server logged the character out and moved on while the client waited forever, so the logout countdown ended and nothing happened
+  - `SMSG_LOGOUT_CANCEL_ACK` — a cancelled logout was never confirmed
+  - `SMSG_ATTACKSWING_NOTINRANGE` / `_BADFACING` / `_DEADTARGET` / `_CANT_ATTACK` — none of the four auto-attack errors ever reached the player
+  - `SMSG_PET_BROKEN`, `SMSG_INVALIDATE_PLAYER`
+
+### Logout
+- `/quit` and `/exit` now leave the game when the server confirms the logout; `/logout` and `/camp` return to character select. They were all aliases of one command that did neither
+- `/logout` was not a command at all: `aliases()` is the complete name list and it only listed camp, quit and exit, so `/help` had been advertising a command that silently did nothing
+- The logout pose is a sit again. The server stuns the player to root them for the countdown, and we mapped `UNIT_FLAG_STUNNED` straight to the stun animation, which played over the sit and left the character slumped
+
+### UI
+- The breath, fatigue and feign-death bars count down. `SMSG_START_MIRROR_TIMER` hands the client a remaining time and a scale and the server then only re-syncs on change, but nothing ticked the value — so the breath bar sat frozen while you drowned. The sub-millisecond remainder is carried, so the timer does not run slow at high frame rates
+- Fix the tail of `SMSG_START_MIRROR_TIMER`: it is paused(1) + spellId(4), not the reverse
+
+---
+
 ## [v2.0.5-preview] — 2026-07-12
 
 ### Build
