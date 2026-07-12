@@ -414,7 +414,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
     actionBarPanel_.renderStanceBar(gameHandler, settingsPanel_, spellbookScreen,
         [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
-    actionBarPanel_.renderBagBar(gameHandler, settingsPanel_, inventoryScreen);
+    if (actionBarPanel_.renderBagBar(gameHandler, settingsPanel_, inventoryScreen))
+        saveSettings();
     renderMicroMenu(gameHandler);
     actionBarPanel_.renderXpBar(gameHandler, settingsPanel_);
     actionBarPanel_.renderRepBar(gameHandler, settingsPanel_);

@@ -36,6 +36,8 @@ public:
     void toggleBag(int idx);
     void openAllBags();
     void closeAllBags();
+    /// Toggle between independently positioned bag windows and one continuous grid.
+    void toggleCombinedBags();
     void setSeparateBags(bool sep) { separateBags_ = sep; }
     bool isSeparateBags() const { return separateBags_; }
     void toggleCompactBags() { compactBags_ = !compactBags_; }

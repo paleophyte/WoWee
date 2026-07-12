@@ -48,7 +48,7 @@ public:
                          SettingsPanel& settingsPanel,
                          SpellbookScreen& spellbookScreen,
                          SpellIconFn getSpellIcon);
-    void renderBagBar(game::GameHandler& gameHandler,
+    bool renderBagBar(game::GameHandler& gameHandler,
                       SettingsPanel& settingsPanel,
                       InventoryScreen& inventoryScreen);
     void renderXpBar(game::GameHandler& gameHandler,

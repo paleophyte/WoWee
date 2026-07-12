@@ -1248,20 +1248,21 @@ void ActionBarPanel::renderStanceBar(game::GameHandler& gameHandler,
     ImGui::PopStyleVar(4);
 }
 
-void ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
-                         SettingsPanel& /*settingsPanel*/,
+bool ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
+                         SettingsPanel& settingsPanel,
                          InventoryScreen& inventoryScreen) {
     ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     float screenW = displaySize.x > 0.0f ? displaySize.x : 1280.0f;
     float screenH = displaySize.y > 0.0f ? displaySize.y : 720.0f;
     auto* assetMgr = services_.assetManager;
+    bool settingChanged = false;
 
     float slotSize = 42.0f;
     float spacing = 4.0f;
     float padding = 6.0f;
 
-    // 5 slots: backpack + 4 bags
-    float barW = 5 * slotSize + 4 * spacing + padding * 2;
+    // Mode toggle + backpack + 4 bags
+    float barW = 6 * slotSize + 5 * spacing + padding * 2;
     float barH = slotSize + padding * 2;
 
     // Position in bottom right corner
@@ -1284,6 +1285,20 @@ void ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
     if (ImGui::Begin("##BagBar", nullptr, flags)) {
         auto& inv = gameHandler.getInventory();
 
+        // Keep this next to the bags so changing layouts never requires a trip
+        // through settings. The saved setting remains the single source of truth.
+        const bool combined = !inventoryScreen.isSeparateBags();
+        if (ImGui::Button(combined ? "Split" : "All", ImVec2(slotSize, slotSize))) {
+            inventoryScreen.toggleCombinedBags();
+            settingsPanel.pendingSeparateBags = inventoryScreen.isSeparateBags();
+            settingChanged = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(combined
+                ? "Split into separate bag windows"
+                : "Combine all bag slots into one window");
+        }
+
         // Load backpack icon if needed
         if (!backpackIconTexture_ && assetMgr && assetMgr->isInitialized()) {
             auto blpData = assetMgr->readFile("Interface\\Buttons\\Button-Backpack-Up.blp");
@@ -1303,7 +1318,7 @@ void ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
 
         // Slots 1-4: Bag slots (leftmost)
         for (int i = 0; i < 4; ++i) {
-            if (i > 0) ImGui::SameLine(0, spacing);
+            ImGui::SameLine(0, spacing);
             ImGui::PushID(i + 1);
 
             game::EquipSlot bagSlot = static_cast<game::EquipSlot>(static_cast<int>(game::EquipSlot::BAG1) + i);
@@ -1524,6 +1539,7 @@ void ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
             fg->AddRect(p0, p1, IM_COL32(200, 200, 200, 255), 0.0f, 0, 2.0f);
         }
     }
+    return settingChanged;
 }
 
 void ActionBarPanel::renderXpBar(game::GameHandler& gameHandler,

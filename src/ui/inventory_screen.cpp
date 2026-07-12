@@ -815,6 +815,20 @@ void InventoryScreen::closeAllBags() {
     for (auto& b : bagOpen_) b = false;
 }
 
+void InventoryScreen::toggleCombinedBags() {
+    if (separateBags_) {
+        // Consolidating is an explicit request to see the inventory, even when
+        // all of the individual windows happened to be closed.
+        separateBags_ = false;
+        open = true;
+    } else {
+        // Restore every physical bag as a visible, independently movable window.
+        separateBags_ = true;
+        openAllBags();
+        open = true;
+    }
+}
+
 bool InventoryScreen::bagHasAnyItems(const game::Inventory& inventory, int bagIndex) const {
     int bagSize = inventory.getBagSize(bagIndex);
     if (bagSize <= 0) return false;
@@ -1006,15 +1020,33 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
 
     constexpr float slotSize = 40.0f;
     constexpr int columns = 6;
-    int rows = (inventory.getBackpackSize() + columns - 1) / columns;
-    float bagContentH = rows * (slotSize + 4.0f) + 40.0f;
-
+    int totalSlots = inventory.getBackpackSize();
+    int usedSlots = 0;
+    for (int slot = 0; slot < inventory.getBackpackSize(); ++slot)
+        usedSlots += !inventory.getBackpackSlot(slot).empty();
     for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; bag++) {
         int bagSize = inventory.getBagSize(bag);
         if (bagSize <= 0) continue;
-        if (compactBags_ && !bagHasAnyItems(inventory, bag)) continue;
-        int bagRows = (bagSize + columns - 1) / columns;
-        bagContentH += bagRows * (slotSize + 4.0f) + 30.0f;
+        totalSlots += bagSize;
+        for (int slot = 0; slot < bagSize; ++slot)
+            usedSlots += !inventory.getBagSlot(bag, slot).empty();
+    }
+
+    int rows = (totalSlots + columns - 1) / columns;
+    float bagContentH = rows * (slotSize + 4.0f) + 40.0f;
+    int visibleKeySlots = 0;
+    if (showKeyring_) {
+        constexpr int keyColumns = 8;
+        int lastOccupied = -1;
+        for (int slot = inventory.getKeyringSize() - 1; slot >= 0; --slot) {
+            if (!inventory.getKeyringSlot(slot).empty()) { lastOccupied = slot; break; }
+        }
+        visibleKeySlots = lastOccupied < 0 ? 0 : ((lastOccupied / keyColumns) + 1) * keyColumns;
+        if (visibleKeySlots > 0) {
+            constexpr float keySlotSize = 24.0f;
+            const int keyRows = (visibleKeySlots + keyColumns - 1) / keyColumns;
+            bagContentH += 30.0f + keyRows * (keySlotSize + 4.0f);
+        }
     }
 
     float windowW = columns * (slotSize + 4.0f) + 30.0f;
@@ -1029,7 +1061,9 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize;
     if (holdingItem || pickupPending_) flags |= ImGuiWindowFlags_NoMove;
 
-    bool windowVisible = ImGui::Begin("Bags", &open, flags);
+    char windowTitle[64];
+    snprintf(windowTitle, sizeof(windowTitle), "All Bags (%d/%d)###Bags", usedSlots, totalSlots);
+    bool windowVisible = ImGui::Begin(windowTitle, &open, flags);
     if (!windowVisible) {
         ImGui::End();
         return;
@@ -1043,7 +1077,43 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
         ImGui::SetWindowPos(ImVec2(posX, posY));
     }
 
-    renderBackpackPanel(inventory, compactBags_);
+    // Draw one uninterrupted grid while retaining each slot's real container
+    // and index for pickup, use, split, destroy, and server swap operations.
+    int gridIndex = 0;
+    auto renderCombinedSlot = [&](const game::ItemSlot& slot, int backpackIndex,
+                                  int bagIndex, int bagSlotIndex) {
+        if (gridIndex % columns != 0) ImGui::SameLine();
+        ImGui::PushID(gridIndex);
+        renderItemSlot(inventory, slot, slotSize, nullptr,
+                       SlotKind::BACKPACK, backpackIndex, game::EquipSlot::NUM_SLOTS,
+                       bagIndex, bagSlotIndex);
+        ImGui::PopID();
+        ++gridIndex;
+    };
+
+    for (int slot = 0; slot < inventory.getBackpackSize(); ++slot)
+        renderCombinedSlot(inventory.getBackpackSlot(slot), slot, -1, -1);
+    for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; ++bag) {
+        const int bagSize = inventory.getBagSize(bag);
+        if (bagSize <= 0) continue;
+        for (int slot = 0; slot < bagSize; ++slot)
+            renderCombinedSlot(inventory.getBagSlot(bag, slot), -1, bag, slot);
+    }
+
+    if (visibleKeySlots > 0) {
+        constexpr float keySlotSize = 24.0f;
+        constexpr int keyColumns = 8;
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextColored(ui::colors::kDarkYellow, "Keyring");
+        for (int slot = 0; slot < visibleKeySlots; ++slot) {
+            if (slot % keyColumns != 0) ImGui::SameLine();
+            ImGui::PushID(10000 + slot);
+            renderItemSlot(inventory, inventory.getKeyringSlot(slot), keySlotSize, nullptr,
+                           SlotKind::BACKPACK, -1, game::EquipSlot::NUM_SLOTS);
+            ImGui::PopID();
+        }
+    }
 
     ImGui::Spacing();
     uint64_t gold = moneyCopper / 10000;
@@ -1053,18 +1123,6 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
                        static_cast<unsigned long long>(gold),
                        static_cast<unsigned long long>(silver),
                        static_cast<unsigned long long>(copper));
-    ImGui::SameLine();
-    const char* collapseLabel = compactBags_ ? "Expand Empty" : "Collapse Empty";
-    const float btnW = 92.0f;
-    const float rightMargin = 8.0f;
-    float rightX = ImGui::GetWindowContentRegionMax().x - btnW - rightMargin;
-    if (rightX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightX);
-    if (ImGui::SmallButton(collapseLabel)) {
-        compactBags_ = !compactBags_;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Toggle empty bag section visibility");
-    }
     ImGui::End();
 }
 
