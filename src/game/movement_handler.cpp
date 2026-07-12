@@ -310,7 +310,7 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
     for (int i = 0; i < 8; ++i) {
         if (guidMask & (1u << i)) ++guidBytes;
     }
-    if (!packet.hasRemaining(guidBytes) + 1) {
+    if (!packet.hasRemaining(guidBytes + 1)) {
         LOG_WARNING("SMSG_CLIENT_CONTROL_UPDATE malformed (truncated packed guid)");
         packet.skipAll();
         return;
