@@ -1354,20 +1354,33 @@ def cmd_replay_survey(
     hostile_scan_radius: float,
     fleet: str = "",
     leader_ids: list[str] | None = None,
+    reverse: bool = False,
+    resume_through_death: bool = False,
+    max_death_recoveries: int = 25,
+    death_recovery_timeout: float = 180.0,
 ) -> int:
     """Walk a leader through a human-captured route catalog (see
     follow_player.py) instead of the automated pathfinding service - a
-    human-verified path sidesteps whatever the pathfinder struggles with."""
+    human-verified path sidesteps whatever the pathfinder struggles with.
+
+    reverse walks the catalog tail-to-head (e.g. replaying a one-way
+    Ironforge->Menethil survey to get back to Ironforge). resume_through_death
+    treats death as expected rather than fatal: it recovers the leader (ghost
+    walk to corpse + reclaim, via the same primitive recover-death uses), then
+    resumes from whichever waypoint is nearest the post-recovery position -
+    reclaiming lands you back near where you died, so this is normally just
+    the next handful of waypoints, not a big jump."""
     catalog = load_survey_catalog(Path(catalog_path_str))
     map_id = int(catalog["mapId"])
-    waypoints = catalog["waypoints"][start_index:]
+    all_waypoints = list(reversed(catalog["waypoints"])) if reverse else list(catalog["waypoints"])
+    waypoints = all_waypoints[start_index:]
     if not waypoints:
         print(f"start_index {start_index} is past the end of the catalog "
-              f"({len(catalog['waypoints'])} waypoints)")
+              f"({len(all_waypoints)} waypoints)")
         return 1
-    print(f"replaying '{catalog.get('routeName')}' ({catalog.get('mapName')}): "
-          f"{len(waypoints)} waypoints starting at index {start_index}, "
-          f"captured from {catalog.get('playerName')}")
+    print(f"replaying '{catalog.get('routeName')}' ({catalog.get('mapName')}) "
+          f"{'reversed' if reverse else 'forward'}: {len(waypoints)} waypoints "
+          f"starting at index {start_index}, captured from {catalog.get('playerName')}")
 
     selected = config.selected_leaders(fleet, leader_ids)
     if not selected:
@@ -1376,41 +1389,87 @@ def cmd_replay_survey(
     ok = True
     for index, leader in selected:
         leader_id = leader.get("id", f"leader-{index + 1}")
+        prefix = f"{leader_id}: "
         api_base = config.api_base_for(leader, index)
+        deaths = 0
+        idx = 0
         try:
             self_info = leader_position(config, leader, index)
-            _raise_if_dead(self_info)
-            current_map = int(self_info.get("mapId", map_id))
-            if current_map != map_id:
-                raise ValueError(f"leader is on map {current_map}, survey is for map {map_id}")
+            already_dead = self_info.get("health", {}).get("isPlayerDead") or self_info.get("death", {}).get("isGhost")
+            if not already_dead:
+                current_map = int(self_info.get("mapId", map_id))
+                if current_map != map_id:
+                    raise ValueError(f"leader is on map {current_map}, survey is for map {map_id}")
 
-            player_level = self_info.get("character", {}).get("level")
-            if not isinstance(player_level, int):
-                player_level = 1
+            while idx < len(waypoints):
+                self_info = leader_position(config, leader, index)
+                is_dead = self_info.get("health", {}).get("isPlayerDead") or self_info.get("death", {}).get("isGhost")
+                if is_dead:
+                    if not resume_through_death:
+                        raise LeaderDiedError("leader died")
+                    deaths += 1
+                    if deaths > max_death_recoveries:
+                        raise RuntimeError(f"exceeded {max_death_recoveries} death recoveries")
+                    print(f"{prefix}died (death #{deaths}), recovering")
+                    if not _recover_from_death(config, leader, index, poll_interval, death_recovery_timeout, prefix=prefix):
+                        raise RuntimeError("death recovery did not complete")
+                    self_info = leader_position(config, leader, index)
+                    pos = self_info.get("position", {})
+                    idx, nearest_d = min(
+                        ((i, point_distance(pos, wp)) for i, wp in enumerate(waypoints)),
+                        key=lambda t: t[1],
+                    )
+                    print(f"{prefix}resuming survey at waypoint {start_index + idx}/{len(all_waypoints)} "
+                          f"({nearest_d:.1f}y from recovery position)")
+                    continue
 
-            wp_payload = [{"x": w["x"], "y": w["y"], "z": w["z"]} for w in waypoints]
-            if avoid_hostiles:
-                execute_waypoints_with_avoidance(
-                    config, leader, index, api_base, map_id, wp_payload, arrival_radius,
-                    leg_timeout, poll_interval, player_level,
-                    hostile_distance_adjuster, hostile_scan_radius, leader_id,
-                    chunk_size=chunk_size,
-                )
-            else:
-                for start in range(0, len(wp_payload), chunk_size):
-                    chunk = wp_payload[start:start + chunk_size]
-                    movement = post_waypoint_movement(api_base, map_id, chunk, arrival_radius)
-                    if not movement.get("ok", False):
-                        raise RuntimeError(movement.get("error", "movement command failed"))
+                player_level = self_info.get("character", {}).get("level")
+                if not isinstance(player_level, int):
+                    player_level = 1
+
+                chunk = waypoints[idx:idx + chunk_size]
+                wp_payload = [{"x": w["x"], "y": w["y"], "z": w["z"]} for w in chunk]
+                if avoid_hostiles:
+                    threats = scan_hostile_threats(
+                        config, leader, index, player_level, hostile_scan_radius, hostile_distance_adjuster,
+                    )
+                    if threats:
+                        wp_payload, nudged_count = nudge_waypoints_around_threats(wp_payload, threats)
+                        if nudged_count:
+                            names = ", ".join(f"{t['name']}(lvl{t['level']})" for t in threats)
+                            print(f"{prefix}rerouting around {len(threats)} threat(s) [{names}], "
+                                  f"nudged {nudged_count}/{len(wp_payload)} waypoints")
+
+                movement = post_waypoint_movement(api_base, map_id, wp_payload, arrival_radius)
+                if not movement.get("ok", False):
+                    raise RuntimeError(movement.get("error", "movement command failed"))
+                try:
                     final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
-                    state = final_status.get("movement", {}).get("state", "unknown")
-                    if state != "arrived":
-                        raise RuntimeError(f"movement ended as {state}")
-                    print(f"{leader_id}: reached waypoint {start + len(chunk)}/{len(wp_payload)}")
-            print(f"{leader_id}: survey replay complete")
+                except LeaderDiedError:
+                    if not resume_through_death:
+                        raise
+                    # wait_for_movement raises as soon as it sees death,
+                    # before movement ever reaches a terminal state - catch
+                    # it here (not just the state!="arrived" case below) so
+                    # the death check at the top of the loop gets a chance to
+                    # recover instead of this propagating straight out.
+                    print(f"{prefix}chunk interrupted by death, rechecking status")
+                    continue
+                state = final_status.get("movement", {}).get("state", "unknown")
+                if state == "arrived":
+                    idx += len(chunk)
+                    print(f"{prefix}reached waypoint {start_index + idx}/{len(all_waypoints)}")
+                elif resume_through_death:
+                    # Most likely died mid-chunk; loop back around and let
+                    # the death check above handle it (or surface a clearer
+                    # error on the next pass if it wasn't death-related).
+                    print(f"{prefix}chunk ended as '{state}', rechecking status")
+                else:
+                    raise RuntimeError(f"movement ended as {state}")
+            print(f"{prefix}survey replay complete" + (f" ({deaths} death(s) recovered)" if deaths else ""))
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, ValueError, RuntimeError) as exc:
             ok = False
-            print(f"{leader_id}: survey replay failed ({exc})")
+            print(f"{prefix}survey replay failed ({exc})")
             try:
                 request_json("POST", api_base + "/movement/stop", {"reason": "survey replay failed"})
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
@@ -2964,6 +3023,13 @@ def main(argv: list[str]) -> int:
     replay_survey_parser.add_argument("--avoid-hostiles", action="store_true")
     replay_survey_parser.add_argument("--hostile-distance-adjuster", type=float, default=1.0)
     replay_survey_parser.add_argument("--hostile-scan-radius", type=float, default=100.0)
+    replay_survey_parser.add_argument("--reverse", action="store_true",
+                                       help="Walk the catalog tail-to-head instead of head-to-tail")
+    replay_survey_parser.add_argument("--resume-through-death", action="store_true",
+                                       help="Treat death as expected: recover (ghost walk + reclaim) and "
+                                            "resume from the nearest waypoint instead of failing")
+    replay_survey_parser.add_argument("--max-death-recoveries", type=int, default=25)
+    replay_survey_parser.add_argument("--death-recovery-timeout", type=float, default=180.0)
     route_demo_parser = sub.add_parser("route-demo", help="Run a named route demo using built-in landmarks")
     route_demo_parser.add_argument("--fleet", default="")
     route_demo_parser.add_argument("--leader", action="append", default=[])
@@ -3173,6 +3239,10 @@ def main(argv: list[str]) -> int:
             args.hostile_scan_radius,
             args.fleet,
             args.leader,
+            args.reverse,
+            args.resume_through_death,
+            args.max_death_recoveries,
+            args.death_recovery_timeout,
         )
     if args.command == "route-demo":
         return cmd_route_demo(
