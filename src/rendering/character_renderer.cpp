@@ -2805,7 +2805,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         if (lk < gpuModel.data.textures.size())
                             texName = gpuModel.data.textures[lk].filename;
                     }
-                    core::Logger::getInstance().info(
+                    // Warning level: the diagnostic is opt-in already, and the file log
+                    // filters info out by default.
+                    core::Logger::getInstance().warning(
                         "SCENE DIAG batch submesh=", batch.submeshId,
                         " blend=", blendMode, " matFlags=0x", std::hex, materialFlags, std::dec,
                         " alphaTest=", matData.alphaTest,
