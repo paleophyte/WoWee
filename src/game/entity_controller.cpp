@@ -1705,7 +1705,8 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             owner_.serverRunSpeedRef() = block.runSpeed;
             // Some server dismount paths update run speed without updating mount display field.
-            if (!owner_.onTaxiFlightRef() && !owner_.taxiMountActiveRef() &&
+            const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+            if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
                 owner_.currentMountDisplayIdRef() != 0 && block.runSpeed <= 8.5f) {
                 LOG_INFO("Auto-clearing mount from movement speed update: speed=", block.runSpeed,
                          " displayId=", owner_.currentMountDisplayIdRef());

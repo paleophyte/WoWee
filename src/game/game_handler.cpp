@@ -415,35 +415,17 @@ if (playerTransportStickyTimer_ > 0.0f) {
     }
 }
 
-// Detect taxi flight landing: UNIT_FLAG_TAXI_FLIGHT (0x00000100) cleared
-if (onTaxiFlight_) {
-    updateClientTaxi(deltaTime);
-    auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-    auto unit = std::dynamic_pointer_cast<Unit>(playerEntity);
-    if (unit &&
-        (unit->getUnitFlags() & game::UNIT_FLAG_TAXI_FLIGHT) == 0 &&
-        !taxiClientActive_ &&
-        !taxiActivatePending_ &&
-        taxiStartGrace_ <= 0.0f) {
-        onTaxiFlight_ = false;
-        taxiLandingCooldown_ = 2.0f;  // 2 second cooldown to prevent re-entering
-        if (taxiMountActive_ && mountCallback_) {
-            mountCallback_(0);
-        }
-        taxiMountActive_ = false;
-        taxiMountDisplayId_ = 0;
-        currentMountDisplayId_ = 0;
-        taxiClientActive_ = false;
-        taxiClientPath_.clear();
-        taxiRecoverPending_ = false;
-        movementInfo.flags = 0;
-        movementInfo.flags2 = 0;
-        if (socket) {
-            sendMovement(Opcode::MSG_MOVE_STOP);
-            sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
-        }
-        LOG_INFO("Taxi flight landed");
-    }
+// Drive the actual flight simulation off MovementHandler's real taxi state.
+// GameHandler used to gate this on its own separate onTaxiFlight_ copy, which
+// activateTaxi() never sets (only MovementHandler's copy is set there), so
+// updateClientTaxi() was never called during a normal flight - no animation,
+// no movement, and the flight never completed/cleared MovementHandler's own
+// onTaxiFlight_, leaving movement locked until a full process restart.
+// MovementHandler::updateClientTaxi() already does correct landing detection
+// and cleanup (mount callback, MSG_MOVE_STOP/HEARTBEAT, state reset) using its
+// own real state, so no duplicate landing logic is needed here.
+if (movementHandler_ && movementHandler_->isOnTaxiFlight()) {
+    movementHandler_->updateClientTaxi(deltaTime);
 }
 
 // Safety: if taxi flight ended but mount is still active, force dismount.
@@ -476,7 +458,7 @@ if (!onTaxiFlight_ && taxiMountActive_) {
 // Keep non-taxi mount state server-authoritative.
 // Some server paths don't emit explicit mount field updates in lockstep
 // with local visual state changes, so reconcile continuously.
-if (!onTaxiFlight_ && !taxiMountActive_) {
+if (!(movementHandler_ && movementHandler_->isOnTaxiFlight()) && !taxiMountActive_) {
     auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
     auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
     if (playerUnit) {
@@ -856,13 +838,14 @@ void GameHandler::update(float deltaTime) {
             static_cast<uint32_t>(MovementFlags::SWIMMING) |
             static_cast<uint32_t>(MovementFlags::FALLING) |
             static_cast<uint32_t>(MovementFlags::FALLINGFAR);
+        const bool onRealTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
         const bool classicLikeStationaryCombatSync =
             classicLikeCombatSync &&
-            !onTaxiFlight_ &&
+            !onRealTaxiFlight &&
             !taxiActivatePending_ &&
             !taxiClientActive_ &&
             (movementInfo.flags & locomotionFlags) == 0;
-        float heartbeatInterval = (onTaxiFlight_ || taxiActivatePending_ || taxiClientActive_)
+        float heartbeatInterval = (onRealTaxiFlight || taxiActivatePending_ || taxiClientActive_)
                                       ? game::HEARTBEAT_INTERVAL_TAXI
                                       : (classicLikeStationaryCombatSync ? game::HEARTBEAT_INTERVAL_STATIONARY_COMBAT
                                                                          : (classicLikeCombatSync ? game::HEARTBEAT_INTERVAL_MOVING_COMBAT
