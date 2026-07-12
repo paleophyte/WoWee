@@ -824,10 +824,13 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
     // Build sorted visible instance list
     sortedVisible_.clear();
+    transparentVisible_.clear();
     const size_t expectedVisible = std::min(instances.size() / 3, size_t(600));
     if (sortedVisible_.capacity() < expectedVisible) {
         sortedVisible_.reserve(expectedVisible);
     }
+    if (transparentVisible_.capacity() < expectedVisible / 4)
+        transparentVisible_.reserve(expectedVisible / 4);
 
     // GPU frustum culling — build frustum for CPU fallback path and overflow instances
     Frustum frustum;
@@ -882,7 +885,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
         }
 
-        sortedVisible_.push_back({i, instance.modelId, distSq, effectiveMaxDistSq});
+        VisibleEntry visible{i, instance.modelId, distSq, effectiveMaxDistSq};
+        sortedVisible_.push_back(visible);
+        if (instance.cachedModel &&
+            (instance.cachedModel->hasTransparentBatches || instance.cachedModel->isSpellEffect))
+            transparentVisible_.push_back(visible);
     }
 
     // Two-pass rendering: opaque/alpha-test first (depth write ON), then transparent/additive
@@ -1257,7 +1264,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // Transparent geometry must be drawn individually per instance in back-to-
     // front order for correct alpha compositing.  Each draw writes one
     // M2InstanceGPU entry and issues a single-instance indexed draw.
-    std::sort(sortedVisible_.begin(), sortedVisible_.end(),
+    std::sort(transparentVisible_.begin(), transparentVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.distSq > b.distSq; });
 
     currentModelId = UINT32_MAX;
@@ -1266,7 +1273,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     currentPipeline = opaquePipeline_;
     currentMaterialSet = VK_NULL_HANDLE;
 
-    for (const auto& entry : sortedVisible_) {
+    for (const auto& entry : transparentVisible_) {
         if (entry.index >= instances.size()) continue;
         auto& instance = instances[entry.index];
 

@@ -142,6 +142,26 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
     auto* drawList = ImGui::GetForegroundDrawList();
 
+    // Partition the entity map once. Marker categories below can traverse their
+    // compact type-specific lists instead of rescanning every entity 4-5 times.
+    std::vector<std::shared_ptr<game::Entity>> minimapUnits;
+    std::vector<std::shared_ptr<game::Entity>> minimapPlayers;
+    std::vector<std::shared_ptr<game::Entity>> minimapGameObjects;
+    const auto& allEntities = gameHandler.getEntityManager().getEntities();
+    minimapUnits.reserve(allEntities.size() / 2);
+    minimapPlayers.reserve(allEntities.size() / 8);
+    minimapGameObjects.reserve(allEntities.size() / 4);
+    for (const auto& [guid, entity] : allEntities) {
+        (void)guid;
+        if (!entity) continue;
+        switch (entity->getType()) {
+            case game::ObjectType::UNIT:       minimapUnits.push_back(entity); break;
+            case game::ObjectType::PLAYER:     minimapPlayers.push_back(entity); break;
+            case game::ObjectType::GAMEOBJECT: minimapGameObjects.push_back(entity); break;
+            default: break;
+        }
+    }
+
     auto projectToMinimap = [&](const glm::vec3& worldRenderPos, float& sx, float& sy) -> bool {
         float dx = worldRenderPos.x - playerRender.x;
         float dy = worldRenderPos.y - playerRender.y;
@@ -170,35 +190,59 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Build sets of entries that are incomplete objectives for tracked quests.
     // minimapQuestEntries: NPC creature entries (npcOrGoId > 0)
     // minimapQuestGoEntries: game object entries (npcOrGoId < 0, stored as abs value)
-    std::unordered_set<uint32_t> minimapQuestEntries;
-    std::unordered_set<uint32_t> minimapQuestGoEntries;
+    uint64_t questSignature = 1469598103934665603ull;
+    auto hashQuestValue = [&](uint64_t value) {
+        questSignature ^= value;
+        questSignature *= 1099511628211ull;
+    };
     {
         const auto& ql = gameHandler.getQuestLog();
         const auto& tq = gameHandler.getTrackedQuestIds();
+        hashQuestValue(tq.size());
         for (const auto& q : ql) {
             if (q.complete || q.questId == 0) continue;
             if (!tq.empty() && !tq.count(q.questId)) continue;
+            hashQuestValue(q.questId);
             for (const auto& obj : q.killObjectives) {
                 if (obj.required == 0) continue;
+                hashQuestValue(static_cast<uint32_t>(obj.npcOrGoId));
+                hashQuestValue(obj.required);
                 if (obj.npcOrGoId > 0) {
                     auto it = q.killCounts.find(static_cast<uint32_t>(obj.npcOrGoId));
-                    if (it == q.killCounts.end() || it->second.first < it->second.second)
-                        minimapQuestEntries.insert(static_cast<uint32_t>(obj.npcOrGoId));
+                    hashQuestValue(it == q.killCounts.end() ? 0 : it->second.first);
                 } else if (obj.npcOrGoId < 0) {
                     uint32_t goEntry = static_cast<uint32_t>(-obj.npcOrGoId);
                     auto it = q.killCounts.find(goEntry);
-                    if (it == q.killCounts.end() || it->second.first < it->second.second)
-                        minimapQuestGoEntries.insert(goEntry);
+                    hashQuestValue(it == q.killCounts.end() ? 0 : it->second.first);
                 }
             }
         }
     }
+    if (questSignature != minimapQuestCacheSignature_) {
+        minimapQuestCacheSignature_ = questSignature;
+        minimapQuestCreatureEntries_.clear();
+        minimapQuestGameObjectEntries_.clear();
+        const auto& tq = gameHandler.getTrackedQuestIds();
+        for (const auto& q : gameHandler.getQuestLog()) {
+            if (q.complete || q.questId == 0 || (!tq.empty() && !tq.count(q.questId))) continue;
+            for (const auto& obj : q.killObjectives) {
+                if (obj.required == 0 || obj.npcOrGoId == 0) continue;
+                const uint32_t entry = static_cast<uint32_t>(obj.npcOrGoId > 0
+                    ? obj.npcOrGoId : -obj.npcOrGoId);
+                auto it = q.killCounts.find(entry);
+                if (it != q.killCounts.end() && it->second.first >= it->second.second) continue;
+                if (obj.npcOrGoId > 0) minimapQuestCreatureEntries_.insert(entry);
+                else minimapQuestGameObjectEntries_.insert(entry);
+            }
+        }
+    }
+    const auto& minimapQuestEntries = minimapQuestCreatureEntries_;
+    const auto& minimapQuestGoEntries = minimapQuestGameObjectEntries_;
 
     // Optional base nearby NPC dots (independent of quest status packets).
     if (settingsPanel_.minimapNpcDots_) {
         ImVec2 mouse = ImGui::GetMousePos();
-        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-            if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+        for (const auto& entity : minimapUnits) {
 
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit || unit->getHealth() == 0) continue;
@@ -230,8 +274,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     if (settingsPanel_.minimapNpcDots_) {
         const uint64_t selfGuid = gameHandler.getPlayerGuid();
         const auto& partyData = gameHandler.getPartyData();
-        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-            if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
+        for (const auto& entity : minimapPlayers) {
+            const uint64_t guid = entity->getGuid();
             if (entity->getGuid() == selfGuid) continue;  // skip self (already drawn as arrow)
 
             // Skip party members (already drawn as squares above)
@@ -255,8 +299,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Shown whenever NPC dots are enabled (or always, since they're always useful).
     {
         constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-            if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+        for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit) continue;
             // Must be dead (health == 0) and marked lootable
@@ -292,8 +335,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Shown as small orange triangles to distinguish from unit dots and loot corpses.
     if (settingsPanel_.minimapNpcDots_) {
         ImVec2 mouse = ImGui::GetMousePos();
-        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-            if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) continue;
+        for (const auto& entity : minimapGameObjects) {
 
             // Only show objects that are likely interactive (chests/nodes: type 3;
             // also show type 0=Door when open, but filter by dynamic-flag ACTIVATED).
@@ -469,8 +511,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
         if (!killInfoMap.empty()) {
             ImVec2 mouse = ImGui::GetMousePos();
-            for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-                if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+            for (const auto& entity : minimapUnits) {
                 auto unit = std::static_pointer_cast<game::Unit>(entity);
                 if (!unit || unit->getHealth() == 0) continue;
                 auto infoIt = killInfoMap.find(unit->getEntry());

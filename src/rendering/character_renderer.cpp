@@ -240,7 +240,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         bindings[0].descriptorCount = 1;
         bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         bindings[1].descriptorCount = 1;
         bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[2].binding = 2;
@@ -274,7 +274,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     for (int i = 0; i < 2; i++) {
         VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_MATERIAL_SETS * 2},  // diffuse + normal/height
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_MATERIAL_SETS},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MAX_MATERIAL_SETS},
         };
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_MATERIAL_SETS;
@@ -2338,12 +2338,45 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (materialDescPools_[frameSlot]) {
             vkResetDescriptorPool(vkCtx_->getDevice(), materialDescPools_[frameSlot], 0);
         }
+        materialDescriptorCache_[frameSlot].clear();
         lastMaterialPoolResetFrame_ = frameIndex;
     }
 
     // Pre-compute aligned UBO stride for ring buffer sub-allocation
     const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
     const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
+    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, VkTexture* normal) -> VkDescriptorSet {
+        if (!diffuse || !normal) return VK_NULL_HANDLE;
+        const VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
+        const VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
+        const MaterialDescriptorKey key{diffuseInfo.imageView, normalInfo.imageView,
+                                        diffuseInfo.sampler, normalInfo.sampler};
+        auto& cache = materialDescriptorCache_[frameSlot];
+        if (auto it = cache.find(key); it != cache.end()) return it->second;
+
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = materialDescPools_[frameSlot];
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &materialSetLayout_;
+        if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS)
+            return VK_NULL_HANDLE;
+
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = materialRingBuffer_[frameSlot];
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(CharMaterialUBO);
+        VkWriteDescriptorSet writes[3] = {};
+        writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, 1,
+                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &diffuseInfo, nullptr, nullptr};
+        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 1, 0, 1,
+                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, nullptr, &bufferInfo, nullptr};
+        writes[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 2, 0, 1,
+                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normalInfo, nullptr, nullptr};
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+        cache.emplace(key, set);
+        return set;
+    };
 
     // Bind per-frame descriptor set (set 0) -- shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2400,58 +2433,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         // Upload bone matrices to SSBO
         int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
         if (numBones > 0) {
-            // Lazy-allocate bone SSBO on first use
-            if (!instance.boneBuffer[frameIndex]) {
-                VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-                bci.size = MAX_BONES * sizeof(glm::mat4);
-                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                VmaAllocationCreateInfo aci{};
-                aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-                aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-                VmaAllocationInfo allocInfo{};
-                vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                                &instance.boneBuffer[frameIndex], &instance.boneAlloc[frameIndex], &allocInfo);
-                instance.boneMapped[frameIndex] = allocInfo.pMappedData;
-
-                // Initialize all bone slots to identity so out-of-range indices
-                // produce correct (neutral) transforms instead of GPU garbage
-                if (instance.boneMapped[frameIndex]) {
-                    auto* dst = static_cast<glm::mat4*>(instance.boneMapped[frameIndex]);
-                    for (int j = 0; j < MAX_BONES; j++) dst[j] = glm::mat4(1.0f);
-                }
-
-                // Allocate descriptor set for bone SSBO
-                VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = boneDescPool_;
-                ai.descriptorSetCount = 1;
-                ai.pSetLayouts = &boneSetLayout_;
-                VkResult dsRes = vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &instance.boneSet[frameIndex]);
-                if (dsRes != VK_SUCCESS) {
-                    LOG_ERROR("CharacterRenderer: bone descriptor allocation failed (instance=",
-                              instance.id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
-                    if (instance.boneBuffer[frameIndex]) {
-                        vmaDestroyBuffer(vkCtx_->getAllocator(),
-                                         instance.boneBuffer[frameIndex], instance.boneAlloc[frameIndex]);
-                        instance.boneBuffer[frameIndex] = VK_NULL_HANDLE;
-                        instance.boneAlloc[frameIndex] = VK_NULL_HANDLE;
-                        instance.boneMapped[frameIndex] = nullptr;
-                    }
-                }
-
-                if (instance.boneSet[frameIndex]) {
-                    VkDescriptorBufferInfo bufInfo{};
-                    bufInfo.buffer = instance.boneBuffer[frameIndex];
-                    bufInfo.offset = 0;
-                    bufInfo.range = bci.size;
-                    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                    write.dstSet = instance.boneSet[frameIndex];
-                    write.dstBinding = 0;
-                    write.descriptorCount = 1;
-                    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    write.pBufferInfo = &bufInfo;
-                    vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-                }
-            }
+            // GPU allocation is performed by prepareRender() before command
+            // recording. Never allocate buffers/descriptors from the draw loop.
+            if (!instance.boneBuffer[frameIndex] || !instance.boneSet[frameIndex]) continue;
 
             // Upload bone matrices
             if (instance.boneMapped[frameIndex]) {
@@ -2719,18 +2703,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     emissiveTint = glm::vec3(1.28f, 1.04f, 0.82f);
                 }
 
-                // Allocate and fill material descriptor set (set 1)
-                VkDescriptorSet materialSet = VK_NULL_HANDLE;
-                {
-                    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                    ai.descriptorPool = materialDescPools_[frameSlot];
-                    ai.descriptorSetCount = 1;
-                    ai.pSetLayouts = &materialSetLayout_;
-                    if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &materialSet) != VK_SUCCESS) {
-                        continue; // Pool exhausted, skip this batch
-                    }
-                }
-
                 // Resolve normal/height map for this texture
                 VkTexture* normalMap = flatNormalTexture_.get();
                 float batchHeightVariance = 0.0f;
@@ -2779,42 +2751,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset, &matData, sizeof(CharMaterialUBO));
                 materialRingOffset_[frameSlot] = matOffset + uboStride;
 
-                // Write descriptor set: binding 0 = texture, binding 1 = material UBO, binding 2 = normal/height map
                 VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
-                VkDescriptorImageInfo imgInfo = bindTex->descriptorInfo();
-                VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = materialRingBuffer_[frameSlot];
-                bufInfo.offset = matOffset;
-                bufInfo.range = sizeof(CharMaterialUBO);
-                VkDescriptorImageInfo nhImgInfo = normalMap->descriptorInfo();
-
-                VkWriteDescriptorSet writes[3] = {};
-                writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[0].dstSet = materialSet;
-                writes[0].dstBinding = 0;
-                writes[0].descriptorCount = 1;
-                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[0].pImageInfo = &imgInfo;
-
-                writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[1].dstSet = materialSet;
-                writes[1].dstBinding = 1;
-                writes[1].descriptorCount = 1;
-                writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                writes[1].pBufferInfo = &bufInfo;
-
-                writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[2].dstSet = materialSet;
-                writes[2].dstBinding = 2;
-                writes[2].descriptorCount = 1;
-                writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[2].pImageInfo = &nhImgInfo;
-
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, normalMap);
+                if (!materialSet) continue;
 
                 // Bind material descriptor set (set 1)
+                const uint32_t dynamicOffset = matOffset;
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipelineLayout_, 1, 1, &materialSet, 0, nullptr);
+                                        pipelineLayout_, 1, 1, &materialSet, 1, &dynamicOffset);
 
                 // Per-batch depth bias from materialLayer to separate coplanar
                 // armor pieces (chest/legs/gloves) that share identical depth.
@@ -2827,18 +2771,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Draw entire model with first texture
             VkTexture* texPtr = !gpuModel.textureIds.empty() ? gpuModel.textureIds[0] : whiteTexture_.get();
             if (!texPtr || !texPtr->isValid()) texPtr = whiteTexture_.get();
-
-            // Allocate material descriptor set
-            VkDescriptorSet materialSet = VK_NULL_HANDLE;
-            {
-                VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = materialDescPools_[frameSlot];
-                ai.descriptorSetCount = 1;
-                ai.pSetLayouts = &materialSetLayout_;
-                if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &materialSet) != VK_SUCCESS) {
-                    continue;
-                }
-            }
 
             // POM quality → sample count
             int pomSamples2 = 32;
@@ -2877,39 +2809,12 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset2, &matData, sizeof(CharMaterialUBO));
             materialRingOffset_[frameSlot] = matOffset2 + uboStride;
 
-            VkDescriptorImageInfo imgInfo = texPtr->descriptorInfo();
-            VkDescriptorBufferInfo bufInfo{};
-            bufInfo.buffer = materialRingBuffer_[frameSlot];
-            bufInfo.offset = matOffset2;
-            bufInfo.range = sizeof(CharMaterialUBO);
-            VkDescriptorImageInfo nhImgInfo2 = flatNormalTexture_->descriptorInfo();
+            VkDescriptorSet materialSet = getMaterialDescriptorSet(texPtr, flatNormalTexture_.get());
+            if (!materialSet) continue;
 
-            VkWriteDescriptorSet writes[3] = {};
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = materialSet;
-            writes[0].dstBinding = 0;
-            writes[0].descriptorCount = 1;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[0].pImageInfo = &imgInfo;
-
-            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[1].dstSet = materialSet;
-            writes[1].dstBinding = 1;
-            writes[1].descriptorCount = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[1].pBufferInfo = &bufInfo;
-
-            writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[2].dstSet = materialSet;
-            writes[2].dstBinding = 2;
-            writes[2].descriptorCount = 1;
-            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[2].pImageInfo = &nhImgInfo2;
-
-            vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
-
+            const uint32_t dynamicOffset = matOffset2;
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelineLayout_, 1, 1, &materialSet, 0, nullptr);
+                                    pipelineLayout_, 1, 1, &materialSet, 1, &dynamicOffset);
 
             vkCmdDrawIndexed(cmd, gpuModel.indexCount, 1, 0, 0, 0);
         }

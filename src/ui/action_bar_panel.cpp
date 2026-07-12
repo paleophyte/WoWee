@@ -161,6 +161,80 @@ uint32_t ActionBarPanel::resolveMacroPrimarySpellId(uint32_t macroId, game::Game
     return result;
 }
 
+const ActionBarPanel::MacroRenderInfo& ActionBarPanel::resolveMacroRenderInfo(
+        uint32_t macroId, game::GameHandler& gameHandler) {
+    const std::string& text = gameHandler.getMacroText(macroId);
+    const size_t spellCount = gameHandler.getKnownSpells().size();
+    const size_t itemCount = gameHandler.getItemInfoCache().size();
+    auto found = macroRenderCache_.find(macroId);
+    if (found != macroRenderCache_.end() && found->second.sourceText == text &&
+        found->second.spellCount == spellCount && found->second.itemCount == itemCount)
+        return found->second;
+
+    MacroRenderInfo info;
+    info.sourceText = text;
+    info.spellCount = spellCount;
+    info.itemCount = itemCount;
+    info.primarySpellId = resolveMacroPrimarySpellId(macroId, gameHandler);
+
+    std::string displayArg = getMacroShowtooltipArg(text);
+    for (const auto& cmd : allMacroCommands(text)) {
+        std::string lower = cmd;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool use = lower.rfind("/use ", 0) == 0;
+        const bool cast = lower.rfind("/cast ", 0) == 0;
+        const bool sequence = lower.rfind("/castsequence ", 0) == 0;
+        if (use) info.isUse = true;
+        if ((!displayArg.empty() && displayArg != "__auto__") || (!use && !cast && !sequence)) continue;
+        size_t space = cmd.find(' ');
+        if (space == std::string::npos) continue;
+        displayArg = cmd.substr(space + 1);
+        if (!displayArg.empty() && displayArg.front() == '[') {
+            size_t end = displayArg.find(']');
+            if (end != std::string::npos) displayArg = displayArg.substr(end + 1);
+        }
+        if (sequence) {
+            size_t reset = displayArg.find("reset=");
+            if (reset != std::string::npos) {
+                size_t after = displayArg.find(' ', reset);
+                if (after != std::string::npos) displayArg = displayArg.substr(after + 1);
+            }
+        }
+        size_t separator = displayArg.find(sequence ? ',' : ';');
+        if (separator != std::string::npos) displayArg.resize(separator);
+        break;
+    }
+
+    size_t first = displayArg.find_first_not_of(" \t!");
+    if (first != std::string::npos) displayArg.erase(0, first); else displayArg.clear();
+    size_t last = displayArg.find_last_not_of(" \t");
+    if (last != std::string::npos) displayArg.resize(last + 1);
+    size_t rank = displayArg.find('(');
+    if (rank != std::string::npos) displayArg.resize(rank);
+    while (!displayArg.empty() && displayArg.back() == ' ') displayArg.pop_back();
+    for (char& c : displayArg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (displayArg.empty() || displayArg == "__auto__") {
+        info.iconSpellId = info.primarySpellId;
+    } else {
+        for (uint32_t sid : gameHandler.getKnownSpells()) {
+            std::string name = gameHandler.getSpellName(sid);
+            for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (name == displayArg) { info.iconSpellId = sid; break; }
+        }
+        if (info.isUse) {
+            for (const auto& [entry, item] : gameHandler.getItemInfoCache()) {
+                if (!item.valid) continue;
+                std::string name = item.name;
+                for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (name == displayArg) { info.itemEntry = entry; break; }
+            }
+        }
+    }
+
+    return macroRenderCache_.insert_or_assign(macroId, std::move(info)).first->second;
+}
+
 void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                              SettingsPanel& settingsPanel,
                              ChatPanel& chatPanel,
@@ -353,80 +427,16 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
 
         // Macro icon: #showtooltip [SpellName] → show that spell's icon on the button
         bool macroIsUseCmd = false;  // tracks if the macro's primary command is /use (for item icon fallback)
+        uint32_t macroItemEntry = 0;
         if (slot.type == game::ActionBarSlot::MACRO && slot.id != 0 && !iconTex) {
-            const std::string& macroText = gameHandler.getMacroText(slot.id);
-            if (!macroText.empty()) {
-                std::string showArg = getMacroShowtooltipArg(macroText);
-                if (showArg.empty() || showArg == "__auto__") {
-                    // No explicit #showtooltip arg — derive spell from first /cast, /castsequence, or /use line
-                    for (const auto& cmdLine : allMacroCommands(macroText)) {
-                        if (cmdLine.size() < 6) continue;
-                        std::string cl = cmdLine;
-                        for (char& c : cl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        bool isCastCmd = (cl.rfind("/cast ", 0) == 0 || cl == "/cast");
-                        bool isCastSeqCmd = (cl.rfind("/castsequence ", 0) == 0);
-                        bool isUseCmd = (cl.rfind("/use ", 0) == 0);
-                        if (isUseCmd) macroIsUseCmd = true;
-                        if (!isCastCmd && !isCastSeqCmd && !isUseCmd) continue;
-                        size_t sp2 = cmdLine.find(' ');
-                        if (sp2 == std::string::npos) continue;
-                        showArg = cmdLine.substr(sp2 + 1);
-                        // Strip conditionals [...]
-                        if (!showArg.empty() && showArg.front() == '[') {
-                            size_t ce = showArg.find(']');
-                            if (ce != std::string::npos) showArg = showArg.substr(ce + 1);
-                        }
-                        // Strip reset= spec for castsequence
-                        if (isCastSeqCmd) {
-                            std::string tmp = showArg;
-                            while (!tmp.empty() && tmp.front() == ' ') tmp.erase(tmp.begin());
-                            if (tmp.rfind("reset=", 0) == 0) {
-                                size_t spA = tmp.find(' ');
-                                if (spA != std::string::npos) showArg = tmp.substr(spA + 1);
-                            }
-                        }
-                        // First alternative: ';' for /cast, ',' for /castsequence
-                        size_t sep = showArg.find(isCastSeqCmd ? ',' : ';');
-                        if (sep != std::string::npos) showArg = showArg.substr(0, sep);
-                        // Trim and strip '!'
-                        size_t ss = showArg.find_first_not_of(" \t!");
-                        if (ss != std::string::npos) showArg = showArg.substr(ss);
-                        size_t se = showArg.find_last_not_of(" \t");
-                        if (se != std::string::npos) showArg.resize(se + 1);
-                        break;
-                    }
-                }
-                // Look up the spell icon by name
-                if (!showArg.empty() && showArg != "__auto__") {
-                    std::string showLower = showArg;
-                    for (char& c : showLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    // Also strip "(Rank N)" suffix for matching
-                    size_t rankParen = showLower.find('(');
-                    if (rankParen != std::string::npos) showLower.resize(rankParen);
-                    while (!showLower.empty() && showLower.back() == ' ') showLower.pop_back();
-                    for (uint32_t sid : gameHandler.getKnownSpells()) {
-                        const std::string& sn = gameHandler.getSpellName(sid);
-                        if (sn.empty()) continue;
-                        std::string snl = sn;
-                        for (char& c : snl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        if (snl == showLower) {
-                            iconTex = assetMgr ? getSpellIcon(sid, assetMgr) : VK_NULL_HANDLE;
-                            if (iconTex) break;
-                        }
-                    }
-                    // Fallback for /use macros: if no spell matched, search item cache for the item icon
-                    if (!iconTex && macroIsUseCmd) {
-                        for (const auto& [entry, info] : gameHandler.getItemInfoCache()) {
-                            if (!info.valid) continue;
-                            std::string iName = info.name;
-                            for (char& c : iName) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            if (iName == showLower && info.displayInfoId != 0) {
-                                iconTex = inventoryScreen.getItemIcon(info.displayInfoId);
-                                break;
-                            }
-                        }
-                    }
-                }
+            const auto& macroInfo = resolveMacroRenderInfo(slot.id, gameHandler);
+            macroIsUseCmd = macroInfo.isUse;
+            macroItemEntry = macroInfo.itemEntry;
+            if (macroInfo.iconSpellId != 0)
+                iconTex = assetMgr ? getSpellIcon(macroInfo.iconSpellId, assetMgr) : VK_NULL_HANDLE;
+            if (!iconTex && macroItemEntry != 0) {
+                if (const auto* item = gameHandler.getItemInfo(macroItemEntry); item && item->displayInfoId != 0)
+                    iconTex = inventoryScreen.getItemIcon(item->displayInfoId);
             }
         }
 
@@ -678,31 +688,10 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 }
                 if (!showedRich) {
                     // For /use macros: try showing the item tooltip instead
-                    if (macroIsUseCmd) {
-                        const std::string& macroText = gameHandler.getMacroText(slot.id);
-                        // Extract item name from first /use command
-                        for (const auto& cmd : allMacroCommands(macroText)) {
-                            std::string cl = cmd;
-                            for (char& c : cl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            if (cl.rfind("/use ", 0) != 0) continue;
-                            size_t sp = cmd.find(' ');
-                            if (sp == std::string::npos) continue;
-                            std::string itemArg = cmd.substr(sp + 1);
-                            while (!itemArg.empty() && itemArg.front() == ' ') itemArg.erase(itemArg.begin());
-                            while (!itemArg.empty() && itemArg.back() == ' ') itemArg.pop_back();
-                            std::string itemLow = itemArg;
-                            for (char& c : itemLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            for (const auto& [entry, info] : gameHandler.getItemInfoCache()) {
-                                if (!info.valid) continue;
-                                std::string iName = info.name;
-                                for (char& c : iName) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                                if (iName == itemLow) {
-                                    inventoryScreen.renderItemTooltip(info);
-                                    showedRich = true;
-                                    break;
-                                }
-                            }
-                            break;
+                    if (macroIsUseCmd && macroItemEntry != 0) {
+                        if (const auto* info = gameHandler.getItemInfo(macroItemEntry); info && info->valid) {
+                            inventoryScreen.renderItemTooltip(*info);
+                            showedRich = true;
                         }
                     }
                     if (!showedRich) {
@@ -946,6 +935,7 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             if (ImGui::Button("Save")) {
                 gameHandler.setMacroText(macroEditorId_, std::string(macroEditorBuf_));
                 macroPrimarySpellCache_.clear();  // invalidate resolved spell IDs
+                macroRenderCache_.clear();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();

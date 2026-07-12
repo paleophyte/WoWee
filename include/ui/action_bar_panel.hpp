@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <functional>
+#include <string>
 #include <vulkan/vulkan.h>
 
 namespace wowee {
@@ -81,6 +82,16 @@ public:
 
     // Macro cooldown cache: maps macro ID → resolved primary spell ID
     std::unordered_map<uint32_t, uint32_t> macroPrimarySpellCache_;
+    struct MacroRenderInfo {
+        std::string sourceText;
+        size_t spellCount = 0;
+        size_t itemCount = 0;
+        uint32_t primarySpellId = 0;
+        uint32_t iconSpellId = 0;
+        uint32_t itemEntry = 0;
+        bool isUse = false;
+    };
+    std::unordered_map<uint32_t, MacroRenderInfo> macroRenderCache_;
     size_t macroCacheSpellCount_ = 0;
 
     // UIServices injection (Phase B singleton breaking)
@@ -89,6 +100,7 @@ public:
 private:
     UIServices services_;
     uint32_t resolveMacroPrimarySpellId(uint32_t macroId, game::GameHandler& gameHandler);
+    const MacroRenderInfo& resolveMacroRenderInfo(uint32_t macroId, game::GameHandler& gameHandler);
 };
 
 } // namespace ui

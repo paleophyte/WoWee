@@ -668,6 +668,7 @@ private:
         float effectiveMaxDistSq;
     };
     std::vector<VisibleEntry> sortedVisible_;  // Reused each frame
+    std::vector<VisibleEntry> transparentVisible_; // Only models needing pass 2
     struct GlowSprite {
         glm::vec3 worldPos;
         glm::vec4 color;

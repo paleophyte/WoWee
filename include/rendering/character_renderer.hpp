@@ -288,6 +288,24 @@ private:
 
     // Descriptor pool
     VkDescriptorPool materialDescPools_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    struct MaterialDescriptorKey {
+        VkImageView diffuse = VK_NULL_HANDLE;
+        VkImageView normal = VK_NULL_HANDLE;
+        VkSampler diffuseSampler = VK_NULL_HANDLE;
+        VkSampler normalSampler = VK_NULL_HANDLE;
+        bool operator==(const MaterialDescriptorKey&) const = default;
+    };
+    struct MaterialDescriptorKeyHash {
+        size_t operator()(const MaterialDescriptorKey& key) const {
+            const size_t a = std::hash<VkImageView>{}(key.diffuse);
+            const size_t b = std::hash<VkImageView>{}(key.normal);
+            const size_t c = std::hash<VkSampler>{}(key.diffuseSampler);
+            const size_t d = std::hash<VkSampler>{}(key.normalSampler);
+            return a ^ (b << 1) ^ (c << 2) ^ (d << 3);
+        }
+    };
+    std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>
+        materialDescriptorCache_[2];
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
     std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
         std::make_shared<std::atomic<uint64_t>>(0);
