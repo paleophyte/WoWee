@@ -637,11 +637,21 @@ uint32_t hp = 0, maxHp = 0;
         const auto& nodes = game_.getTaxiNodes();
         auto it = nodes.find(nearest);
         if (it != nodes.end()) nearestNodeName = it->second.name;
+        // Only meaningful once at least one SMSG_SHOWTAXINODES has been
+        // received (loadTaxiDbc() is lazy, triggered from that handler) -
+        // empty before the first flight master visit this session/process.
+        json known = json::array();
+        for (const auto& [id, node] : nodes) {
+            if (game_.isKnownTaxiNode(id)) {
+                known.push_back({{"id", id}, {"name", node.name}});
+            }
+        }
         return {
             {"windowOpen", game_.isTaxiWindowOpen()},
             {"nearestNode", nearest},
             {"nearestNodeName", nearestNodeName},
-            {"nearestNodeKnown", nearest != 0 && game_.isKnownTaxiNode(nearest)}
+            {"nearestNodeKnown", nearest != 0 && game_.isKnownTaxiNode(nearest)},
+            {"knownNodes", known}
         };
     }
 
