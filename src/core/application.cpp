@@ -1492,14 +1492,28 @@ void Application::update(float deltaTime) {
                         }
 
                         std::optional<float> targetFloor;
-                        if (terrainFloor) targetFloor = terrainFloor;
-                        if (wmoFloor && (!targetFloor || *wmoFloor > *targetFloor)) targetFloor = wmoFloor;
-                        if (m2Floor && (!targetFloor || *m2Floor > *targetFloor)) targetFloor = m2Floor;
+                        const char* pickedFrom = "none";
+                        if (terrainFloor) { targetFloor = terrainFloor; pickedFrom = "terrain"; }
+                        if (wmoFloor && (!targetFloor || *wmoFloor > *targetFloor)) { targetFloor = wmoFloor; pickedFrom = "wmo"; }
+                        if (m2Floor && (!targetFloor || *m2Floor > *targetFloor)) { targetFloor = m2Floor; pickedFrom = "m2"; }
+
+                        // Diagnostic for the Ironforge-style case (flight point inside a mountain):
+                        // raw terrain height has no notion of the WMO tunnel above/below it, so
+                        // logging every candidate here shows whether "highest floor wins" is
+                        // picking outdoor terrain over the correct (lower) interior WMO floor.
+                        LOG_INFO("Taxi landing clamp: pos=(", p.x, ", ", p.y, ", ", p.z, ") ",
+                                 "terrainFloor=", terrainFloor ? std::to_string(*terrainFloor) : "none", " ",
+                                 "wmoFloor=", wmoFloor ? std::to_string(*wmoFloor) : "none", " ",
+                                 "m2Floor=", m2Floor ? std::to_string(*m2Floor) : "none", " ",
+                                 "picked=", pickedFrom, " ",
+                                 "timer=", worldEntryCallbacks_ ? worldEntryCallbacks_->getTaxiLandingClampTimer() : 0.0f);
 
                         if (targetFloor) {
                             // Floor found — snap player to it and start countdown to release
                             float targetZ = *targetFloor + 0.10f;
                             if (std::abs(p.z - targetZ) > 0.05f) {
+                                LOG_INFO("Taxi landing clamp: snapping z ", p.z, " -> ", targetZ,
+                                         " (source=", pickedFrom, ")");
                                 p.z = targetZ;
                                 renderer->getCharacterPosition() = p;
                                 glm::vec3 canonical = core::coords::renderToCanonical(p);
