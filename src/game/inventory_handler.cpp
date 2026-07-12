@@ -54,6 +54,28 @@ bool isBandageItem(const ItemQueryResponseData* info) {
            info->subClass == kConsumableSubclassBandage;
 }
 
+void synchronizeStationaryBandageCast(GameHandler& owner) {
+    // Bandages are cast through CMSG_USE_ITEM and therefore bypass
+    // SpellHandler::castSpell(), which normally sends a stop before a timed cast.
+    // Explicitly synchronize the stationary state so the server cannot retain a
+    // stale start-forward/strafe/turn state after the character has visually stopped.
+    auto& movement = owner.movementInfoRef();
+    const uint32_t horizontalMask =
+        static_cast<uint32_t>(MovementFlags::FORWARD) |
+        static_cast<uint32_t>(MovementFlags::BACKWARD) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT);
+    const uint32_t turnMask =
+        static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
+        static_cast<uint32_t>(MovementFlags::TURN_RIGHT);
+    movement.flags &= ~(horizontalMask | turnMask);
+
+    owner.sendMovement(Opcode::MSG_MOVE_STOP);
+    owner.sendMovement(Opcode::MSG_MOVE_STOP_STRAFE);
+    owner.sendMovement(Opcode::MSG_MOVE_STOP_TURN);
+    owner.sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+}
+
 bool usesVisibleItemDisplayIds() {
     return false;
 }
@@ -368,9 +390,9 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 }
                 if (!removedPending) {
                     if (!buybackItems_.empty()) {
-                        uint64_t frontGuid = buybackItems_.front().itemGuid;
-                        if (pendingSellToBuyback_.erase(frontGuid) > 0) {
-                            buybackItems_.pop_front();
+                        uint64_t backGuid = buybackItems_.back().itemGuid;
+                        if (pendingSellToBuyback_.erase(backGuid) > 0) {
+                            buybackItems_.pop_back();
                             removedPending = true;
                         }
                     }
@@ -1071,8 +1093,8 @@ void InventoryHandler::sellItemBySlot(int backpackIndex) {
         sold.itemGuid = itemGuid;
         sold.item = slot.item;
         sold.count = 1;
-        buybackItems_.push_front(sold);
-        if (buybackItems_.size() > 12) buybackItems_.pop_back();
+        buybackItems_.push_back(sold);
+        if (buybackItems_.size() > 12) buybackItems_.pop_front();
         pendingSellToBuyback_[itemGuid] = sold;
         sellItem(currentVendorItems_.vendorGuid, itemGuid, 1);
     } else if (itemGuid == 0) {
@@ -1117,8 +1139,8 @@ void InventoryHandler::sellItemInBag(int bagIndex, int slotIndex) {
         sold.itemGuid = itemGuid;
         sold.item = slot.item;
         sold.count = 1;
-        buybackItems_.push_front(sold);
-        if (buybackItems_.size() > 12) buybackItems_.pop_back();
+        buybackItems_.push_back(sold);
+        if (buybackItems_.size() > 12) buybackItems_.pop_front();
         pendingSellToBuyback_[itemGuid] = sold;
         sellItem(currentVendorItems_.vendorGuid, itemGuid, 1);
     } else if (itemGuid == 0) {
@@ -1252,6 +1274,7 @@ void InventoryHandler::useItemBySlot(int backpackIndex) {
                       " spellId=", useSpellId);
         }
         const auto* itemInfo = owner_.getItemInfo(slot.item.itemId);
+        if (isBandageItem(itemInfo)) synchronizeStationaryBandageCast(owner_);
         const uint64_t targetGuid = targetGuidForUseItem(owner_, itemInfo);
         auto packet = owner_.getPacketParsers()
             ? owner_.getPacketParsers()->buildUseItem(0xFF, static_cast<uint8_t>(Inventory::NUM_EQUIP_SLOTS + backpackIndex), itemGuid, useSpellId, targetGuid)
@@ -1297,6 +1320,7 @@ void InventoryHandler::useItemInBag(int bagIndex, int slotIndex) {
         }
         uint8_t wowBag = static_cast<uint8_t>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIndex);
         const auto* itemInfo = owner_.getItemInfo(slot.item.itemId);
+        if (isBandageItem(itemInfo)) synchronizeStationaryBandageCast(owner_);
         const uint64_t targetGuid = targetGuidForUseItem(owner_, itemInfo);
         auto packet = owner_.getPacketParsers()
             ? owner_.getPacketParsers()->buildUseItem(wowBag, static_cast<uint8_t>(slotIndex), itemGuid, useSpellId, targetGuid)
@@ -1634,7 +1658,9 @@ void InventoryHandler::handleTrainerList(network::Packet& packet) {
 }
 
 void InventoryHandler::trainSpell(uint32_t spellId) {
-    LOG_INFO("trainSpell called: spellId=", spellId, " state=", (int)owner_.getState(), " socket=", (owner_.getSocket() ? "yes" : "no"));
+    LOG_INFO("Trainer purchase requested: spellId=", spellId,
+             " state=", (int)owner_.getState(),
+             " socket=", (owner_.getSocket() ? "yes" : "no"));
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) {
         LOG_WARNING("trainSpell: Not in world or no socket connection");
         return;
@@ -2159,7 +2185,8 @@ void InventoryHandler::handleAuctionHello(network::Packet& packet) {
 
 void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
     AuctionListResult result;
-    if (!AuctionListResultParser::parse(packet, result)) return;
+    const int enchantSlots = isClassicLikeExpansion() ? 1 : 6;
+    if (!AuctionListResultParser::parse(packet, result, enchantSlots)) return;
 
     if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) {
         auctionOwnerResults_ = std::move(result);
@@ -2176,6 +2203,7 @@ void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
     auto ensureEntries = [this](const AuctionListResult& r) {
         for (const auto& e : r.auctions) {
             owner_.ensureItemInfo(e.itemEntry);
+            if (e.ownerGuid != 0) owner_.queryPlayerName(e.ownerGuid);
         }
     };
     if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) ensureEntries(auctionOwnerResults_);

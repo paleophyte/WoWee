@@ -481,8 +481,9 @@ network::Packet AuctionListItemsPacket::build(
     p.writeUInt32(quality);
     p.writeUInt8(usableOnly);
     p.writeUInt8(0);  // getAll (0 = normal search)
-    p.writeUInt8(exactMatch);
-    // Sort columns (0 = none)
+    // WotLK has no exact-match field here; the next byte is the sort count.
+    // Keep the API argument for callers shared with older server profiles.
+    (void)exactMatch;
     p.writeUInt8(0);
     return p;
 }
@@ -550,8 +551,8 @@ bool AuctionListResultParser::parse(network::Packet& packet, AuctionListResult& 
     //   randProp(4) + suffix(4) + stack(4) + charges(4) + flags(4) +
     //   ownerGuid(8) + startBid(4) + outbid(4) + buyout(4) + expire(4) +
     //   bidderGuid(8) + curBid(4)
-    // Classic: numEnchantSlots=1 → 80 bytes/entry
-    // TBC/WotLK: numEnchantSlots=3 → 104 bytes/entry
+    // Classic: numEnchantSlots=1 → 72 bytes/entry
+    // TBC/WotLK: numEnchantSlots=6 → 132 bytes/entry
     if (!packet.hasRemaining(4)) return false;
 
     uint32_t count = packet.readUInt32();

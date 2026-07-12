@@ -102,6 +102,45 @@ bool isLootContainerName(const std::string& name) {
                            sizeof(kContainerTerms) / sizeof(kContainerTerms[0]));
 }
 
+uint32_t openLockSpellForGameObject(pipeline::AssetManager* assets,
+                                    const GameObjectQueryResponseData* info,
+                                    const std::unordered_set<uint32_t>& knownSpells) {
+    if (!assets || !info || !info->hasData || info->data[0] == 0) return 0;
+
+    auto lockDbc = assets->loadDBC("Lock.dbc");
+    auto spellDbc = assets->loadDBC("Spell.dbc");
+    if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
+        lockDbc->getFieldCount() < 33 || spellDbc->getFieldCount() < 234) {
+        return 0;
+    }
+
+    const uint32_t lockId = info->data[0];
+    for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
+        if (lockDbc->getUInt32(row, 0) != lockId) continue;
+
+        for (uint32_t slot = 0; slot < 8; ++slot) {
+            const uint32_t keyType = lockDbc->getUInt32(row, 1 + slot);
+            const uint32_t keyIndex = lockDbc->getUInt32(row, 9 + slot);
+            if (keyType == 1 && keyIndex != 0) return keyIndex; // LOCK_KEY_SPELL
+            if (keyType != 2 || keyIndex == 0) continue;       // LOCK_KEY_SKILL
+
+            for (uint32_t spellRow = 0; spellRow < spellDbc->getRecordCount(); ++spellRow) {
+                const uint32_t spellId = spellDbc->getUInt32(spellRow, 0);
+                if (knownSpells.count(spellId) == 0) continue;
+                for (uint32_t effect = 0; effect < 3; ++effect) {
+                    constexpr uint32_t kSpellEffectOpenLock = 33;
+                    if (spellDbc->getUInt32(spellRow, 71 + effect) == kSpellEffectOpenLock &&
+                        spellDbc->getUInt32(spellRow, 110 + effect) == keyIndex) {
+                        return spellId;
+                    }
+                }
+            }
+        }
+        break;
+    }
+    return 0;
+}
+
 uint32_t gatherSpellForGameObject(const GameObjectQueryResponseData* info, const std::string& name) {
     if (info && info->type != 3) return 0; // GAMEOBJECT_TYPE_CHEST
 
@@ -2239,7 +2278,8 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     LOG_INFO("GO interaction: guid=0x", std::hex, guid, std::dec,
              " entry=", goEntry, " type=", goType,
              " name='", goName, "' chestLike=", chestLike,
-             " metadataPending=", metadataPending, " isMailbox=", isMailbox);
+             " metadataPending=", metadataPending, " isMailbox=", isMailbox,
+             " lockId=", (goInfo && goInfo->hasData ? goInfo->data[0] : 0));
 
     const uint32_t gatherBaseSpellId = gatherSpellForGameObject(goInfo, goName);
     if (gatherBaseSpellId != 0) {
@@ -2261,8 +2301,31 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         return;
     }
 
-    // Always send CMSG_GAMEOBJ_USE first — this triggers the server-side
-    // GameObject::Use() handler for all GO types.
+    if (chestLike && isActiveExpansion("wotlk")) {
+        // AzerothCore does not handle type-3 chests in GameObject::Use(), and
+        // HandleLootOpcode rejects non-creature GUIDs. Normal quest containers
+        // are opened through the generic OPEN_LOCK effect spell instead.
+        const uint32_t openLockSpellId = openLockSpellForGameObject(
+            services_.assetManager, goInfo, spellHandler_->getKnownSpells());
+        if (openLockSpellId == 0) {
+            addSystemChatMessage("This object requires a key or opening skill.");
+            LOG_WARNING("GO chest has no usable open-lock spell: lockId=",
+                        goInfo && goInfo->hasData ? goInfo->data[0] : 0,
+                        " guid=0x", std::hex, guid, std::dec,
+                        " entry=", goEntry, " name='", goName, "'");
+            return;
+        }
+        auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
+            openLockSpellId, guid, 0);
+        socket->send(castPacket);
+        lastInteractedGoGuid_ = guid;
+        LOG_INFO("GO chest open-lock cast: spell=", openLockSpellId,
+                 " guid=0x", std::hex, guid, std::dec,
+                 " entry=", goEntry, " name='", goName, "'");
+        return;
+    }
+
+    // Every expansion activates game objects through CMSG_GAMEOBJ_USE.
     auto usePacket = GameObjectUsePacket::build(guid);
     socket->send(usePacket);
     lastInteractedGoGuid_ = guid;

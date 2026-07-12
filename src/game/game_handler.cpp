@@ -2544,6 +2544,11 @@ const GossipMessageData& GameHandler::getCurrentGossip() const {
     if (questHandler_) return questHandler_->getCurrentGossip();
     return currentGossip;
 }
+const std::string& GameHandler::getNpcText(uint32_t textId) const {
+    static const std::string empty;
+    if (questHandler_) return questHandler_->getNpcText(textId);
+    return empty;
+}
 bool GameHandler::isQuestDetailsOpen() {
     if (questHandler_) return questHandler_->isQuestDetailsOpen();
     return questDetailsOpen;

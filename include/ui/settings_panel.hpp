@@ -126,6 +126,7 @@ public:
     bool volumeSettingsApplied_ = false;  // True once saved volume settings applied to audio managers
     bool msaaSettingsApplied_ = false;   // True once saved MSAA setting applied to renderer
     bool fxaaSettingsApplied_ = false;   // True once saved FXAA setting applied to renderer
+    bool lightingSettingsApplied_ = false; // True once saved shadows/brightness are applied
     bool waterRefractionApplied_ = false;
     bool normalMapSettingsApplied_ = false;  // True once saved normal map/POM settings applied
 

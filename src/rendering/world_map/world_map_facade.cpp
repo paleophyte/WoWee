@@ -298,6 +298,8 @@ bool WorldMapFacade::initialize(VkContext* ctx, pipeline::AssetManager* am) {
         impl_->zoneHighlightLayer->initialize(ctx, am);
     if (impl_->playerMarkerLayer)
         impl_->playerMarkerLayer->initialize(ctx, am);
+    if (impl_->corpseMarkerLayer)
+        impl_->corpseMarkerLayer->initialize(ctx, am);
     impl_->initialized = true;
     return true;
 }
@@ -306,6 +308,8 @@ void WorldMapFacade::shutdown() {
     if (!impl_) return;
     if (impl_->zoneHighlightLayer)
         impl_->zoneHighlightLayer->clearTextures();
+    if (impl_->corpseMarkerLayer)
+        impl_->corpseMarkerLayer->clearTexture();
     impl_->compositor.shutdown();
     impl_->data.clear();
     impl_->initialized = false;

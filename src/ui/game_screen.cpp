@@ -239,6 +239,20 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
+    // Settings are loaded before renderer services are injected. Apply the
+    // saved lighting state once the renderer exists so opening the settings
+    // window cannot become the first operation that changes scene lighting.
+    if (!settingsPanel_.lightingSettingsApplied_) {
+        if (auto* renderer = services_.renderer) {
+            renderer->setShadowsEnabled(settingsPanel_.pendingShadows);
+            renderer->setShadowDistance(settingsPanel_.pendingShadowDistance);
+            if (auto* post = renderer->getPostProcessPipeline()) {
+                post->setBrightness(static_cast<float>(settingsPanel_.pendingBrightness) / 50.0f);
+            }
+            settingsPanel_.lightingSettingsApplied_ = true;
+        }
+    }
+
     // Apply saved volume settings once when audio managers first become available
     if (!settingsPanel_.volumeSettingsApplied_) {
         auto* ac = services_.audioCoordinator;
@@ -432,7 +446,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     windowManager_.renderQuestOfferRewardWindow(gameHandler, chatPanel_, inventoryScreen);
     windowManager_.renderVendorWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderTrainerWindow(gameHandler,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
+        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
+        inventoryScreen);
     windowManager_.renderBarberShopWindow(gameHandler);
     windowManager_.renderStableWindow(gameHandler);
     windowManager_.renderTaxiWindow(gameHandler);

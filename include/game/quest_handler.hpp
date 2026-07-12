@@ -40,6 +40,7 @@ public:
 
     bool isGossipWindowOpen() const { return gossipWindowOpen_; }
     const GossipMessageData& getCurrentGossip() const { return currentGossip_; }
+    const std::string& getNpcText(uint32_t textId) const;
 
     // Quest details
     bool isQuestDetailsOpen() {
@@ -147,6 +148,7 @@ private:
     void handleQuestgiverQuestList(network::Packet& packet);
     void classifyGossipQuests(bool updateQuestLog);
     void handleGossipComplete(network::Packet& packet);
+    void handleNpcTextUpdate(network::Packet& packet);
     void handleQuestPoiQueryResponse(network::Packet& packet);
     void handleQuestDetails(network::Packet& packet);
     void handleQuestRequestItems(network::Packet& packet);
@@ -187,6 +189,9 @@ private:
 
     // Quest giver status per NPC
     std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;
+
+    // NPC gossip text cache (textId → body text)
+    std::unordered_map<uint32_t, std::string> npcTextCache_;
 
     // Shared quest state
     bool        pendingSharedQuest_       = false;

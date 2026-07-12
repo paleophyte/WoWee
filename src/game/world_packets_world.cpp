@@ -721,6 +721,20 @@ bool QuestDetailsParser::parse(network::Packet& packet, QuestDetailsData& data) 
         return true;
     }
 
+    // AzerothCore WotLK 3.3.5a has portrait strings + portrait IDs here
+    if (!isPreWotlk()) {
+        packet.readString(); // portraitGiverText
+        packet.readString(); // portraitGiverName
+        packet.readString(); // portraitTurnInText
+        packet.readString(); // portraitTurnInName
+        if (packet.hasRemaining(8)) {
+            packet.readUInt32(); // portraitGiver
+            packet.readUInt32(); // portraitTurnIn
+        }
+    }
+
+    if (!packet.hasRemaining(10)) return true;
+
     /*activateAccept*/ packet.readUInt8();
     /*flags*/ packet.readUInt32();
     data.suggestedPlayers = packet.readUInt32();
@@ -962,13 +976,79 @@ bool QuestOfferRewardParser::parse(network::Packet& packet, QuestOfferRewardData
         return true;
     }
 
-    const bool preferFixedRewardArrays = !isPreWotlk();
+    // WotLK 3.3.5a (AzerothCore/TrinityCore): known fixed format — parse directly.
+    // portrait strings(4) + portrait ids(8) + autoFinish(4) + flags(4) +
+    // suggestedPlayers(4) + emotes + 6 choice slots + 4 reward slots +
+    // money + xp + ~96 bytes trailing (honor, spells, reputation arrays).
+    // The heuristic scanner can't handle the large trailing tail correctly.
+    if (!isPreWotlk()) {
+        packet.readString(); // portraitGiverText
+        packet.readString(); // portraitGiverName
+        packet.readString(); // portraitTurnInText
+        packet.readString(); // portraitTurnInName
+        if (!packet.hasRemaining(20)) return true;
+        packet.readUInt32(); // portraitGiver
+        packet.readUInt32(); // portraitTurnIn
+        packet.readUInt32(); // autoFinish
+        packet.readUInt32(); // questFlags
+        packet.readUInt32(); // suggestedPlayers
 
-    // After the two strings the packet contains a variable prefix (autoFinish + optional fields)
-    // before the emoteCount.  Different expansions and server emulator versions differ:
+        if (!packet.hasRemaining(4)) return true;
+        uint32_t emoteCount = packet.readUInt32();
+        if (emoteCount > 32) return true;
+        for (uint32_t i = 0; i < emoteCount; ++i) {
+            if (!packet.hasRemaining(8)) return true;
+            packet.readUInt32(); // delay
+            packet.readUInt32(); // emote
+        }
+
+        if (!packet.hasRemaining(4)) return true;
+        uint32_t choiceCount = packet.readUInt32();
+        if (choiceCount > 6) return true;
+        for (uint32_t i = 0; i < 6; ++i) {
+            if (!packet.hasRemaining(12)) return true;
+            QuestRewardItem item;
+            item.itemId = packet.readUInt32();
+            item.count = packet.readUInt32();
+            item.displayInfoId = packet.readUInt32();
+            item.choiceSlot = i;
+            if (item.itemId > 0)
+                data.choiceRewards.push_back(item);
+        }
+
+        if (!packet.hasRemaining(4)) return true;
+        uint32_t rewardCount = packet.readUInt32();
+        if (rewardCount > 4) return true;
+        for (uint32_t i = 0; i < 4; ++i) {
+            if (!packet.hasRemaining(12)) return true;
+            QuestRewardItem item;
+            item.itemId = packet.readUInt32();
+            item.count = packet.readUInt32();
+            item.displayInfoId = packet.readUInt32();
+            if (item.itemId > 0)
+                data.fixedRewards.push_back(item);
+        }
+
+        if (packet.hasRemaining(4))
+            data.rewardMoney = packet.readUInt32();
+        if (packet.hasRemaining(4))
+            data.rewardXp = packet.readUInt32();
+
+        LOG_INFO("Quest offer reward: id=", data.questId, " title='", data.title,
+                 "' choices=", data.choiceRewards.size(), " fixed=", data.fixedRewards.size(),
+                 " money=", data.rewardMoney, " xp=", data.rewardXp);
+        for (const auto& ri : data.choiceRewards)
+            LOG_INFO("  choice: itemId=", ri.itemId, " count=", ri.count,
+                     " displayId=", ri.displayInfoId, " slot=", ri.choiceSlot);
+        for (const auto& ri : data.fixedRewards)
+            LOG_INFO("  fixed: itemId=", ri.itemId, " count=", ri.count,
+                     " displayId=", ri.displayInfoId);
+        return true;
+    }
+
+    // Classic/TBC: variable prefix precedes emoteCount:
     //   Classic 1.12   : uint8 autoFinish + uint32 suggestedPlayers  = 5 bytes
     //   TBC 2.4.3      : uint32 autoFinish + uint32 suggestedPlayers = 8 bytes (variable arrays)
-    //   WotLK 3.3.5a   : uint32 autoFinish + uint32 suggestedPlayers = 8 bytes (fixed 6/4 arrays)
     // Some vanilla-family servers omit autoFinish entirely (0 bytes of prefix).
     // We scan prefix sizes 0..16 bytes with both fixed and variable array layouts, scoring each.
 
@@ -989,13 +1069,12 @@ bool QuestOfferRewardParser::parse(network::Packet& packet, QuestOfferRewardData
         out.fixedArrays = fixedArrays;
         packet.setReadPos(startPos);
 
-        // Skip the prefix bytes (autoFinish + optional suggestedPlayers before emoteCount)
         if (!packet.hasRemaining(prefixSkip)) return out;
         packet.setReadPos(packet.getReadPos() + prefixSkip);
 
         if (!packet.hasRemaining(4)) return out;
         uint32_t emoteCount = packet.readUInt32();
-        if (emoteCount > 32) return out;  // guard against misalignment
+        if (emoteCount > 32) return out;
         for (uint32_t i = 0; i < emoteCount; ++i) {
             if (!packet.hasRemaining(8)) return out;
             packet.readUInt32(); // delay
@@ -1046,39 +1125,41 @@ bool QuestOfferRewardParser::parse(network::Packet& packet, QuestOfferRewardData
 
         out.ok = true;
         out.score = 0;
-        // Prefer the standard WotLK/TBC 8-byte prefix (uint32 autoFinish + uint32 suggestedPlayers)
-        if (prefixSkip == 8) out.score += 3;
-        else if (prefixSkip == 5) out.score += 1;  // Classic uint8 autoFinish + uint32 suggestedPlayers
-        // WotLK/AzerothCore uses fixed 6 choice + 4 fixed reward arrays; older
-        // Classic/TBC-style packets use compact variable arrays.  Keep the
-        // reward choice slot aligned with the active protocol.
-        if (fixedArrays == preferFixedRewardArrays) out.score += 4;
-        // Valid counts
+        if (prefixSkip == 4 || prefixSkip == 8) out.score += 3;
+        else if (prefixSkip == 5) out.score += 1;
         if (choiceCount <= 6) out.score += 3;
         if (rewardCount <= 4) out.score += 3;
-        // All non-zero items are within declared counts
         if (nonZeroChoice <= choiceCount) out.score += 2;
         if (nonZeroFixed <= rewardCount) out.score += 2;
-        // No bytes left over (or only a few)
+        for (const auto& ri : out.choiceRewards) {
+            if (ri.itemId > 0 && ri.itemId < 100000 && ri.count > 0 && ri.count < 1000 && ri.displayInfoId > 0)
+                out.score += 2;
+            else if (ri.itemId >= 100000)
+                out.score -= 2;
+        }
+        for (const auto& ri : out.fixedRewards) {
+            if (ri.itemId > 0 && ri.itemId < 100000 && ri.count > 0 && ri.count < 1000 && ri.displayInfoId > 0)
+                out.score += 2;
+            else if (ri.itemId >= 100000)
+                out.score -= 2;
+        }
         size_t remaining = packet.getRemainingSize();
         if (remaining == 0) out.score += 5;
         else if (remaining <= 4) out.score += 3;
         else if (remaining <= 8) out.score += 2;
         else if (remaining <= 16) out.score += 1;
         else out.score -= static_cast<int>(remaining / 4);
-        // Plausible money/XP values
-        if (out.rewardMoney < 5000000u) out.score += 1;   // < 500g
-        if (out.rewardXp < 200000u) out.score += 1;       // < 200k XP
+        if (out.rewardMoney < 5000000u) out.score += 1;
+        if (out.rewardXp < 200000u) out.score += 1;
         return out;
     };
 
     size_t tailStart = packet.getReadPos();
-    // Try prefix sizes 0..16 bytes with both fixed and variable array layouts
     std::vector<ParsedTail> candidates;
     candidates.reserve(34);
     for (size_t skip = 0; skip <= 16; ++skip) {
-        candidates.push_back(parseTail(tailStart, skip, true));   // fixed arrays
-        candidates.push_back(parseTail(tailStart, skip, false));  // variable arrays
+        candidates.push_back(parseTail(tailStart, skip, true));
+        candidates.push_back(parseTail(tailStart, skip, false));
     }
 
     const ParsedTail* best = nullptr;
@@ -1094,10 +1175,18 @@ bool QuestOfferRewardParser::parse(network::Packet& packet, QuestOfferRewardData
         data.rewardXp      = best->rewardXp;
     }
 
-    LOG_DEBUG("Quest offer reward: id=", data.questId, " title='", data.title,
+    LOG_INFO("Quest offer reward: id=", data.questId, " title='", data.title,
              "' choices=", data.choiceRewards.size(), " fixed=", data.fixedRewards.size(),
+             " money=", data.rewardMoney, " xp=", data.rewardXp,
              " prefix=", (best ? best->prefixSkip : size_t(0)),
+             " score=", (best ? best->score : -1),
              (best && best->fixedArrays ? " fixed" : " var"));
+    for (const auto& ri : data.choiceRewards)
+        LOG_INFO("  choice: itemId=", ri.itemId, " count=", ri.count,
+                 " displayId=", ri.displayInfoId, " slot=", ri.choiceSlot);
+    for (const auto& ri : data.fixedRewards)
+        LOG_INFO("  fixed: itemId=", ri.itemId, " count=", ri.count,
+                 " displayId=", ri.displayInfoId);
     return true;
 }
 

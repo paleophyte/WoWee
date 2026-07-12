@@ -1,6 +1,7 @@
 #include "game/transport_manager.hpp"
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_animator.hpp"
+#include "game/game_utils.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "core/coordinates.hpp"
@@ -481,7 +482,7 @@ void TransportManager::updateServerTransport(uint64_t guid, const glm::vec3& pos
         return;
     }
 
-    if (transport->isM2 && isDeeprunTramTransport(*transport) && pathEntry->fromDBC) {
+    if (transport->isM2 && isDeeprunTramTransport(*transport) && pathEntry->fromDBC && isPreWotlk()) {
         // CMangos sends occasional position echoes for Deeprun subway cars, but the client
         // owns the TransportAnimation.dbc path phase. Treat those samples as presence/yaw
         // hints rather than switching the M2 tram into stationary server-driven mode.

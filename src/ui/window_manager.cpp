@@ -262,16 +262,29 @@ void WindowManager::renderGossipWindow(game::GameHandler& gameHandler,
     ImGui::SetNextWindowPos(ImVec2(screenW / 2 - 200, 150), ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_Always);
 
-    bool open = true;
-    if (ImGui::Begin("NPC Dialog", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
-        const auto& gossip = gameHandler.getCurrentGossip();
+    const auto& gossip = gameHandler.getCurrentGossip();
+    auto npcEntity = gameHandler.getEntityManager().getEntity(gossip.npcGuid);
+    std::string npcName;
+    if (npcEntity && npcEntity->getType() == game::ObjectType::UNIT) {
+        auto unit = std::static_pointer_cast<game::Unit>(npcEntity);
+        npcName = unit->getName();
+    }
 
-        // NPC name (from creature cache)
-        auto npcEntity = gameHandler.getEntityManager().getEntity(gossip.npcGuid);
-        if (npcEntity && npcEntity->getType() == game::ObjectType::UNIT) {
-            auto unit = std::static_pointer_cast<game::Unit>(npcEntity);
-            if (!unit->getName().empty()) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%s", unit->getName().c_str());
+    // Keep a stable ImGui ID while presenting the NPC name as the title.
+    std::string windowTitle = (npcName.empty() ? "NPC Dialog" : npcName) +
+                              std::string("###NPCDialog");
+    bool open = true;
+    if (ImGui::Begin(windowTitle.c_str(), &open,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
+        // NPC body text (from NPC_TEXT referenced by titleTextId)
+        if (gossip.titleTextId > 0) {
+            const std::string& bodyText = gameHandler.getNpcText(gossip.titleTextId);
+            if (!bodyText.empty()) {
+                std::string processedBodyText =
+                    chat_utils::replaceGenderPlaceholders(bodyText, gameHandler);
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+                ImGui::TextWrapped("%s", processedBodyText.c_str());
+                ImGui::PopTextWrapPos();
                 ImGui::Separator();
             }
         }
@@ -984,7 +997,7 @@ void WindowManager::renderVendorWindow(game::GameHandler& gameHandler,
                 ImGui::TableSetupColumn("Price", ImGuiTableColumnFlags_WidthFixed, 110.0f);
                 ImGui::TableSetupColumn("Buy", ImGuiTableColumnFlags_WidthFixed, 62.0f);
                 ImGui::TableHeadersRow();
-                // Show all buyback items (most recently sold first)
+                // Show all buyback items (oldest sold first, matching server slot order)
                 for (int i = 0; i < static_cast<int>(buyback.size()); ++i) {
                     const auto& entry = buyback[i];
                     gameHandler.ensureItemInfo(entry.item.itemId);
@@ -1221,7 +1234,8 @@ void WindowManager::renderVendorWindow(game::GameHandler& gameHandler,
 }
 
 void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
-                                SpellIconFn getSpellIcon) {
+                                SpellIconFn getSpellIcon,
+                                InventoryScreen& inventoryScreen) {
     if (!gameHandler.isTrainerWindowOpen()) return;
 
     auto* window = services_.window;
@@ -1349,17 +1363,29 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         statusLabel = "Unavailable";
                     }
 
-                    // Icon column
+                    // Icon column — use item icon for crafting recipes, spell icon otherwise
                     ImGui::TableSetColumnIndex(0);
                     {
-                        VkDescriptorSet spellIcon = getSpellIcon(spell->spellId, assetMgr);
-                        if (spellIcon) {
+                        VkDescriptorSet icon = VK_NULL_HANDLE;
+                        if (isProfessionTrainer) {
+                            gameHandler.loadSpellNameCache();
+                            auto cit = gameHandler.spellNameCacheRef().find(spell->spellId);
+                            if (cit != gameHandler.spellNameCacheRef().end() && cit->second.createdItemId != 0) {
+                                gameHandler.ensureItemInfo(cit->second.createdItemId);
+                                const auto* itemInfo = gameHandler.getItemInfo(cit->second.createdItemId);
+                                if (itemInfo && itemInfo->displayInfoId)
+                                    icon = inventoryScreen.getItemIcon(itemInfo->displayInfoId);
+                            }
+                        }
+                        if (!icon)
+                            icon = getSpellIcon(spell->spellId, assetMgr);
+                        if (icon) {
                             if (effectiveState == 1 && !alreadyKnown) {
-                                ImGui::ImageWithBg((ImTextureID)(uintptr_t)spellIcon, ImVec2(18, 18),
+                                ImGui::ImageWithBg((ImTextureID)(uintptr_t)icon, ImVec2(18, 18),
                                     ImVec2(0, 0), ImVec2(1, 1),
                                     ImVec4(0, 0, 0, 0), ImVec4(0.5f, 0.5f, 0.5f, 0.6f));
                             } else {
-                                ImGui::Image((ImTextureID)(uintptr_t)spellIcon, ImVec2(18, 18));
+                                ImGui::Image((ImTextureID)(uintptr_t)icon, ImVec2(18, 18));
                             }
                         }
                     }
@@ -1433,11 +1459,13 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         ImGui::TextColored(color, "Free");
                     }
 
-                    // Train button - only enabled if available, affordable, prereqs met
+                    // The server-computed trainer state is authoritative for level,
+                    // skill, class, race, and prerequisite requirements.  Do not
+                    // veto an available offer using the client's incomplete spell
+                    // cache (weapon proficiencies in particular may not appear there).
                     ImGui::TableSetColumnIndex(4);
-                    // Use effectiveState so newly available spells (after learning prereqs) can be trained
+                    // Keep the local money check for immediate UI feedback.
                     bool canTrain = !alreadyKnown && effectiveState == 0
-                                  && prereqsMet && levelMet
                                   && (money >= spell->spellCost);
 
                     // Debug logging for first 3 spells to see why buttons are disabled
@@ -1448,7 +1476,7 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         lastTrainerGuid = trainer.trainerGuid;
                     }
                     if (logCount < 3) {
-                        LOG_INFO("Trainer button debug: spellId=", spell->spellId,
+                        LOG_INFO("Trainer button state: spellId=", spell->spellId,
                                 " alreadyKnown=", alreadyKnown, " state=", static_cast<int>(spell->state),
                                 " prereqsMet=", prereqsMet, " (", prereq1Met, ",", prereq2Met, ",", prereq3Met, ")",
                                 " levelMet=", levelMet,
@@ -1459,7 +1487,9 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         logCount++;
                     }
 
-                    if (isProfessionTrainer && alreadyKnown) {
+                    bool isCraftRecipe = isProfessionTrainer && alreadyKnown
+                                       && spell->profDialog != 0;
+                    if (isCraftRecipe) {
                         // Profession trainer: known recipes show "Create" button to craft
                         bool isCasting = gameHandler.isCasting();
                         if (isCasting) ImGui::BeginDisabled();
@@ -1469,9 +1499,18 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         if (isCasting) ImGui::EndDisabled();
                     } else {
                         if (!canTrain) ImGui::BeginDisabled();
-                        if (ImGui::SmallButton("Train")) {
+                        if (canTrain) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.48f, 0.20f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.62f, 0.27f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.38f, 0.16f, 1.0f));
+                        }
+                        // Fill the action column so the enabled control has a clear,
+                        // reliable hit target instead of SmallButton's text-sized box.
+                        const char* actionLabel = alreadyKnown ? "Known" : "Train";
+                        if (ImGui::Button(actionLabel, ImVec2(-1.0f, 0.0f))) {
                             gameHandler.trainSpell(spell->spellId);
                         }
+                        if (canTrain) ImGui::PopStyleColor(3);
                         if (!canTrain) ImGui::EndDisabled();
                     }
 
@@ -1578,13 +1617,74 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
             }
             if (!hasTrainable) ImGui::EndDisabled();
 
-            // Profession trainer: craft quantity controls
+            // Profession trainer: crafting panel
             if (isProfessionTrainer) {
                 ImGui::Separator();
                 static int craftQuantity = 1;
                 static uint32_t selectedCraftSpell = 0;
 
-                // Show craft queue status if active
+                gameHandler.loadSpellNameCache();
+
+                // Difficulty color from skill thresholds
+                // orange < (minSkill + trivialLow) / 2, yellow < trivialLow, green < trivialHigh, gray >= trivialHigh
+                auto getDifficultyColor = [&](uint32_t spellId) -> ImVec4 {
+                    auto cit = gameHandler.spellNameCacheRef().find(spellId);
+                    if (cit == gameHandler.spellNameCacheRef().end()) return ui::colors::kWhite;
+                    const auto& se = cit->second;
+                    if (se.trivialSkillHigh == 0 && se.trivialSkillLow == 0)
+                        return ImVec4(1.0f, 0.5f, 0.0f, 1.0f); // orange (no thresholds = always useful)
+                    auto slIt = gameHandler.spellToSkillLineRef().find(spellId);
+                    if (slIt == gameHandler.spellToSkillLineRef().end()) return ui::colors::kWhite;
+                    auto skIt = gameHandler.getPlayerSkills().find(slIt->second);
+                    if (skIt == gameHandler.getPlayerSkills().end()) return ui::colors::kWhite;
+                    uint32_t skill = skIt->second.effectiveValue();
+                    if (skill >= se.trivialSkillHigh)
+                        return ImVec4(0.5f, 0.5f, 0.5f, 1.0f); // gray
+                    if (skill >= se.trivialSkillLow)
+                        return ImVec4(0.3f, 0.8f, 0.3f, 1.0f); // green
+                    uint32_t yellowThresh = se.minSkillRank + (se.trivialSkillLow - se.minSkillRank) / 2;
+                    if (skill >= yellowThresh)
+                        return ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // yellow
+                    return ImVec4(1.0f, 0.5f, 0.0f, 1.0f); // orange
+                };
+
+                auto getDifficultyLabel = [&](uint32_t spellId) -> const char* {
+                    auto cit = gameHandler.spellNameCacheRef().find(spellId);
+                    if (cit == gameHandler.spellNameCacheRef().end()) return "";
+                    const auto& se = cit->second;
+                    if (se.trivialSkillHigh == 0 && se.trivialSkillLow == 0) return "Orange";
+                    auto slIt = gameHandler.spellToSkillLineRef().find(spellId);
+                    if (slIt == gameHandler.spellToSkillLineRef().end()) return "";
+                    auto skIt = gameHandler.getPlayerSkills().find(slIt->second);
+                    if (skIt == gameHandler.getPlayerSkills().end()) return "";
+                    uint32_t skill = skIt->second.effectiveValue();
+                    if (skill >= se.trivialSkillHigh) return "Gray";
+                    if (skill >= se.trivialSkillLow) return "Green";
+                    uint32_t yellowThresh = se.minSkillRank + (se.trivialSkillLow - se.minSkillRank) / 2;
+                    if (skill >= yellowThresh) return "Yellow";
+                    return "Orange";
+                };
+
+                std::vector<const game::TrainerSpell*> craftable;
+                for (const auto& spell : trainer.spells) {
+                    if (isKnown(spell.spellId))
+                        craftable.push_back(&spell);
+                }
+
+                // Show player skill level
+                if (!craftable.empty()) {
+                    auto slIt = gameHandler.spellToSkillLineRef().find(craftable[0]->spellId);
+                    if (slIt != gameHandler.spellToSkillLineRef().end()) {
+                        auto skIt = gameHandler.getPlayerSkills().find(slIt->second);
+                        if (skIt != gameHandler.getPlayerSkills().end()) {
+                            const std::string& skillName = gameHandler.getSkillName(slIt->second);
+                            ImGui::TextDisabled("%s: %u / %u",
+                                skillName.empty() ? "Skill" : skillName.c_str(),
+                                skIt->second.effectiveValue(), skIt->second.maxValue);
+                        }
+                    }
+                }
+
                 int queueRemaining = gameHandler.getCraftQueueRemaining();
                 if (queueRemaining > 0) {
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
@@ -1594,66 +1694,149 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                         gameHandler.cancelCraftQueue();
                         gameHandler.cancelCast();
                     }
-                } else {
-                    // Spell selector + quantity input
-                    // Build list of known (craftable) spells
-                    std::vector<const game::TrainerSpell*> craftable;
-                    for (const auto& spell : trainer.spells) {
-                        if (isKnown(spell.spellId)) {
-                            craftable.push_back(&spell);
+                } else if (!craftable.empty()) {
+                    const char* previewName = "Select recipe...";
+                    for (const auto* sp : craftable) {
+                        if (sp->spellId == selectedCraftSpell) {
+                            const std::string& n = gameHandler.getSpellName(sp->spellId);
+                            if (!n.empty()) previewName = n.c_str();
+                            break;
                         }
                     }
-                    if (!craftable.empty()) {
-                        // Combo box for recipe selection
-                        const char* previewName = "Select recipe...";
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+                    if (ImGui::BeginCombo("##CraftSelect", previewName)) {
                         for (const auto* sp : craftable) {
-                            if (sp->spellId == selectedCraftSpell) {
-                                const std::string& n = gameHandler.getSpellName(sp->spellId);
-                                if (!n.empty()) previewName = n.c_str();
-                                break;
-                            }
+                            const std::string& n = gameHandler.getSpellName(sp->spellId);
+                            const std::string& r = gameHandler.getSpellRank(sp->spellId);
+                            ImVec4 diffCol = getDifficultyColor(sp->spellId);
+                            char label[128];
+                            if (!r.empty())
+                                snprintf(label, sizeof(label), "%s (%s)##%u",
+                                    n.empty() ? "???" : n.c_str(), r.c_str(), sp->spellId);
+                            else
+                                snprintf(label, sizeof(label), "%s##%u",
+                                    n.empty() ? "???" : n.c_str(), sp->spellId);
+                            ImGui::PushStyleColor(ImGuiCol_Text, diffCol);
+                            if (ImGui::Selectable(label, sp->spellId == selectedCraftSpell))
+                                selectedCraftSpell = sp->spellId;
+                            ImGui::PopStyleColor();
                         }
-                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-                        if (ImGui::BeginCombo("##CraftSelect", previewName)) {
-                            for (const auto* sp : craftable) {
-                                const std::string& n = gameHandler.getSpellName(sp->spellId);
-                                const std::string& r = gameHandler.getSpellRank(sp->spellId);
-                                char label[128];
-                                if (!r.empty())
-                                    snprintf(label, sizeof(label), "%s (%s)##%u",
-                                        n.empty() ? "???" : n.c_str(), r.c_str(), sp->spellId);
-                                else
-                                    snprintf(label, sizeof(label), "%s##%u",
-                                        n.empty() ? "???" : n.c_str(), sp->spellId);
-                                if (ImGui::Selectable(label, sp->spellId == selectedCraftSpell)) {
-                                    selectedCraftSpell = sp->spellId;
+                        ImGui::EndCombo();
+                    }
+
+                    // Show selected recipe details
+                    if (selectedCraftSpell != 0) {
+                        auto cacheIt = gameHandler.spellNameCacheRef().find(selectedCraftSpell);
+                        if (cacheIt != gameHandler.spellNameCacheRef().end()) {
+                            const auto& spellEntry = cacheIt->second;
+                            ImGui::Spacing();
+
+                            // Difficulty
+                            ImVec4 diffCol = getDifficultyColor(selectedCraftSpell);
+                            const char* diffLabel = getDifficultyLabel(selectedCraftSpell);
+                            ImGui::TextDisabled("Difficulty:");
+                            ImGui::SameLine(0, 4);
+                            ImGui::TextColored(diffCol, "%s", diffLabel);
+
+                            // Produced item
+                            if (spellEntry.createdItemId != 0) {
+                                gameHandler.ensureItemInfo(spellEntry.createdItemId);
+                                const auto* prodInfo = gameHandler.getItemInfo(spellEntry.createdItemId);
+                                ImGui::TextDisabled("Creates:");
+                                ImGui::SameLine(0, 4);
+                                if (prodInfo && prodInfo->displayInfoId) {
+                                    VkDescriptorSet icon = inventoryScreen.getItemIcon(prodInfo->displayInfoId);
+                                    if (icon) {
+                                        ImGui::Image((ImTextureID)(uintptr_t)icon, ImVec2(20, 20));
+                                        ImGui::SameLine(0, 4);
+                                    }
+                                }
+                                if (prodInfo && !prodInfo->name.empty()) {
+                                    ImVec4 nameCol = InventoryScreen::getQualityColor(
+                                        static_cast<game::ItemQuality>(prodInfo->quality));
+                                    ImGui::TextColored(nameCol, "%s", prodInfo->name.c_str());
+                                    if (prodInfo->armor > 0 || prodInfo->damageMax > 0.0f ||
+                                        prodInfo->stamina != 0 || prodInfo->strength != 0 ||
+                                        prodInfo->agility != 0 || prodInfo->intellect != 0 ||
+                                        prodInfo->spirit != 0) {
+                                        ImGui::Indent(24.0f);
+                                        if (prodInfo->armor > 0)
+                                            ImGui::TextDisabled("Armor: %d", prodInfo->armor);
+                                        if (prodInfo->damageMax > 0.0f)
+                                            ImGui::TextDisabled("Damage: %.0f - %.0f", prodInfo->damageMin, prodInfo->damageMax);
+                                        auto showStat = [](const char* label, int32_t val) {
+                                            if (val != 0) ImGui::TextColored(
+                                                ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "+%d %s", val, label);
+                                        };
+                                        showStat("Stamina", prodInfo->stamina);
+                                        showStat("Strength", prodInfo->strength);
+                                        showStat("Agility", prodInfo->agility);
+                                        showStat("Intellect", prodInfo->intellect);
+                                        showStat("Spirit", prodInfo->spirit);
+                                        if (!prodInfo->description.empty())
+                                            ImGui::TextColored(ImVec4(1.0f, 0.84f, 0.0f, 1.0f),
+                                                "\"%s\"", prodInfo->description.c_str());
+                                        ImGui::Unindent(24.0f);
+                                    }
+                                } else {
+                                    ImGui::Text("Item #%u", spellEntry.createdItemId);
                                 }
                             }
-                            ImGui::EndCombo();
-                        }
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(50.0f);
-                        ImGui::InputInt("##CraftQty", &craftQuantity, 0, 0);
-                        if (craftQuantity < 1) craftQuantity = 1;
-                        if (craftQuantity > 99) craftQuantity = 99;
-                        ImGui::SameLine();
-                        bool canCraft = selectedCraftSpell != 0 && !gameHandler.isCasting();
-                        if (!canCraft) ImGui::BeginDisabled();
-                        if (ImGui::Button("Create")) {
-                            if (craftQuantity == 1) {
-                                gameHandler.castSpell(selectedCraftSpell, 0);
-                            } else {
-                                gameHandler.startCraftQueue(selectedCraftSpell, craftQuantity);
+
+                            // Reagents
+                            bool hasReagents = false;
+                            for (int r = 0; r < 8; ++r) {
+                                if (spellEntry.reagents[r].itemId != 0) { hasReagents = true; break; }
+                            }
+                            if (hasReagents) {
+                                ImGui::TextDisabled("Reagents:");
+                                for (int r = 0; r < 8; ++r) {
+                                    uint32_t rId = spellEntry.reagents[r].itemId;
+                                    uint32_t rCount = spellEntry.reagents[r].count;
+                                    if (rId == 0 || rCount == 0) continue;
+                                    gameHandler.ensureItemInfo(rId);
+                                    const auto* rInfo = gameHandler.getItemInfo(rId);
+                                    ImGui::Indent(24.0f);
+                                    if (rInfo && rInfo->displayInfoId) {
+                                        VkDescriptorSet icon = inventoryScreen.getItemIcon(rInfo->displayInfoId);
+                                        if (icon) {
+                                            ImGui::Image((ImTextureID)(uintptr_t)icon, ImVec2(16, 16));
+                                            ImGui::SameLine(0, 4);
+                                        }
+                                    }
+                                    if (rInfo && !rInfo->name.empty()) {
+                                        ImVec4 rCol = InventoryScreen::getQualityColor(
+                                            static_cast<game::ItemQuality>(rInfo->quality));
+                                        ImGui::TextColored(rCol, "%s x%u", rInfo->name.c_str(), rCount);
+                                    } else {
+                                        ImGui::Text("Item #%u x%u", rId, rCount);
+                                    }
+                                    ImGui::Unindent(24.0f);
+                                }
                             }
                         }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Create All")) {
-                            // Queue a large count — server stops the queue automatically
-                            // when materials run out (sends SPELL_FAILED_REAGENTS).
-                            gameHandler.startCraftQueue(selectedCraftSpell, 999);
-                        }
-                        if (!canCraft) ImGui::EndDisabled();
+                        ImGui::Spacing();
                     }
+
+                    // Craft controls
+                    ImGui::SetNextItemWidth(50.0f);
+                    ImGui::InputInt("##CraftQty", &craftQuantity, 0, 0);
+                    if (craftQuantity < 1) craftQuantity = 1;
+                    if (craftQuantity > 99) craftQuantity = 99;
+                    ImGui::SameLine();
+                    bool canCraft = selectedCraftSpell != 0 && !gameHandler.isCasting();
+                    if (!canCraft) ImGui::BeginDisabled();
+                    if (ImGui::Button("Create")) {
+                        if (craftQuantity == 1)
+                            gameHandler.castSpell(selectedCraftSpell, 0);
+                        else
+                            gameHandler.startCraftQueue(selectedCraftSpell, craftQuantity);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Create All")) {
+                        gameHandler.startCraftQueue(selectedCraftSpell, 999);
+                    }
+                    if (!canCraft) ImGui::EndDisabled();
                 }
             }
         }
@@ -3028,7 +3211,7 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
     if (!gameHandler.isAuctionHouseOpen()) return;
 
     bool open = true;
-    ImGui::SetNextWindowSize(ImVec2(650, 500), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Auction House", &open)) {
         ImGui::End();
         if (!open) gameHandler.closeAuctionHouse();
@@ -3116,14 +3299,55 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
             gameHandler.auctionSearch(auctionSearchName_,
                 static_cast<uint8_t>(auctionLevelMin_),
                 static_cast<uint8_t>(auctionLevelMax_),
-                q, getSearchClassId(), getSearchSubClassId(), 0,
+                q, getSearchClassId(), getSearchSubClassId(), 0xFFFFFFFFu,
                 auctionUsableOnly_ ? 1 : 0, offset);
         };
 
+        // Original-style browse hierarchy: categories remain visible on the
+        // left while search controls and results occupy the right pane.
+        if (ImGui::BeginChild("AuctionCategories", ImVec2(185.0f, -1.0f), true)) {
+            ImGui::TextUnformatted("Categories");
+            ImGui::Separator();
+
+            for (int c = 0; c < NUM_CLASSES; ++c) {
+                bool selected = (auctionItemClass_ == c) ||
+                                (c == 0 && auctionItemClass_ < 0);
+                if (ImGui::Selectable(classMappings[c].label, selected)) {
+                    auctionItemClass_ = c;
+                    auctionItemSubClass_ = -1;
+                    auctionBrowseOffset_ = 0;
+                }
+
+                uint32_t classId = classMappings[c].classId;
+                if (selected && (classId == 2 || classId == 4)) {
+                    const AHSubMapping* subs = (classId == 2) ? weaponSubs : armorSubs;
+                    int numSubs = (classId == 2) ? NUM_WEAPON_SUBS : NUM_ARMOR_SUBS;
+                    ImGui::Indent(14.0f);
+                    for (int s = 0; s < numSubs; ++s) {
+                        // Subclass index 0 is the visible "All" row; the stored
+                        // value uses -1 for that wire-level wildcard.
+                        int storedSub = s - 1;
+                        bool subSelected = auctionItemSubClass_ == storedSub;
+                        ImGui::PushID(c * 100 + s);
+                        if (ImGui::Selectable(subs[s].label, subSelected)) {
+                            auctionItemSubClass_ = storedSub;
+                            auctionBrowseOffset_ = 0;
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::Unindent(14.0f);
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+        ImGui::BeginChild("AuctionBrowsePane", ImVec2(0.0f, -1.0f), false);
+
         // Row 1: Name + Level range
-        ImGui::SetNextItemWidth(200);
-        bool enterPressed = ImGui::InputText("Name", auctionSearchName_, sizeof(auctionSearchName_),
-                                              ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SetNextItemWidth(240);
+        bool enterPressed = ImGui::InputTextWithHint(
+            "##AuctionItemName", "Item name (optional)", auctionSearchName_,
+            sizeof(auctionSearchName_), ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Min Lv", &auctionLevelMin_, 0);
@@ -3131,37 +3355,10 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Max Lv", &auctionLevelMax_, 0);
 
-        // Row 2: Quality + Category + Subcategory + Search button
+        // Row 2: quality and usability refine the category selected at left.
         const char* qualities[] = {"All", "Poor", "Common", "Uncommon", "Rare", "Epic", "Legendary"};
         ImGui::SetNextItemWidth(100);
         ImGui::Combo("Quality", &auctionQuality_, qualities, 7);
-
-        ImGui::SameLine();
-        // Build class label list from mappings
-        const char* classLabels[NUM_CLASSES];
-        for (int c = 0; c < NUM_CLASSES; c++) classLabels[c] = classMappings[c].label;
-        ImGui::SetNextItemWidth(120);
-        int classIdx = auctionItemClass_ < 0 ? 0 : auctionItemClass_;
-        if (ImGui::Combo("Category", &classIdx, classLabels, NUM_CLASSES)) {
-            if (classIdx != auctionItemClass_) auctionItemSubClass_ = -1;
-            auctionItemClass_ = classIdx;
-        }
-
-        // Subcategory (only for Weapon and Armor)
-        uint32_t curClassId = getSearchClassId();
-        if (curClassId == 2 || curClassId == 4) {
-            const AHSubMapping* subs = (curClassId == 2) ? weaponSubs : armorSubs;
-            int numSubs = (curClassId == 2) ? NUM_WEAPON_SUBS : NUM_ARMOR_SUBS;
-            const char* subLabels[20];
-            for (int s = 0; s < numSubs && s < 20; s++) subLabels[s] = subs[s].label;
-            int subIdx = auctionItemSubClass_ + 1;  // -1 → 0 ("All")
-            if (subIdx < 0 || subIdx >= numSubs) subIdx = 0;
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110);
-            if (ImGui::Combo("Subcat", &subIdx, subLabels, numSubs)) {
-                auctionItemSubClass_ = subIdx - 1;  // 0 → -1 ("All")
-            }
-        }
 
         ImGui::SameLine();
         ImGui::Checkbox("Usable", &auctionUsableOnly_);
@@ -3174,7 +3371,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
             ImGui::Button(delayBuf);
             ImGui::EndDisabled();
         } else {
-            if (ImGui::Button("Search") || enterPressed) {
+            const char* searchLabel = auctionSearchName_[0] == '\0' ? "Browse" : "Search";
+            if (ImGui::Button(searchLabel) || enterPressed) {
                 doSearch(0);
             }
         }
@@ -3211,9 +3409,10 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         }
 
         if (ImGui::BeginChild("AuctionResults", ImVec2(0, -110), true)) {
-            if (ImGui::BeginTable("AuctionTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY)) {
+            if (ImGui::BeginTable("AuctionTable", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY)) {
                 ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthFixed, 40);
+                ImGui::TableSetupColumn("Seller", ImGuiTableColumnFlags_WidthFixed, 95);
                 ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableSetupColumn("Bid", ImGuiTableColumnFlags_WidthFixed, 90);
                 ImGui::TableSetupColumn("Buyout", ImGuiTableColumnFlags_WidthFixed, 90);
@@ -3258,26 +3457,37 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                     ImGui::Text("%u", auction.stackCount);
 
                     ImGui::TableSetColumnIndex(2);
+                    if (auction.ownerGuid == gameHandler.getPlayerGuid()) {
+                        ImGui::TextUnformatted("You");
+                    } else {
+                        std::string seller = gameHandler.getCachedPlayerName(auction.ownerGuid);
+                        if (!seller.empty())
+                            ImGui::TextUnformatted(seller.c_str());
+                        else
+                            ImGui::TextDisabled("Loading...");
+                    }
+
+                    ImGui::TableSetColumnIndex(3);
                     // Time left display
                     uint32_t mins = auction.timeLeftMs / 60000;
                     if (mins > 720) ImGui::Text("Long");
                     else if (mins > 120) ImGui::Text("Medium");
                     else ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Short");
 
-                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TableSetColumnIndex(4);
                     {
                         uint32_t bid = auction.currentBid > 0 ? auction.currentBid : auction.startBid;
                         renderCoinsFromCopper(bid);
                     }
 
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(5);
                     if (auction.buyoutPrice > 0) {
                         renderCoinsFromCopper(auction.buyoutPrice);
                     } else {
                         ImGui::TextDisabled("--");
                     }
 
-                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TableSetColumnIndex(6);
                     ImGui::PushID(static_cast<int>(i) + 7000);
                     if (auction.buyoutPrice > 0 && ImGui::SmallButton("Buy")) {
                         gameHandler.auctionBuyout(auction.auctionId, auction.buyoutPrice);
@@ -3393,6 +3603,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
             auctionSellBuyout_[0] = auctionSellBuyout_[1] = auctionSellBuyout_[2] = 0;
         }
         if (!canCreate) ImGui::EndDisabled();
+
+        ImGui::EndChild(); // AuctionBrowsePane
 
     } else if (tab == 1) {
         // Bids tab

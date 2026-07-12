@@ -2369,7 +2369,7 @@ public:
 
 struct TrainerSpell {
     uint32_t spellId = 0;
-    uint8_t state = 0;         // 0=unavailable(grey), 1=available(green), 2=known(green)
+    uint8_t state = 0;         // 0=available(green), 1=unavailable(grey), 2=known
     uint32_t spellCost = 0;    // copper
     uint32_t profDialog = 0;
     uint32_t profButton = 0;
@@ -2799,8 +2799,8 @@ public:
 /** SMSG_AUCTION_LIST_RESULT parser (shared for browse/owner/bidder) */
 class AuctionListResultParser {
 public:
-    // numEnchantSlots: Classic 1.12 = 1, TBC/WotLK = 3 (extra enchant slots per entry)
-    static bool parse(network::Packet& packet, AuctionListResult& data, int numEnchantSlots = 3);
+    // numEnchantSlots: Classic 1.12 = 1, TBC/WotLK = 6 (MAX_INSPECTED_ENCHANTMENT_SLOT)
+    static bool parse(network::Packet& packet, AuctionListResult& data, int numEnchantSlots = 6);
 };
 
 /** SMSG_AUCTION_COMMAND_RESULT parser */

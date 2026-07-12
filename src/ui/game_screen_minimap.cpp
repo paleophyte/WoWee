@@ -778,8 +778,12 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         drawList->AddTriangle(tip, notch, baseR, IM_COL32(60, 40, 0, 200), 1.2f);
     }
 
+    // Skip minimap input when an ImGui window (bag, settings, etc.) is in front.
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    bool minimapInputBlocked = (g.HoveredWindow != nullptr);
+
     // Scroll wheel over minimap → zoom in/out
-    {
+    if (!minimapInputBlocked) {
         float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f) {
             ImVec2 mouse = ImGui::GetMousePos();
@@ -795,7 +799,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     }
 
     // Ctrl+click on minimap → send minimap ping to party
-    if (ImGui::IsMouseClicked(0) && ImGui::GetIO().KeyCtrl) {
+    if (!minimapInputBlocked && ImGui::IsMouseClicked(0) && ImGui::GetIO().KeyCtrl) {
         ImVec2 mouse = ImGui::GetMousePos();
         float mdx = mouse.x - centerX;
         float mdy = mouse.y - centerY;
@@ -894,7 +898,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         ImVec2 mouse = ImGui::GetMousePos();
         float mdx = mouse.x - centerX;
         float mdy = mouse.y - centerY;
-        bool overMinimap = (mdx * mdx + mdy * mdy <= mapRadius * mapRadius);
+        bool overMinimap = !minimapInputBlocked && (mdx * mdx + mdy * mdy <= mapRadius * mapRadius);
 
         if (overMinimap) {
             ImGui::BeginTooltip();

@@ -64,6 +64,9 @@ add_executable(test_spline
     test_spline.cpp
     ${TEST_COMMON_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/math/spline.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
 )
 target_include_directories(test_spline PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_spline SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})

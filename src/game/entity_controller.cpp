@@ -650,6 +650,7 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
         fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE),
         fieldIndex(UF::UNIT_FIELD_FLAGS),
         fieldIndex(UF::UNIT_DYNAMIC_FLAGS),
+        fieldIndex(UF::UNIT_FIELD_AURASTATE),
         fieldIndex(UF::UNIT_FIELD_DISPLAYID),
         fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID),
         fieldIndex(UF::UNIT_NPC_FLAGS),
@@ -816,6 +817,9 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                     pendingEvents_.emit("UNIT_FLAGS", {uid});
             }
         }
+        else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            unit->setAuraState(val);
+        }
         else if (key == ufi.bytes0) {
             unit->setPowerType(static_cast<uint8_t>((val >> 24) & 0xFF));
         } else if (key == ufi.displayId) {
@@ -948,6 +952,9 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stealthStateCallbackRef()(nowStealth);
                 }
             }
+        }
+        else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            unit->setAuraState(val);
         }
         else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1 && block.guid == owner_.getPlayerGuid()) {
             uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
@@ -2052,25 +2059,22 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
     // Remove entity
     if (entityManager.hasEntity(data.guid)) {
         if (transportGuids_.count(data.guid) > 0) {
-            // Mirror processOutOfRangeObjects(): keep any known transport alive across
-            // an explicit DESTROY_OBJECT too, not just implicit "fell out of the near
-            // list" removal. CMaNGOS judges visibility for these using their static DB
-            // spawn coordinate, which for a client-animated transport (e.g. the Deeprun
-            // Tram) can be arbitrarily far from where it currently, actually is - the
-            // server can send DESTROY_OBJECT for a car that's animated right next to the
-            // player. Previously that erased transportGuids_ for it, which made
-            // isTransportGuid() false and silently rejected setPlayerOnTransport()'s
-            // validation check, even though the render instance (kept alive separately
-            // in EntitySpawner::despawnGameObject) was still visible right there.
             const bool playerAboardNow = (owner_.playerTransportGuidRef() == data.guid);
             const bool stickyAboard = (owner_.playerTransportStickyGuidRef() == data.guid && owner_.playerTransportStickyTimerRef() > 0.0f);
             const bool movementSaysAboard = (owner_.movementInfoRef().transportGuid == data.guid);
-            serverUpdatedTransportGuids_.erase(data.guid);
-            LOG_INFO("Preserving transport on destroy: 0x", std::hex, data.guid, std::dec,
-                     " now=", playerAboardNow,
-                     " sticky=", stickyAboard,
-                     " movement=", movementSaysAboard);
-            return;
+            // CMaNGOS judges visibility using the transport's static DB spawn
+            // coordinate, which can be far from where a client-animated transport
+            // currently is — keep all transports alive unconditionally on pre-WotLK.
+            // AzerothCore (WotLK) sends legitimate destroy/recreate cycles, so only
+            // preserve if the player is actually aboard.
+            if (isPreWotlk() || playerAboardNow || stickyAboard || movementSaysAboard) {
+                serverUpdatedTransportGuids_.erase(data.guid);
+                LOG_INFO("Preserving transport on destroy: 0x", std::hex, data.guid, std::dec,
+                         " now=", playerAboardNow,
+                         " sticky=", stickyAboard,
+                         " movement=", movementSaysAboard);
+                return;
+            }
         }
         // Mirror out-of-range handling: invoke render-layer despawn callbacks before entity removal.
         auto entity = entityManager.getEntity(data.guid);

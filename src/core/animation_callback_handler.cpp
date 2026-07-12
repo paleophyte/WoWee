@@ -390,14 +390,34 @@ void AnimationCallbackHandler::setupCallbacks() {
             };
 
             bool isBandage = false;
+            bool isMining = false;
+            bool isGathering = false;
             if (isLocalPlayer && currentSpell != 0) {
                 gameHandler_.loadSpellNameCache();
                 auto it = gameHandler_.spellNameCacheRef().find(currentSpell);
                 isBandage = (it != gameHandler_.spellNameCacheRef().end() &&
                              it->second.name.find("Bandage") != std::string::npos);
+                if (!isBandage && !isFishing && it != gameHandler_.spellNameCacheRef().end()) {
+                    const auto& nm = it->second.name;
+                    isMining = (nm == "Mining" || nm == "Smelting");
+                    if (!isMining) {
+                        isGathering = gameHandler_.isProfessionSpell(currentSpell);
+                        if (!isGathering)
+                            isGathering = (nm == "Opening" || nm == "Open Lock");
+                    }
+                }
             }
 
-            if (isBandage) {
+            if (isMining) {
+                uint32_t mineAnim = pickFirst({
+                    rendering::anim::ATTACK_1H,
+                    rendering::anim::EMOTE_WORK,
+                    rendering::anim::EMOTE_USE_STANDING
+                });
+                if (auto* ac = renderer_.getAnimationController()) {
+                    ac->startSpellCast(0, mineAnim ? mineAnim : rendering::anim::STAND, true, 0);
+                }
+            } else if (isBandage || isGathering) {
                 uint32_t useStart = isChannel ? 0 : pickFirst({
                     rendering::anim::USE_STANDING_START,
                     rendering::anim::EMOTE_USE_STANDING_NO_SHEATHE,

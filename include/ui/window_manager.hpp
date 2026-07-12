@@ -48,7 +48,8 @@ public:
                             InventoryScreen& inventoryScreen,
                             ChatPanel& chatPanel);
     void renderTrainerWindow(game::GameHandler& gameHandler,
-                             SpellIconFn getSpellIcon);
+                             SpellIconFn getSpellIcon,
+                             InventoryScreen& inventoryScreen);
     void renderBarberShopWindow(game::GameHandler& gameHandler);
     void renderStableWindow(game::GameHandler& gameHandler);
     void renderTaxiWindow(game::GameHandler& gameHandler);
