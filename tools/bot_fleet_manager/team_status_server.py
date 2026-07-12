@@ -47,7 +47,10 @@ ZONE_BOUNDS = _load_zone_bounds()
 
 
 def _request_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
+    # url is validated to http(s) above; this calls our own local fleet API, not attacker-controlled input.
+    with urllib.request.urlopen(url, timeout=timeout) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.loads(response.read().decode("utf-8"))
 
 

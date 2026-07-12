@@ -79,18 +79,24 @@ def fail(msg: str) -> None:
 
 
 def http_get(url: str, timeout: float = 5.0) -> dict:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        # url is validated to http(s) above; this calls our own local test targets, not attacker-controlled input.
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             return json.loads(resp.read().decode())
     except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         fail(f"GET {url} failed: {exc}")
 
 
 def http_post(url: str, data: dict, timeout: float = 5.0) -> dict:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
     try:
         body = json.dumps(data).encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # url is validated to http(s) above; this calls our own local test targets, not attacker-controlled input.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         return json.loads(exc.read().decode()) if exc.code == 400 else {"error": str(exc)}

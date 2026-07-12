@@ -95,6 +95,8 @@ Bot fleet accounts need GM level 1+ to run `.bot add` commands. Pass `--gmlevel 
 
 `create_account_direct_soap.py` is kept for cases where the SOAP endpoint is reachable from the machine running WoWee, or where you want to run a small HTTP provisioning service that forwards to SOAP.
 
+Requires `defusedxml` (`pip install defusedxml`) to parse SOAP responses safely.
+
 Enable SOAP in your CMaNGOS world server config, create or choose a GM account that is allowed to run SOAP commands, then run:
 
 ```bash

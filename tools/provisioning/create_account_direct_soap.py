@@ -9,7 +9,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET  # SOAP response is server-controlled, but parse it safely regardless
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -19,6 +19,8 @@ SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
 
 
 def soap_execute_command(soap_url: str, admin_user: str, admin_pass: str, command: str, timeout: float = 15.0) -> str:
+    if not soap_url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {soap_url}")
     envelope = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:ns1="{SOAP_NS}">
   <SOAP-ENV:Body>
@@ -41,7 +43,8 @@ def soap_execute_command(soap_url: str, admin_user: str, admin_pass: str, comman
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # soap_url is validated to http(s) above and comes from an operator-supplied --soap-url flag, not attacker-controlled input.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

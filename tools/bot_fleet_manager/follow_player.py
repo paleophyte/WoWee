@@ -25,10 +25,13 @@ from pathlib import Path
 
 
 def http_json(url: str, method: str = "GET", payload: dict | None = None, timeout: float = 10.0):
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method,
                                   headers={"Content-Type": "application/json"} if data else {})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # url is validated to http(s) above; this calls our own local fleet API, not attacker-controlled input.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.loads(resp.read())
 
 

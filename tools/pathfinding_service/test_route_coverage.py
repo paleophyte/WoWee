@@ -61,10 +61,13 @@ def test_route(base: str, start_name: str, end_name: str) -> dict:
         "tileMargin": 2,
     }
     url = base.rstrip("/") + "/route"
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
     t0 = time.monotonic()
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # url is validated to http(s) above; this calls our own local pathfinding service, not attacker-controlled input.
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             result = json.loads(resp.read().decode())
         elapsed = time.monotonic() - t0
         if not result.get("ok"):

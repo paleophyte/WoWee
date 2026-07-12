@@ -11,13 +11,16 @@ from typing import Any
 
 
 def request_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) URL: {url}")
     data = None
     headers = {}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    # url is validated to http(s) above; this calls our own local fleet API, not attacker-controlled input.
+    with urllib.request.urlopen(req, timeout=timeout) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.loads(response.read().decode("utf-8"))
 
 
