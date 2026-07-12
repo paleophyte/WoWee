@@ -67,8 +67,23 @@ def main() -> int:
 
     log_path = catalog_path(args.catalog_dir, args.map_name, args.route_name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Resume from an existing catalog instead of starting fresh - a restart
+    # (e.g. after the leader dies) used to silently overwrite everything
+    # captured so far, since the in-memory list always started empty.
+    # Live-observed losing 71 already-logged waypoints this way.
     waypoints: list[dict] = []
     started_at = time.time()
+    if log_path.exists():
+        try:
+            existing = json.loads(log_path.read_text())
+            existing_wps = existing.get("waypoints") or []
+            waypoints = [{"mapId": existing.get("mapId"), **w} for w in existing_wps]
+            if existing.get("capturedAt"):
+                started_at = existing["capturedAt"]
+            if waypoints:
+                print(f"resuming existing catalog with {len(waypoints)} waypoints already logged")
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"could not read existing catalog ({exc}), starting fresh")
 
     def save():
         catalog = {
@@ -84,8 +99,8 @@ def main() -> int:
 
     print(f"waiting to spot {args.player_name} within {args.search_radius}y...")
     print(f"catalog: {log_path}")
-    last_target: dict | None = None
-    last_map_id = None
+    last_target: dict | None = waypoints[-1] if waypoints else None
+    last_map_id = waypoints[-1]["mapId"] if waypoints else None
 
     while True:
         try:
