@@ -186,9 +186,14 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
     // Partition the entity map once. Marker categories below can traverse their
     // compact type-specific lists instead of rescanning every entity 4-5 times.
-    std::vector<std::shared_ptr<game::Entity>> minimapUnits;
-    std::vector<std::shared_ptr<game::Entity>> minimapPlayers;
-    std::vector<std::shared_ptr<game::Entity>> minimapGameObjects;
+    // Reused across frames to avoid three vector allocations per frame; the
+    // clear below releases the previous frame's shared_ptrs on re-entry.
+    static thread_local std::vector<std::shared_ptr<game::Entity>> minimapUnits;
+    static thread_local std::vector<std::shared_ptr<game::Entity>> minimapPlayers;
+    static thread_local std::vector<std::shared_ptr<game::Entity>> minimapGameObjects;
+    minimapUnits.clear();
+    minimapPlayers.clear();
+    minimapGameObjects.clear();
     const auto& allEntities = gameHandler.getEntityManager().getEntities();
     minimapUnits.reserve(allEntities.size() / 2);
     minimapPlayers.reserve(allEntities.size() / 8);

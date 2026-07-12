@@ -679,6 +679,9 @@ struct MessageChatData {
     std::string channelName;  // For channel messages
     uint8_t chatTag = 0;      // Player flags (AFK, DND, GM, etc.)
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
+    // Monotonic id assigned by ChatHandler when the message enters history.
+    // Stable cache key for the chat UI's formatted/parsed line cache.
+    uint64_t uid = 0;
 
     bool isValid() const { return !message.empty(); }
 };
