@@ -103,6 +103,48 @@ namespace {
 
 namespace wowee { namespace ui {
 
+void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
+    uint64_t signature = 1469598103934665603ull;
+    auto mix = [&](uint64_t value) {
+        signature ^= value;
+        signature *= 1099511628211ull;
+    };
+    const auto& tracked = gameHandler.getTrackedQuestIds();
+    mix(tracked.size());
+    for (const auto& quest : gameHandler.getQuestLog()) {
+        if (quest.complete || quest.questId == 0 ||
+            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+        mix(quest.questId);
+        for (const auto& objective : quest.killObjectives) {
+            if (objective.required == 0) continue;
+            const uint32_t entry = static_cast<uint32_t>(objective.npcOrGoId > 0
+                ? objective.npcOrGoId : -objective.npcOrGoId);
+            auto count = quest.killCounts.find(entry);
+            mix(static_cast<uint32_t>(objective.npcOrGoId));
+            mix(objective.required);
+            mix(count == quest.killCounts.end() ? 0 : count->second.first);
+        }
+    }
+    if (signature == minimapQuestCacheSignature_) return;
+
+    minimapQuestCacheSignature_ = signature;
+    minimapQuestCreatureEntries_.clear();
+    minimapQuestGameObjectEntries_.clear();
+    for (const auto& quest : gameHandler.getQuestLog()) {
+        if (quest.complete || quest.questId == 0 ||
+            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+        for (const auto& objective : quest.killObjectives) {
+            if (objective.required == 0 || objective.npcOrGoId == 0) continue;
+            const uint32_t entry = static_cast<uint32_t>(objective.npcOrGoId > 0
+                ? objective.npcOrGoId : -objective.npcOrGoId);
+            auto count = quest.killCounts.find(entry);
+            if (count != quest.killCounts.end() && count->second.first >= count->second.second) continue;
+            if (objective.npcOrGoId > 0) minimapQuestCreatureEntries_.insert(entry);
+            else minimapQuestGameObjectEntries_.insert(entry);
+        }
+    }
+}
+
 void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     const auto& statuses = gameHandler.getNpcQuestStatuses();
     auto* renderer = services_.renderer;
@@ -190,52 +232,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Build sets of entries that are incomplete objectives for tracked quests.
     // minimapQuestEntries: NPC creature entries (npcOrGoId > 0)
     // minimapQuestGoEntries: game object entries (npcOrGoId < 0, stored as abs value)
-    uint64_t questSignature = 1469598103934665603ull;
-    auto hashQuestValue = [&](uint64_t value) {
-        questSignature ^= value;
-        questSignature *= 1099511628211ull;
-    };
-    {
-        const auto& ql = gameHandler.getQuestLog();
-        const auto& tq = gameHandler.getTrackedQuestIds();
-        hashQuestValue(tq.size());
-        for (const auto& q : ql) {
-            if (q.complete || q.questId == 0) continue;
-            if (!tq.empty() && !tq.count(q.questId)) continue;
-            hashQuestValue(q.questId);
-            for (const auto& obj : q.killObjectives) {
-                if (obj.required == 0) continue;
-                hashQuestValue(static_cast<uint32_t>(obj.npcOrGoId));
-                hashQuestValue(obj.required);
-                if (obj.npcOrGoId > 0) {
-                    auto it = q.killCounts.find(static_cast<uint32_t>(obj.npcOrGoId));
-                    hashQuestValue(it == q.killCounts.end() ? 0 : it->second.first);
-                } else if (obj.npcOrGoId < 0) {
-                    uint32_t goEntry = static_cast<uint32_t>(-obj.npcOrGoId);
-                    auto it = q.killCounts.find(goEntry);
-                    hashQuestValue(it == q.killCounts.end() ? 0 : it->second.first);
-                }
-            }
-        }
-    }
-    if (questSignature != minimapQuestCacheSignature_) {
-        minimapQuestCacheSignature_ = questSignature;
-        minimapQuestCreatureEntries_.clear();
-        minimapQuestGameObjectEntries_.clear();
-        const auto& tq = gameHandler.getTrackedQuestIds();
-        for (const auto& q : gameHandler.getQuestLog()) {
-            if (q.complete || q.questId == 0 || (!tq.empty() && !tq.count(q.questId))) continue;
-            for (const auto& obj : q.killObjectives) {
-                if (obj.required == 0 || obj.npcOrGoId == 0) continue;
-                const uint32_t entry = static_cast<uint32_t>(obj.npcOrGoId > 0
-                    ? obj.npcOrGoId : -obj.npcOrGoId);
-                auto it = q.killCounts.find(entry);
-                if (it != q.killCounts.end() && it->second.first >= it->second.second) continue;
-                if (obj.npcOrGoId > 0) minimapQuestCreatureEntries_.insert(entry);
-                else minimapQuestGameObjectEntries_.insert(entry);
-            }
-        }
-    }
+    refreshQuestObjectiveCache(gameHandler);
     const auto& minimapQuestEntries = minimapQuestCreatureEntries_;
     const auto& minimapQuestGoEntries = minimapQuestGameObjectEntries_;
 

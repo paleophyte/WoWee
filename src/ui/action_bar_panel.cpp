@@ -252,6 +252,26 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
     float slotSize = 48.0f * settingsPanel.pendingActionBarScale;
     float spacing = 4.0f;
     float padding = 8.0f;
+
+    // Build one inventory index for all action slots. Previously each item slot
+    // rescanned backpack, equipment, and every bag both for lookup and stack count.
+    std::unordered_map<uint32_t, const game::ItemDef*> actionItemsById;
+    std::unordered_map<uint32_t, uint32_t> actionItemCounts;
+    auto indexSlot = [&](const game::ItemSlot& invSlot) {
+        if (invSlot.empty() || invSlot.item.itemId == 0) return;
+        actionItemsById.try_emplace(invSlot.item.itemId, &invSlot.item);
+        actionItemCounts[invSlot.item.itemId] += invSlot.item.stackCount;
+    };
+    auto& actionInventory = gameHandler.getInventory();
+    actionItemsById.reserve(32);
+    actionItemCounts.reserve(32);
+    for (int i = 0; i < actionInventory.getBackpackSize(); ++i)
+        indexSlot(actionInventory.getBackpackSlot(i));
+    for (int i = 0; i < game::Inventory::NUM_EQUIP_SLOTS; ++i)
+        indexSlot(actionInventory.getEquipSlot(static_cast<game::EquipSlot>(i)));
+    for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; ++bag)
+        for (int i = 0; i < actionInventory.getBagSize(bag); ++i)
+            indexSlot(actionInventory.getBagSlot(bag, i));
     float barW = 12 * slotSize + 11 * spacing + padding * 2;
     float barH = slotSize + 24.0f;
     float barX = (screenW - barW) / 2.0f;
@@ -393,25 +413,8 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
         if (slot.type == game::ActionBarSlot::SPELL && slot.id != 0) {
             iconTex = getSpellIcon(slot.id, assetMgr);
         } else if (slot.type == game::ActionBarSlot::ITEM && slot.id != 0) {
-            auto& inv = gameHandler.getInventory();
-            for (int bi = 0; bi < inv.getBackpackSize(); bi++) {
-                const auto& bs = inv.getBackpackSlot(bi);
-                if (!bs.empty() && bs.item.itemId == slot.id) { barItemDef = &bs.item; break; }
-            }
-            if (!barItemDef) {
-                for (int ei = 0; ei < game::Inventory::NUM_EQUIP_SLOTS; ei++) {
-                    const auto& es = inv.getEquipSlot(static_cast<game::EquipSlot>(ei));
-                    if (!es.empty() && es.item.itemId == slot.id) { barItemDef = &es.item; break; }
-                }
-            }
-            if (!barItemDef) {
-                for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS && !barItemDef; bag++) {
-                    for (int si = 0; si < inv.getBagSize(bag); si++) {
-                        const auto& bs = inv.getBagSlot(bag, si);
-                        if (!bs.empty() && bs.item.itemId == slot.id) { barItemDef = &bs.item; break; }
-                    }
-                }
-            }
+            if (auto it = actionItemsById.find(slot.id); it != actionItemsById.end())
+                barItemDef = it->second;
             if (barItemDef && barItemDef->displayInfoId != 0)
                 itemDisplayInfoId = barItemDef->displayInfoId;
             if (itemDisplayInfoId == 0) {
@@ -818,19 +821,9 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
 
         // Item stack count overlay — bottom-right corner of icon
         if (slot.type == game::ActionBarSlot::ITEM && slot.id != 0) {
-            // Count total of this item across all inventory slots
-            auto& inv = gameHandler.getInventory();
-            int totalCount = 0;
-            for (int bi = 0; bi < inv.getBackpackSize(); bi++) {
-                const auto& bs = inv.getBackpackSlot(bi);
-                if (!bs.empty() && bs.item.itemId == slot.id) totalCount += bs.item.stackCount;
-            }
-            for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; bag++) {
-                for (int si = 0; si < inv.getBagSize(bag); si++) {
-                    const auto& bs = inv.getBagSlot(bag, si);
-                    if (!bs.empty() && bs.item.itemId == slot.id) totalCount += bs.item.stackCount;
-                }
-            }
+            const auto countIt = actionItemCounts.find(slot.id);
+            const int totalCount = countIt != actionItemCounts.end()
+                ? static_cast<int>(countIt->second) : 0;
             if (totalCount > 0) {
                 char countStr[16];
                 snprintf(countStr, sizeof(countStr), "%d", totalCount);

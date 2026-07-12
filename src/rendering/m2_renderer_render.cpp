@@ -773,6 +773,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     glowSprites_.clear();
 
     lastDrawCallCount = 0;
+    const float lavaAnimSeconds = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - kLavaAnimStart).count();
 
     // GPU cull results — dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
@@ -1175,9 +1177,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 uvOffset = glm::vec2(trans.x, trans.y);
                             }
                             if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
-                                float t = std::chrono::duration<float>(
-                                    std::chrono::steady_clock::now() - kLavaAnimStart).count();
-                                uvOffset = glm::vec2(t * 0.03f, -t * 0.08f);
+                                uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
+                                                     -lavaAnimSeconds * 0.08f);
                             }
                             // Copy base entry and override uvOffset
                             instSSBO[instanceDataCount_] = instSSBO[groupSSBOOffset + (j - lodIdx)];
@@ -1377,8 +1378,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 }
             }
             if (model.isLavaModel && uvOffset == glm::vec2(0.0f)) {
-                float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - kLavaAnimStart).count();
-                uvOffset = glm::vec2(t * 0.03f, -t * 0.08f);
+                uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
+                                     -lavaAnimSeconds * 0.08f);
             }
 
             // Write single instance entry to SSBO

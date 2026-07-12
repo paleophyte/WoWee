@@ -927,26 +927,8 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const uint64_t  playerGuid = gameHandler.getPlayerGuid();
     const uint64_t  targetGuid = gameHandler.getTargetGuid();
 
-    // Build set of creature entries that are kill objectives in active (incomplete) quests.
-    std::unordered_set<uint32_t> questKillEntries;
-    {
-        const auto& questLog = gameHandler.getQuestLog();
-        const auto& trackedIds = gameHandler.getTrackedQuestIds();
-        for (const auto& q : questLog) {
-            if (q.complete || q.questId == 0) continue;
-            // Only highlight for tracked quests (or all if nothing tracked).
-            if (!trackedIds.empty() && !trackedIds.count(q.questId)) continue;
-            for (const auto& obj : q.killObjectives) {
-                if (obj.npcOrGoId > 0 && obj.required > 0) {
-                    // Check if not already completed.
-                    auto it = q.killCounts.find(static_cast<uint32_t>(obj.npcOrGoId));
-                    if (it == q.killCounts.end() || it->second.first < it->second.second) {
-                        questKillEntries.insert(static_cast<uint32_t>(obj.npcOrGoId));
-                    }
-                }
-            }
-        }
-    }
+    refreshQuestObjectiveCache(gameHandler);
+    const auto& questKillEntries = minimapQuestCreatureEntries_;
 
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
 
