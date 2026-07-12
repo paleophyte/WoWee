@@ -1037,6 +1037,56 @@ uint32_t hp = 0, maxHp = 0;
         return {{"ok", true}, {"npcGuid", bestGuid}, {"distance", bestDist}, {"taxi", taxiJson()}};
     }
 
+    // Resolves a name (case-insensitive prefix match, closest within
+    // searchRadius wins) to an entity and starts the same real GameHandler
+    // follow (camera + walking-toward-live-position, via
+    // MovementHandler::updateFollowMovement) the GUI client's /follow chat
+    // command uses - this was previously only approximated externally by
+    // follow_player.py polling /world/self and reissuing /movement/goto,
+    // which lagged behind the target's actual live position.
+    json followByNameAction(const std::string& targetName, float searchRadius) {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        std::string needle = targetName;
+        std::transform(needle.begin(), needle.end(), needle.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const auto& move = game_.getMovementInfo();
+        uint64_t bestGuid = 0;
+        float bestDist = -1.0f;
+        std::string bestName;
+        for (const auto& entity : game_.getEntityManager().snapshotEntities()) {
+            if (!entity || !entity->isUnit()) continue;
+            const auto* unit = static_cast<const game::Unit*>(entity.get());
+            std::string name = unit->getName();
+            std::string lowerName = name;
+            std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lowerName.rfind(needle, 0) != 0) continue;
+            const float dx = entity->getX() - move.x;
+            const float dy = entity->getY() - move.y;
+            const float dz = entity->getZ() - move.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > searchRadius) continue;
+            if (bestDist < 0.0f || dist < bestDist) {
+                bestDist = dist;
+                bestGuid = entity->getGuid();
+                bestName = name;
+            }
+        }
+        if (bestGuid == 0) {
+            return {{"ok", false}, {"error", "no matching entity found nearby"}, {"searchRadius", searchRadius}};
+        }
+        game_.setTarget(bestGuid);
+        game_.followTarget();
+        return {{"ok", true}, {"targetGuid", bestGuid}, {"targetName", bestName}, {"distance", bestDist}};
+    }
+
+    json stopFollowAction() {
+        game_.cancelFollow();
+        return {{"ok", true}};
+    }
+
     void requestGracefulLogout() {
         if (logoutRequested_.exchange(true)) return;
         if (game_.getState() == game::WorldState::IN_WORLD) {
@@ -1786,6 +1836,18 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             const float searchRadius = payload.value("searchRadius", 15.0f);
             const auto result = session.learnFlightPathAction(searchRadius);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/follow") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const std::string name = payload.value("name", "");
+            const float searchRadius = payload.value("searchRadius", 150.0f);
+            if (name.empty()) {
+                sendHttp(client, 400, {{"error", "name is required"}});
+            } else {
+                const auto result = session.followByNameAction(name, searchRadius);
+                sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+            }
+        } else if (method == "POST" && path == "/follow/stop") {
+            sendHttp(client, 200, session.stopFollowAction());
         } else if (method == "POST" && path == "/logout") {
             // Requests a clean CMSG_LOGOUT_REQUEST and lets the process exit
             // on its own once the server confirms logout (or a timeout
