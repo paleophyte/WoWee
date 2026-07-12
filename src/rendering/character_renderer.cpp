@@ -2689,10 +2689,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                               (blendMode == 0 && alphaCutout) ||
                                               (blendMode >= 2 && !alphaCutout) ||
                                               hairMaterial;
-                // Enchant glows emit their own light, and glue-scene backdrops carry
-                // theirs baked in; neither may be tinted by the scene light.
+                // Enchant glows emit their own light; scene lighting must not tint them.
                 const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
-                                   instance.isEffectModel || instance.renderUnlit;
+                                   instance.isEffectModel;
 
                 // Hair textures are authored as alpha-cut cards. If they use the
                 // translucent pipeline they form a soft shell around the head.
@@ -2721,10 +2720,6 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 float emissiveBoost = 1.0f;
                 glm::vec3 emissiveTint(1.0f, 1.0f, 1.0f);
-                // The unlit path multiplies the texture by (1 + boost), which is what a
-                // glow wants. A backdrop wants its texture exactly as the artist painted
-                // it, so cancel the boost rather than shipping a washed-out Stormwind.
-                if (instance.renderUnlit) emissiveBoost = 0.0f;
                 const bool koboldCandleFlame = colorKeyBlack && gpuModel.isKoboldFlame;
                 if (unlit && koboldCandleFlame) {
                     float phase = static_cast<float>(batch.submeshId) * 0.31f;
@@ -3657,11 +3652,6 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
 void CharacterRenderer::setInstanceIgnoreCulling(uint32_t instanceId, bool ignore) {
     auto it = instances.find(instanceId);
     if (it != instances.end()) it->second.ignoreCulling = ignore;
-}
-
-void CharacterRenderer::setInstanceUnlit(uint32_t instanceId, bool unlit) {
-    auto it = instances.find(instanceId);
-    if (it != instances.end()) it->second.renderUnlit = unlit;
 }
 
 void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId) {

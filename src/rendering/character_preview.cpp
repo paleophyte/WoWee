@@ -761,6 +761,13 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         return false;
     }
 
+    // Weapons first, and unconditionally: they depend on nothing below, while the
+    // geoset/skin work that follows bails out early on characters whose body skin
+    // could not be composited. Attaching last meant those characters showed no
+    // weapon at all — and kept the previously selected character's weapon and
+    // enchant, since detaching happens here too.
+    attachWeapons(equipment);
+
     charRenderer_->clearTextureSlotOverride(instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_));
     charRenderer_->setGroupTextureOverride(instanceId_, 15, nullptr);
 
@@ -1053,7 +1060,6 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         }
     }
 
-    attachWeapons(equipment);
     return true;
 }
 
@@ -1096,12 +1102,11 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     struct WeaponSlot {
         std::initializer_list<uint8_t> invTypes;
         uint32_t attachmentId;
-        uint32_t modelId;
     };
     // Main hand also covers two-handers and ranged; off hand covers shields and held items.
     const WeaponSlot slots[] = {
-        { {13, 17, 21, 15, 25, 26}, 1, PREVIEW_MAINHAND_MODEL_ID },
-        { {14, 22, 23},             2, PREVIEW_OFFHAND_MODEL_ID  },
+        { {13, 17, 21, 15, 25, 26}, 1 },
+        { {14, 22, 23},             2 },
     };
 
     for (const auto& ws : slots) {
@@ -1150,16 +1155,24 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
             }
         }
 
+        const uint32_t weaponModelId = previewModelIdFor(m2Path);
         if (!charRenderer_->attachWeapon(instanceId_, ws.attachmentId, weaponModel,
-                                         ws.modelId, texturePath)) {
+                                         weaponModelId, texturePath)) {
             continue;
         }
-        attachWeaponEnchantVisual(ws.attachmentId, ws.modelId, itemVisualId);
+        attachWeaponEnchantVisual(ws.attachmentId, itemVisualId);
     }
 }
 
-void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t weaponModelId,
-                                                 uint32_t itemVisualId) {
+uint32_t CharacterPreview::previewModelIdFor(const std::string& assetKey) {
+    auto it = previewModelIds_.find(assetKey);
+    if (it != previewModelIds_.end()) return it->second;
+    uint32_t id = nextPreviewModelId_++;
+    previewModelIds_.emplace(assetKey, id);
+    return id;
+}
+
+void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId) {
     if (itemVisualId == 0 || !charRenderer_ || !assetManager_) return;
 
     auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
@@ -1169,9 +1182,6 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
     auto effectModels = pipeline::resolveItemVisualModels(itemVisualId, visualsDbc.get(),
                                                           effectsDbc.get());
 
-    // Effect model ids are derived from the weapon's so main hand and off hand
-    // cannot collide, and re-attaching reuses the same ids.
-    uint32_t nextModelId = weaponModelId * 10;
     for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
         const std::string& modelName = effectModels[visualSlot];
         if (modelName.empty()) continue;
@@ -1186,7 +1196,7 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
             continue;
         }
         charRenderer_->attachWeaponEffect(instanceId_, attachmentId, visualSlot,
-                                          effectModel, nextModelId++);
+                                          effectModel, previewModelIdFor(m2Path));
     }
 }
 
@@ -1250,7 +1260,6 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     backdropInstanceId_ = charRenderer_->createInstance(PREVIEW_BACKDROP_MODEL_ID, glm::vec3(0.0f));
     if (backdropInstanceId_ == 0) return;
     charRenderer_->setInstanceIgnoreCulling(backdropInstanceId_, true);
-    charRenderer_->setInstanceUnlit(backdropInstanceId_, true);
 
     // loadCharacter() has already framed the camera on the character: it sits on
     // +Y at (0, distance, centerZ). Keep that framing distance and height, but move
