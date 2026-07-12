@@ -661,7 +661,8 @@ uint32_t hp = 0, maxHp = 0;
             {"nearestNode", nearest},
             {"nearestNodeName", nearestNodeName},
             {"nearestNodeKnown", nearest != 0 && game_.isKnownTaxiNode(nearest)},
-            {"knownNodes", known}
+            {"knownNodes", known},
+            {"onFlight", game_.isOnTaxiFlight()}
         };
     }
 
@@ -1045,6 +1046,44 @@ uint32_t hp = 0, maxHp = 0;
         game_.queryTaxiNodes(bestGuid);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         return {{"ok", true}, {"npcGuid", bestGuid}, {"distance", bestDist}, {"taxi", taxiJson()}};
+    }
+
+    // Activates a taxi flight to destNodeId (or, if 0, the first known node
+    // whose name contains destName, case-insensitive) via the same
+    // GameHandler::activateTaxi() path the GUI's flight-map click uses. The
+    // node must already be known (learnFlightPathAction / a real flight-master
+    // visit populates knownNodes) since activateTaxi() needs both a resolved
+    // start node (currentTaxiData_.nearestNode) and taxiNpcGuid_ from that.
+    json activateTaxiAction(uint32_t destNodeId, const std::string& destName) {
+        if (!isInWorld()) {
+            return {{"ok", false}, {"error", "not in world"}};
+        }
+        if (destNodeId == 0 && !destName.empty()) {
+            std::string needle = destName;
+            std::transform(needle.begin(), needle.end(), needle.begin(),
+                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            for (const auto& [id, node] : game_.getTaxiNodes()) {
+                if (!game_.isKnownTaxiNode(id)) continue;
+                std::string lowerName = node.name;
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (lowerName.find(needle) != std::string::npos) {
+                    destNodeId = id;
+                    break;
+                }
+            }
+            if (destNodeId == 0) {
+                return {{"ok", false}, {"error", "no known taxi node matches destName"}, {"destName", destName}};
+            }
+        }
+        if (destNodeId == 0) {
+            return {{"ok", false}, {"error", "destNodeId or destName is required"}};
+        }
+        if (game_.isOnTaxiFlight()) {
+            return {{"ok", false}, {"error", "movement_locked: already on taxi flight"}};
+        }
+        game_.activateTaxi(destNodeId);
+        return {{"ok", true}, {"destNodeId", destNodeId}, {"taxi", taxiJson()}};
     }
 
     // Resolves a name (case-insensitive prefix match, closest within
@@ -1845,6 +1884,12 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             json payload = json::parse(body.empty() ? "{}" : body);
             const float searchRadius = payload.value("searchRadius", 15.0f);
             const auto result = session.learnFlightPathAction(searchRadius);
+            sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "POST" && path == "/taxi/activate") {
+            json payload = json::parse(body.empty() ? "{}" : body);
+            const uint32_t destNodeId = payload.value("destNodeId", 0u);
+            const std::string destName = payload.value("destName", "");
+            const auto result = session.activateTaxiAction(destNodeId, destName);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else if (method == "POST" && path == "/follow") {
             json payload = json::parse(body.empty() ? "{}" : body);

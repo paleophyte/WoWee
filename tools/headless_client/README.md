@@ -102,6 +102,22 @@ curl -X POST http://127.0.0.1:8787/movement/goto/waypoints \
   }'
 ```
 
+Learn the flight point at the nearest flight master (must be within range):
+
+```bash
+curl -X POST http://127.0.0.1:8787/learn-flight-path \
+  -H "Content-Type: application/json" \
+  -d "{\"searchRadius\":15.0}"
+```
+
+Take a flight to a known taxi node (by id, or by a case-insensitive substring of its name - `/world/self`'s `taxi.knownNodes` lists both). Poll `/world/self`'s `position` and `taxi.onFlight` to track progress; `onFlight` flips back to `false` on landing:
+
+```bash
+curl -X POST http://127.0.0.1:8787/taxi/activate \
+  -H "Content-Type: application/json" \
+  -d "{\"destName\":\"Ironforge\"}"
+```
+
 ### Coordinate Convention
 
 The headless client's `/world/self` and movement APIs use WoWee canonical world coordinates:
