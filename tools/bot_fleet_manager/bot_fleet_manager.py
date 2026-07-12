@@ -1171,6 +1171,79 @@ def execute_waypoints_with_avoidance(
     return final_status
 
 
+FLIGHT_MASTER_NPC_FLAG = 0x2000
+
+
+def _find_flight_master_position(api_base: str, search_radius: float) -> dict[str, Any] | None:
+    try:
+        result = request_json("GET", f"{api_base}/world/entities?radius={search_radius}")
+    except Exception:
+        return None
+    map_id = result.get("mapId", 0)
+    for entity in result.get("entities", []):
+        if entity.get("type") != "UNIT" or (entity.get("npcFlags", 0) & FLIGHT_MASTER_NPC_FLAG) == 0:
+            continue
+        pos = entity.get("position", {})
+        if "x" not in pos or "y" not in pos:
+            continue
+        return {"mapId": map_id, "x": float(pos["x"]), "y": float(pos["y"]), "z": float(pos.get("z", 0.0))}
+    return None
+
+
+def _try_auto_learn_flight_path(api_base: str, prefix: str, search_radius: float = 30.0) -> None:
+    """Best-effort: checks for a Flight Master within search_radius and
+    learns it if found. A no-op (silent) when nothing's nearby, which is the
+    common case when this is called after every leg/waypoint arrival.
+
+    /learn-flight-path's own search radius is wider than the real
+    interaction range CMaNGOS requires to actually accept
+    CMSG_TAXIQUERYAVAILABLENODES (~3-5y, same class of gotcha as the spirit
+    healer) - firing from further away silently does nothing even though the
+    NPC shows up in the entity scan. Walk in close first when needed."""
+    try:
+        result = request_json("POST", api_base + "/learn-flight-path", {"searchRadius": search_radius})
+    except Exception:
+        return
+    if not result.get("ok", False):
+        return
+    taxi = result.get("taxi", {})
+    if taxi.get("windowOpen"):
+        print(f"{prefix}auto-learn-flight-paths: near '{taxi.get('nearestNodeName')}' "
+              f"(known={taxi.get('nearestNodeKnown')})")
+        return
+
+    # Wasn't close enough for the server to actually accept it - find the
+    # NPC's real position and walk within interaction range, then retry once.
+    fm_pos = _find_flight_master_position(api_base, search_radius)
+    if fm_pos is None:
+        return
+    try:
+        request_json("POST", api_base + "/movement/goto", {
+            "mapId": fm_pos["mapId"], "x": fm_pos["x"], "y": fm_pos["y"], "z": fm_pos["z"],
+            "arrivalRadius": 3.0,
+        })
+    except Exception:
+        return
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            here = request_json("GET", f"{api_base}/world/self").get("position", {})
+        except Exception:
+            time.sleep(1.0)
+            continue
+        if point_distance(here, fm_pos) <= 5.0:
+            break
+        time.sleep(1.0)
+    try:
+        result = request_json("POST", api_base + "/learn-flight-path", {"searchRadius": 10.0})
+    except Exception:
+        return
+    if result.get("ok", False):
+        taxi = result.get("taxi", {})
+        print(f"{prefix}auto-learn-flight-paths: near '{taxi.get('nearestNodeName')}' "
+              f"(known={taxi.get('nearestNodeKnown')})")
+
+
 def cmd_route_goto(
     config: FleetConfig,
     map_id: int,
@@ -1187,6 +1260,10 @@ def cmd_route_goto(
     avoid_hostiles: bool = False,
     hostile_distance_adjuster: float = 1.0,
     hostile_scan_radius: float = 100.0,
+    resume_through_death: bool = False,
+    max_death_recoveries: int = 25,
+    death_recovery_timeout: float = 180.0,
+    auto_learn_flight_paths: bool = False,
 ) -> int:
     selected = config.selected_leaders(fleet, leader_ids)
     if not selected:
@@ -1207,9 +1284,24 @@ def cmd_route_goto(
             "arrivalRadius": arrival_radius,
         }, {"startedAt": utc_timestamp(), "lastLeg": 0})
         try:
-            for leg_number in range(1, max_legs + 1):
+            leg_number = 0
+            deaths = 0
+            arrived = False
+            while leg_number < max_legs:
                 self_info = leader_position(config, leader, index)
-                _raise_if_dead(self_info)
+                is_dead = self_info.get("health", {}).get("isPlayerDead") or self_info.get("death", {}).get("isGhost")
+                if is_dead:
+                    if not resume_through_death:
+                        raise LeaderDiedError("leader died")
+                    deaths += 1
+                    if deaths > max_death_recoveries:
+                        raise RuntimeError(f"exceeded {max_death_recoveries} death recoveries")
+                    print(f"{leader_id}: died (death #{deaths}), recovering")
+                    if not _recover_from_death(config, leader, index, poll_interval, death_recovery_timeout,
+                                                prefix=f"{leader_id}: ", resume_targets=[destination]):
+                        raise RuntimeError("death recovery did not complete")
+                    continue  # death recoveries don't count against max_legs
+
                 position = self_info.get("position", {})
                 current_map = int(self_info.get("mapId", map_id))
                 if current_map != map_id:
@@ -1218,8 +1310,12 @@ def cmd_route_goto(
                 remaining = point_distance(position, destination)
                 if remaining <= arrival_radius:
                     print(f"{leader_id}: arrived within {remaining:.1f} yards")
+                    if auto_learn_flight_paths:
+                        _try_auto_learn_flight_path(api_base, f"{leader_id}: ")
+                    arrived = True
                     break
 
+                leg_number += 1
                 route_request = {
                     "mapId": map_id,
                     "start": {
@@ -1291,26 +1387,35 @@ def cmd_route_goto(
                         f"planner stalled: progress {progress:.1f}y below {min_progress_yards:.1f}y"
                     )
 
-                if avoid_hostiles:
-                    player_level = self_info.get("character", {}).get("level")
-                    if not isinstance(player_level, int):
-                        player_level = 1
-                    final_status = execute_waypoints_with_avoidance(
-                        config, leader, index, api_base, map_id, waypoints, arrival_radius,
-                        leg_timeout, poll_interval, player_level,
-                        hostile_distance_adjuster, hostile_scan_radius, leader_id,
-                    )
-                else:
-                    movement = post_waypoint_movement(api_base, map_id, waypoints, arrival_radius)
-                    if not movement.get("ok", False):
-                        raise RuntimeError(movement.get("error", "movement command failed"))
+                try:
+                    if avoid_hostiles:
+                        player_level = self_info.get("character", {}).get("level")
+                        if not isinstance(player_level, int):
+                            player_level = 1
+                        execute_waypoints_with_avoidance(
+                            config, leader, index, api_base, map_id, waypoints, arrival_radius,
+                            leg_timeout, poll_interval, player_level,
+                            hostile_distance_adjuster, hostile_scan_radius, leader_id,
+                        )
+                    else:
+                        movement = post_waypoint_movement(api_base, map_id, waypoints, arrival_radius)
+                        if not movement.get("ok", False):
+                            raise RuntimeError(movement.get("error", "movement command failed"))
 
-                    final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
-                    movement_status = final_status.get("movement", {})
-                    state = movement_status.get("state", "unknown")
-                    if state != "arrived":
-                        raise RuntimeError(f"movement ended as {state}: {movement_status.get('error', '')}")
-            else:
+                        final_status = wait_for_movement(api_base, leg_timeout, poll_interval)
+                        movement_status = final_status.get("movement", {})
+                        state = movement_status.get("state", "unknown")
+                        if state != "arrived":
+                            raise RuntimeError(f"movement ended as {state}: {movement_status.get('error', '')}")
+                except LeaderDiedError:
+                    if not resume_through_death:
+                        raise
+                    # Death mid-leg raises immediately, before movement ever
+                    # reaches a terminal state - let the death check at the
+                    # top of the loop handle recovery instead of propagating.
+                    print(f"{leader_id}: leg interrupted by death, rechecking status")
+                    continue
+            if not arrived:
                 raise RuntimeError(f"route-goto used all {max_legs} legs without arriving")
             save_route_state(config, leader_id, "complete", {
                 "mapId": map_id,
@@ -1358,6 +1463,7 @@ def cmd_replay_survey(
     resume_through_death: bool = False,
     max_death_recoveries: int = 25,
     death_recovery_timeout: float = 180.0,
+    auto_learn_flight_paths: bool = False,
 ) -> int:
     """Walk a leader through a human-captured route catalog (see
     follow_player.py) instead of the automated pathfinding service - a
@@ -1460,6 +1566,8 @@ def cmd_replay_survey(
                 if state == "arrived":
                     idx += len(chunk)
                     print(f"{prefix}reached waypoint {start_index + idx}/{len(all_waypoints)}")
+                    if auto_learn_flight_paths:
+                        _try_auto_learn_flight_path(api_base, prefix)
                 elif resume_through_death:
                     # Most likely died mid-chunk; loop back around and let
                     # the death check above handle it (or surface a clearer
@@ -1880,6 +1988,13 @@ def cmd_travel_node_execute(
     min_progress_yards: float,
     fleet: str = "",
     leader_ids: list[str] | None = None,
+    avoid_hostiles: bool = False,
+    hostile_distance_adjuster: float = 1.0,
+    hostile_scan_radius: float = 100.0,
+    resume_through_death: bool = False,
+    max_death_recoveries: int = 25,
+    death_recovery_timeout: float = 180.0,
+    auto_learn_flight_paths: bool = False,
 ) -> int:
     registry = load_travel_registry(registry_path)
     plan_name, node_ids = route_node_ids(registry, route_or_nodes)
@@ -2090,6 +2205,13 @@ def cmd_travel_node_execute(
                 poll_interval,
                 min_progress_yards,
                 leader_ids=[leader_id],
+                avoid_hostiles=avoid_hostiles,
+                hostile_distance_adjuster=hostile_distance_adjuster,
+                hostile_scan_radius=hostile_scan_radius,
+                resume_through_death=resume_through_death,
+                max_death_recoveries=max_death_recoveries,
+                death_recovery_timeout=death_recovery_timeout,
+                auto_learn_flight_paths=auto_learn_flight_paths,
             )
             if step_result != 0:
                 ok = False
@@ -2476,6 +2598,25 @@ def _estimate_spirit_healer_seconds(ghost_pos: dict, resume_targets: list[dict],
     return nearest / run_speed
 
 
+SPIRIT_HEALER_NPC_FLAG = 0x4000
+
+
+def _find_spirit_healer_position(api_base: str, search_radius: float) -> dict[str, Any] | None:
+    try:
+        result = request_json("GET", f"{api_base}/world/entities?radius={search_radius}")
+    except Exception:
+        return None
+    map_id = result.get("mapId", 0)
+    for entity in result.get("entities", []):
+        if entity.get("type") != "UNIT" or (entity.get("npcFlags", 0) & SPIRIT_HEALER_NPC_FLAG) == 0:
+            continue
+        pos = entity.get("position", {})
+        if "x" not in pos or "y" not in pos:
+            continue
+        return {"mapId": map_id, "x": float(pos["x"]), "y": float(pos["y"]), "z": float(pos.get("z", 0.0))}
+    return None
+
+
 def _wait_until_alive(config: FleetConfig, leader: dict[str, Any], index: int,
                        poll_interval: float, deadline: float, prefix: str) -> bool:
     while time.monotonic() < deadline:
@@ -2583,15 +2724,47 @@ def _recover_from_death(
         healer_time = _estimate_spirit_healer_seconds(ghost_pos, resume_targets, run_speed)
         print(f"{prefix}recovery estimate: corpse-walk ~{corpse_time:.0f}s vs spirit-healer+walk ~{healer_time:.0f}s")
         if healer_time < corpse_time * SPIRIT_HEALER_PREFERENCE_MARGIN:
-            try:
-                result = request_json("POST", api_base + "/resurrect-at-graveyard", {"searchRadius": 60.0})
-            except Exception as exc:
-                print(f"{prefix}resurrect-at-graveyard failed: {exc}, falling back to corpse walk")
-                result = {"ok": False}
-            if result.get("ok", False):
+            healer_pos = _find_spirit_healer_position(api_base, 60.0)
+            healer_ok = False
+            if healer_pos is None:
+                print(f"{prefix}no Spirit Healer found nearby, falling back to corpse walk")
+            else:
+                # /resurrect-at-graveyard's search radius (60y) is much wider
+                # than the real interaction range CMaNGOS actually enforces
+                # for CMSG_SPIRIT_HEALER_ACTIVATE (~3-5y) - firing it from
+                # outside that range is silently ignored server-side even
+                # though the NPC shows up in the entity scan. Live-observed:
+                # fired from 10.5y, resurrection confirmation timed out.
+                # Ghosts are safe from mobs, so walk in close first.
+                try:
+                    request_json("POST", api_base + "/movement/goto", {
+                        "mapId": healer_pos["mapId"], "x": healer_pos["x"], "y": healer_pos["y"],
+                        "z": healer_pos["z"], "arrivalRadius": 3.0,
+                    })
+                except Exception as exc:
+                    print(f"{prefix}goto spirit healer failed: {exc}")
+                else:
+                    while time.monotonic() < deadline:
+                        try:
+                            here = leader_position(config, leader, index).get("position", {})
+                        except Exception:
+                            time.sleep(poll_interval)
+                            continue
+                        if point_distance(here, healer_pos) <= 5.0:
+                            break
+                        time.sleep(poll_interval)
+                    else:
+                        print(f"{prefix}never got close enough to the spirit healer")
+                    try:
+                        result = request_json("POST", api_base + "/resurrect-at-graveyard", {"searchRadius": 15.0})
+                    except Exception as exc:
+                        print(f"{prefix}resurrect-at-graveyard failed: {exc}")
+                        result = {"ok": False}
+                    healer_ok = result.get("ok", False)
+            if healer_ok:
                 print(f"{prefix}using spirit healer (clearly closer to the destination than the corpse)")
                 return _wait_until_alive(config, leader, index, poll_interval, deadline, prefix)
-            print(f"{prefix}spirit-healer resurrection unavailable ({result.get('error', 'unknown')}), falling back to corpse walk")
+            print(f"{prefix}spirit-healer resurrection unavailable, falling back to corpse walk")
 
     print(f"{prefix}walking to corpse at ({corpse['x']:.1f}, {corpse['y']:.1f}), {corpse.get('distance', 0):.0f}y away")
     try:
@@ -3078,6 +3251,13 @@ def main(argv: list[str]) -> int:
                                     help="Multiplier on the computed danger radius (>1 = more cautious)")
     route_goto_parser.add_argument("--hostile-scan-radius", type=float, default=100.0,
                                     help="How far out to scan for hostiles each leg")
+    route_goto_parser.add_argument("--resume-through-death", action="store_true",
+                                    help="Treat death as expected: recover (ghost walk or spirit healer, "
+                                         "whichever is more efficient) and keep going toward the destination")
+    route_goto_parser.add_argument("--max-death-recoveries", type=int, default=25)
+    route_goto_parser.add_argument("--death-recovery-timeout", type=float, default=180.0)
+    route_goto_parser.add_argument("--auto-learn-flight-paths", action="store_true",
+                                    help="On arrival, check for a nearby Flight Master and learn it")
     replay_survey_parser = sub.add_parser(
         "replay-survey",
         help="Walk a leader through a human-captured route catalog (see follow_player.py) instead of the automated pathfinder",
@@ -3101,6 +3281,8 @@ def main(argv: list[str]) -> int:
                                             "resume from the nearest waypoint instead of failing")
     replay_survey_parser.add_argument("--max-death-recoveries", type=int, default=25)
     replay_survey_parser.add_argument("--death-recovery-timeout", type=float, default=180.0)
+    replay_survey_parser.add_argument("--auto-learn-flight-paths", action="store_true",
+                                       help="On arrival at each waypoint chunk, check for a nearby Flight Master and learn it")
     route_demo_parser = sub.add_parser("route-demo", help="Run a named route demo using built-in landmarks")
     route_demo_parser.add_argument("--fleet", default="")
     route_demo_parser.add_argument("--leader", action="append", default=[])
@@ -3154,6 +3336,16 @@ def main(argv: list[str]) -> int:
     travel_node_execute_parser.add_argument("--leg-timeout", type=float, default=180.0)
     travel_node_execute_parser.add_argument("--poll-interval", type=float, default=1.0)
     travel_node_execute_parser.add_argument("--min-progress-yards", type=float, default=15.0)
+    travel_node_execute_parser.add_argument("--avoid-hostiles", action="store_true",
+                                             help="Reroute around hostile creatures on plain walk legs")
+    travel_node_execute_parser.add_argument("--hostile-distance-adjuster", type=float, default=1.0)
+    travel_node_execute_parser.add_argument("--hostile-scan-radius", type=float, default=100.0)
+    travel_node_execute_parser.add_argument("--resume-through-death", action="store_true",
+                                             help="Treat death as expected: recover and keep going on walk legs")
+    travel_node_execute_parser.add_argument("--max-death-recoveries", type=int, default=25)
+    travel_node_execute_parser.add_argument("--death-recovery-timeout", type=float, default=180.0)
+    travel_node_execute_parser.add_argument("--auto-learn-flight-paths", action="store_true",
+                                             help="On arrival at each walk leg, check for a nearby Flight Master and learn it")
     travel_node_execute_parser.add_argument(
         "route_or_nodes",
         nargs="+",
@@ -3295,6 +3487,10 @@ def main(argv: list[str]) -> int:
             args.avoid_hostiles,
             args.hostile_distance_adjuster,
             args.hostile_scan_radius,
+            args.resume_through_death,
+            args.max_death_recoveries,
+            args.death_recovery_timeout,
+            args.auto_learn_flight_paths,
         )
     if args.command == "replay-survey":
         return cmd_replay_survey(
@@ -3314,6 +3510,7 @@ def main(argv: list[str]) -> int:
             args.resume_through_death,
             args.max_death_recoveries,
             args.death_recovery_timeout,
+            args.auto_learn_flight_paths,
         )
     if args.command == "route-demo":
         return cmd_route_demo(
@@ -3376,6 +3573,13 @@ def main(argv: list[str]) -> int:
             args.min_progress_yards,
             args.fleet,
             args.leader,
+            args.avoid_hostiles,
+            args.hostile_distance_adjuster,
+            args.hostile_scan_radius,
+            args.resume_through_death,
+            args.max_death_recoveries,
+            args.death_recovery_timeout,
+            args.auto_learn_flight_paths,
         )
     if args.command == "resume-travel-plan":
         return cmd_resume_travel_plan(
