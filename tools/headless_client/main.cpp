@@ -1,6 +1,7 @@
 #include "auth/auth_handler.hpp"
 #include "auth/auth_packets.hpp"
 #include "game/game_handler.hpp"
+#include "game/faction_hostility.hpp"
 #include "game/game_services.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/transport_manager.hpp"
@@ -502,6 +503,15 @@ public:
             std::cout << "\n";
             if (settings_.autoJoinDefaultChannels) {
                 game_.autoJoinDefaultChannels();
+            }
+            // The GUI client builds this via WorldLoader (world_loader.cpp) as
+            // part of its render-setup sequence; the headless client has no
+            // equivalent call anywhere, so isHostileFaction() was permanently
+            // falling through to its "unknown -> hostile" default for every
+            // faction template - live-observed as ~20 false-positive threats
+            // at Menethil Harbor (town guards, our own party bots, a critter).
+            if (const auto* activeChar = game_.getActiveCharacter()) {
+                game::buildFactionHostilityMap(assetManager_, game_, static_cast<uint8_t>(activeChar->race));
             }
             queueOnEnterWorldCommands();
         }
