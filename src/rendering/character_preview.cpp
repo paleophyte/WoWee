@@ -1100,6 +1100,12 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     VkClearColorValue clearColor = {{0.05f, 0.05f, 0.1f, 1.0f}};
     renderTarget_->beginPass(cmd, clearColor);
 
+    // Preview rendering bypasses Renderer::renderWorld(), so it must run the
+    // same resource-preparation hook itself after server appearance data has
+    // produced bone matrices. This preserves lazy data loading while keeping
+    // GPU allocation outside CharacterRenderer::render().
+    charRenderer_->prepareRender(fi);
+
     // Render the character model
     charRenderer_->render(cmd, previewPerFrameSet_[fi], *camera_);
 

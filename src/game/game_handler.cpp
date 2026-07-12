@@ -555,8 +555,9 @@ if (attackTargetGuid != 0 && attackTargetGuid != playerGuid && attackTargetGuid 
         engaged->updateMovement(deltaTime);
 }
 
-auto nearbyEntities = entityController_->getEntityManager().getEntitiesNear(
-    playerPos.x, playerPos.y, game::ENTITY_UPDATE_RADIUS);
+static thread_local std::vector<std::shared_ptr<Entity>> nearbyEntities;
+entityController_->getEntityManager().getEntitiesNear(
+    playerPos.x, playerPos.y, game::ENTITY_UPDATE_RADIUS, nearbyEntities);
 for (const auto& entity : nearbyEntities) {
     if (!entity) continue;
     const uint64_t guid = entity->getGuid();

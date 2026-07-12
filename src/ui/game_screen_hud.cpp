@@ -931,8 +931,16 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const auto& questKillEntries = minimapQuestCreatureEntries_;
 
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+    static thread_local std::vector<std::shared_ptr<game::Entity>> nameplateEntities;
+    glm::vec3 playerCanonical(0.0f);
+    if (auto player = gameHandler.getEntityManager().getEntity(playerGuid))
+        playerCanonical = glm::vec3(player->getX(), player->getY(), player->getZ());
+    gameHandler.getEntityManager().getEntitiesNear(
+        playerCanonical.x, playerCanonical.y, 150.0f, nameplateEntities);
 
-    for (const auto& [guid, entityPtr] : gameHandler.getEntityManager().getEntities()) {
+    for (const auto& entityPtr : nameplateEntities) {
+        if (!entityPtr) continue;
+        const uint64_t guid = entityPtr->getGuid();
         if (!entityPtr || guid == playerGuid) continue;
 
         if (!entityPtr->isUnit()) continue;

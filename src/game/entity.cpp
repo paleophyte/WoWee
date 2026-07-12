@@ -1,5 +1,6 @@
 #include "game/entity.hpp"
 #include "core/logger.hpp"
+#include <algorithm>
 
 namespace wowee {
 namespace game {
@@ -44,6 +45,13 @@ bool EntityManager::hasEntity(uint64_t guid) const {
 
 std::vector<std::shared_ptr<Entity>> EntityManager::getEntitiesNear(
         float x, float y, float radius) const {
+    std::vector<std::shared_ptr<Entity>> result;
+    getEntitiesNear(x, y, radius, result);
+    return result;
+}
+
+void EntityManager::getEntitiesNear(float x, float y, float radius,
+                                    std::vector<std::shared_ptr<Entity>>& result) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto now = std::chrono::steady_clock::now();
     if (spatialDirty_ || lastSpatialRebuild_.time_since_epoch().count() == 0 ||
@@ -70,7 +78,8 @@ std::vector<std::shared_ptr<Entity>> EntityManager::getEntitiesNear(
     const int32_t minY = static_cast<int32_t>(std::floor((y - radius) / kSpatialCellSize));
     const int32_t maxY = static_cast<int32_t>(std::floor((y + radius) / kSpatialCellSize));
     const float radiusSq = radius * radius;
-    std::vector<std::shared_ptr<Entity>> result;
+    result.clear();
+    result.reserve(std::min(entities.size(), size_t(256)));
     auto cellKey = [](int32_t cx, int32_t cy) -> int64_t {
         return static_cast<int64_t>((static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
                                     static_cast<uint32_t>(cy));
@@ -86,7 +95,6 @@ std::vector<std::shared_ptr<Entity>> EntityManager::getEntitiesNear(
             }
         }
     }
-    return result;
 }
 
 } // namespace game

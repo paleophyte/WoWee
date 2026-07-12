@@ -443,6 +443,8 @@ public:
     // Main-thread spatial query. The cell index is refreshed at most four times
     // per second, avoiding a full entity-map distance scan every rendered frame.
     std::vector<std::shared_ptr<Entity>> getEntitiesNear(float x, float y, float radius) const;
+    void getEntitiesNear(float x, float y, float radius,
+                         std::vector<std::shared_ptr<Entity>>& out) const;
 
     // Get all entities. MAIN-THREAD-ONLY: mutations happen via dispatchQueuedPackets()
     // on the main thread, and this reference is not lock-protected. Callers on any
