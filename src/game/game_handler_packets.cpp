@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/movement_handler.hpp"
@@ -603,13 +604,34 @@ void GameHandler::registerOpcodeHandlers() {
         // the client-simulated path actually finishes) - obeying it unconditionally
         // cancelled the taxi mount animation while updateClientTaxi() kept flying
         // the real path for several more seconds, seen as "walking in the air".
-        // The client's own flight simulation is authoritative for when the taxi
-        // mount visually ends (see MovementHandler::updateClientTaxi's
-        // finishTaxiFlight, which already clears the mount correctly on arrival),
-        // so ignore this while it's still active.
+        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
+        // dismounting/stopping the player is the *authoritative* completion
+        // signal there, not a premature estimate - so a blanket "ignore while
+        // flying" guard could let the client fly past a real landing if local
+        // spline timing ever drifts from the server's. Distinguish the two using
+        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
+        // premature-estimate quirk (ignore, let updateClientTaxi() finish
+        // naturally); already cleared means the server considers the flight
+        // genuinely over (honor it now instead of waiting on our own spline).
         const bool onTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
-        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight);
-        if (onTaxiFlight) return;
+        bool serverStillTaxiing = false;
+        if (onTaxiFlight) {
+            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
+            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+            if (playerUnit) {
+                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+            }
+        }
+        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
+                 " serverStillTaxiing=", serverStillTaxiing);
+        if (onTaxiFlight && serverStillTaxiing) return;
+        if (onTaxiFlight && movementHandler_) {
+            // Authoritative server completion ahead of our own spline - stop the
+            // client flight now rather than snapping to a final waypoint that may
+            // not match where the server actually stopped us.
+            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+            return;
+        }
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
     };
