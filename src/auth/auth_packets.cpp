@@ -374,6 +374,7 @@ bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& 
 
     for (uint16_t i = 0; i < realmCount; ++i) {
         Realm realm;
+        const size_t realmStart = packet.getReadPos();
 
         // Icon/type: uint32 for legacy vanilla, uint8 for TBC/WotLK.
         if (isLegacyVanilla) {
@@ -414,6 +415,38 @@ bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& 
             realm.minorVersion = packet.readUInt8();
             realm.patchVersion = packet.readUInt8();
             realm.build = packet.readUInt16();
+        }
+
+        // VMangos 1.12 can use auth protocol v8 while still sending the
+        // vanilla realm-entry shape. If the caller forgot to opt into the
+        // vanilla layout, the TBC/WotLK parse shifts the fields and commonly
+        // produces name="" and address="<realm name>". Recover in-place.
+        if (!isLegacyVanilla && realm.name.empty() && !realm.address.empty()) {
+            LOG_WARNING("Realm list entry looked shifted; retrying as vanilla layout");
+            packet.setReadPos(realmStart);
+
+            realm = Realm{};
+            realm.icon = static_cast<uint8_t>(packet.readUInt32());
+            realm.lock = 0;
+            realm.flags = packet.readUInt8();
+            realm.name = packet.readString();
+            realm.address = packet.readString();
+
+            uint32_t populationBits = packet.readUInt32();
+            std::memcpy(&realm.population, &populationBits, sizeof(float));
+            realm.characters = packet.readUInt8();
+            realm.timezone = packet.readUInt8();
+            realm.id = packet.readUInt8();
+
+            if (realm.hasVersionInfo()) {
+                realm.majorVersion = packet.readUInt8();
+                realm.minorVersion = packet.readUInt8();
+                realm.patchVersion = packet.readUInt8();
+                realm.build = packet.readUInt16();
+            }
+        }
+
+        if (realm.hasVersionInfo()) {
 
             LOG_DEBUG("  Realm ", static_cast<int>(i), " (", realm.name, ") version: ",
                       static_cast<int>(realm.majorVersion), ".", static_cast<int>(realm.minorVersion), ".",

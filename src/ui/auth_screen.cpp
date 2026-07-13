@@ -590,6 +590,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
             info.os = profile->os;
             info.locale = profile->locale;
             info.timezone = profile->timezone;
+            info.legacyVanillaRealmList = (profile->id == "classic");
             authHandler.setClientInfo(info);
         }
     }
