@@ -872,8 +872,16 @@ void WMORenderer::cleanupUnusedModels() {
     // Delete GPU resources and remove from map.
     // Ensure all in-flight frames are complete before freeing vertex/index buffers —
     // the GPU may still be reading them from the previous frame's command buffer.
+    // vkDeviceWaitIdle is a full GPU pipeline stall — suspected (not yet confirmed)
+    // contributor to multi-second freezes observed right after taxi landings, when
+    // a zone transition can leave a large GPU upload backlog for this to drain.
+    // Timed here so the next repro pins down exactly how much this costs.
     if (!toRemove.empty() && vkCtx_) {
+        const auto waitStart = std::chrono::steady_clock::now();
         vkDeviceWaitIdle(vkCtx_->getDevice());
+        const float waitMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - waitStart).count();
+        core::Logger::getInstance().info("WMO cleanup: vkDeviceWaitIdle took ", waitMs, "ms (", toRemove.size(), " models to remove)");
     }
     for (uint32_t id : toRemove) {
         unloadModel(id);
