@@ -2483,6 +2483,14 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         movementInfo.x = landingPos.x;
         movementInfo.y = landingPos.y;
         movementInfo.z = landingPos.z;
+        // Application's own per-frame render-position sync only runs while onTaxi
+        // is true (see its "Sync character render position" block) - by the time
+        // this function returns, onTaxiFlight_/taxiMountActive_ are already false,
+        // so that sync won't pick up this correction. Push it to the renderer
+        // directly instead - see taxiLandingPositionCallbackRef()'s comment.
+        if (owner_.taxiLandingPositionCallbackRef()) {
+            owner_.taxiLandingPositionCallbackRef()(landingPos.x, landingPos.y, landingPos.z);
+        }
         LOG_INFO("Taxi landing: snapped to final waypoint (",
                  landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
     }
