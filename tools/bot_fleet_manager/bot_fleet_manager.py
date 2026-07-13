@@ -116,9 +116,24 @@ def request_json(method: str, url: str, payload: dict[str, Any] | None = None, t
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    # url is validated to http(s) above; this calls our own local fleet API, not attacker-controlled input.
-    with urllib.request.urlopen(req, timeout=timeout) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        # url is validated to http(s) above; this calls our own local fleet API, not attacker-controlled input.
+        with urllib.request.urlopen(req, timeout=timeout) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # The headless client's HTTP API consistently encodes {"ok": false, "error": "..."}
+        # bodies for legitimate "request was fine, action just didn't succeed" outcomes
+        # (e.g. "no Flight Master found nearby") using a 400 status - not a genuinely
+        # malformed request. Letting HTTPError propagate here discarded that body
+        # entirely, so every caller's `result.get("error")` saw nothing and every
+        # failure surfaced as an opaque "HTTP Error 400: Bad Request" - live-hit this
+        # exact loss debugging why auto-learn-flight-paths kept silently giving up.
+        # Parse the body through like a normal response when possible; only re-raise
+        # if there genuinely isn't a JSON body to fall back on.
+        try:
+            return json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            raise exc
 
 
 class LeaderDiedError(TimeoutError):
