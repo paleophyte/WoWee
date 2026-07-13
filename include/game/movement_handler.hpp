@@ -150,6 +150,14 @@ public:
     // MovementHandler (SMSG_DISMOUNT / UNIT_FIELD_MOUNTDISPLAYID handlers reacting
     // to an authoritative server completion signal) should pass false.
     void finishClientTaxiFlight(bool snapToFinalWaypoint);
+    // Remember an early server-side dismount/flag clear. Some cores send the
+    // completion signal well before our local spline endpoint and do not repeat
+    // it, so updateClientTaxi() consumes it once the player reaches the landing
+    // zone instead of waiting for the exact final waypoint.
+    void deferServerTaxiCompletion();
+    // Server cores can clear taxi flags/dismount before the client spline reaches
+    // its final waypoint. Only treat those signals as authoritative near arrival.
+    bool isNearTaxiDestination(float maxDistance = 24.0f) const;
     uint32_t nextMovementTimestampMs();
     void sanitizeMovementForTaxi();
 
@@ -301,6 +309,7 @@ private:
     std::vector<glm::vec3> taxiClientPath_;
     float taxiClientSpeed_ = 32.0f;
     float taxiClientSegmentProgress_ = 0.0f;
+    bool taxiServerCompletionPending_ = false;
     bool taxiRecoverPending_ = false;
     uint32_t taxiRecoverMapId_ = 0;
     glm::vec3 taxiRecoverPos_{0.0f};

@@ -694,9 +694,16 @@ void GameHandler::registerOpcodeHandlers() {
                 serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
             }
         }
+        const bool nearDestination = onTaxiFlight && movementHandler_ &&
+                                     movementHandler_->isNearTaxiDestination();
         LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
-                 " serverStillTaxiing=", serverStillTaxiing);
-        if (onTaxiFlight && serverStillTaxiing) return;
+                 " serverStillTaxiing=", serverStillTaxiing,
+                 " nearDestination=", nearDestination);
+        if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
+            movementHandler_->deferServerTaxiCompletion();
+            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
+            return;
+        }
         if (onTaxiFlight && movementHandler_) {
             // Authoritative server completion ahead of our own spline - stop the
             // client flight now rather than snapping to a final waypoint that may
@@ -951,7 +958,11 @@ void GameHandler::registerOpcodeHandlers() {
     // Taxi
     dispatchTable_[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
-            standState_ = packet.readUInt8();
+            const uint8_t newStandState = packet.readUInt8();
+            if (newStandState == standState_) {
+                return;
+            }
+            standState_ = newStandState;
             // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
             // wrong state here is indistinguishable, in-game, from a wrong animation.
             // At warning level: the file log filters info out by default.

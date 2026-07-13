@@ -888,6 +888,14 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                     }
                     auto blp = assetManager->loadTexture(blpKey);
                     if (blp.isValid()) {
+                        float variance = 0.0f;
+                        auto normalPixels = WMORenderer::generateNormalHeightMapPixels(
+                            blp.data.data(), static_cast<uint32_t>(blp.width),
+                            static_cast<uint32_t>(blp.height), variance);
+                        if (normalPixels.isValid()) {
+                            pending->preloadedWMONormalMaps[blpKey] = std::move(normalPixels);
+                            pending->preloadedWMONormalMapVariances[blpKey] = variance;
+                        }
                         pending->preloadedWMOTextures[blpKey] = std::move(blp);
                     }
                 }
@@ -1090,8 +1098,12 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
         if (wmoRenderer && assetManager) {
             if (!wmoRenderer->initialize(nullptr, VK_NULL_HANDLE, assetManager))
                 LOG_WARNING("WMORenderer terrain re-init failed");
-            // Set pre-decoded BLP cache and defer normal maps during streaming
+            // Diffuse decode and normal/height generation were completed by the
+            // terrain worker. The main thread only uploads those prepared pixels.
             wmoRenderer->setPredecodedBLPCache(&pending->preloadedWMOTextures);
+            wmoRenderer->setPredecodedNormalMapCache(
+                &pending->preloadedWMONormalMaps,
+                &pending->preloadedWMONormalMapVariances);
             wmoRenderer->setDeferNormalMaps(true);
 
             bool wmoWorkersIdle;
@@ -1113,9 +1125,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
             }
             wmoRenderer->setDeferNormalMaps(false);
             wmoRenderer->setPredecodedBLPCache(nullptr);
+            wmoRenderer->setPredecodedNormalMapCache(nullptr, nullptr);
             if (ft.wmoModelIndex < pending->wmoModels.size()) return false;
-            // All WMO models loaded — backfill normal/height maps that were skipped during streaming
-            wmoRenderer->backfillNormalMaps();
         }
         ft.phase = FinalizationPhase::WMO_INSTANCES;
         return false;
@@ -1311,34 +1322,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
 }
 
 void TerrainManager::workerLoop() {
-    // Keep worker threads off core 0 (reserved for main thread)
-    {
-        int numCores = static_cast<int>(std::thread::hardware_concurrency());
-        if (numCores >= 2) {
-#ifdef __linux__
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            for (int i = 1; i < numCores; i++) {
-                CPU_SET(i, &cpuset);
-            }
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-#elif defined(_WIN32)
-            DWORD_PTR mask = 0;
-            for (int i = 1; i < numCores && i < 64; i++) {
-                mask |= (static_cast<DWORD_PTR>(1) << i);
-            }
-            SetThreadAffinityMask(GetCurrentThread(), mask);
-#elif defined(__APPLE__)
-            // Use affinity tag 2 for workers (separate from main thread tag 1)
-            thread_affinity_policy_data_t policy = { 2 };
-            thread_policy_set(
-                pthread_mach_thread_np(pthread_self()),
-                THREAD_AFFINITY_POLICY,
-                reinterpret_cast<thread_policy_t>(&policy),
-                THREAD_AFFINITY_POLICY_COUNT);
-#endif
-        }
-    }
+    // Leave placement to the OS scheduler. Artificially reserving CPU 0 made
+    // this worker policy depend on the old main-thread pin and reduced the
+    // scheduler's ability to balance streaming with render workers.
     LOG_INFO("Terrain worker thread started");
 
     while (workerRunning.load()) {

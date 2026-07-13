@@ -121,6 +121,13 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
     if (auto* terrain = renderer->getTerrainManager()) {
         consider(terrain->getHeightAt(renderPos.x, renderPos.y));
     }
+    // Outdoor movers almost always match the terrain heightfield. Avoid the
+    // expensive WMO/M2 collision walks in that common case. Tunnel, bridge,
+    // and interior overlaps still use full arbitration because raw terrain is
+    // not close to the server-provided Z there.
+    if (best && std::abs(*best - renderPos.z) <= 0.35f) {
+        return best;
+    }
     if (auto* wmo = renderer->getWMORenderer()) {
         consider(wmo->getFloorHeight(renderPos.x, renderPos.y, probeZ));
     }
@@ -154,7 +161,9 @@ bool Application::initialize() {
     windowConfig.title = "Wowee";
     windowConfig.width = 1280;
     windowConfig.height = 720;
-    windowConfig.vsync = false;
+    // Pace rendering to the display by default. The old 240 FPS default kept
+    // the main thread near a full core even while the scene was idle.
+    windowConfig.vsync = true;
 
     window = std::make_unique<Window>(windowConfig);
     if (!window->initialize()) {
@@ -620,45 +629,10 @@ void Application::run() {
     ZoneScopedN("Application::run");
     LOG_INFO("Starting main loop");
 
-    // Pin main thread to a dedicated CPU core to reduce scheduling jitter
-    {
-        int numCores = static_cast<int>(std::thread::hardware_concurrency());
-        if (numCores >= 2) {
-#ifdef __linux__
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(0, &cpuset);
-            int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-            if (rc == 0) {
-                LOG_INFO("Main thread pinned to CPU core 0 (", numCores, " cores available)");
-            } else {
-                LOG_WARNING("Failed to pin main thread to CPU core 0 (error ", rc, ")");
-            }
-#elif defined(_WIN32)
-            DWORD_PTR mask = 1; // Core 0
-            DWORD_PTR prev = SetThreadAffinityMask(GetCurrentThread(), mask);
-            if (prev != 0) {
-                LOG_INFO("Main thread pinned to CPU core 0 (", numCores, " cores available)");
-            } else {
-                LOG_WARNING("Failed to pin main thread to CPU core 0 (error ", GetLastError(), ")");
-            }
-#elif defined(__APPLE__)
-            // macOS doesn't support hard pinning — use affinity tags to hint
-            // that the main thread should stay on its own core group
-            thread_affinity_policy_data_t policy = { 1 }; // tag 1 = main thread group
-            kern_return_t kr = thread_policy_set(
-                pthread_mach_thread_np(pthread_self()),
-                THREAD_AFFINITY_POLICY,
-                reinterpret_cast<thread_policy_t>(&policy),
-                THREAD_AFFINITY_POLICY_COUNT);
-            if (kr == KERN_SUCCESS) {
-                LOG_INFO("Main thread affinity tag set (", numCores, " cores available)");
-            } else {
-                LOG_WARNING("Failed to set main thread affinity tag (error ", kr, ")");
-            }
-#endif
-        }
-    }
+    // Do not pin the main thread. The shared render pool is created lazily
+    // from this thread, and OS threads inherit their creator's affinity mask
+    // on Linux. Pinning here silently confined every later render worker to
+    // CPU 0 and defeated all command-recording parallelism.
 
     const bool frameProfileEnabled = envFlagEnabled("WOWEE_FRAME_PROFILE", false);
     if (frameProfileEnabled) {
@@ -700,6 +674,7 @@ void Application::run() {
 
     try {
         while (running && !window->shouldClose()) {
+            const auto frameStart = std::chrono::steady_clock::now();
             watchdogHeartbeatMs.store(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count(),
@@ -866,13 +841,18 @@ void Application::run() {
                 window->setShouldClose(true);
             }
 
-            // Soft frame rate cap when vsync is off to prevent 100% CPU usage.
-            // Target ~240 FPS max (~4.2ms per frame); vsync handles its own pacing.
-            if (!window->isVsyncEnabled() && deltaTime < 0.004f) {
-                float sleepMs = (0.004f - deltaTime) * 1000.0f;
-                if (sleepMs > 0.5f)
-                    std::this_thread::sleep_for(std::chrono::microseconds(
-                        static_cast<int64_t>(sleepMs * 900.0f)));  // 90% of target to account for sleep overshoot
+            // Pace from the start of the frame we just completed. Using deltaTime
+            // here measured the previous frame, and relying only on FIFO present
+            // still allowed the main thread to saturate a core on high-refresh or
+            // compositor-managed displays. VSync defaults to a conservative 60 Hz;
+            // disabling it retains the existing 240 Hz ceiling.
+            const auto targetFrame = window->isVsyncEnabled()
+                ? std::chrono::microseconds(16667)
+                : std::chrono::microseconds(4167);
+            const auto deadline = frameStart + targetFrame;
+            const auto now = std::chrono::steady_clock::now();
+            if (now < deadline) {
+                std::this_thread::sleep_until(deadline);
             }
         }
     } catch (...) {
