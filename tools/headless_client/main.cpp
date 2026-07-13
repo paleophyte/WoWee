@@ -619,6 +619,7 @@ uint32_t hp = 0, maxHp = 0;
             {"movementFlags", move.flags},
             {"movementFlags2", move.flags2},
             {"runSpeed", game_.getServerRunSpeed()},
+            {"moneyCopper", game_.getMoneyCopper()},
             {"transport", {
                 {"onTransport", game_.isOnTransport()},
                 {"guid", game_.getPlayerTransportGuid()},
