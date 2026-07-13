@@ -1195,8 +1195,14 @@ def _find_flight_master_position(api_base: str, search_radius: float) -> dict[st
 
 def _try_auto_learn_flight_path(api_base: str, prefix: str, search_radius: float = 30.0) -> None:
     """Best-effort: checks for a Flight Master within search_radius and
-    learns it if found. A no-op (silent) when nothing's nearby, which is the
-    common case when this is called after every leg/waypoint arrival.
+    learns it if found. Every give-up path prints why - this used to be
+    entirely silent on failure (a bare `return` at each step), which made a
+    genuine "no Flight Master here" indistinguishable in the field from a
+    network hiccup, a timing race, or an unverified/inaccurate travel-node
+    coordinate placing the real NPC outside search_radius. Live-hit this
+    exact ambiguity: a leader "arrived" at a travel node 7.9y from its
+    recorded (unverified) coordinate and knownNodes stayed empty with zero
+    output anywhere in the chain.
 
     /learn-flight-path's own search radius is wider than the real
     interaction range CMaNGOS requires to actually accept
@@ -1205,9 +1211,12 @@ def _try_auto_learn_flight_path(api_base: str, prefix: str, search_radius: float
     NPC shows up in the entity scan. Walk in close first when needed."""
     try:
         result = request_json("POST", api_base + "/learn-flight-path", {"searchRadius": search_radius})
-    except Exception:
+    except Exception as exc:
+        print(f"{prefix}auto-learn-flight-paths: /learn-flight-path request failed ({exc})")
         return
     if not result.get("ok", False):
+        print(f"{prefix}auto-learn-flight-paths: {result.get('error', 'unknown error')} "
+              f"(searchRadius={search_radius})")
         return
     taxi = result.get("taxi", {})
     if taxi.get("windowOpen"):
@@ -1217,17 +1226,23 @@ def _try_auto_learn_flight_path(api_base: str, prefix: str, search_radius: float
 
     # Wasn't close enough for the server to actually accept it - find the
     # NPC's real position and walk within interaction range, then retry once.
+    print(f"{prefix}auto-learn-flight-paths: Flight Master found but too far for the "
+          f"server to accept the query - walking closer")
     fm_pos = _find_flight_master_position(api_base, search_radius)
     if fm_pos is None:
+        print(f"{prefix}auto-learn-flight-paths: no Flight Master within {search_radius}y "
+              f"on retry scan - likely an inaccurate/unverified travel-node coordinate")
         return
     try:
         request_json("POST", api_base + "/movement/goto", {
             "mapId": fm_pos["mapId"], "x": fm_pos["x"], "y": fm_pos["y"], "z": fm_pos["z"],
             "arrivalRadius": 3.0,
         })
-    except Exception:
+    except Exception as exc:
+        print(f"{prefix}auto-learn-flight-paths: /movement/goto to Flight Master failed ({exc})")
         return
     deadline = time.monotonic() + 30.0
+    reached = False
     while time.monotonic() < deadline:
         try:
             here = request_json("GET", f"{api_base}/world/self").get("position", {})
@@ -1235,16 +1250,24 @@ def _try_auto_learn_flight_path(api_base: str, prefix: str, search_radius: float
             time.sleep(1.0)
             continue
         if point_distance(here, fm_pos) <= 5.0:
+            reached = True
             break
         time.sleep(1.0)
+    if not reached:
+        print(f"{prefix}auto-learn-flight-paths: did not reach the Flight Master within 30s, "
+              f"retrying /learn-flight-path anyway")
     try:
         result = request_json("POST", api_base + "/learn-flight-path", {"searchRadius": 10.0})
-    except Exception:
+    except Exception as exc:
+        print(f"{prefix}auto-learn-flight-paths: retry /learn-flight-path request failed ({exc})")
         return
     if result.get("ok", False):
         taxi = result.get("taxi", {})
         print(f"{prefix}auto-learn-flight-paths: near '{taxi.get('nearestNodeName')}' "
               f"(known={taxi.get('nearestNodeKnown')})")
+    else:
+        print(f"{prefix}auto-learn-flight-paths: retry still failed - "
+              f"{result.get('error', 'unknown error')}")
 
 
 def cmd_route_goto(
