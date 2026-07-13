@@ -628,7 +628,8 @@ void GameHandler::registerOpcodeHandlers() {
                  " serverStillTaxiing=", serverStillTaxiing,
                  " nearDestination=", nearDestination);
         if (onTaxiFlight && (serverStillTaxiing || !nearDestination)) {
-            LOG_WARNING("Ignoring premature SMSG_DISMOUNT before taxi destination");
+            movementHandler_->deferServerTaxiCompletion();
+            LOG_WARNING("Deferring premature SMSG_DISMOUNT until taxi landing zone");
             return;
         }
         if (onTaxiFlight && movementHandler_) {

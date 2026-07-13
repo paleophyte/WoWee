@@ -516,8 +516,9 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         }
         const bool nearDestination = owner_.getMovementHandler()->isNearTaxiDestination();
         if (serverStillTaxiing || !nearDestination) {
+            owner_.getMovementHandler()->deferServerTaxiCompletion();
             if (!nearDestination) {
-                LOG_WARNING("Ignoring premature taxi mount clear before destination");
+                LOG_WARNING("Deferring premature taxi mount clear until landing zone");
             }
             return;
         }

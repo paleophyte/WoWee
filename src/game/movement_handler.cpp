@@ -786,6 +786,7 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     taxiActivateTimer_ = 0.0f;
     taxiClientActive_ = false;
     taxiClientPath_.clear();
+    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
     taxiStartGrace_ = 0.0f;
     onTaxiFlight_ = false;
@@ -1988,6 +1989,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     taxiActivatePending_ = false;
     taxiClientActive_ = false;
     taxiClientPath_.clear();
+    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
     taxiStartGrace_ = 0.0f;
     owner_.currentMountDisplayIdRef() = 0;
@@ -2373,6 +2375,7 @@ void MovementHandler::beginTaxiFlightMotion() {
     }
 
     LOG_INFO("Taxi flight started with ", taxiClientPath_.size(), " spline waypoints");
+    taxiServerCompletionPending_ = false;
     taxiClientActive_ = true;
 }
 
@@ -2415,6 +2418,7 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
     // remain visible after the flight has completed.
     owner_.vehicleIdRef() = 0;
     taxiClientPath_.clear();
+    taxiServerCompletionPending_ = false;
     taxiRecoverPending_ = false;
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
@@ -2423,6 +2427,11 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
     LOG_INFO("Taxi flight landed (client path)");
+}
+
+void MovementHandler::deferServerTaxiCompletion() {
+    if (!taxiClientActive_) return;
+    taxiServerCompletionPending_ = true;
 }
 
 bool MovementHandler::isNearTaxiDestination(float maxDistance) const {
@@ -2560,6 +2569,16 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
     movementInfo.y = nextPos.y;
     movementInfo.z = nextPos.z;
     movementInfo.orientation = smoothOrientation;
+
+    // A server completion packet can arrive much earlier than the local DBC
+    // spline endpoint (observed on CMaNGOS), and it is commonly sent only once.
+    // Do not land at the packet's early position, but also do not discard it:
+    // consume it inside a small landing radius so the mount comes off promptly
+    // rather than lingering through the tail of a mismatched local path.
+    if (taxiServerCompletionPending_ && isNearTaxiDestination()) {
+        finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
+        return;
+    }
 
     if (owner_.taxiOrientationCallbackRef()) {
         glm::vec3 renderTangent = core::coords::canonicalToRender(tangent);
