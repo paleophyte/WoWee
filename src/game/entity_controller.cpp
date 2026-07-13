@@ -1,5 +1,6 @@
 #include "game/entity_controller.hpp"
 #include "game/game_handler.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -493,6 +494,35 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
 // Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
 void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                                                 const FlatFieldMap& blockFields) {
+    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
+    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
+    // simulation actually finishes (same early-completion behavior already
+    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
+    // animation while MovementHandler::updateClientTaxi() kept flying the
+    // real path for several more seconds. But some cores finalize taxi
+    // flights server-side, so a bare "ignore while flying" guard could let
+    // the client fly past a genuine server landing if local spline timing
+    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
+    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
+    // let the client spline finish naturally); already cleared means the
+    // server considers the flight over (honor it now).
+    const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+    if (onRealTaxiFlight && newMountDisplayId == 0) {
+        bool serverStillTaxiing = false;
+        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+        }
+        if (serverStillTaxiing) {
+            return;
+        }
+        // Authoritative server completion ahead of our own spline - stop the
+        // client flight now rather than snapping to a final waypoint that may
+        // not match where the server actually stopped us.
+        owner_.getMovementHandler()->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+        return;
+    }
     uint32_t old = owner_.currentMountDisplayIdRef();
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
@@ -1454,7 +1484,6 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // Self-player post-unit-field handling
     if (block.guid == owner_.getPlayerGuid()) {
-        constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
         if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !owner_.onTaxiFlightRef() && owner_.taxiLandingCooldownRef() <= 0.0f) {
             owner_.onTaxiFlightRef() = true;
             owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
@@ -1705,7 +1734,8 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             owner_.serverRunSpeedRef() = block.runSpeed;
             // Some server dismount paths update run speed without updating mount display field.
-            if (!owner_.onTaxiFlightRef() && !owner_.taxiMountActiveRef() &&
+            const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+            if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
                 owner_.currentMountDisplayIdRef() != 0 && block.runSpeed <= 8.5f) {
                 LOG_INFO("Auto-clearing mount from movement speed update: speed=", block.runSpeed,
                          " displayId=", owner_.currentMountDisplayIdRef());
