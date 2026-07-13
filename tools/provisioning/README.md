@@ -1,6 +1,6 @@
 # WoWee Provisioning Tools
 
-These scripts create CMaNGOS or AzerothCore test accounts and characters for headless automation.
+These scripts create CMaNGOS, AzerothCore, or VMangos test accounts and characters for headless automation.
 
 ## Account Creation
 
@@ -40,6 +40,16 @@ AC_SOAP_URL=http://127.0.0.1:7879/
 AC_SOAP_USERNAME=SERVERADMIN
 AC_SOAP_PASSWORD=GMPASSWORD
 ```
+
+For VMangos, the helper can reuse the same SSH host/key and SOAP admin values as `MANGOS_*`, but defaults SOAP to the VMangos world server port:
+
+```dotenv
+VMANGOS_SOAP_URL=http://127.0.0.1:7880/
+```
+
+If `VMANGOS_SOAP_USERNAME` is not set, the helper uses `SERVERADMIN` for VMangos and can still reuse `MANGOS_SOAP_PASSWORD`. VMangos enforces the older 16-character password limit; when the VMangos profile reads a shared env SOAP password, it uses the first 16 characters.
+
+VMangos' administrator level is `6` in this build. The SOAP admin account must be level `6` or higher for SOAP commands; normal bot roster accounts still default to moderator level `1`.
 
 Create or update an account:
 
@@ -106,7 +116,7 @@ python tools/provisioning/create_account_ssh.py BOT001 \
   --skip-create
 ```
 
-For TBC on CMaNGOS, `--expansion 1` is normally the useful account expansion value. For AzerothCore WotLK, use `--server-type azerothcore`; it defaults account expansion to `2`.
+For TBC on CMaNGOS, `--expansion 1` is normally the useful account expansion value. For AzerothCore WotLK, use `--server-type azerothcore`; it defaults account expansion to `2`. For VMangos Vanilla, use `--server-type vmangos`; it defaults account expansion to `0`.
 
 ### GM Level for Bot Accounts
 
@@ -131,7 +141,7 @@ python tools/provisioning/create_account_direct_soap.py create \
   --expansion 1
 ```
 
-For AzerothCore direct SOAP, pass `--server-type azerothcore`.
+For AzerothCore direct SOAP, pass `--server-type azerothcore`. For VMangos direct SOAP, pass `--server-type vmangos` and the VMangos SOAP URL, normally `http://127.0.0.1:7880/` from the server host.
 
 If the CMaNGOS host should expose a tiny provisioning endpoint, run this on the Linux box:
 
@@ -274,4 +284,12 @@ python tools/provisioning/provision_roster.py tools/provisioning/roster.json \
   --auth-host 10.102.172.4
 ```
 
-When `serverType` is `azerothcore`, or when `--server-type azerothcore` is passed, roster provisioning defaults to account expansion `2`, GM level `1`, auth port `3725`, realm `AzerothCore`, client expansion `wotlk`, and client version `3.3.5.12340`. CMaNGOS defaults remain expansion `1`, GM level `1`, auth port `3724`, realm `MaNGOS`, client expansion `tbc`, and client version `2.4.3.8606`. The CLI flag overrides the roster default for quick retargeting.
+To target VMangos from the command line:
+
+```bash
+python tools/provisioning/provision_roster.py tools/provisioning/roster.json \
+  --server-type vmangos \
+  --auth-host 10.102.172.4
+```
+
+When `serverType` is `azerothcore`, or when `--server-type azerothcore` is passed, roster provisioning defaults to account expansion `2`, GM level `1`, auth port `3725`, realm `AzerothCore`, client expansion `wotlk`, and client version `3.3.5.12340`. When `serverType` is `vmangos`, roster provisioning defaults to account expansion `0`, GM level `1`, auth port `3726`, realm `VMangos`, client expansion `classic`, and client version `1.12.1.5875`. CMaNGOS defaults remain expansion `1`, GM level `1`, auth port `3724`, realm `MaNGOS`, client expansion `tbc`, and client version `2.4.3.8606`. The CLI flag overrides the roster default for quick retargeting.

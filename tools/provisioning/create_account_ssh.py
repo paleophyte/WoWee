@@ -35,6 +35,15 @@ SERVER_PROFILES = {
         "default_expansion": 2,
         "default_soap_url": "http://127.0.0.1:7879/",
     },
+    "vmangos": {
+        "label": "VMangos",
+        "env_prefixes": ("VMANGOS", "MANGOS"),
+        "soap_namespace": "urn:MaNGOS",
+        "default_expansion": 0,
+        "default_soap_url": "http://127.0.0.1:7880/",
+        "default_soap_username": "SERVERADMIN",
+        "max_soap_password_len": 16,
+    },
 }
 
 
@@ -197,7 +206,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", help="WoW account password. If omitted, prompt securely.")
     parser.add_argument("--server-type", choices=sorted(SERVER_PROFILES), default="cmangos")
     parser.add_argument("--expansion", type=int, choices=(0, 1, 2), help="0=Classic, 1=TBC, 2=WotLK")
-    parser.add_argument("--gmlevel", type=int, default=1, choices=(0, 1, 2, 3, 4), help="GM security level; use 0 for a regular player account")
+    parser.add_argument("--gmlevel", type=int, default=1, choices=range(0, 8), help="GM security level; use 0 for a regular player account")
     parser.add_argument("--realm-id", type=int, default=-1, help="Realm ID for gmlevel assignment (-1 = all realms)")
     parser.add_argument("--env", type=pathlib.Path, default=DEFAULT_ENV, help="Path to .env")
     parser.add_argument("--soap-url", default="", help="Override SOAP URL on the server")
@@ -219,7 +228,8 @@ def main() -> int:
     account_name = validate_account_username(args.username)
     account_password = validate_account_password(args.password or getpass.getpass("New WoW account password: "))
 
-    soap_user = args.soap_user or env_value(env, env_prefixes, "SOAP_USERNAME")
+    soap_user_prefixes = env_prefixes if args.server_type == "cmangos" else tuple(prefix for prefix in env_prefixes if prefix != "MANGOS")
+    soap_user = args.soap_user or env_value(env, soap_user_prefixes, "SOAP_USERNAME") or str(profile.get("default_soap_username", ""))
     if not soap_user:
         soap_user = input("SOAP admin username: ").strip()
     if not soap_user:
@@ -230,6 +240,9 @@ def main() -> int:
         soap_password = getpass.getpass("SOAP admin password: ")
     if not soap_password:
         raise SystemExit("SOAP admin password is required.")
+    max_soap_password_len = int(profile.get("max_soap_password_len", 0) or 0)
+    if max_soap_password_len > 0 and not args.soap_password:
+        soap_password = soap_password[:max_soap_password_len]
 
     ssh_host = env_value(env, env_prefixes, "HOST")
     if not ssh_host:
@@ -241,8 +254,8 @@ def main() -> int:
     ssh_key = env_value(env, env_prefixes, "SSH_KEY_PATH")
     if not ssh_key:
         raise SystemExit(f"{env_prefixes[0]}_SSH_KEY_PATH must be set in .env")
-    soap_url_prefixes = tuple(prefix for prefix in env_prefixes if prefix != "MANGOS") if args.server_type == "azerothcore" else env_prefixes
-    soap_url = args.soap_url or env_value(soap_url_prefixes and env or {}, soap_url_prefixes, "SOAP_URL", str(profile["default_soap_url"]))
+    soap_url_prefixes = env_prefixes if args.server_type == "cmangos" else tuple(prefix for prefix in env_prefixes if prefix != "MANGOS")
+    soap_url = args.soap_url or env_value(env, soap_url_prefixes, "SOAP_URL", str(profile["default_soap_url"]))
 
     commands = []
     if not args.skip_create:

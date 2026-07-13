@@ -40,6 +40,18 @@ SERVER_DEFAULTS = {
         "clientProtocol": 8,
         "gmlevel": 1,
     },
+    "vmangos": {
+        "accountExpansion": 0,
+        "authPort": 3726,
+        "realm": "VMangos",
+        "clientExpansion": "classic",
+        "clientMajor": 1,
+        "clientMinor": 12,
+        "clientPatch": 1,
+        "clientBuild": 5875,
+        "clientProtocol": 8,
+        "gmlevel": 1,
+    },
 }
 
 
