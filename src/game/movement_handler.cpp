@@ -2324,6 +2324,16 @@ void MovementHandler::startClientTaxiPath(const std::vector<uint32_t>& pathNodes
         return;
     }
 
+    // NOTE: this only builds taxiClientPath_ as pending data - it deliberately does
+    // NOT snap the player to the path start or set taxiClientActive_. CMSG_ACTIVATETAXI
+    // can still be rejected by the server at this point; see activateTaxi()'s comment
+    // and beginTaxiFlightMotion(), which does the actual activation once
+    // SMSG_ACTIVATETAXIREPLY confirms success.
+}
+
+void MovementHandler::beginTaxiFlightMotion() {
+    if (taxiClientPath_.size() < 2) return;
+
     glm::vec3 start = taxiClientPath_[0];
     glm::vec3 dir(0.0f);
     float dirLenSq = 0.0f;
@@ -2366,49 +2376,61 @@ void MovementHandler::startClientTaxiPath(const std::vector<uint32_t>& pathNodes
     taxiClientActive_ = true;
 }
 
+// Ends the active client-simulated taxi flight. snapToFinalWaypoint controls
+// whether the player is teleported to taxiClientPath_'s last waypoint first:
+// - true: natural completion (the client spline reached its own end) - our
+//   own path data is authoritative for where "arrived" means.
+// - false: an authoritative server signal (SMSG_DISMOUNT with
+//   UNIT_FLAG_TAXI_FLIGHT already cleared, or the equivalent
+//   UNIT_FIELD_MOUNTDISPLAYID update) arrived ahead of our own spline
+//   finishing. The server's stop point may not match our path's precomputed
+//   final waypoint, so leave the player where the spline currently has them
+//   and let the server's own subsequent position updates reconcile it,
+//   rather than snapping somewhere that might be wrong.
+void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
+    if (snapToFinalWaypoint && !taxiClientPath_.empty()) {
+        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+        const auto& landingPos = taxiClientPath_.back();
+        if (playerEntity) {
+            playerEntity->setPosition(landingPos.x, landingPos.y, landingPos.z,
+                                      movementInfo.orientation);
+        }
+        movementInfo.x = landingPos.x;
+        movementInfo.y = landingPos.y;
+        movementInfo.z = landingPos.z;
+        LOG_INFO("Taxi landing: snapped to final waypoint (",
+                 landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
+    }
+    taxiClientActive_ = false;
+    onTaxiFlight_ = false;
+    taxiLandingCooldown_ = 2.0f;
+    if (taxiMountActive_ && owner_.mountCallbackRef()) {
+        owner_.mountCallbackRef()(0);
+    }
+    taxiMountActive_ = false;
+    taxiMountDisplayId_ = 0;
+    owner_.currentMountDisplayIdRef() = 0;
+    // Some WotLK servers expose the taxi mount through vehicle data.
+    // Clear that cached ID at landing so the dismount control does not
+    // remain visible after the flight has completed.
+    owner_.vehicleIdRef() = 0;
+    taxiClientPath_.clear();
+    taxiRecoverPending_ = false;
+    movementInfo.flags = 0;
+    movementInfo.flags2 = 0;
+    if (owner_.getSocket()) {
+        sendMovement(Opcode::MSG_MOVE_STOP);
+        sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    }
+    LOG_INFO("Taxi flight landed (client path)");
+}
+
 void MovementHandler::updateClientTaxi(float deltaTime) {
     if (!taxiClientActive_ || taxiClientPath_.size() < 2) return;
     auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
 
-    auto finishTaxiFlight = [&]() {
-            if (!taxiClientPath_.empty()) {
-                const auto& landingPos = taxiClientPath_.back();
-                if (playerEntity) {
-                    playerEntity->setPosition(landingPos.x, landingPos.y, landingPos.z,
-                                              movementInfo.orientation);
-                }
-                movementInfo.x = landingPos.x;
-                movementInfo.y = landingPos.y;
-                movementInfo.z = landingPos.z;
-                LOG_INFO("Taxi landing: snapped to final waypoint (",
-                         landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
-            }
-            taxiClientActive_ = false;
-            onTaxiFlight_ = false;
-            taxiLandingCooldown_ = 2.0f;
-            if (taxiMountActive_ && owner_.mountCallbackRef()) {
-                owner_.mountCallbackRef()(0);
-            }
-            taxiMountActive_ = false;
-            taxiMountDisplayId_ = 0;
-            owner_.currentMountDisplayIdRef() = 0;
-            // Some WotLK servers expose the taxi mount through vehicle data.
-            // Clear that cached ID at landing so the dismount control does not
-            // remain visible after the flight has completed.
-            owner_.vehicleIdRef() = 0;
-            taxiClientPath_.clear();
-            taxiRecoverPending_ = false;
-            movementInfo.flags = 0;
-            movementInfo.flags2 = 0;
-            if (owner_.getSocket()) {
-                sendMovement(Opcode::MSG_MOVE_STOP);
-                sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
-            }
-            LOG_INFO("Taxi flight landed (client path)");
-    };
-
     if (taxiClientIndex_ + 1 >= taxiClientPath_.size()) {
-        finishTaxiFlight();
+        finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
         return;
     }
 
@@ -2421,7 +2443,7 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
 
     while (true) {
         if (taxiClientIndex_ + 1 >= taxiClientPath_.size()) {
-            finishTaxiFlight();
+            finishClientTaxiFlight(/*snapToFinalWaypoint=*/true);
             return;
         }
 
@@ -2530,6 +2552,9 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
         applyTaxiMountForCurrentNode();
+        // Now that the server has confirmed, actually move the player to the path
+        // start and start advancing the spline (see activateTaxi()'s comment).
+        beginTaxiFlightMotion();
         if (owner_.getSocket()) {
             sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
         }
@@ -2545,6 +2570,12 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         owner_.addSystemChatMessage("Cannot take that flight path.");
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
+        // Clear the pending path data built speculatively by activateTaxi() -
+        // it was never committed (taxiClientActive_ never went true), but drop it
+        // explicitly so a retry can't somehow pick up stale waypoints.
+        taxiClientPath_.clear();
+        taxiClientIndex_ = 0;
+        taxiClientSegmentProgress_ = 0.0f;
         if (taxiMountActive_ && owner_.mountCallbackRef()) {
             owner_.mountCallbackRef()(0);
         }
@@ -2693,12 +2724,16 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     taxiWindowOpen_ = false;
     taxiActivatePending_ = true;
     taxiActivateTimer_ = 0.0f;
-    taxiStartGrace_ = 2.0f;
-    if (!onTaxiFlight_) {
-        onTaxiFlight_ = true;
-        sanitizeMovementForTaxi();
-        applyTaxiMountForCurrentNode();
-    }
+    // Do NOT mount, set onTaxiFlight_, or activate the client spline here.
+    // CMSG_ACTIVATETAXI can be rejected by the server (insufficient gold, invalid
+    // route, distance/state restrictions). Starting the flight speculatively meant
+    // a rejection reply became indistinguishable from a stale/duplicate one once
+    // updateClientTaxi() started running unconditionally every frame - the client
+    // would just keep flying an unauthorized route. Everything that actually starts
+    // the flight (mount, onTaxiFlight_, taxiClientActive_) now happens only in the
+    // success branch of handleActivateTaxiReply(), once the server confirms.
+    // taxiClientPath_ is still built below as pending data - see
+    // startClientTaxiPath()'s comment.
     if (owner_.getSocket()) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }

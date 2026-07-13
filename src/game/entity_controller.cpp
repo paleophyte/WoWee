@@ -1,5 +1,6 @@
 #include "game/entity_controller.hpp"
 #include "game/game_handler.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -600,11 +601,28 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
     // simulation actually finishes (same early-completion behavior already
     // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
     // animation while MovementHandler::updateClientTaxi() kept flying the
-    // real path for several more seconds. Ignore a drop to 0 while a real
-    // taxi flight is still active; finishTaxiFlight() clears it correctly
-    // once the client path actually ends.
+    // real path for several more seconds. But some cores finalize taxi
+    // flights server-side, so a bare "ignore while flying" guard could let
+    // the client fly past a genuine server landing if local spline timing
+    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
+    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
+    // let the client spline finish naturally); already cleared means the
+    // server considers the flight over (honor it now).
     const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
     if (onRealTaxiFlight && newMountDisplayId == 0) {
+        bool serverStillTaxiing = false;
+        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+        }
+        if (serverStillTaxiing) {
+            return;
+        }
+        // Authoritative server completion ahead of our own spline - stop the
+        // client flight now rather than snapping to a final waypoint that may
+        // not match where the server actually stopped us.
+        owner_.getMovementHandler()->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
         return;
     }
     uint32_t old = owner_.currentMountDisplayIdRef();
@@ -1568,7 +1586,6 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // Self-player post-unit-field handling
     if (block.guid == owner_.getPlayerGuid()) {
-        constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
         if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !owner_.onTaxiFlightRef() && owner_.taxiLandingCooldownRef() <= 0.0f) {
             owner_.onTaxiFlightRef() = true;
             owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
