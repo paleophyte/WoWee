@@ -137,10 +137,13 @@ EmoteRegistry& EmoteRegistry::instance() {
 }
 
 void EmoteRegistry::loadFromDbc() {
+    loadFromDbc(core::Application::getInstance().getAssetManager());
+}
+
+void EmoteRegistry::loadFromDbc(pipeline::AssetManager* assetManager) {
     if (loaded_) return;
     loaded_ = true;
 
-    auto* assetManager = core::Application::getInstance().getAssetManager();
     if (!assetManager) {
         LOG_WARNING("Emotes: no AssetManager");
         loadFallbackEmotes();

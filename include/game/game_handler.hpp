@@ -494,6 +494,7 @@ public:
     // Instance difficulty
     void sendSetDifficulty(uint32_t difficulty);
     bool  isLoggingOut() const;
+    bool  isLogoutComplete() const;
     float getLogoutCountdown() const;
 
     // Stand state
@@ -647,6 +648,9 @@ public:
     void queryPlayerName(uint64_t guid);
     void queryCreatureInfo(uint32_t entry, uint64_t guid);
     void queryGameObjectInfo(uint32_t entry, uint64_t guid);
+    void cachePlayerName(uint64_t guid, const std::string& name) {
+        entityController_->cachePlayerName(guid, name);
+    }
     const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const {
         return entityController_->getCachedGameObjectInfo(entry);
     }
@@ -1186,6 +1190,7 @@ public:
     bool hasServerTransportUpdate(uint64_t guid) const { return entityController_->hasServerTransportUpdate(guid); }
     glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
+    const TransportManager* getTransportManager() const { return transportManager_.get(); }
     // Client-side M2 transport (trams, lifts) board/disembark check by proximity to the
     // transport's live position. Call once per tick with the player's current canonical
     // world position; safe to call whether or not any M2 transports are registered.
@@ -1301,6 +1306,10 @@ public:
         outY = corpseX_;  // server X = canonical Y (west)
         return true;
     }
+    /** Corpse Z (up); only meaningful when getCorpseCanonicalPos() returns true. */
+    float getCorpseZ() const { return corpseZ_; }
+    /** Map the corpse is on, or 0 if no corpse data yet. */
+    uint32_t getCorpseMapId() const { return corpseMapId_; }
     /** Send CMSG_RECLAIM_CORPSE; noop if not a ghost or not near corpse. */
     void reclaimCorpse();
     void releaseSpirit();
@@ -1507,6 +1516,10 @@ public:
     // NPC Gossip
     void interactWithNpc(uint64_t guid);
     void interactWithGameObject(uint64_t guid);
+    // Sends CMSG_TAXIQUERYAVAILABLENODES directly (what a real client sends
+    // when clicking a flight master, instead of CMSG_GOSSIP_HELLO) - see
+    // queryTaxiNodes() usage in headless_client/main.cpp for why.
+    void queryTaxiNodes(uint64_t guid);
     void selectGossipOption(uint32_t optionId);
     void selectGossipQuest(uint32_t questId);
     void acceptQuest();

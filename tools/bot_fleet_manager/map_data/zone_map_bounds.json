@@ -1,0 +1,642 @@
+{
+  "1": {
+    "asset": "DunMorogh.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -7160.41650391,
+    "left": 1802.08325195,
+    "map_id": 0,
+    "right": -3122.91650391,
+    "top": -3877.08325195
+  },
+  "10": {
+    "asset": "Duskwood.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -11516.66601562,
+    "left": 833.33331299,
+    "map_id": 0,
+    "right": -1866.66662598,
+    "top": -9716.66601562
+  },
+  "11": {
+    "asset": "Wetlands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -4904.16650391,
+    "left": -389.58331299,
+    "map_id": 0,
+    "right": -4525.0,
+    "top": -2147.91650391
+  },
+  "12": {
+    "asset": "Elwynn.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -10254.16601562,
+    "left": 1535.41662598,
+    "map_id": 0,
+    "right": -1935.41662598,
+    "top": -7939.58300781
+  },
+  "130": {
+    "asset": "Silverpine.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1133.33325195,
+    "left": 3449.99975586,
+    "map_id": 0,
+    "right": -750.0,
+    "top": 1666.66662598
+  },
+  "1377": {
+    "asset": "Silithus.png",
+    "asset_height": 669,
+    "asset_width": 1002,
+    "bottom": -8281.25,
+    "left": 2537.5,
+    "map_id": 1,
+    "right": -945.83398438,
+    "top": -5958.33398438
+  },
+  "139": {
+    "asset": "EasternPlaguelands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1218.75,
+    "left": -2185.41650391,
+    "map_id": 0,
+    "right": -6056.25,
+    "top": 3799.99975586
+  },
+  "14": {
+    "asset": "Durotar.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1716.66662598,
+    "left": -1962.49987793,
+    "map_id": 1,
+    "right": -7249.99951172,
+    "top": 1808.33325195
+  },
+  "141": {
+    "asset": "Teldrassil.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 8437.5,
+    "left": 3814.58325195,
+    "map_id": 1,
+    "right": -1277.08325195,
+    "top": 11831.25
+  },
+  "148": {
+    "asset": "Darkshore.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 3966.66650391,
+    "left": 2941.66650391,
+    "map_id": 1,
+    "right": -3608.33325195,
+    "top": 8333.33300781
+  },
+  "1497": {
+    "asset": "Undercity.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1237.84118652,
+    "left": 873.19262695,
+    "map_id": 0,
+    "right": -86.18240356,
+    "top": 1877.9453125
+  },
+  "15": {
+    "asset": "Dustwallow.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -5533.33300781,
+    "left": -974.99993896,
+    "map_id": 1,
+    "right": -6225.0,
+    "top": -2033.33325195
+  },
+  "1519": {
+    "asset": "Stormwind.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -9175.20507812,
+    "left": 1380.97143555,
+    "map_id": 0,
+    "right": 36.70063019,
+    "top": -8278.85058594
+  },
+  "1537": {
+    "asset": "Ironforge.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -5096.84570312,
+    "left": -713.59136963,
+    "map_id": 0,
+    "right": -1504.21643066,
+    "top": -4569.24121094
+  },
+  "16": {
+    "asset": "Aszhara.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1960.41662598,
+    "left": -3277.08325195,
+    "map_id": 1,
+    "right": -8347.91601562,
+    "top": 5341.66650391
+  },
+  "1637": {
+    "asset": "Ogrimmar.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1338.46057129,
+    "left": -3680.60107422,
+    "map_id": 1,
+    "right": -5083.20556641,
+    "top": 2273.87719727
+  },
+  "1638": {
+    "asset": "ThunderBluff.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1545.83325195,
+    "left": 516.66662598,
+    "map_id": 1,
+    "right": -527.08331299,
+    "top": -849.99993896
+  },
+  "1657": {
+    "asset": "Darnassis.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 9532.58691406,
+    "left": 2938.36279297,
+    "map_id": 1,
+    "right": 1880.02954102,
+    "top": 10238.31640625
+  },
+  "17": {
+    "asset": "Barrens.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -5143.75,
+    "left": 2622.91650391,
+    "map_id": 1,
+    "right": -7510.41650391,
+    "top": 1612.49987793
+  },
+  "215": {
+    "asset": "Mulgore.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -3697.91650391,
+    "left": 2047.91662598,
+    "map_id": 1,
+    "right": -3089.58325195,
+    "top": -272.91665649
+  },
+  "2597": {
+    "asset": "AlteracValley.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1739.58325195,
+    "left": 1781.24987793,
+    "map_id": 30,
+    "right": -2456.25,
+    "top": 1085.41662598
+  },
+  "267": {
+    "asset": "Hilsbrad.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1733.33325195,
+    "left": 1066.66662598,
+    "map_id": 0,
+    "right": -2133.33325195,
+    "top": 400.0
+  },
+  "28": {
+    "asset": "WesternPlaguelands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 499.99996948,
+    "left": 416.66665649,
+    "map_id": 0,
+    "right": -3883.33325195,
+    "top": 3366.66650391
+  },
+  "3": {
+    "asset": "Badlands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -7547.91650391,
+    "left": -2079.16650391,
+    "map_id": 0,
+    "right": -4566.66650391,
+    "top": -5889.58300781
+  },
+  "3277": {
+    "asset": "WarsongGulch.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 862.49993896,
+    "left": 2041.66662598,
+    "map_id": 489,
+    "right": 895.83331299,
+    "top": 1627.08325195
+  },
+  "33": {
+    "asset": "Stranglethorn.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -15422.91601562,
+    "left": 2220.83325195,
+    "map_id": 0,
+    "right": -4160.41650391,
+    "top": -11168.75
+  },
+  "331": {
+    "asset": "Ashenvale.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 829.16662598,
+    "left": 1699.99987793,
+    "map_id": 1,
+    "right": -4066.66650391,
+    "top": 4672.91650391
+  },
+  "3358": {
+    "asset": "ArathiBasin.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 337.5,
+    "left": 1858.33325195,
+    "map_id": 529,
+    "right": 102.08332825,
+    "top": 1508.33325195
+  },
+  "3430": {
+    "asset": "EversongWoods.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 7758.33300781,
+    "left": -4487.5,
+    "map_id": 530,
+    "right": -9412.5,
+    "top": 11041.66601562
+  },
+  "3433": {
+    "asset": "Ghostlands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 6066.66650391,
+    "left": -5283.33300781,
+    "map_id": 530,
+    "right": -8583.33300781,
+    "top": 8266.66601562
+  },
+  "3483": {
+    "asset": "Hellfire.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1962.49987793,
+    "left": 5539.58300781,
+    "map_id": 530,
+    "right": 375.0,
+    "top": 1481.25
+  },
+  "3487": {
+    "asset": "SilvermoonCity.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 9346.93847656,
+    "left": -6400.75,
+    "map_id": 530,
+    "right": -7612.20849609,
+    "top": 10153.70898438
+  },
+  "3518": {
+    "asset": "Nagrand.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -3641.66650391,
+    "left": 10295.83300781,
+    "map_id": 530,
+    "right": 4770.83300781,
+    "top": 41.66666412
+  },
+  "3519": {
+    "asset": "TerokkarForest.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -4600.0,
+    "left": 7083.33300781,
+    "map_id": 530,
+    "right": 1683.33325195,
+    "top": -999.99993896
+  },
+  "3520": {
+    "asset": "ShadowmoonValley.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -5614.58300781,
+    "left": 4225.0,
+    "map_id": 530,
+    "right": -1275.0,
+    "top": -1947.91662598
+  },
+  "3521": {
+    "asset": "Zangarmarsh.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1416.66662598,
+    "left": 9475.0,
+    "map_id": 530,
+    "right": 4447.91650391,
+    "top": 1935.41662598
+  },
+  "3522": {
+    "asset": "BladesEdgeMountains.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 791.66662598,
+    "left": 8845.83300781,
+    "map_id": 530,
+    "right": 3420.83325195,
+    "top": 4408.33300781
+  },
+  "3523": {
+    "asset": "Netherstorm.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1739.58325195,
+    "left": 5483.33300781,
+    "map_id": 530,
+    "right": -91.66666412,
+    "top": 5456.25
+  },
+  "3524": {
+    "asset": "AzuremystIsle.png",
+    "asset_height": 668,
+    "asset_width": 1020,
+    "bottom": -5508.33300781,
+    "left": -10500.0,
+    "map_id": 530,
+    "right": -14570.83300781,
+    "top": -2793.75
+  },
+  "3525": {
+    "asset": "BloodmystIsle.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -2933.33325195,
+    "left": -10075.0,
+    "map_id": 530,
+    "right": -13337.49902344,
+    "top": -758.33331299
+  },
+  "3557": {
+    "asset": "TheExodar.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -4314.37109375,
+    "left": -11066.3671875,
+    "map_id": 530,
+    "right": -12123.13769531,
+    "top": -3609.68334961
+  },
+  "357": {
+    "asset": "Feralas.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -6999.99951172,
+    "left": 5441.66650391,
+    "map_id": 1,
+    "right": -1508.33325195,
+    "top": -2366.66650391
+  },
+  "36": {
+    "asset": "Alterac.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -366.66665649,
+    "left": 783.33331299,
+    "map_id": 0,
+    "right": -2016.66662598,
+    "top": 1500.0
+  },
+  "361": {
+    "asset": "Felwood.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 3299.99975586,
+    "left": 1641.66662598,
+    "map_id": 1,
+    "right": -4108.33300781,
+    "top": 7133.33300781
+  },
+  "3703": {
+    "asset": "ShattrathCity.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -2344.7878418,
+    "left": 6135.25878906,
+    "map_id": 530,
+    "right": 4829.00878906,
+    "top": -1473.95446777
+  },
+  "38": {
+    "asset": "LochModan.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -6327.08300781,
+    "left": -1993.74987793,
+    "map_id": 0,
+    "right": -4752.08300781,
+    "top": -4487.5
+  },
+  "3820": {
+    "asset": "NetherstormArena.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 1404.16662598,
+    "left": 2660.41650391,
+    "map_id": 566,
+    "right": 389.58331299,
+    "top": 2918.75
+  },
+  "4": {
+    "asset": "BlastedLands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -12800.0,
+    "left": -1241.66662598,
+    "map_id": 0,
+    "right": -4591.66650391,
+    "top": -10566.66601562
+  },
+  "40": {
+    "asset": "Westfall.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -11733.33300781,
+    "left": 3016.66650391,
+    "map_id": 0,
+    "right": -483.33331299,
+    "top": -9400.0
+  },
+  "400": {
+    "asset": "ThousandNeedles.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -6899.99951172,
+    "left": -433.33331299,
+    "map_id": 1,
+    "right": -4833.33300781,
+    "top": -3966.66650391
+  },
+  "405": {
+    "asset": "Desolace.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -2545.83325195,
+    "left": 4233.33300781,
+    "map_id": 1,
+    "right": -262.5,
+    "top": 452.08331299
+  },
+  "406": {
+    "asset": "StonetalonMountains.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -339.58331299,
+    "left": 3245.83325195,
+    "map_id": 1,
+    "right": -1637.49987793,
+    "top": 2916.66650391
+  },
+  "41": {
+    "asset": "DeadwindPass.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -11533.33300781,
+    "left": -833.33331299,
+    "map_id": 0,
+    "right": -3333.33325195,
+    "top": -9866.66601562
+  },
+  "44": {
+    "asset": "Redridge.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -10022.91601562,
+    "left": -1570.83325195,
+    "map_id": 0,
+    "right": -3741.66650391,
+    "top": -8575.0
+  },
+  "440": {
+    "asset": "Tanaris.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -10475.0,
+    "left": -218.74998474,
+    "map_id": 1,
+    "right": -7118.74951172,
+    "top": -5875.0
+  },
+  "45": {
+    "asset": "Arathi.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -2533.33325195,
+    "left": -866.66662598,
+    "map_id": 0,
+    "right": -4466.66650391,
+    "top": -133.33332825
+  },
+  "46": {
+    "asset": "BurningSteppes.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -8983.33300781,
+    "left": -266.66665649,
+    "map_id": 0,
+    "right": -3195.83325195,
+    "top": -7031.24951172
+  },
+  "47": {
+    "asset": "Hinterlands.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -1100.0,
+    "left": -1575.0,
+    "map_id": 0,
+    "right": -5425.0,
+    "top": 1466.66662598
+  },
+  "490": {
+    "asset": "UngoroCrater.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -8433.33300781,
+    "left": 533.33331299,
+    "map_id": 1,
+    "right": -3166.66650391,
+    "top": -5966.66650391
+  },
+  "493": {
+    "asset": "Moonglade.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 6952.08300781,
+    "left": -1381.25,
+    "map_id": 1,
+    "right": -3689.58325195,
+    "top": 8491.66601562
+  },
+  "51": {
+    "asset": "SearingGorge.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -7587.49951172,
+    "left": -322.91665649,
+    "map_id": 0,
+    "right": -2554.16650391,
+    "top": -6100.0
+  },
+  "618": {
+    "asset": "Winterspring.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 3799.99975586,
+    "left": -316.66665649,
+    "map_id": 1,
+    "right": -7416.66650391,
+    "top": 8533.33300781
+  },
+  "8": {
+    "asset": "SwampOfSorrows.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": -11150.0,
+    "left": -2222.91650391,
+    "map_id": 0,
+    "right": -4516.66650391,
+    "top": -9620.83300781
+  },
+  "85": {
+    "asset": "Tirisfal.png",
+    "asset_height": 668,
+    "asset_width": 1002,
+    "bottom": 824.99993896,
+    "left": 3033.33325195,
+    "map_id": 0,
+    "right": -1485.41662598,
+    "top": 3837.49975586
+  }
+}

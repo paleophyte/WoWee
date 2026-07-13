@@ -7,6 +7,7 @@
 #include "network/world_socket.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
+#include "core/crash_diagnostics.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
 #include <chrono>
@@ -20,6 +21,41 @@
 
 namespace wowee {
 namespace game {
+
+namespace {
+
+bool equalNameIgnoreCase(const std::string& a, const std::string& b) {
+    return a.size() == b.size() &&
+        std::equal(a.begin(), a.end(), b.begin(), [](unsigned char ca, unsigned char cb) {
+            return std::tolower(ca) == std::tolower(cb);
+        });
+}
+
+uint64_t findGuidByKnownName(GameHandler& owner, const std::string& name) {
+    if (name.empty()) return 0;
+
+    if (const auto* active = owner.getActiveCharacter()) {
+        if (equalNameIgnoreCase(active->name, name)) {
+            return owner.getPlayerGuid();
+        }
+    }
+
+    for (const auto& [guid, cachedName] : owner.getPlayerNameCache()) {
+        if (equalNameIgnoreCase(cachedName, name)) {
+            return guid;
+        }
+    }
+
+    for (const auto& member : owner.getPartyData().members) {
+        if (equalNameIgnoreCase(member.name, name)) {
+            return member.guid;
+        }
+    }
+
+    return 0;
+}
+
+} // namespace
 
 ChatHandler::ChatHandler(GameHandler& owner)
     : owner_(owner) {
@@ -95,6 +131,18 @@ bool chatPacketDiagEnabled() {
         return !isFalsyEnvValue(raw);
     }();
     return enabled;
+}
+
+bool headlessModeEnabled() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+    return true;
+#else
+    static const bool enabled = [] {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && !isFalsyEnvValue(raw);
+    }();
+    return enabled;
+#endif
 }
 
 } // namespace
@@ -302,7 +350,12 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
                     " target='", target, "' bytes=", raw.size(), " data=[",
                     raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
     }
-    owner_.getSocket()->send(packet);
+    auto* sock = owner_.getSocket();
+    if (!sock) {
+        LOG_WARNING("Cannot send chat: socket is null");
+        return;
+    }
+    sock->send(packet);
 
     // Add local echo so the player sees their own message immediately
     MessageChatData echo;
@@ -619,15 +672,23 @@ void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
 void ChatHandler::handleTextEmote(network::Packet& packet) {
     const bool legacyFormat = isClassicLikeExpansion();
     TextEmoteData data;
+    wowee::core::setCrashNote("SMSG_TEXT_EMOTE: parse");
     if (!TextEmoteParser::parse(packet, data, legacyFormat)) {
         LOG_WARNING("Failed to parse SMSG_TEXT_EMOTE");
         return;
     }
+    wowee::core::setCrashBreadcrumb("SMSG_TEXT_EMOTE:parsed",
+                                    packet.getOpcode(),
+                                    "SMSG_TEXT_EMOTE",
+                                    packet.getSize(),
+                                    packet.getReadPos(),
+                                    static_cast<int>(owner_.getState()));
 
     if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
         return;
     }
 
+    wowee::core::setCrashNote("SMSG_TEXT_EMOTE: sender lookup");
     std::string senderName = owner_.lookupName(data.senderGuid);
     if (senderName.empty()) {
         const auto& partyData = owner_.getPartyData();
@@ -639,8 +700,13 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         }
     }
 
-    uint32_t animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
-    if (animId != 0 && owner_.emoteAnimCallbackRef()) {
+    uint32_t animId = 0;
+    if (!headlessModeEnabled()) {
+        wowee::core::setCrashNote("SMSG_TEXT_EMOTE: animation lookup");
+        animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
+    }
+    if (!headlessModeEnabled() && animId != 0 && owner_.emoteAnimCallbackRef()) {
+        wowee::core::setCrashNote("SMSG_TEXT_EMOTE: animation callback");
         owner_.emoteAnimCallbackRef()(data.senderGuid, animId);
     }
 
@@ -653,11 +719,15 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
 
     const std::string* targetPtr = data.targetName.empty() ? nullptr : &data.targetName;
-    std::string emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
+    std::string emoteText;
+    if (!headlessModeEnabled()) {
+        wowee::core::setCrashNote("SMSG_TEXT_EMOTE: text lookup");
+        emoteText = rendering::AnimationController::getEmoteTextByDbcId(data.textEmoteId, senderName, targetPtr);
+    }
     if (emoteText.empty()) {
         emoteText = data.targetName.empty()
-            ? senderName + " performs an emote."
-            : senderName + " performs an emote at " + data.targetName + ".";
+            ? senderName + " performs text emote " + std::to_string(data.textEmoteId) + "."
+            : senderName + " performs text emote " + std::to_string(data.textEmoteId) + " at " + data.targetName + ".";
     }
 
     MessageChatData chatMsg;
@@ -665,11 +735,16 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     chatMsg.language = ChatLanguage::COMMON;
     chatMsg.senderGuid = data.senderGuid;
     chatMsg.senderName = senderName;
+    chatMsg.receiverGuid = findGuidByKnownName(owner_, data.targetName);
+    chatMsg.receiverName = data.targetName;
+    chatMsg.channelName = "TEXT_EMOTE:" + std::to_string(data.textEmoteId);
     chatMsg.message = emoteText;
 
+    wowee::core::setCrashNote("SMSG_TEXT_EMOTE: add chat");
     addLocalChatMessage(chatMsg);
 
     LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ", anim=", animId, ")");
+    wowee::core::setCrashNote("SMSG_TEXT_EMOTE: done");
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {

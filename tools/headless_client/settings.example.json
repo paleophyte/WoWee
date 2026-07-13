@@ -1,0 +1,44 @@
+{
+  "auth": {
+    "host": "127.0.0.1",
+    "port": 3724,
+    "account": "ACCOUNT",
+    "password": "PASSWORD"
+  },
+  "client": {
+    "major": 3,
+    "minor": 3,
+    "patch": 5,
+    "build": 12340,
+    "protocol": 8,
+    "locale": "enUS",
+    "platform": "x86",
+    "os": "Win",
+    "expansion": "wotlk"
+  },
+  "realm": {
+    "name": "",
+    "index": 0,
+    "id": 0
+  },
+  "character": {
+    "name": ""
+  },
+  "chat": {
+    "autoJoinDefaultChannels": false
+  },
+  "bots": {
+    "enabled": false,
+    "names": []
+  },
+  "automation": {
+    "commandDelaySeconds": 0.25,
+    "onEnterWorldCommands": []
+  },
+  "api": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 8787,
+    "maxMessages": 200
+  }
+}

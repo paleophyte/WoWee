@@ -145,6 +145,11 @@ public:
     }
 
     void updateClientTaxi(float deltaTime);
+    // Ends the active client-simulated taxi flight. See the definition in
+    // movement_handler.cpp for what snapToFinalWaypoint means - callers outside
+    // MovementHandler (SMSG_DISMOUNT / UNIT_FIELD_MOUNTDISPLAYID handlers reacting
+    // to an authoritative server completion signal) should pass false.
+    void finishClientTaxiFlight(bool snapToFinalWaypoint);
     uint32_t nextMovementTimestampMs();
     void sanitizeMovementForTaxi();
 
@@ -209,6 +214,10 @@ private:
     // --- Private helpers ---
     void buildTaxiCostMap();
     void startClientTaxiPath(const std::vector<uint32_t>& pathNodes);
+    // Commits a taxi flight already built by startClientTaxiPath(): snaps the player
+    // to the path start and sets taxiClientActive_. Only called once
+    // SMSG_ACTIVATETAXIREPLY confirms success - see activateTaxi()'s comment.
+    void beginTaxiFlightMotion();
     bool restoreWorldTransferFallbackIfNearOrigin(const char* context);
 
     GameHandler& owner_;
@@ -282,6 +291,9 @@ private:
     uint32_t taxiMountDisplayId_ = 0;
     bool taxiActivatePending_ = false;
     float taxiActivateTimer_ = 0.0f;
+    // How long to wait for SMSG_ACTIVATETAXIREPLY before giving up - see
+    // updateClientTaxi()'s comment on why a dropped reply needs this now.
+    static constexpr float kTaxiActivateReplyTimeoutSeconds = 8.0f;
     bool taxiClientActive_ = false;
     float taxiLandingCooldown_ = 0.0f;
     float taxiStartGrace_ = 0.0f;

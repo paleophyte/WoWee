@@ -1,5 +1,6 @@
 #include "game/entity_controller.hpp"
 #include "game/game_handler.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
@@ -45,6 +46,29 @@ bool envFlagEnabled(const char* key, bool defaultValue = false) {
              raw[0] == 'n' || raw[0] == 'N');
 }
 
+bool headlessModeEnabled() {
+    // WOWEE_HEADLESS must win over the compile-time default when set, same
+    // as headlessMode() in game_handler_packets.cpp - this copy previously
+    // checked WOWEE_HEADLESS_DEFAULT first and returned unconditionally,
+    // so fullWorldSimulation's WOWEE_HEADLESS=0 override never took effect
+    // here specifically. Live-observed: other players never got created as
+    // entities (skipped at CREATE_OBJECT), even standing right next to one,
+    // while regular units/NPCs worked fine (a different, correctly-gated
+    // code path).
+    static const bool enabled = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        if (raw && *raw) {
+            return envFlagEnabled("WOWEE_HEADLESS", false);
+        }
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return enabled;
+}
+
 int parseEnvIntClamped(const char* key, int defaultValue, int minValue, int maxValue) {
     const char* raw = std::getenv(key);
     if (!raw || !*raw) return defaultValue;
@@ -66,6 +90,27 @@ float slowUpdateObjectBlockLogThresholdMs() {
     static const int thresholdMs =
         parseEnvIntClamped("WOWEE_NET_SLOW_UPDATE_BLOCK_LOG_MS", 10, 1, 60000);
     return static_cast<float>(thresholdMs);
+}
+
+bool transportDebugEnabled() {
+    static const bool enabled = envFlagEnabled("WOWEE_TRANSPORT_DEBUG", false);
+    return enabled;
+}
+
+const char* updateTypeDebugName(UpdateType type) {
+    switch (type) {
+        case UpdateType::VALUES: return "VALUES";
+        case UpdateType::MOVEMENT: return "MOVEMENT";
+        case UpdateType::CREATE_OBJECT: return "CREATE_OBJECT";
+        case UpdateType::CREATE_OBJECT2: return "CREATE_OBJECT2";
+        case UpdateType::OUT_OF_RANGE_OBJECTS: return "OUT_OF_RANGE_OBJECTS";
+        case UpdateType::NEAR_OBJECTS: return "NEAR_OBJECTS";
+    }
+    return "UNKNOWN";
+}
+
+bool isDeeprunSubwayEntry(uint32_t entry) {
+    return entry >= 176080 && entry <= 176086;
 }
 
 } // anonymous namespace
@@ -210,6 +255,55 @@ void EntityController::handleUpdateObject(network::Packet& packet) {
             LOG_WARNING("Failed to parse SMSG_UPDATE_OBJECT");
         if (data.blocks.empty()) return;
         // Fall through: process any blocks that were successfully parsed before the failure.
+    }
+
+    if (transportDebugEnabled()) {
+        size_t creates = 0;
+        size_t movements = 0;
+        size_t gameObjects = 0;
+        size_t transportFlagged = 0;
+        size_t subwayCandidates = 0;
+        const uint16_t entryIdx = fieldIndex(UF::OBJECT_FIELD_ENTRY);
+        const uint16_t displayIdx = fieldIndex(UF::GAMEOBJECT_DISPLAYID);
+        for (const auto& block : data.blocks) {
+            const bool isCreate = block.updateType == UpdateType::CREATE_OBJECT ||
+                                  block.updateType == UpdateType::CREATE_OBJECT2;
+            if (isCreate) ++creates;
+            if (block.updateType == UpdateType::MOVEMENT) ++movements;
+            if (block.objectType == ObjectType::GAMEOBJECT) ++gameObjects;
+            if ((block.updateFlags & 0x0002) != 0) ++transportFlagged;
+
+            uint32_t entry = 0;
+            uint32_t displayId = 0;
+            auto entryIt = block.fields.find(entryIdx);
+            if (entryIt != block.fields.end()) entry = entryIt->second;
+            auto displayIt = block.fields.find(displayIdx);
+            if (displayIt != block.fields.end()) displayId = displayIt->second;
+
+            if (isDeeprunSubwayEntry(entry) || displayId == 3831 || (block.objectType == ObjectType::GAMEOBJECT && (block.updateFlags & 0x0002) != 0)) {
+                ++subwayCandidates;
+                LOG_INFO("TRANSPORT DEBUG block type=", updateTypeDebugName(block.updateType),
+                         " guid=0x", std::hex, block.guid, std::dec,
+                         " objectType=", static_cast<int>(block.objectType),
+                         " updateFlags=0x", std::hex, block.updateFlags, std::dec,
+                         " entry=", entry,
+                         " displayId=", displayId,
+                         " hasMovement=", block.hasMovement,
+                         " pos=(", block.x, ", ", block.y, ", ", block.z, ")",
+                         " onTransport=", block.onTransport,
+                         " transportGuid=0x", std::hex, block.transportGuid, std::dec);
+            }
+        }
+        if (creates || movements || gameObjects || transportFlagged || !data.outOfRangeGuids.empty()) {
+            LOG_INFO("TRANSPORT DEBUG update packet blocks=", data.blocks.size(),
+                     " creates=", creates,
+                     " movements=", movements,
+                     " gameObjects=", gameObjects,
+                     " transportFlagged=", transportFlagged,
+                     " subwayCandidates=", subwayCandidates,
+                     " outOfRange=", data.outOfRangeGuids.size(),
+                     " entitiesNow=", entityManager.getEntityCount());
+        }
     }
 
     enqueueUpdateObjectWork(std::move(data));
@@ -397,6 +491,15 @@ void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
 // ============================================================
 
 void EntityController::applyUpdateObjectBlock(const UpdateBlock& block, bool& newItemCreated) {
+    if (headlessModeEnabled() &&
+        block.guid != owner_.getPlayerGuid() &&
+        block.objectType == ObjectType::PLAYER &&
+        (block.updateType == UpdateType::CREATE_OBJECT ||
+         block.updateType == UpdateType::CREATE_OBJECT2)) {
+        LOG_INFO("Headless skipped remote player create guid=0x", std::hex, block.guid, std::dec);
+        return;
+    }
+
     switch (block.updateType) {
         case UpdateType::CREATE_OBJECT:
         case UpdateType::CREATE_OBJECT2:
@@ -493,6 +596,35 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
 // Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
 void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                                                 const FlatFieldMap& blockFields) {
+    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
+    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
+    // simulation actually finishes (same early-completion behavior already
+    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
+    // animation while MovementHandler::updateClientTaxi() kept flying the
+    // real path for several more seconds. But some cores finalize taxi
+    // flights server-side, so a bare "ignore while flying" guard could let
+    // the client fly past a genuine server landing if local spline timing
+    // ever drifts. Distinguish using the server's own UNIT_FLAG_TAXI_FLIGHT,
+    // same as the SMSG_DISMOUNT guard: still set means premature (ignore,
+    // let the client spline finish naturally); already cleared means the
+    // server considers the flight over (honor it now).
+    const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+    if (onRealTaxiFlight && newMountDisplayId == 0) {
+        bool serverStillTaxiing = false;
+        auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+        auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+        if (playerUnit) {
+            serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+        }
+        if (serverStillTaxiing) {
+            return;
+        }
+        // Authoritative server completion ahead of our own spline - stop the
+        // client flight now rather than snapping to a final waypoint that may
+        // not match where the server actually stopped us.
+        owner_.getMovementHandler()->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+        return;
+    }
     uint32_t old = owner_.currentMountDisplayIdRef();
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
@@ -1454,7 +1586,6 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // Self-player post-unit-field handling
     if (block.guid == owner_.getPlayerGuid()) {
-        constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
         if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !owner_.onTaxiFlightRef() && owner_.taxiLandingCooldownRef() <= 0.0f) {
             owner_.onTaxiFlightRef() = true;
             owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
@@ -1705,7 +1836,8 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
             owner_.serverRunSpeedRef() = block.runSpeed;
             // Some server dismount paths update run speed without updating mount display field.
-            if (!owner_.onTaxiFlightRef() && !owner_.taxiMountActiveRef() &&
+            const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+            if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
                 owner_.currentMountDisplayIdRef() != 0 && block.runSpeed <= 8.5f) {
                 LOG_INFO("Auto-clearing mount from movement speed update: speed=", block.runSpeed,
                          " displayId=", owner_.currentMountDisplayIdRef());
@@ -2051,6 +2183,21 @@ void EntityController::handleDestroyObject(network::Packet& packet) {
 // ============================================================
 
 void EntityController::queryPlayerName(uint64_t guid) {
+    static const bool headlessAllowRemoteNameQueries =
+        envFlagEnabled("WOWEE_HEADLESS_QUERY_REMOTE_NAMES", false);
+    if (headlessModeEnabled() && !headlessAllowRemoteNameQueries &&
+        guid != owner_.getPlayerGuid()) {
+        LOG_INFO("queryPlayerName: headless skipped remote guid=0x", std::hex, guid, std::dec);
+        return;
+    }
+
+    static const bool headlessAllowHighGuidNameQueries =
+        envFlagEnabled("WOWEE_HEADLESS_QUERY_HIGH_GUIDS", false);
+    if (headlessModeEnabled() && !headlessAllowHighGuidNameQueries && (guid >> 32) != 0) {
+        LOG_INFO("queryPlayerName: headless skipped high guid=0x", std::hex, guid, std::dec);
+        return;
+    }
+
     // If already cached, apply the name to the entity (handles entity recreation after
     // moving out/in range — the entity object is new but the cached name is valid).
     auto cacheIt = playerNameCache.find(guid);
@@ -2078,6 +2225,7 @@ void EntityController::queryPlayerName(uint64_t guid) {
 }
 
 void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
+    if (headlessModeEnabled()) return;
     if (creatureInfoCache.count(entry) || pendingCreatureQueries.count(entry)) return;
     if (!owner_.isInWorld()) return;
 
@@ -2087,6 +2235,7 @@ void EntityController::queryCreatureInfo(uint32_t entry, uint64_t guid) {
 }
 
 void EntityController::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
+    if (headlessModeEnabled()) return;
     if (gameObjectInfoCache_.count(entry) || pendingGameObjectQueries_.count(entry)) return;
     if (!owner_.isInWorld()) return;
 
@@ -2175,6 +2324,11 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
 }
 
 void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
+    if (headlessModeEnabled()) {
+        packet.skipAll();
+        return;
+    }
+
     CreatureQueryResponseData data;
     if (!owner_.getPacketParsers()->parseCreatureQueryResponse(packet, data)) return;
 
@@ -2199,6 +2353,11 @@ void EntityController::handleCreatureQueryResponse(network::Packet& packet) {
 // ============================================================
 
 void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
+    if (headlessModeEnabled()) {
+        packet.skipAll();
+        return;
+    }
+
     GameObjectQueryResponseData data;
     bool ok = owner_.getPacketParsers() ? owner_.getPacketParsers()->parseGameObjectQueryResponse(packet, data)
                              : GameObjectQueryResponseParser::parse(packet, data);

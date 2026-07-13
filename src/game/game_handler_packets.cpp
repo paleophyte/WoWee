@@ -1,4 +1,5 @@
 #include "game/game_handler.hpp"
+#include "game/protocol_constants.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/movement_handler.hpp"
@@ -31,6 +32,7 @@
 #include "core/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "core/crash_diagnostics.hpp"
 #include "core/logger.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <glm/gtx/quaternion.hpp>
@@ -123,6 +125,77 @@ float slowPacketLogThresholdMs() {
     static const int thresholdMs =
         parseEnvIntClamped("WOWEE_NET_SLOW_PACKET_LOG_MS", 10, 1, 60000);
     return static_cast<float>(thresholdMs);
+}
+
+bool headlessTracePackets() {
+    static const bool enabled = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS_TRACE_PACKETS");
+        return raw && *raw && raw[0] != '0';
+    }();
+    return enabled;
+}
+
+bool headlessMode() {
+    static const bool enabled = []() {
+        // WOWEE_HEADLESS lets an individual leader opt back into full world-object
+        // simulation (SMSG_UPDATE_OBJECT et al, see shouldSkipHeadlessWorldSimulationPacket
+        // below) even in a WOWEE_HEADLESS_DEFAULT build. Without this, entities
+        // (other players, NPCs, GameObjects like transports) are never created
+        // client-side, so anything that needs to see/board them - e.g. the Deeprun
+        // Tram - is impossible no matter what automation code sits on top.
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        if (raw && *raw) {
+            return raw[0] != '0';
+        }
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return enabled;
+}
+
+// Cosmetic/animation packets whose handlers assume a fully initialized rendering
+// pipeline (AnimationController, spell visual system, etc). These are skipped
+// unconditionally in every headless build, even when WOWEE_HEADLESS=0 opts a
+// leader back into object tracking: SMSG_EMOTE's handler was observed to SIGSEGV
+// the first time it actually ran under a headless leader, since nothing in this
+// build's startup path had wired up whatever it dereferences. None of them are
+// needed to track entities/transports, so there's no upside to risking it.
+bool shouldAlwaysSkipHeadlessPacket(LogicalOpcode op) {
+    switch (op) {
+        case Opcode::MSG_MOVE_HEARTBEAT:
+        case Opcode::SMSG_EMOTE:
+        case Opcode::SMSG_SPELL_START:
+        case Opcode::SMSG_SPELL_GO:
+        case Opcode::SMSG_SET_EXTRA_AURA_INFO_OBSOLETE:
+        case Opcode::SMSG_INIT_EXTRA_AURA_INFO_OBSOLETE:
+        case Opcode::SMSG_SET_EXTRA_AURA_INFO_NEED_UPDATE_OBSOLETE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Object-lifecycle packets that populate EntityManager (see entity.hpp). Skipped
+// by default for lightweight bot fleets; WOWEE_HEADLESS=0 (see headlessMode()
+// above) re-enables these for a leader that needs to see nearby entities, e.g.
+// to board a transport like the Deeprun Tram.
+bool shouldSkipHeadlessWorldSimulationPacket(LogicalOpcode op) {
+    switch (op) {
+        case Opcode::SMSG_UPDATE_OBJECT:
+        case Opcode::SMSG_COMPRESSED_UPDATE_OBJECT:
+        case Opcode::SMSG_DESTROY_OBJECT:
+        case Opcode::SMSG_MONSTER_MOVE:
+        case Opcode::SMSG_CREATURE_QUERY_RESPONSE:
+        case Opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE:
+        case Opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE:
+        case Opcode::SMSG_ITEM_QUERY_MULTIPLE_RESPONSE:
+            return true;
+        default:
+            return false;
+    }
 }
 
 constexpr size_t kMaxQueuedInboundPackets = 4096;
@@ -598,6 +671,39 @@ void GameHandler::registerOpcodeHandlers() {
 
     // Mount/dismount
     dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& /*packet*/) {
+        // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
+        // own server-side flight-completion estimate firing early, well before
+        // the client-simulated path actually finishes) - obeying it unconditionally
+        // cancelled the taxi mount animation while updateClientTaxi() kept flying
+        // the real path for several more seconds, seen as "walking in the air".
+        // But other cores (e.g. AzerothCore) finalize taxi flights server-side -
+        // dismounting/stopping the player is the *authoritative* completion
+        // signal there, not a premature estimate - so a blanket "ignore while
+        // flying" guard could let the client fly past a real landing if local
+        // spline timing ever drifts from the server's. Distinguish the two using
+        // the server's own UNIT_FLAG_TAXI_FLIGHT: still set means this is the
+        // premature-estimate quirk (ignore, let updateClientTaxi() finish
+        // naturally); already cleared means the server considers the flight
+        // genuinely over (honor it now instead of waiting on our own spline).
+        const bool onTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
+        bool serverStillTaxiing = false;
+        if (onTaxiFlight) {
+            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
+            auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
+            if (playerUnit) {
+                serverStillTaxiing = (playerUnit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0;
+            }
+        }
+        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=", onTaxiFlight,
+                 " serverStillTaxiing=", serverStillTaxiing);
+        if (onTaxiFlight && serverStillTaxiing) return;
+        if (onTaxiFlight && movementHandler_) {
+            // Authoritative server completion ahead of our own spline - stop the
+            // client flight now rather than snapping to a final waypoint that may
+            // not match where the server actually stopped us.
+            movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
+            return;
+        }
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
     };
@@ -2865,9 +2971,60 @@ void GameHandler::handlePacket(network::Packet& packet) {
     }
 
     // Dispatch via the opcode handler table
+    if (state == WorldState::IN_WORLD && shouldAlwaysSkipHeadlessPacket(*logicalOp)) {
+        const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+        wowee::core::setCrashBreadcrumb("world_packet:headless_skip",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
+        packet.skipAll();
+        return;
+    }
+    if (headlessMode() && state == WorldState::IN_WORLD &&
+        shouldSkipHeadlessWorldSimulationPacket(*logicalOp)) {
+        const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+        wowee::core::setCrashBreadcrumb("world_packet:headless_skip",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
+        packet.skipAll();
+        return;
+    }
+
+    const std::string logicalName = OpcodeTable::logicalToName(*logicalOp);
+    wowee::core::setCrashBreadcrumb("world_packet:dispatch_begin",
+                                    opcode,
+                                    logicalName.c_str(),
+                                    packet.getSize(),
+                                    packet.getReadPos(),
+                                    static_cast<int>(state));
+
     auto it = dispatchTable_.find(*logicalOp);
     if (it != dispatchTable_.end()) {
+        if (headlessTracePackets()) {
+            LOG_INFO("HEADLESS DISPATCH begin wire=0x", std::hex, opcode, std::dec,
+                     " logical=", logicalName,
+                     " size=", packet.getSize(),
+                     " readPos=", packet.getReadPos(),
+                     " state=", worldStateName(state));
+        }
         it->second(packet);
+        wowee::core::setCrashBreadcrumb("world_packet:dispatch_end",
+                                        opcode,
+                                        logicalName.c_str(),
+                                        packet.getSize(),
+                                        packet.getReadPos(),
+                                        static_cast<int>(state));
+        if (headlessTracePackets()) {
+            LOG_INFO("HEADLESS DISPATCH end wire=0x", std::hex, opcode, std::dec,
+                     " logical=", logicalName,
+                     " readPos=", packet.getReadPos(), "/", packet.getSize(),
+                     " state=", worldStateName(state));
+        }
     } else {
         // In pre-world states we need full visibility (char create/login handshakes).
         // In-world we keep de-duplication to avoid heavy log I/O in busy areas.

@@ -38,6 +38,15 @@ public:
     bool initialize(const std::string& dataPath);
 
     /**
+     * Initialize only enough of the asset manager to load loose DBC files.
+     * This is intended for headless/tooling paths that do not need a full
+     * manifest-backed asset extraction.
+     * @param dataPath Path checked for db/ and DBFilesClient/ DBC files
+     * @return true if initialization succeeded
+     */
+    bool initializeDbcOnly(const std::string& dataPath);
+
+    /**
      * Shutdown and cleanup
      */
     void shutdown();

@@ -109,6 +109,10 @@ public:
     void cancelLogout();
     bool  isLoggingOut()        const { return loggingOut_; }
     float getLogoutCountdown()  const { return logoutCountdown_; }
+    // Distinct from isLoggingOut(), which goes back to false once the
+    // logout finishes - this stays true so callers (e.g. the headless
+    // client's shutdown loop) can tell "never logged out" from "done".
+    bool  isLogoutComplete()    const { return logoutComplete_; }
     bool  isLogoutToExit()      const { return exitAfterLogout_; }
 
     // Guild
@@ -368,6 +372,7 @@ private:
 
     // Logout
     bool  loggingOut_        = false;
+    bool  logoutComplete_    = false;
     bool  exitAfterLogout_   = false;
     float logoutCountdown_   = 0.0f;
 

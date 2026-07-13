@@ -31,6 +31,7 @@ option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
 option(WOWEE_ENABLE_AMD_FSR2 "Enable AMD FidelityFX FSR2 backend when SDK is present" ON)
 option(WOWEE_ENABLE_AMD_FSR3_FRAMEGEN "Enable AMD FidelityFX SDK FSR3 frame generation interface probe when SDK is present" ON)
 option(WOWEE_BUILD_AMD_FSR3_RUNTIME "Build native AMD FidelityFX VK runtime (Path A) from extern/FidelityFX-SDK/Kits" ON)
+set(WOWEE_MANGOS_TBC_DIR "C:/Users/admin/code/mangos-tbc" CACHE PATH "Optional CMaNGOS TBC checkout used to build mmap_path_query")
 
 # AMD FidelityFX FSR2 SDK detection (drop-in under extern/FidelityFX-FSR2)
 set(WOWEE_AMD_FSR2_DIR ${CMAKE_SOURCE_DIR}/extern/FidelityFX-FSR2)
@@ -506,6 +507,7 @@ set(WOWEE_SOURCES
     src/core/window.cpp
     src/core/input.cpp
     src/core/logger.cpp
+    src/core/crash_diagnostics.cpp
     src/core/memory_monitor.cpp
 
     # Math
@@ -1454,6 +1456,106 @@ set_target_properties(auth_login_probe PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 install(TARGETS auth_login_probe RUNTIME DESTINATION bin)
+
+set(WOWEE_HEADLESS_SOURCES ${WOWEE_SOURCES})
+list(REMOVE_ITEM WOWEE_HEADLESS_SOURCES src/main.cpp)
+add_executable(wowee_headless
+    tools/headless_client/main.cpp
+    ${WOWEE_HEADLESS_SOURCES}
+)
+target_compile_definitions(wowee_headless PRIVATE WOWEE_HEADLESS_DEFAULT=1)
+if(TARGET opcodes-generate)
+    add_dependencies(wowee_headless opcodes-generate)
+endif()
+add_dependencies(wowee_headless wowee_version)
+target_include_directories(wowee_headless PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated
+)
+target_include_directories(wowee_headless SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src
+)
+if(HAVE_FFMPEG)
+    target_compile_definitions(wowee_headless PRIVATE HAVE_FFMPEG)
+    target_include_directories(wowee_headless PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(wowee_headless PRIVATE ${FFMPEG_LIBRARIES})
+    if(FFMPEG_LIBRARY_DIRS)
+        target_link_directories(wowee_headless PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    endif()
+endif()
+target_link_libraries(wowee_headless PRIVATE
+    SDL2::SDL2
+    Vulkan::Vulkan
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+    ZLIB::ZLIB
+    lua51
+    ${CMAKE_DL_LIBS}
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(wowee_headless PRIVATE X11)
+endif()
+if(WIN32)
+    target_link_libraries(wowee_headless PRIVATE ws2_32)
+endif()
+if(TARGET imgui)
+    target_link_libraries(wowee_headless PRIVATE imgui)
+endif()
+if(TARGET vk-bootstrap)
+    target_link_libraries(wowee_headless PRIVATE vk-bootstrap)
+endif()
+if(TARGET wowee_fsr2_amd_vk)
+    target_link_libraries(wowee_headless PRIVATE wowee_fsr2_amd_vk)
+endif()
+if(TARGET wowee_fsr3_framegen_amd_vk_probe)
+    target_link_libraries(wowee_headless PRIVATE wowee_fsr3_framegen_amd_vk_probe)
+endif()
+if(HAVE_UNICORN)
+    target_link_libraries(wowee_headless PRIVATE ${UNICORN_LIBRARY})
+    target_include_directories(wowee_headless PRIVATE ${UNICORN_INCLUDE_DIR})
+    target_compile_definitions(wowee_headless PRIVATE HAVE_UNICORN)
+endif()
+if(TARGET glm::glm)
+    target_link_libraries(wowee_headless PRIVATE glm::glm)
+elseif(glm_FOUND)
+    target_include_directories(wowee_headless PRIVATE ${GLM_INCLUDE_DIRS})
+endif()
+set_target_properties(wowee_headless PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+install(TARGETS wowee_headless RUNTIME DESTINATION bin)
+
+# ---- Tool: mmap_path_query (CMaNGOS mmap/Detour JSON path helper) ----
+set(WOWEE_DETOUR_DIR "${WOWEE_MANGOS_TBC_DIR}/dep/recastnavigation/Detour")
+if(EXISTS "${WOWEE_DETOUR_DIR}/Include/DetourNavMesh.h")
+    add_executable(mmap_path_query
+        tools/pathfinding_service/mmap_path_query.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourAlloc.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourAssert.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourCommon.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourNavMesh.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourNavMeshBuilder.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourNavMeshQuery.cpp
+        ${WOWEE_DETOUR_DIR}/Source/DetourNode.cpp
+    )
+    target_include_directories(mmap_path_query PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/extern
+        ${WOWEE_DETOUR_DIR}/Include
+    )
+    target_compile_definitions(mmap_path_query PRIVATE DT_POLYREF64)
+    set_target_properties(mmap_path_query PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    install(TARGETS mmap_path_query RUNTIME DESTINATION bin)
+    message(STATUS "  mmap_path_query tool: ENABLED (${WOWEE_MANGOS_TBC_DIR})")
+else()
+    message(STATUS "  mmap_path_query tool: DISABLED (set WOWEE_MANGOS_TBC_DIR to a CMaNGOS TBC checkout)")
+endif()
 
 # ---- Tool: blp_convert (BLP ↔ PNG) ----
 add_executable(blp_convert

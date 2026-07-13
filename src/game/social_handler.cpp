@@ -37,9 +37,39 @@ std::filesystem::path guildNameCachePath() {
     return std::filesystem::path("guild_names.tsv");
 }
 
+bool headlessMode() {
+    static const bool enabled = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+#endif
+    }();
+    return enabled;
+}
+
+std::string guildEventName(uint8_t eventType) {
+    switch (eventType) {
+        case GuildEvent::PROMOTION: return "PROMOTION";
+        case GuildEvent::DEMOTION: return "DEMOTION";
+        case GuildEvent::MOTD: return "MOTD";
+        case GuildEvent::JOINED: return "JOINED";
+        case GuildEvent::LEFT: return "LEFT";
+        case GuildEvent::REMOVED: return "REMOVED";
+        case GuildEvent::LEADER_IS: return "LEADER_IS";
+        case GuildEvent::LEADER_CHANGED: return "LEADER_CHANGED";
+        case GuildEvent::DISBANDED: return "DISBANDED";
+        case GuildEvent::TABARD_CHANGED: return "TABARD_CHANGED";
+        case GuildEvent::SIGNED_ON: return "SIGNED_ON";
+        case GuildEvent::SIGNED_OFF: return "SIGNED_OFF";
+        case GuildEvent::GUILD_BANK_BAG_SLOTS_CHANGED: return "GUILD_BANK_BAG_SLOTS_CHANGED";
+        case GuildEvent::BANK_TAB_PURCHASED: return "BANK_TAB_PURCHASED";
+        default: return "EVENT_" + std::to_string(eventType);
+    }
+}
+
 } // namespace
-
-
 
 
 // LFG join result codes from LFGJoinResult enum (WotLK 3.3.5a).
@@ -1276,8 +1306,9 @@ void SocialHandler::requestLogout(bool exitAfterLogout) {
     auto packet = LogoutRequestPacket::build();
     owner_.getSocket()->send(packet);
     loggingOut_ = true;
+    logoutComplete_ = false;
     exitAfterLogout_ = exitAfterLogout;
-    LOG_WARNING("Sent logout request (exitAfterLogout=", exitAfterLogout ? "yes" : "no", ")");  // temporary
+    LOG_INFO("Sent logout request (exitAfterLogout=", exitAfterLogout ? "yes" : "no", ")");
 }
 
 void SocialHandler::cancelLogout() {
@@ -1713,9 +1744,13 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
     partyData = GroupListData{};
     if (!GroupListParser::parse(packet, partyData, hasRoles, hasBattleGroupFlag)) return;
 
+    for (const auto& member : partyData.members) {
+        owner_.cachePlayerName(member.guid, member.name);
+    }
+
     const bool nowInGroup = !partyData.isEmpty();
     if (!nowInGroup && wasInGroup) {
-        owner_.addSystemChatMessage("You are no longer in a group.");
+        if (!headlessMode()) owner_.addSystemChatMessage("You are no longer in a group.");
         LOG_INFO("Left group");
     } else if (nowInGroup && !wasInGroup) {
         std::string members;
@@ -1723,8 +1758,8 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
             if (!members.empty()) members += ", ";
             members += m.name.empty() ? "?" : m.name;
         }
-        owner_.addSystemChatMessage("You joined a group with: " + members);
-        LOG_INFO("Joined group with ", partyData.memberCount, " members: ", members);
+        if (!headlessMode()) owner_.addSystemChatMessage("You joined a group with: " + members);
+        LOG_INFO("Joined group with ", partyData.members.size(), " parsed members: ", members);
     }
     // Loot method change notification
     if (wasInGroup && nowInGroup && partyData.lootMethod != prevLootMethod) {
@@ -1732,9 +1767,9 @@ void SocialHandler::handleGroupList(network::Packet& packet) {
             "Free for All", "Round Robin", "Master Looter", "Group Loot", "Need Before Greed"
         };
         const char* methodName = (partyData.lootMethod < 5) ? kLootMethods[partyData.lootMethod] : "Unknown";
-        owner_.addSystemChatMessage(std::string("Loot method changed to ") + methodName + ".");
+        if (!headlessMode()) owner_.addSystemChatMessage(std::string("Loot method changed to ") + methodName + ".");
     }
-    if (owner_.addonEventCallbackRef()) {
+    if (!headlessMode() && owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("GROUP_ROSTER_UPDATE", {});
         owner_.addonEventCallbackRef()("PARTY_MEMBERS_CHANGED", {});
         if (partyData.groupType == 1)
@@ -1996,16 +2031,29 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             hasGuildRoster_ = false;
             if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
             break;
+        case GuildEvent::TABARD_CHANGED:
+            msg = "Guild tabard changed.";
+            break;
         case GuildEvent::SIGNED_ON:
             if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has come online.";
             break;
         case GuildEvent::SIGNED_OFF:
             if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has gone offline.";
             break;
+        case GuildEvent::GUILD_BANK_BAG_SLOTS_CHANGED:
+            msg = "Guild bank bag slots changed.";
+            break;
+        case GuildEvent::BANK_TAB_PURCHASED:
+            msg = "Guild bank tab purchased.";
+            break;
         default:
             msg = "Guild event " + std::to_string(data.eventType);
             // Was `!numStrings && numStrings >= 1` — always false (0 can't be ≥1).
-            if (data.numStrings >= 1) msg += ": " + data.strings[0];
+            for (uint8_t i = 0; i < data.numStrings && i < 3; ++i) {
+                if (i == 0) msg += ": ";
+                else msg += " | ";
+                msg += data.strings[i];
+            }
             break;
     }
 
@@ -2014,6 +2062,7 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
         chatMsg.type = ChatType::GUILD;
         chatMsg.language = ChatLanguage::UNIVERSAL;
         chatMsg.message = msg;
+        chatMsg.channelName = guildEventName(data.eventType);
         owner_.addLocalChatMessage(chatMsg);
     }
 
@@ -2398,7 +2447,8 @@ void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
     const bool exiting = exitAfterLogout_;
     owner_.addSystemChatMessage("Logout complete.");
     loggingOut_ = false; exitAfterLogout_ = false; logoutCountdown_ = 0.0f;
-    LOG_WARNING("Logout complete (exiting=", exiting ? "yes" : "no", ")");  // temporary: visible at default log level
+    logoutComplete_ = true;
+    LOG_INFO("Logout complete (exiting=", exiting ? "yes" : "no", ")");
     if (owner_.logoutCompleteCallbackRef()) owner_.logoutCompleteCallbackRef()(exiting);
 }
 

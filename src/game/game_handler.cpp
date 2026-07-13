@@ -421,35 +421,14 @@ if (playerTransportStickyTimer_ > 0.0f) {
     }
 }
 
-// Detect taxi flight landing: UNIT_FLAG_TAXI_FLIGHT (0x00000100) cleared
-if (onTaxiFlight_) {
-    auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-    auto unit = std::dynamic_pointer_cast<Unit>(playerEntity);
-    if (unit &&
-        (unit->getUnitFlags() & game::UNIT_FLAG_TAXI_FLIGHT) == 0 &&
-        !taxiClientActive_ &&
-        !taxiActivatePending_ &&
-        taxiStartGrace_ <= 0.0f) {
-        onTaxiFlight_ = false;
-        taxiLandingCooldown_ = 2.0f;  // 2 second cooldown to prevent re-entering
-        if (taxiMountActive_ && mountCallback_) {
-            mountCallback_(0);
-        }
-        taxiMountActive_ = false;
-        taxiMountDisplayId_ = 0;
-        currentMountDisplayId_ = 0;
-        taxiClientActive_ = false;
-        taxiClientPath_.clear();
-        taxiRecoverPending_ = false;
-        movementInfo.flags = 0;
-        movementInfo.flags2 = 0;
-        if (socket) {
-            sendMovement(Opcode::MSG_MOVE_STOP);
-            sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
-        }
-        LOG_INFO("Taxi flight landed");
-    }
-}
+// Landing detection/cleanup already happens inside MovementHandler::updateClientTaxi()'s
+// finishTaxiFlight() (called unconditionally above, using MovementHandler's own real taxi
+// state) - mount callback, MSG_MOVE_STOP/HEARTBEAT, state reset, all handled there. Upstream
+// independently discovered the same "updateClientTaxi() never called" bug and fixed it by
+// making the call above unconditional, but kept this landing-detection duplicate gated on
+// GameHandler's onTaxiFlight_ - the same legacy copy noted above, never set true reachably
+// (activateTaxi() only sets MovementHandler's copy), so it's dead code here. Dropped rather
+// than merged in to avoid double-processing landing every frame a flight completes.
 
 // Safety: if taxi flight ended but mount is still active, force dismount.
 // Guard against transient taxi-state flicker.
@@ -481,7 +460,7 @@ if (!onTaxiFlight_ && taxiMountActive_) {
 // Keep non-taxi mount state server-authoritative.
 // Some server paths don't emit explicit mount field updates in lockstep
 // with local visual state changes, so reconcile continuously.
-if (!onTaxiFlight_ && !taxiMountActive_) {
+if (!(movementHandler_ && movementHandler_->isOnTaxiFlight()) && !taxiMountActive_) {
     auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
     auto playerUnit = std::dynamic_pointer_cast<Unit>(playerEntity);
     if (playerUnit) {
@@ -676,7 +655,11 @@ void GameHandler::updateTimers(float deltaTime) {
     // Periodically re-query names for players whose initial CMSG_NAME_QUERY was
     // lost (server didn't respond) or whose entity was recreated while the query
     // was still pending. Runs every 5 seconds to keep overhead minimal.
-    if (isInWorld()) {
+    static const bool headlessMode = []() {
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+    }();
+    if (!headlessMode && isInWorld()) {
         static float nameResyncTimer = 0.0f;
         nameResyncTimer += deltaTime;
         if (nameResyncTimer >= 5.0f) {
@@ -861,13 +844,14 @@ void GameHandler::update(float deltaTime) {
             static_cast<uint32_t>(MovementFlags::SWIMMING) |
             static_cast<uint32_t>(MovementFlags::FALLING) |
             static_cast<uint32_t>(MovementFlags::FALLINGFAR);
+        const bool onRealTaxiFlight = movementHandler_ && movementHandler_->isOnTaxiFlight();
         const bool classicLikeStationaryCombatSync =
             classicLikeCombatSync &&
-            !onTaxiFlight_ &&
+            !onRealTaxiFlight &&
             !taxiActivatePending_ &&
             !taxiClientActive_ &&
             (movementInfo.flags & locomotionFlags) == 0;
-        float heartbeatInterval = (onTaxiFlight_ || taxiActivatePending_ || taxiClientActive_)
+        float heartbeatInterval = (onRealTaxiFlight || taxiActivatePending_ || taxiClientActive_)
                                       ? game::HEARTBEAT_INTERVAL_TAXI
                                       : (classicLikeStationaryCombatSync ? game::HEARTBEAT_INTERVAL_STATIONARY_COMBAT
                                                                          : (classicLikeCombatSync ? game::HEARTBEAT_INTERVAL_MOVING_COMBAT
@@ -2276,6 +2260,10 @@ const std::vector<GameHandler::BgPlayerPosition>& GameHandler::getBgPlayerPositi
 
 bool GameHandler::isLoggingOut() const {
     return socialHandler_ ? socialHandler_->isLoggingOut() : false;
+}
+
+bool GameHandler::isLogoutComplete() const {
+    return socialHandler_ ? socialHandler_->isLogoutComplete() : false;
 }
 
 float GameHandler::getLogoutCountdown() const {

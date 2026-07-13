@@ -22,6 +22,22 @@
 namespace wowee {
 namespace game {
 
+namespace {
+
+bool headlessMode() {
+    static const bool enabled = []() {
+#ifdef WOWEE_HEADLESS_DEFAULT
+        return true;
+#else
+        const char* raw = std::getenv("WOWEE_HEADLESS");
+        return raw && *raw && raw[0] != '0';
+#endif
+    }();
+    return enabled;
+}
+
+} // namespace
+
 std::string formatCopperAmount(uint32_t amount);
 
 InventoryHandler::InventoryHandler(GameHandler& owner)
@@ -2679,6 +2695,7 @@ void InventoryHandler::handleEquipmentSetList(network::Packet& packet) {
 // ============================================================
 
 void InventoryHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
+    if (headlessMode()) return;
     if (owner_.itemInfoCacheRef().count(entry) || owner_.pendingItemQueriesRef().count(entry)) return;
     if (!owner_.isInWorld()) return;
 
@@ -2696,6 +2713,11 @@ void InventoryHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
 }
 
 void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
+    if (headlessMode()) {
+        packet.skipAll();
+        return;
+    }
+
     ItemQueryResponseData data;
     bool parsed = owner_.getPacketParsers()
         ? owner_.getPacketParsers()->parseItemQueryResponse(packet, data)

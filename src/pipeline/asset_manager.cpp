@@ -85,6 +85,22 @@ bool AssetManager::initialize(const std::string& dataPath_) {
     return true;
 }
 
+bool AssetManager::initializeDbcOnly(const std::string& dataPath_) {
+    if (initialized) {
+        LOG_WARNING("AssetManager already initialized");
+        return true;
+    }
+
+    dataPath = dataPath_;
+    overridePath_ = dataPath + "/override";
+    LOG_WARNING("Initializing asset manager in DBC-only mode with data path: ", dataPath);
+
+    setupFileCacheBudget();
+
+    initialized = true;
+    return true;
+}
+
 void AssetManager::setupFileCacheBudget() {
     auto& memMonitor = core::MemoryMonitor::getInstance();
     size_t recommendedBudget = memMonitor.getRecommendedCacheBudget();
