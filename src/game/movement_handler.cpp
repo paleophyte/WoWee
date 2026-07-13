@@ -2285,6 +2285,18 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
     }
 }
 
+glm::vec3 MovementHandler::evalTaxiCatmullRom(const glm::vec3& p0, const glm::vec3& p1,
+                                               const glm::vec3& p2, const glm::vec3& p3, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5f * (
+        (2.0f * p1) +
+        (-p0 + p2) * t +
+        (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+        (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
+    );
+}
+
 void MovementHandler::startClientTaxiPath(const std::vector<uint32_t>& pathNodes) {
     taxiClientPath_.clear();
     taxiClientIndex_ = 0;
@@ -2330,6 +2342,31 @@ void MovementHandler::startClientTaxiPath(const std::vector<uint32_t>& pathNodes
     if (taxiClientPath_.size() < 2) {
         LOG_WARNING("Taxi path too short: ", taxiClientPath_.size(), " waypoints");
         return;
+    }
+
+    // Precompute each segment's real curve arc length (see taxiClientSegmentArcLengths_'s
+    // comment for why - pacing must use this, not the straight-line chord length, to keep
+    // total flight duration in line with the server's own identical-speed spline). Sampled
+    // numerically since the Catmull-Rom curve has no closed-form arc length; 16 sub-steps
+    // is more than enough resolution for a taxi path segment's typical curvature.
+    taxiClientSegmentArcLengths_.clear();
+    taxiClientSegmentArcLengths_.reserve(taxiClientPath_.size() - 1);
+    constexpr int kArcLengthSamples = 16;
+    for (size_t i = 0; i + 1 < taxiClientPath_.size(); i++) {
+        glm::vec3 p0 = (i > 0) ? taxiClientPath_[i - 1] : taxiClientPath_[i];
+        glm::vec3 p1 = taxiClientPath_[i];
+        glm::vec3 p2 = taxiClientPath_[i + 1];
+        glm::vec3 p3 = (i + 2 < taxiClientPath_.size()) ? taxiClientPath_[i + 2] : taxiClientPath_[i + 1];
+
+        float arcLength = 0.0f;
+        glm::vec3 prev = p1;
+        for (int s = 1; s <= kArcLengthSamples; s++) {
+            float t = static_cast<float>(s) / static_cast<float>(kArcLengthSamples);
+            glm::vec3 cur = evalTaxiCatmullRom(p0, p1, p2, p3, t);
+            arcLength += glm::length(cur - prev);
+            prev = cur;
+        }
+        taxiClientSegmentArcLengths_.push_back(arcLength);
     }
 
     // NOTE: this only builds taxiClientPath_ as pending data - it deliberately does
@@ -2391,11 +2428,38 @@ void MovementHandler::beginTaxiFlightMotion() {
 // - false: an authoritative server signal (SMSG_DISMOUNT with
 //   UNIT_FLAG_TAXI_FLIGHT already cleared, or the equivalent
 //   UNIT_FIELD_MOUNTDISPLAYID update) arrived ahead of our own spline
-//   finishing. The server's stop point may not match our path's precomputed
-//   final waypoint, so leave the player where the spline currently has them
-//   and let the server's own subsequent position updates reconcile it,
-//   rather than snapping somewhere that might be wrong.
+//   finishing.
+//
+//   The server's stop point may not match our path's precomputed final
+//   waypoint - e.g. a genuinely interrupted/mid-route stop - so this does
+//   NOT unconditionally snap there. But per AzerothCore's own
+//   FlightPathMovementGenerator::DoFinalize() (confirmed by reading its
+//   source): "update z position to ground ... this prevent cheating with
+//   landing point at lags when client side flight end early in comparison
+//   server side" - the server itself anticipates exactly this scenario and
+//   corrects the player's own authoritative position to the true
+//   destination on the terminal leg. So: if we're within a generous sanity
+//   distance of our own known final waypoint (kAuthoritativeLandingSnapDist),
+//   treat this as that same normal "client finished slightly early" case
+//   and snap there - safety net for whatever spline/server pacing drift
+//   remains despite arc-length-parameterizing taxiClientPath_'s pacing (see
+//   taxiClientSegmentArcLengths_). Live-confirmed a ~90 yard gap on one long
+//   flight even before that fix could be verified against a from-scratch
+//   pacing recompute, so this net stays regardless. Beyond the sanity
+//   distance, stay conservative and leave the player where the spline
+//   currently has them, per the original caution.
 void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
+    if (!snapToFinalWaypoint && !taxiClientPath_.empty()) {
+        constexpr float kAuthoritativeLandingSnapDist = 300.0f;
+        const auto& finalPos = taxiClientPath_.back();
+        glm::vec3 gap = finalPos - glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
+        if (glm::length(gap) <= kAuthoritativeLandingSnapDist) {
+            LOG_INFO("Taxi landing (authoritative early completion): within sanity "
+                     "distance of known final waypoint, snapping there instead of "
+                     "current spline position (gap=", glm::length(gap), ")");
+            snapToFinalWaypoint = true;
+        }
+    }
     if (snapToFinalWaypoint && !taxiClientPath_.empty()) {
         auto playerEntity = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
         const auto& landingPos = taxiClientPath_.back();
@@ -2493,7 +2557,12 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
             taxiClientIndex_++;
             continue;
         }
-        segmentLen = std::sqrt(segLenSq);
+        // Pace by the curve's real arc length, not the straight-line chord -
+        // see taxiClientSegmentArcLengths_'s comment. Fall back to the chord
+        // length only if the precomputed array is somehow missing/stale.
+        segmentLen = (taxiClientIndex_ < taxiClientSegmentArcLengths_.size())
+            ? taxiClientSegmentArcLengths_[taxiClientIndex_]
+            : std::sqrt(segLenSq);
 
         if (remainingDistance >= segmentLen) {
             remainingDistance -= segmentLen;
@@ -2513,15 +2582,9 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
     glm::vec3 p3 = (taxiClientIndex_ + 2 < taxiClientPath_.size()) ?
                    taxiClientPath_[taxiClientIndex_ + 2] : end;
 
-    float t2 = t * t;
-    float t3 = t2 * t;
-    glm::vec3 nextPos = 0.5f * (
-        (2.0f * p1) +
-        (-p0 + p2) * t +
-        (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
-        (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
-    );
+    glm::vec3 nextPos = evalTaxiCatmullRom(p0, p1, p2, p3, t);
 
+    float t2 = t * t;
     glm::vec3 tangent = 0.5f * (
         (-p0 + p2) +
         2.0f * (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t +
