@@ -665,6 +665,12 @@ void GameHandler::registerOpcodeHandlers() {
 
     // Mount/dismount
     dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& /*packet*/) {
+        // No taxi-flight guard here on purpose historically, but this is a real
+        // server-driven opcode with no logging - if CMaNGOS ever sends this
+        // mid-flight (e.g. an aura refresh quirk), it would silently cancel the
+        // taxi mount animation while the client-simulated flight keeps going.
+        LOG_INFO("SMSG_DISMOUNT received: onTaxiFlight=",
+                 movementHandler_ && movementHandler_->isOnTaxiFlight());
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
     };

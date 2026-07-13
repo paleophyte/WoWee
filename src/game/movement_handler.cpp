@@ -848,7 +848,7 @@ void MovementHandler::dismount() {
         taxiMountActive_ = false;
         taxiMountDisplayId_ = 0;
         owner_.mountAuraSpellIdRef() = 0;
-        LOG_INFO("Dismount: cleared local mount state");
+        LOG_INFO("Dismount: cleared local mount state, onTaxiFlight=", onTaxiFlight_);
     }
     uint16_t cancelMountWire = wireOpcode(Opcode::CMSG_CANCEL_MOUNT_AURA);
     if (cancelMountWire != 0xFFFF) {
@@ -2558,6 +2558,7 @@ void MovementHandler::closeTaxi() {
     }
 
     if (taxiMountActive_ && owner_.mountCallbackRef()) {
+        LOG_INFO("closeTaxi: clearing taxi mount");
         owner_.mountCallbackRef()(0);
     }
     taxiMountActive_ = false;
