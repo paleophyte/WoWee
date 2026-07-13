@@ -26,6 +26,7 @@ SERVER_DEFAULTS = {
         "clientPatch": 3,
         "clientBuild": 8606,
         "clientProtocol": 8,
+        "gmlevel": 1,
     },
     "azerothcore": {
         "accountExpansion": 2,
@@ -37,6 +38,7 @@ SERVER_DEFAULTS = {
         "clientPatch": 5,
         "clientBuild": 12340,
         "clientProtocol": 8,
+        "gmlevel": 1,
     },
 }
 
@@ -273,7 +275,7 @@ def provision(args: argparse.Namespace) -> int:
         if server_type not in SERVER_DEFAULTS:
             raise ValueError(f"{account or '<account>'}: unknown serverType {server_type!r}")
         expansion = int(raw_account.get("expansion", defaults.get("expansion", SERVER_DEFAULTS[server_type]["accountExpansion"])))
-        gmlevel = int(raw_account.get("gmlevel", defaults.get("gmlevel", 0)))
+        gmlevel = int(raw_account.get("gmlevel", defaults.get("gmlevel", SERVER_DEFAULTS[server_type]["gmlevel"])))
         realm_id = int(raw_account.get("realmId", defaults.get("realmId", -1)))
         if not account:
             raise ValueError("account is required")

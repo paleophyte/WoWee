@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--account", required=True)
     create.add_argument("--password", required=True)
     create.add_argument("--expansion", type=int, help="Optional CMaNGOS expansion value, such as 1 for TBC")
-    create.add_argument("--gmlevel", type=int, default=0, choices=(0, 1, 2, 3, 4), help="GM security level (1+ enables .bot add)")
+    create.add_argument("--gmlevel", type=int, default=1, choices=(0, 1, 2, 3, 4), help="GM security level; use 0 for a regular player account")
     create.add_argument("--realm-id", type=int, default=-1, help="Realm ID for gmlevel assignment (-1 = all realms)")
     create.set_defaults(func=create_account)
 

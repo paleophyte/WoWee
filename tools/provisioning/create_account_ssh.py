@@ -197,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", help="WoW account password. If omitted, prompt securely.")
     parser.add_argument("--server-type", choices=sorted(SERVER_PROFILES), default="cmangos")
     parser.add_argument("--expansion", type=int, choices=(0, 1, 2), help="0=Classic, 1=TBC, 2=WotLK")
-    parser.add_argument("--gmlevel", type=int, default=0, choices=(0, 1, 2, 3, 4), help="GM security level (1+ enables .bot add)")
+    parser.add_argument("--gmlevel", type=int, default=1, choices=(0, 1, 2, 3, 4), help="GM security level; use 0 for a regular player account")
     parser.add_argument("--realm-id", type=int, default=-1, help="Realm ID for gmlevel assignment (-1 = all realms)")
     parser.add_argument("--env", type=pathlib.Path, default=DEFAULT_ENV, help="Path to .env")
     parser.add_argument("--soap-url", default="", help="Override SOAP URL on the server")

@@ -58,7 +58,7 @@ python tools/provisioning/create_account_ssh.py BOT001 \
   --expansion 2
 ```
 
-For bot accounts that need to use `.bot add` commands, set GM level to 1 (Moderator):
+New accounts default to GM level 1 (Moderator) so automation can run moderator-only bot commands. Pass `--gmlevel 0` when you need a regular player account:
 
 ```bash
 python tools/provisioning/create_account_ssh.py BOT001 \
@@ -110,7 +110,7 @@ For TBC on CMaNGOS, `--expansion 1` is normally the useful account expansion val
 
 ### GM Level for Bot Accounts
 
-Bot fleet accounts need GM level 1+ to run `.bot add` commands. Pass `--gmlevel 1` during account creation. The `--realm-id` argument (default `-1`, all realms) controls which realm gets the GM assignment. Level 0 (default) keeps the account as a regular player.
+Bot fleet accounts need GM level 1+ to run moderator-only bot commands. The account helpers default to `--gmlevel 1`. The `--realm-id` argument (default `-1`, all realms) controls which realm gets the GM assignment. Pass `--gmlevel 0` to keep the account as a regular player.
 
 ### Direct SOAP / Provisioning Service
 
@@ -242,7 +242,7 @@ Example roster shape:
 }
 ```
 
-Set `gmlevel` in `defaults` for all accounts, or override per-account. Set `realmId` (default `-1`, all realms) to target a specific realm for the GM assignment. Omit or set to `0` to keep the account as a regular player.
+Roster provisioning defaults to `gmlevel: 1`. Set `gmlevel` in `defaults` for all accounts, or override per-account. Set `realmId` (default `-1`, all realms) to target a specific realm for the GM assignment. Set `gmlevel` to `0` to keep an account as a regular player.
 
 Dry-run the roster first:
 
@@ -274,4 +274,4 @@ python tools/provisioning/provision_roster.py tools/provisioning/roster.json \
   --auth-host 10.102.172.4
 ```
 
-When `serverType` is `azerothcore`, or when `--server-type azerothcore` is passed, roster provisioning defaults to account expansion `2`, auth port `3725`, realm `AzerothCore`, client expansion `wotlk`, and client version `3.3.5.12340`. CMaNGOS defaults remain expansion `1`, auth port `3724`, realm `MaNGOS`, client expansion `tbc`, and client version `2.4.3.8606`. The CLI flag overrides the roster default for quick retargeting.
+When `serverType` is `azerothcore`, or when `--server-type azerothcore` is passed, roster provisioning defaults to account expansion `2`, GM level `1`, auth port `3725`, realm `AzerothCore`, client expansion `wotlk`, and client version `3.3.5.12340`. CMaNGOS defaults remain expansion `1`, GM level `1`, auth port `3724`, realm `MaNGOS`, client expansion `tbc`, and client version `2.4.3.8606`. The CLI flag overrides the roster default for quick retargeting.
