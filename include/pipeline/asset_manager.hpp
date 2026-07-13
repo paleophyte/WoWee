@@ -38,6 +38,13 @@ public:
     bool initialize(const std::string& dataPath);
 
     /**
+     * Replace the active manifest without replacing the AssetManager object.
+     * Intended for expansion changes from the login screen, before world work
+     * is active. Existing file/DBC caches are cleared on success.
+     */
+    bool switchDataPath(const std::string& newDataPath);
+
+    /**
      * Initialize only enough of the asset manager to load loose DBC files.
      * This is intended for headless/tooling paths that do not need a full
      * manifest-backed asset extraction.
