@@ -174,6 +174,17 @@ static constexpr int kBaseTexSize    = 256;  // NPC baked texture default
 static constexpr int kUpscaleTexSize = 512;  // Target size for region compositing
 static constexpr int32_t kPreviewSimpleTextureMode = -31336;
 
+// WOWEE_SCENE_DIAG=1 — dump what each glue-scene backdrop batch is handed at draw
+// time. The scene renders through the character path, so when it comes out wrong
+// the question is always which texture, blend mode and shader path it actually got.
+static bool sceneDiagEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("WOWEE_SCENE_DIAG");
+        return v && v[0] != '\0' && v[0] != '0';
+    }();
+    return enabled;
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
@@ -391,6 +402,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
     // Clean up shader modules
     charVert.destroy();
@@ -462,6 +474,7 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(alphaTestPipeline_);
     destroyPipeline(alphaPipeline_);
     destroyPipeline(additivePipeline_);
+    destroyPipeline(translucentPipeline_);
 
     if (pipelineLayout_) { vkDestroyPipelineLayout(device, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
 
@@ -1876,7 +1889,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         if (inst.hasOverrideModelMatrix && !inst.isEffectModel) continue;
 
         float distSq = glm::distance2(inst.position, cameraPos);
-        if (distSq >= animUpdateRadiusSq) continue;
+        if (distSq >= animUpdateRadiusSq && !inst.isSceneModel) continue;
 
         // Advance global sequence timer (accumulates independently of animation wrapping)
         inst.globalSequenceTime += deltaTime * 1000.0f;
@@ -1998,9 +2011,11 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                 boneMat = instance.boneMatrices[wa.boneIndex];
             }
 
-            // Weapon model matrix = character model * bone transform * offset translation
+            // Weapon model matrix = character model * bone transform * attachment
+            // offset * item/sheath orientation.
             const glm::mat4 weaponMat =
-                charModelMat * boneMat * glm::translate(glm::mat4(1.0f), wa.offset);
+                charModelMat * boneMat * glm::translate(glm::mat4(1.0f), wa.offset) *
+                wa.localTransform;
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
 
@@ -2416,7 +2431,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         if (!instance.visible) continue;
 
         // Character instance culling: test both distance and frustum visibility
-        if (!instance.hasOverrideModelMatrix) {
+        if (!instance.hasOverrideModelMatrix && !instance.isSceneModel) {
             glm::vec3 toInst = instance.position - camPos;
             float distSq = glm::dot(toInst, toInst);
 
@@ -2631,8 +2646,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
                 const bool hairGeoset = (submeshGroup == 1) ||
                                         (submeshGroup == 0 && batch.submeshId > 0 && batch.submeshId <= 99);
-                const bool hairMaterial = hairTexture ||
-                                          (hairGeoset && (blendMode != 0 || batch.textureCount > 1));
+                // Scene models have no hair, and their submesh ids are all 0, which
+                // would otherwise satisfy the hair-geoset guess for every batch.
+                const bool hairMaterial = !instance.isSceneModel &&
+                                          (hairTexture ||
+                                           (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
 
                 // Attached weapon models can include additive FX/card batches that
                 // appear as detached flat quads for some swords. Keep core geometry
@@ -2643,7 +2661,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 }
 
                 // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
-                if (texPtr == whiteTexture_.get()) {
+                if (texPtr == whiteTexture_.get() && !instance.isSceneModel) {
                     uint16_t group = batchGroup;
                     bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 ||
                                         group == 8 || group == 9 || group == 13);
@@ -2685,10 +2703,17 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         colorKeyBlack = pit->second.colorKeyBlack;
                     }
                 }
-                const bool blendNeedsCutout = (blendMode == 1) ||
-                                              (blendMode == 0 && alphaCutout) ||
-                                              (blendMode >= 2 && !alphaCutout) ||
-                                              hairMaterial;
+                // A scene means what its materials say. Stormwind's walls are DXT5 with
+                // an unused alpha channel — every texel below the 0.5 cutoff — so
+                // inferring a cutout from "the texture has alpha" discards the whole
+                // building and leaves the sky showing through it. Only an alpha-key
+                // material (blendMode 1) cuts out here.
+                const bool blendNeedsCutout = instance.isSceneModel
+                    ? (blendMode == 1)
+                    : ((blendMode == 1) ||
+                       (blendMode == 0 && alphaCutout) ||
+                       (blendMode >= 2 && !alphaCutout) ||
+                       hairMaterial);
                 // Enchant glows emit their own light; scene lighting must not tint them.
                 const bool unlit = ((materialFlags & 0x01) != 0) || (blendMode >= 3) ||
                                    instance.isEffectModel;
@@ -2701,6 +2726,14 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // declare Mod/alpha blending, which would composite that black
                     // background as an opaque quad — force additive so only the light adds.
                     desiredPipeline = additivePipeline_;
+                } else if (instance.opacity < 0.999f) {
+                    // Whole-instance fade (ghost form, spawn fade-in): the opaque and
+                    // alpha-test pipelines have blending disabled, so the shader's
+                    // texColor.a * opacity output is discarded and only hair (via
+                    // alpha-to-coverage) ever looked translucent. Route every batch
+                    // through the blend pipeline; the per-batch alphaTest UBO flag
+                    // still handles cutout materials in the shader.
+                    desiredPipeline = translucentPipeline_;
                 } else if (hairMaterial) {
                     desiredPipeline = alphaTestPipeline_;
                 } else {
@@ -2774,6 +2807,28 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     matData.heightMapVariance = 0.0f;
                 }
 
+                // WOWEE_SCENE_DIAG=1 dumps what each backdrop batch is actually told to
+                // draw — texture, blend mode, shader path — once per scene model.
+                static int sceneDiagLines = 0;
+                if (instance.isSceneModel && sceneDiagEnabled() && sceneDiagLines++ < 40) {
+                    std::string texName = "<white>";
+                    if (batch.textureIndex < gpuModel.data.textureLookup.size()) {
+                        uint16_t lk = gpuModel.data.textureLookup[batch.textureIndex];
+                        if (lk < gpuModel.data.textures.size())
+                            texName = gpuModel.data.textures[lk].filename;
+                    }
+                    // Warning level: the diagnostic is opt-in already, and the file log
+                    // filters info out by default.
+                    core::Logger::getInstance().warning(
+                        "SCENE DIAG batch submesh=", batch.submeshId,
+                        " blend=", blendMode, " matFlags=0x", std::hex, materialFlags, std::dec,
+                        " alphaTest=", matData.alphaTest,
+                        " unlit=", matData.unlit,
+                        " simplePath=", (matData.enablePOM == kPreviewSimpleTextureMode ? 1 : 0),
+                        " whiteFallback=", (texPtr == whiteTexture_.get() ? 1 : 0),
+                        " tex=", texName);
+                }
+
                 // Sub-allocate material UBO from ring buffer
                 uint32_t matOffset = materialRingOffset_[frameSlot];
                 if (matOffset + uboStride > ringCapacityBytes) continue; // ring exhausted
@@ -2805,6 +2860,15 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             int pomSamples2 = 32;
             if (pomQuality_ == 0) pomSamples2 = 16;
             else if (pomQuality_ == 2) pomSamples2 = 64;
+
+            // Whole-model fallback inherits whatever pipeline was bound last;
+            // pick it explicitly so instance fades blend here too.
+            VkPipeline fallbackPipeline = (instance.opacity < 0.999f)
+                ? translucentPipeline_ : opaquePipeline_;
+            if (fallbackPipeline != currentPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
+                currentPipeline = fallbackPipeline;
+            }
 
             CharMaterialUBO matData{};
             matData.opacity = instance.opacity;
@@ -3479,7 +3543,8 @@ bool CharacterRenderer::findAttachmentBone(uint32_t modelId, uint32_t attachment
 
 bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmentId,
                                       const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
-                                      const std::string& texturePath) {
+                                      const std::string& texturePath,
+                                      const glm::mat4& localTransform) {
     auto charIt = instances.find(charInstanceId);
     if (charIt == instances.end()) {
         core::Logger::getInstance().warning("attachWeapon: character instance ", charInstanceId, " not found");
@@ -3533,6 +3598,7 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     wa.attachmentId = attachmentId;
     wa.boneIndex = boneIndex;
     wa.offset = offset;
+    wa.localTransform = localTransform;
     charInstance.weaponAttachments.push_back(wa);
 
     core::Logger::getInstance().debug("Attached weapon model ", weaponModelId,
@@ -3649,6 +3715,11 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     return true;
 }
 
+void CharacterRenderer::setInstanceSceneModel(uint32_t instanceId, bool isScene) {
+    auto it = instances.find(instanceId);
+    if (it != instances.end()) it->second.isSceneModel = isScene;
+}
+
 void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId) {
     auto charIt = instances.find(charInstanceId);
     if (charIt == instances.end()) return;
@@ -3726,6 +3797,7 @@ void CharacterRenderer::recreatePipelines() {
     if (alphaTestPipeline_) { vkDestroyPipeline(device, alphaTestPipeline_, nullptr); alphaTestPipeline_ = VK_NULL_HANDLE; }
     if (alphaPipeline_)     { vkDestroyPipeline(device, alphaPipeline_, nullptr); alphaPipeline_ = VK_NULL_HANDLE; }
     if (additivePipeline_)  { vkDestroyPipeline(device, additivePipeline_, nullptr); additivePipeline_ = VK_NULL_HANDLE; }
+    if (translucentPipeline_) { vkDestroyPipeline(device, translucentPipeline_, nullptr); translucentPipeline_ = VK_NULL_HANDLE; }
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;
@@ -3782,11 +3854,13 @@ void CharacterRenderer::recreatePipelines() {
     alphaTestPipeline_ = buildCharPipeline(PipelineBuilder::blendDisabled(), true, true);
     alphaPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), false);
     additivePipeline_ = buildCharPipeline(PipelineBuilder::blendAdditive(), false);
+    translucentPipeline_ = buildCharPipeline(PipelineBuilder::blendAlpha(), true);
 
     charVert.destroy();
     charFrag.destroy();
 
-    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_) {
+    if (!opaquePipeline_ || !alphaTestPipeline_ || !alphaPipeline_ || !additivePipeline_ ||
+        !translucentPipeline_) {
         LOG_ERROR("CharacterRenderer::recreatePipelines FAILED: opaque=", (void*)opaquePipeline_,
                   " alphaTest=", (void*)alphaTestPipeline_,
                   " alpha=", (void*)alphaPipeline_,

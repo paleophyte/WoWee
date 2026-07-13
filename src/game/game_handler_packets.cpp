@@ -249,19 +249,24 @@ void GameHandler::registerOpcodeHandlers() {
         }
     };
     dispatchTable_[Opcode::SMSG_START_MIRROR_TIMER] = [this](network::Packet& packet) {
+        // type(4) + value(4) + maxValue(4) + scale(4) + paused(1) + spellId(4).
+        // The last two were being read the other way round: harmless while the
+        // spell id is 0, but a non-zero one would land its high byte in paused and
+        // freeze the bar.
         if (!packet.hasRemaining(21)) return;
         uint32_t type  = packet.readUInt32();
         int32_t  value = static_cast<int32_t>(packet.readUInt32());
         int32_t  maxV  = static_cast<int32_t>(packet.readUInt32());
         int32_t  scale = static_cast<int32_t>(packet.readUInt32());
-        /*uint32_t tracker =*/ packet.readUInt32();
         uint8_t  paused = packet.readUInt8();
+        /*uint32_t spellId =*/ packet.readUInt32();
         if (type < 3) {
-            mirrorTimers_[type].value    = value;
-            mirrorTimers_[type].maxValue = maxV;
-            mirrorTimers_[type].scale    = scale;
-            mirrorTimers_[type].paused   = (paused != 0);
-            mirrorTimers_[type].active   = true;
+            mirrorTimers_[type].value     = value;
+            mirrorTimers_[type].maxValue  = maxV;
+            mirrorTimers_[type].scale     = scale;
+            mirrorTimers_[type].paused    = (paused != 0);
+            mirrorTimers_[type].active    = true;
+            mirrorTimers_[type].pendingMs = 0.0f;  // server re-sync; drop the local carry
                             fireAddonEvent("MIRROR_TIMER_START", {
                     std::to_string(type), std::to_string(value),
                     std::to_string(maxV), std::to_string(scale),
@@ -841,6 +846,10 @@ void GameHandler::registerOpcodeHandlers() {
     dispatchTable_[Opcode::SMSG_STANDSTATE_UPDATE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             standState_ = packet.readUInt8();
+            // 0=stand, 1=sit, 2-6=sit variants, 7=dead, 8=kneel. Logged because a
+            // wrong state here is indistinguishable, in-game, from a wrong animation.
+            // At warning level: the file log filters info out by default.
+            LOG_WARNING("SMSG_STANDSTATE_UPDATE: standState=", static_cast<int>(standState_));
             if (standStateCallback_) standStateCallback_(standState_);
         }
     };
@@ -877,9 +886,14 @@ void GameHandler::registerOpcodeHandlers() {
                                    | (static_cast<uint64_t>(go->getField(7)) << 32);
                 if (createdBy == playerGuid) {
                     auto* info = getCachedGameObjectInfo(go->getEntry());
-                    if (info && info->type == 17) {
-                        addUIError("A fish is on your line!");
-                        addSystemChatMessage("A fish is on your line!");
+                    // The bite can arrive before GAMEOBJECT_QUERY_RESPONSE. An
+                    // owned GO with unknown metadata is safe to remember here;
+                    // once metadata exists, still require FISHINGNODE (type 17).
+                    if (!info || info->type == 17) {
+                        hookedFishingBobberGuid_ = guid;
+                        setTarget(guid);
+                        addUIError("A fish is on your line! Right-click to reel it in.");
+                        addSystemChatMessage("A fish is on your line! Right-click to reel it in.");
                         withSoundManager(&audio::AudioCoordinator::getUiSoundManager, [](auto* sfx) { sfx->playQuestUpdate(); });
                     }
                 }
@@ -918,9 +932,11 @@ void GameHandler::registerOpcodeHandlers() {
         handleAllAchievementData(packet);
     };
     dispatchTable_[Opcode::SMSG_FISH_NOT_HOOKED] = [this](network::Packet& /*packet*/) {
+        hookedFishingBobberGuid_ = 0;
         addSystemChatMessage("Your fish got away.");
     };
     dispatchTable_[Opcode::SMSG_FISH_ESCAPED] = [this](network::Packet& /*packet*/) {
+        hookedFishingBobberGuid_ = 0;
         addSystemChatMessage("Your fish escaped!");
     };
 
@@ -2656,11 +2672,11 @@ void GameHandler::registerOpcodeHandlers() {
 }
 
 void GameHandler::handlePacket(network::Packet& packet) {
-    if (packet.getSize() < 1) {
-        LOG_DEBUG("Received empty world packet (ignored)");
-        return;
-    }
-
+    // Do NOT drop packets with an empty body. getSize() is the payload length and the
+    // opcode is carried separately, so for the many opcodes that have no payload the
+    // opcode *is* the message. Dropping them here silently swallowed
+    // SMSG_LOGOUT_COMPLETE — the server logged the character out and moved on while
+    // the client waited forever, so the countdown ended and nothing happened.
     uint16_t opcode = packet.getOpcode();
 
     try {

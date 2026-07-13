@@ -761,6 +761,13 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         return false;
     }
 
+    // Weapons first, and unconditionally: they depend on nothing below, while the
+    // geoset/skin work that follows bails out early on characters whose body skin
+    // could not be composited. Attaching last meant those characters showed no
+    // weapon at all — and kept the previously selected character's weapon and
+    // enchant, since detaching happens here too.
+    attachWeapons(equipment);
+
     charRenderer_->clearTextureSlotOverride(instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_));
     charRenderer_->setGroupTextureOverride(instanceId_, 15, nullptr);
 
@@ -1053,7 +1060,6 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         }
     }
 
-    attachWeapons(equipment);
     return true;
 }
 
@@ -1096,20 +1102,25 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     struct WeaponSlot {
         std::initializer_list<uint8_t> invTypes;
         uint32_t attachmentId;
-        uint32_t modelId;
     };
     // Main hand also covers two-handers and ranged; off hand covers shields and held items.
     const WeaponSlot slots[] = {
-        { {13, 17, 21, 15, 25, 26}, 1, PREVIEW_MAINHAND_MODEL_ID },
-        { {14, 22, 23},             2, PREVIEW_OFFHAND_MODEL_ID  },
+        { {13, 17, 21, 15, 25, 26}, 1 },
+        { {14, 22, 23},             2 },
     };
 
     for (const auto& ws : slots) {
         uint32_t displayId = 0;
+        uint32_t itemVisualId = 0;
         for (const auto& item : equipment) {
             if (item.displayModel == 0) continue;
             for (uint8_t t : ws.invTypes) {
-                if (item.inventoryType == t) { displayId = item.displayModel; break; }
+                if (item.inventoryType == t) {
+                    displayId = item.displayModel;
+                    // SMSG_CHAR_ENUM already reports the enchant as its ItemVisual id.
+                    itemVisualId = item.enchantment;
+                    break;
+                }
             }
             if (displayId != 0) break;
         }
@@ -1144,7 +1155,48 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
             }
         }
 
-        charRenderer_->attachWeapon(instanceId_, ws.attachmentId, weaponModel, ws.modelId, texturePath);
+        const uint32_t weaponModelId = previewModelIdFor(m2Path);
+        if (!charRenderer_->attachWeapon(instanceId_, ws.attachmentId, weaponModel,
+                                         weaponModelId, texturePath)) {
+            continue;
+        }
+        attachWeaponEnchantVisual(ws.attachmentId, itemVisualId);
+    }
+}
+
+uint32_t CharacterPreview::previewModelIdFor(const std::string& assetKey) {
+    auto it = previewModelIds_.find(assetKey);
+    if (it != previewModelIds_.end()) return it->second;
+    uint32_t id = nextPreviewModelId_++;
+    previewModelIds_.emplace(assetKey, id);
+    return id;
+}
+
+void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId) {
+    if (itemVisualId == 0 || !charRenderer_ || !assetManager_) return;
+
+    auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
+    auto effectsDbc = assetManager_->loadDBC("ItemVisualEffects.dbc");
+    if (!visualsDbc || !visualsDbc->isLoaded() || !effectsDbc || !effectsDbc->isLoaded()) return;
+
+    auto effectModels = pipeline::resolveItemVisualModels(itemVisualId, visualsDbc.get(),
+                                                          effectsDbc.get());
+
+    for (uint32_t visualSlot = 0; visualSlot < effectModels.size(); ++visualSlot) {
+        const std::string& modelName = effectModels[visualSlot];
+        if (modelName.empty()) continue;
+
+        std::string m2Path = modelName;
+        size_t dot = m2Path.rfind('.');
+        m2Path = (dot != std::string::npos ? m2Path.substr(0, dot) : m2Path) + ".m2";
+
+        pipeline::M2Model effectModel;
+        if (!loadPreviewM2(m2Path, effectModel)) {
+            LOG_WARNING("CharacterPreview: failed to load enchant visual ", m2Path);
+            continue;
+        }
+        charRenderer_->attachWeaponEffect(instanceId_, attachmentId, visualSlot,
+                                          effectModel, previewModelIdFor(m2Path));
     }
 }
 
@@ -1183,15 +1235,59 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         LOG_WARNING("CharacterPreview: no racial backdrop at ", scenePath);
         return;
     }
+
+    // These scenes are authored in their own space — the human one sits ~230 units
+    // from its origin — and carry the camera and the spot the character stands on.
+    // Without both there is no way to place the scene, so leave it out entirely
+    // rather than drop geometry somewhere off-screen.
+    if (sceneModel.cameras.empty()) {
+        LOG_WARNING("CharacterPreview: racial backdrop ", scenePath, " has no camera; skipping");
+        return;
+    }
+    const auto& sceneCam = sceneModel.cameras[0];
+
+    // Attachment 0 is the character's mark on the scene's ground.
+    glm::vec3 standPos = sceneCam.targetBase;
+    for (const auto& att : sceneModel.attachments) {
+        if (att.id == 0) { standPos = att.position; break; }
+    }
+
     if (!charRenderer_->loadModel(sceneModel, PREVIEW_BACKDROP_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to load racial backdrop ", scenePath);
         return;
     }
 
     backdropInstanceId_ = charRenderer_->createInstance(PREVIEW_BACKDROP_MODEL_ID, glm::vec3(0.0f));
-    if (backdropInstanceId_ != 0) {
-        LOG_INFO("CharacterPreview: racial backdrop ", scenePath);
-    }
+    if (backdropInstanceId_ == 0) return;
+    charRenderer_->setInstanceSceneModel(backdropInstanceId_, true);
+
+    // loadCharacter() has already framed the camera on the character: it sits on
+    // +Y at (0, distance, centerZ). Keep that framing distance and height, but move
+    // the whole rig into the scene and swing it round to the artist's viewing angle.
+    const glm::vec3 framed = camera_->getPosition();
+    const float frameDistance = framed.y;
+    const float focusHeight = framed.z;
+
+    const glm::vec3 focus = standPos + glm::vec3(0.0f, 0.0f, focusHeight);
+    glm::vec3 toCamera = sceneCam.positionBase - sceneCam.targetBase;
+    if (glm::length(toCamera) < 0.001f) toCamera = glm::vec3(0.0f, 1.0f, 0.0f);
+    toCamera = glm::normalize(toCamera);
+
+    const glm::vec3 camPos = focus + toCamera * frameDistance;
+    camera_->setPosition(camPos);
+
+    const glm::vec3 forward = glm::normalize(focus - camPos);
+    const float yaw = glm::degrees(std::atan2(forward.y, forward.x));
+    const float pitch = glm::degrees(std::asin(std::clamp(forward.z, -1.0f, 1.0f)));
+    camera_->setRotation(yaw, pitch);
+
+    // Stand the character on the mark, facing the camera.
+    charRenderer_->setInstancePosition(instanceId_, standPos);
+    modelYaw_ = glm::degrees(std::atan2(toCamera.y, toCamera.x));
+    charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+
+    LOG_INFO("CharacterPreview: racial backdrop ", scenePath,
+             " stand=(", standPos.x, ",", standPos.y, ",", standPos.z, ")");
 }
 
 void CharacterPreview::update(float deltaTime) {

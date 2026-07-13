@@ -52,6 +52,7 @@
 #include "ui/ui_services.hpp"
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
+#include "game/faction_hostility.hpp"
 #include "game/transport_manager.hpp"
 #include "game/world.hpp"
 #include "game/expansion_profile.hpp"
@@ -94,6 +95,37 @@ bool envFlagEnabled(const char* key, bool defaultValue = false) {
     if (!raw || !*raw) return defaultValue;
     return !(raw[0] == '0' || raw[0] == 'f' || raw[0] == 'F' ||
              raw[0] == 'n' || raw[0] == 'N');
+}
+
+std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
+                                        const glm::vec3& renderPos) {
+    if (!renderer) return std::nullopt;
+
+    // Server movement Z is the reference surface.  In WMO overlap regions the
+    // outdoor heightfield may be a roof many units above a tunnel/interior, so
+    // choose the closest reachable floor instead of blindly preferring terrain.
+    constexpr float kMaxStepUp = 1.5f;
+    constexpr float kMaxGroundDrop = 3.0f;
+    const float probeZ = renderPos.z + kMaxStepUp;
+    std::optional<float> best;
+
+    auto consider = [&](const std::optional<float>& floor) {
+        if (!floor || *floor > probeZ || *floor < renderPos.z - kMaxGroundDrop) return;
+        if (!best || std::abs(*floor - renderPos.z) < std::abs(*best - renderPos.z)) {
+            best = floor;
+        }
+    };
+
+    if (auto* terrain = renderer->getTerrainManager()) {
+        consider(terrain->getHeightAt(renderPos.x, renderPos.y));
+    }
+    if (auto* wmo = renderer->getWMORenderer()) {
+        consider(wmo->getFloorHeight(renderPos.x, renderPos.y, probeZ));
+    }
+    if (auto* m2 = renderer->getM2Renderer()) {
+        consider(m2->getFloorHeight(renderPos.x, renderPos.y, probeZ));
+    }
+    return best;
 }
 
 } // namespace
@@ -1016,6 +1048,21 @@ void Application::setState(AppState newState) {
                 gameHandler->setRangedWeaponSwapCallback([this](bool show) {
                     if (appearanceComposer_) appearanceComposer_->showRangedWeapon(show);
                 });
+                // The logout countdown finishing is not the end of it: the server
+                // confirms with SMSG_LOGOUT_COMPLETE, and only then does the client
+                // leave. Without this the countdown ran out and nothing happened.
+                gameHandler->setLogoutCompleteCallback([this](bool exiting) {
+                    if (exiting) {
+                        if (auto* ac = getAudioCoordinator()) {
+                            if (auto* music = ac->getMusicManager()) music->stopMusic(0.0f);
+                        }
+                        LOG_INFO("Logout complete — quitting");
+                        if (window) window->setShouldClose(true);
+                    } else {
+                        LOG_INFO("Logout complete — returning to character select");
+                        logoutToLogin();
+                    }
+                });
                 gameHandler->setKnockBackCallback([this](float vcos, float vsin, float hspeed, float vspeed) {
                     if (renderer && renderer->getCameraController()) {
                         renderer->getCameraController()->applyKnockBack(vcos, vsin, hspeed, vspeed);
@@ -1281,6 +1328,10 @@ void Application::update(float deltaTime) {
                 const bool uiWantsKeyboard = ImGui::GetIO().WantCaptureKeyboard;
                 auto& input = Input::getInstance();
                 if (!uiWantsKeyboard && input.isKeyJustPressed(SDL_SCANCODE_Z) && appearanceComposer_) {
+                    const bool sheathing = !appearanceComposer_->isWeaponsSheathed();
+                    if (renderer && renderer->getAnimationController()) {
+                        renderer->getAnimationController()->playWeaponSheathAnimation(sheathing);
+                    }
                     appearanceComposer_->toggleWeaponsSheathed();
                     appearanceComposer_->loadEquippedWeapons();
                 }
@@ -1829,14 +1880,14 @@ void Application::update(float deltaTime) {
                         inOverrun ? entity->getLatestZ() : entity->getZ());
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
 
-                    // Clamp creature Z to terrain surface during movement interpolation.
-                    // The server sends single-segment moves and expects the client to place
-                    // creatures on the ground.  Only clamp while actively moving — idle
-                    // creatures keep their server-authoritative Z (flight masters, etc.).
-                    if (entity->isActivelyMoving() && renderer->getTerrainManager()) {
-                        auto terrainZ = renderer->getTerrainManager()->getHeightAt(renderPos.x, renderPos.y);
-                        if (terrainZ.has_value()) {
-                            renderPos.z = terrainZ.value();
+                    // Ground-moving entities need client floor projection between server
+                    // spline points. Use the floor nearest server Z so outdoor terrain
+                    // above a tunnel cannot move the model into/onto the WMO shell.
+                    const bool groundCreature = !_creatureFlyingState.count(guid) &&
+                                                !_creatureSwimmingState.count(guid);
+                    if (entity->isActivelyMoving() && groundCreature) {
+                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos)) {
+                            renderPos.z = *floorZ;
                         }
                     }
 
@@ -2045,11 +2096,13 @@ void Application::update(float deltaTime) {
                         inOverrun ? entity->getLatestZ() : entity->getZ());
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
 
-                    // Clamp other players' Z to terrain surface during movement
-                    if (entity->isActivelyMoving() && renderer->getTerrainManager()) {
-                        auto terrainZ = renderer->getTerrainManager()->getHeightAt(renderPos.x, renderPos.y);
-                        if (terrainZ.has_value()) {
-                            renderPos.z = terrainZ.value();
+                    // Match creature projection: terrain alone is not a valid floor in
+                    // WMO overlap regions (tunnels, buildings, bridges).
+                    const bool groundPlayer = !_pCreatureFlyingState.count(guid) &&
+                                              !_pCreatureSwimmingState.count(guid);
+                    if (entity->isActivelyMoving() && groundPlayer) {
+                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos)) {
+                            renderPos.z = *floorZ;
                         }
                     }
 
@@ -2515,131 +2568,8 @@ void Application::spawnPlayerCharacter() {
 }
 
 void Application::buildFactionHostilityMap(uint8_t playerRace) {
-    if (!assetManager || !assetManager->isInitialized() || !gameHandler) return;
-
-    auto ftDbc = assetManager->loadDBC("FactionTemplate.dbc");
-    auto fDbc = assetManager->loadDBC("Faction.dbc");
-    if (!ftDbc || !ftDbc->isLoaded()) return;
-
-    // Race enum → race mask bit: race 1=0x1, 2=0x2, 3=0x4, 4=0x8, 5=0x10, 6=0x20, 7=0x40, 8=0x80, 10=0x200, 11=0x400
-    uint32_t playerRaceMask = 0;
-    if (playerRace >= 1 && playerRace <= 8) {
-        playerRaceMask = 1u << (playerRace - 1);
-    } else if (playerRace == 10) {
-        playerRaceMask = 0x200;  // Blood Elf
-    } else if (playerRace == 11) {
-        playerRaceMask = 0x400;  // Draenei
-    }
-
-    // Race → player faction template ID
-    // Human=1, Orc=2, Dwarf=3, NightElf=4, Undead=5, Tauren=6, Gnome=115, Troll=116, BloodElf=1610, Draenei=1629
-    uint32_t playerFtId = 0;
-    switch (playerRace) {
-        case 1: playerFtId = 1; break;     // Human
-        case 2: playerFtId = 2; break;     // Orc
-        case 3: playerFtId = 3; break;     // Dwarf
-        case 4: playerFtId = 4; break;     // Night Elf
-        case 5: playerFtId = 5; break;     // Undead
-        case 6: playerFtId = 6; break;     // Tauren
-        case 7: playerFtId = 115; break;   // Gnome
-        case 8: playerFtId = 116; break;   // Troll
-        case 10: playerFtId = 1610; break; // Blood Elf
-        case 11: playerFtId = 1629; break; // Draenei
-        default: playerFtId = 1; break;
-    }
-
-    // Build set of hostile parent faction IDs from Faction.dbc base reputation
-    const auto* facL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("Faction") : nullptr;
-    const auto* ftL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("FactionTemplate") : nullptr;
-    std::unordered_set<uint32_t> hostileParentFactions;
-    if (fDbc && fDbc->isLoaded()) {
-        const uint32_t facID = facL ? (*facL)["ID"] : 0;
-        const uint32_t facRaceMask0 = facL ? (*facL)["ReputationRaceMask0"] : 2;
-        const uint32_t facBase0 = facL ? (*facL)["ReputationBase0"] : 10;
-        for (uint32_t i = 0; i < fDbc->getRecordCount(); i++) {
-            uint32_t factionId = fDbc->getUInt32(i, facID);
-            for (int slot = 0; slot < 4; slot++) {
-                uint32_t raceMask = fDbc->getUInt32(i, facRaceMask0 + slot);
-                if (raceMask & playerRaceMask) {
-                    int32_t baseRep = fDbc->getInt32(i, facBase0 + slot);
-                    if (baseRep < 0) {
-                        hostileParentFactions.insert(factionId);
-                    }
-                    break;
-                }
-            }
-        }
-        LOG_INFO("Faction.dbc: ", hostileParentFactions.size(), " factions hostile to race ", static_cast<int>(playerRace));
-    }
-
-    // Get player faction template data
-    const uint32_t ftID = ftL ? (*ftL)["ID"] : 0;
-    const uint32_t ftFaction = ftL ? (*ftL)["Faction"] : 1;
-    const uint32_t ftFG = ftL ? (*ftL)["FactionGroup"] : 3;
-    const uint32_t ftFriend = ftL ? (*ftL)["FriendGroup"] : 4;
-    const uint32_t ftEnemy = ftL ? (*ftL)["EnemyGroup"] : 5;
-    const uint32_t ftEnemy0 = ftL ? (*ftL)["Enemy0"] : 6;
-    uint32_t playerFriendGroup = 0;
-    uint32_t playerEnemyGroup = 0;
-    uint32_t playerFactionId = 0;
-    for (uint32_t i = 0; i < ftDbc->getRecordCount(); i++) {
-        if (ftDbc->getUInt32(i, ftID) == playerFtId) {
-            playerFriendGroup = ftDbc->getUInt32(i, ftFriend) | ftDbc->getUInt32(i, ftFG);
-            playerEnemyGroup = ftDbc->getUInt32(i, ftEnemy);
-            playerFactionId = ftDbc->getUInt32(i, ftFaction);
-            break;
-        }
-    }
-
-    // Build hostility map for each faction template
-    std::unordered_map<uint32_t, bool> factionMap;
-    for (uint32_t i = 0; i < ftDbc->getRecordCount(); i++) {
-        uint32_t id = ftDbc->getUInt32(i, ftID);
-        uint32_t parentFaction = ftDbc->getUInt32(i, ftFaction);
-        uint32_t factionGroup = ftDbc->getUInt32(i, ftFG);
-        uint32_t friendGroup = ftDbc->getUInt32(i, ftFriend);
-        uint32_t enemyGroup = ftDbc->getUInt32(i, ftEnemy);
-
-        // 1. Symmetric group check
-        bool hostile = (enemyGroup & playerFriendGroup) != 0
-                    || (factionGroup & playerEnemyGroup) != 0;
-
-        // 2. Monster factionGroup bit (8)
-        if (!hostile && (factionGroup & 8) != 0) {
-            hostile = true;
-        }
-
-        // 3. Individual enemy faction IDs
-        if (!hostile && playerFactionId > 0) {
-            for (uint32_t e = ftEnemy0; e <= ftEnemy0 + 3; e++) {
-                if (ftDbc->getUInt32(i, e) == playerFactionId) {
-                    hostile = true;
-                    break;
-                }
-            }
-        }
-
-        // 4. Parent faction base reputation check (Faction.dbc)
-        if (!hostile && parentFaction > 0) {
-            if (hostileParentFactions.count(parentFaction)) {
-                hostile = true;
-            }
-        }
-
-        // 5. If explicitly friendly (friendGroup includes player), override to non-hostile
-        if (hostile && (friendGroup & playerFriendGroup) != 0) {
-            hostile = false;
-        }
-
-        factionMap[id] = hostile;
-    }
-
-    uint32_t hostileCount = 0;
-    for (const auto& [fid, h] : factionMap) { if (h) hostileCount++; }
-    gameHandler->setFactionHostileMap(std::move(factionMap));
-    LOG_INFO("Faction hostility for race ", static_cast<int>(playerRace), " (FT ", playerFtId, "): ",
-        hostileCount, "/", ftDbc->getRecordCount(),
-        " hostile (friendGroup=0x", std::hex, playerFriendGroup, ", enemyGroup=0x", playerEnemyGroup, std::dec, ")");
+    if (!assetManager || !gameHandler) return;
+    game::buildFactionHostilityMap(*assetManager, *gameHandler, playerRace);
 }
 
 // Render bounds/position queries — delegates to EntitySpawner
