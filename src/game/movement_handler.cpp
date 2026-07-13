@@ -1731,12 +1731,20 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     uint32_t counter = packet.readUInt32();
 
     const bool taNoFlags2 = isPreWotlk();
-    // Pre-WotLK sends one extra byte here that isn't part of the documented
-    // MovementInfo layout - confirmed by live capture (byte value 0x04,
-    // constant across samples) and verified against a known ground-truth
-    // teleport target (.go xyz to ironforge-city decoded to the exact
-    // expected x/y/z only once this byte was accounted for).
-    const size_t minMoveSz = taNoFlags2 ? (4 + 4 + 1 + 4 * 4) : (4 + 2 + 4 + 4 * 4);
+    // TBC sends one extra byte here that isn't part of the documented
+    // MovementInfo layout - confirmed by live capture against CMaNGOS TBC
+    // (byte value 0x04, constant across samples) and verified against a
+    // known ground-truth teleport target (.go xyz to ironforge-city decoded
+    // to the exact expected x/y/z only once this byte was accounted for).
+    // True Vanilla (VMangos) does NOT send it - confirmed by live capture
+    // against VMangos 1.12.1: assuming this byte for "classic" produced
+    // garbage x/y/z (denormalized near-zero floats), and removing it for
+    // classic decoded the exact expected .go xyz target with no remainder.
+    // So this is a TBC-only quirk, not a general pre-WotLK one - narrower
+    // than the moveFlags2 check below, which WotLK genuinely added and
+    // every earlier expansion (classic/tbc/turtle) genuinely lacks.
+    const bool taExtraByte = isActiveExpansion("tbc");
+    const size_t minMoveSz = (4 + (taNoFlags2 ? 0 : 2) + 4 + (taExtraByte ? 1 : 0) + 4 * 4);
     if (packet.getRemainingSize() < minMoveSz) {
         LOG_WARNING("MSG_MOVE_TELEPORT_ACK: not enough data for movement info");
         return;
@@ -1746,8 +1754,8 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     if (!taNoFlags2)
         packet.readUInt16();  // moveFlags2 (WotLK only)
     uint32_t moveTime = packet.readUInt32();
-    if (taNoFlags2)
-        packet.readUInt8();  // unknown byte, pre-WotLK only (see comment above)
+    if (taExtraByte)
+        packet.readUInt8();  // unknown byte, TBC only (see comment above)
     float serverX = packet.readFloat();
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();

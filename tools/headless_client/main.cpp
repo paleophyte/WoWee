@@ -213,6 +213,7 @@ Settings loadSettings(const std::string& path) {
     s.clientInfo.platform = jsonValue<std::string>(clientObj, "platform", "x86");
     s.clientInfo.os = jsonValue<std::string>(clientObj, "os", "Win");
     s.expansion = jsonValue<std::string>(clientObj, "expansion", detectExpansion(s.clientInfo.build));
+    s.clientInfo.legacyVanillaRealmList = (s.expansion == "classic");
 
     const auto realmObj = doc.value("realm", json::object());
     s.realmName = jsonValue<std::string>(realmObj, "name", "");
@@ -667,6 +668,47 @@ uint32_t hp = 0, maxHp = 0;
         };
     }
 
+    // Full DBC-loaded taxi node list (id/name/map/position for every node,
+    // not just ones this character knows) - only populated once
+    // loadTaxiDbc() has fired via at least one SMSG_SHOWTAXINODES response
+    // this session (see taxiJson()'s comment). Useful for resolving a named
+    // flight point's exact coordinates (e.g. for a GM teleport) without
+    // hardcoding them.
+    json taxiNodesListAction() const {
+        json list = json::array();
+        for (const auto& [id, node] : game_.getTaxiNodes()) {
+            list.push_back({
+                {"id", id},
+                {"name", node.name},
+                {"mapId", node.mapId},
+                {"x", node.x},
+                {"y", node.y},
+                {"z", node.z},
+                {"known", game_.isKnownTaxiNode(id)}
+            });
+        }
+        return {{"ok", true}, {"nodes", list}};
+    }
+
+    // Full DBC-loaded TaxiPath.dbc edge list (pathId/fromNode/toNode/cost) -
+    // same lazy-load timing as taxiNodesListAction(). Lets you check whether
+    // a route between two known node IDs actually exists in the data before
+    // assuming a silent flight-master query failure is a bug rather than a
+    // genuinely disconnected/unreachable node (real WoW clients just show an
+    // error in that case rather than opening the flight map at all).
+    json taxiEdgesListAction() const {
+        json list = json::array();
+        for (const auto& edge : game_.getTaxiPathEdges()) {
+            list.push_back({
+                {"pathId", edge.pathId},
+                {"fromNode", edge.fromNode},
+                {"toNode", edge.toNode},
+                {"cost", edge.cost}
+            });
+        }
+        return {{"ok", true}, {"edges", list}};
+    }
+
     // Requires stateMutex_ already held (called from worldSelf() while locked).
     json deathJsonLocked() const {
         float corpseX = 0.0f, corpseY = 0.0f;
@@ -1021,7 +1063,18 @@ uint32_t hp = 0, maxHp = 0;
         if (!isInWorld()) {
             return {{"ok", false}, {"error", "not in world"}};
         }
-        constexpr uint32_t kNpcFlagFlightMaster = 0x2000;
+        // TBC/WotLK (and Turtle WoW, which follows the same Blizzard-derived
+        // enum) use bit 0x2000 for UNIT_NPC_FLAG_FLIGHTMASTER. This specific
+        // VMangos fork uses its own compacted NPCFlags enum instead (no gaps
+        // reserved for later-expansion features) with FLIGHTMASTER at bit
+        // 0x8 - confirmed against /home/josh/vmangos/core/src/game/Objects/
+        // UnitDefines.h on the live dev server and cross-checked against
+        // creature_template.npc_flags for the real Stormwind flight master
+        // (Dungar Longdrink, npc_flags=11 = GOSSIP|QUESTGIVER|FLIGHTMASTER
+        // under this enum, which made no sense under the 0x2000 assumption).
+        // Scoped to "classic" only, not "turtle" - no evidence turtle shares
+        // this fork's specific reordering.
+        const uint32_t kNpcFlagFlightMaster = (settings_.expansion == "classic") ? 0x8u : 0x2000u;
         const auto& move = game_.getMovementInfo();
         uint64_t bestGuid = 0;
         float bestDist = -1.0f;
@@ -1055,7 +1108,14 @@ uint32_t hp = 0, maxHp = 0;
     // node must already be known (learnFlightPathAction / a real flight-master
     // visit populates knownNodes) since activateTaxi() needs both a resolved
     // start node (currentTaxiData_.nearestNode) and taxiNpcGuid_ from that.
-    json activateTaxiAction(uint32_t destNodeId, const std::string& destName) {
+    //
+    // Cost is checked client-side against known money and surfaced as a
+    // "warning" field by default (some servers - confirmed live against a
+    // CMaNGOS instance - don't enforce CMSG_ACTIVATETAXI cost at all, so a
+    // hard client-side block by default would make this endpoint unable to
+    // exercise that exact server behavior). Pass requireAffordable=true to
+    // turn the warning into a hard pre-check that blocks the request instead.
+    json activateTaxiAction(uint32_t destNodeId, const std::string& destName, bool requireAffordable = false) {
         if (!isInWorld()) {
             return {{"ok", false}, {"error", "not in world"}};
         }
@@ -1083,8 +1143,25 @@ uint32_t hp = 0, maxHp = 0;
         if (game_.isOnTaxiFlight()) {
             return {{"ok", false}, {"error", "movement_locked: already on taxi flight"}};
         }
+        const uint32_t costCopper = game_.getTaxiCostTo(destNodeId);
+        const uint64_t moneyCopper = game_.getMoneyCopper();
+        const bool affordable = costCopper <= moneyCopper;
+        if (!affordable) {
+            LOG_WARNING("Taxi activate: dest=", destNodeId, " costCopper=", costCopper,
+                        " moneyCopper=", moneyCopper, " - insufficient funds",
+                        requireAffordable ? " (blocking, requireAffordable=true)" : " (proceeding anyway)");
+            if (requireAffordable) {
+                return {{"ok", false}, {"error", "insufficient funds"}, {"destNodeId", destNodeId},
+                        {"costCopper", costCopper}, {"moneyCopper", moneyCopper}};
+            }
+        }
         game_.activateTaxi(destNodeId);
-        return {{"ok", true}, {"destNodeId", destNodeId}, {"taxi", taxiJson()}};
+        json result = {{"ok", true}, {"destNodeId", destNodeId}, {"costCopper", costCopper},
+                        {"moneyCopper", moneyCopper}, {"taxi", taxiJson()}};
+        if (!affordable) {
+            result["warning"] = "insufficient funds - server may reject or silently accept depending on its taxi cost enforcement";
+        }
+        return result;
     }
 
     // Resolves a name (case-insensitive prefix match, closest within
@@ -1886,11 +1963,18 @@ void handleHttpClient(socket_t client, HeadlessSession& session) {
             const float searchRadius = payload.value("searchRadius", 15.0f);
             const auto result = session.learnFlightPathAction(searchRadius);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
+        } else if (method == "GET" && path == "/taxi/nodes") {
+            const auto result = session.taxiNodesListAction();
+            sendHttp(client, 200, result);
+        } else if (method == "GET" && path == "/taxi/edges") {
+            const auto result = session.taxiEdgesListAction();
+            sendHttp(client, 200, result);
         } else if (method == "POST" && path == "/taxi/activate") {
             json payload = json::parse(body.empty() ? "{}" : body);
             const uint32_t destNodeId = payload.value("destNodeId", 0u);
             const std::string destName = payload.value("destName", "");
-            const auto result = session.activateTaxiAction(destNodeId, destName);
+            const bool requireAffordable = payload.value("requireAffordable", false);
+            const auto result = session.activateTaxiAction(destNodeId, destName, requireAffordable);
             sendHttp(client, result.value("ok", false) ? 200 : 400, result);
         } else if (method == "POST" && path == "/follow") {
             json payload = json::parse(body.empty() ? "{}" : body);

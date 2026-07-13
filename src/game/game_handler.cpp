@@ -2657,6 +2657,11 @@ const std::unordered_map<uint32_t, GameHandler::TaxiNode>& GameHandler::getTaxiN
     static const std::unordered_map<uint32_t, TaxiNode> empty;
     return empty;
 }
+const std::vector<GameHandler::TaxiPathEdge>& GameHandler::getTaxiPathEdges() const {
+    if (movementHandler_) return movementHandler_->getTaxiPathEdges();
+    static const std::vector<TaxiPathEdge> empty;
+    return empty;
+}
 bool GameHandler::isKnownTaxiNode(uint32_t nodeId) const {
     // Was reading a GameHandler-local knownTaxiMask_ that nothing ever wrote
     // to (handleShowTaxiNodes only updates MovementHandler's own copy), so

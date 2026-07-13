@@ -1995,6 +1995,7 @@ public:
     using TaxiPathEdge = MovementHandler::TaxiPathEdge;
     using TaxiPathNode = MovementHandler::TaxiPathNode;
     const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const;
+    const std::vector<TaxiPathEdge>& getTaxiPathEdges() const;
     bool isKnownTaxiNode(uint32_t nodeId) const;
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
