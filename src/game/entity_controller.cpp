@@ -595,6 +595,18 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
 // Detect player mount/dismount from UNIT_FIELD_MOUNTDISPLAYID changes
 void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
                                                 const FlatFieldMap& blockFields) {
+    // Live-confirmed: CMaNGOS can push a player values-update mid-taxi-flight
+    // that zeroes UNIT_FIELD_MOUNTDISPLAYID before the client's own flight
+    // simulation actually finishes (same early-completion behavior already
+    // seen and guarded for SMSG_DISMOUNT) - obeying it here cut the mount
+    // animation while MovementHandler::updateClientTaxi() kept flying the
+    // real path for several more seconds. Ignore a drop to 0 while a real
+    // taxi flight is still active; finishTaxiFlight() clears it correctly
+    // once the client path actually ends.
+    const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
+    if (onRealTaxiFlight && newMountDisplayId == 0) {
+        return;
+    }
     uint32_t old = owner_.currentMountDisplayIdRef();
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
