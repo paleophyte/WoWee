@@ -103,8 +103,9 @@ public:
     }
     const std::vector<BgPlayerPosition>& getBgPlayerPositions() const { return bgPlayerPositions_; }
 
-    // Logout
-    void requestLogout();
+    // Logout. exitAfterLogout distinguishes /quit and /exit, which leave the game
+    // entirely, from /logout and /camp, which drop back to character select.
+    void requestLogout(bool exitAfterLogout = false);
     void cancelLogout();
     bool  isLoggingOut()        const { return loggingOut_; }
     float getLogoutCountdown()  const { return logoutCountdown_; }
@@ -112,6 +113,7 @@ public:
     // logout finishes - this stays true so callers (e.g. the headless
     // client's shutdown loop) can tell "never logged out" from "done".
     bool  isLogoutComplete()    const { return logoutComplete_; }
+    bool  isLogoutToExit()      const { return exitAfterLogout_; }
 
     // Guild
     void requestGuildInfo();
@@ -371,6 +373,7 @@ private:
     // Logout
     bool  loggingOut_        = false;
     bool  logoutComplete_    = false;
+    bool  exitAfterLogout_   = false;
     float logoutCountdown_   = 0.0f;
 
     // Time played

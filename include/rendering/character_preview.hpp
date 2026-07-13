@@ -74,6 +74,8 @@ private:
     bool loadPreviewM2(const std::string& m2Path, pipeline::M2Model& outModel);
     // Hang the character's weapons off the preview model's hand attachments.
     void attachWeapons(const std::vector<game::EquipmentItem>& equipment);
+    // Put the weapon's enchant glint on it (char enum reports the ItemVisual id directly).
+    void attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t itemVisualId);
     // Load the race's glue scene (Stormwind for humans, Orgrimmar for orcs, ...) as a backdrop.
     void loadRacialBackdrop(game::Race race);
 
@@ -109,9 +111,16 @@ private:
     static constexpr int fboHeight_ = 800;
 
     static constexpr uint32_t PREVIEW_MODEL_ID = 9999;
-    static constexpr uint32_t PREVIEW_MAINHAND_MODEL_ID = 9998;
-    static constexpr uint32_t PREVIEW_OFFHAND_MODEL_ID  = 9997;
     static constexpr uint32_t PREVIEW_BACKDROP_MODEL_ID = 9996;
+
+    // CharacterRenderer::loadModel() keeps a model cache keyed by id and skips
+    // loading when the id is already present, so a fixed id per hand would hand
+    // every subsequent character the first character's weapon. Key the id by what
+    // is actually being loaded instead: same weapon reuses the model, different
+    // weapon gets its own.
+    uint32_t previewModelIdFor(const std::string& assetKey);
+    std::unordered_map<std::string, uint32_t> previewModelIds_;
+    uint32_t nextPreviewModelId_ = 20000;
     uint32_t backdropInstanceId_ = 0;
     int backdropRace_ = -1;   // race whose glue scene is currently loaded (-1 = none)
     uint32_t instanceId_ = 0;

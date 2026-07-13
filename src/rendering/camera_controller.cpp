@@ -144,6 +144,44 @@ std::optional<float> CameraController::getCachedFloorHeight(float x, float y, fl
     return result;
 }
 
+float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const glm::vec3& camDir,
+                                                   float maxDist) const {
+    if (!terrainManager || maxDist <= MIN_DISTANCE) return maxDist;
+
+    // Clearance the camera keeps above the terrain surface along the whole ray.
+    constexpr float kClearance = CAM_SPHERE_RADIUS + 0.25f;
+
+    // If the pivot itself sits below the heightfield (caves, WMO basements,
+    // terrain holes under cities), the heightfield is not the relevant occluder
+    // here — skip limiting rather than pinning the camera to first-person.
+    auto pivotH = terrainManager->getHeightAt(pivot.x, pivot.y);
+    if (pivotH && pivot.z < *pivotH - 0.2f) return maxDist;
+
+    // Coarse march in ~1.25-unit steps (capped so worst case stays cheap),
+    // then bisect between the last clear sample and the first blocked one.
+    const int steps = std::clamp(static_cast<int>(maxDist / 1.25f) + 1, 4, 24);
+    const float stepLen = maxDist / static_cast<float>(steps);
+    float prevT = 0.0f;
+    for (int i = 1; i <= steps; ++i) {
+        float t = stepLen * static_cast<float>(i);
+        glm::vec3 p = pivot + camDir * t;
+        auto h = terrainManager->getHeightAt(p.x, p.y);
+        if (h && p.z < *h + kClearance) {
+            float lo = prevT;
+            float hi = t;
+            for (int j = 0; j < 4; ++j) {
+                float mid = 0.5f * (lo + hi);
+                glm::vec3 mp = pivot + camDir * mid;
+                auto mh = terrainManager->getHeightAt(mp.x, mp.y);
+                if (mh && mp.z < *mh + kClearance) hi = mid; else lo = mid;
+            }
+            return std::max(MIN_DISTANCE, lo);
+        }
+        prevT = t;
+    }
+    return maxDist;
+}
+
 void CameraController::triggerShake(float magnitude, float frequency, float duration) {
     // Allow stronger shake to override weaker; don't allow zero magnitude.
     if (magnitude <= 0.0f || duration <= 0.0f) return;
@@ -446,7 +484,8 @@ void CameraController::update(float deltaTime) {
     // Blocked while mounted
     bool prevSitting = sitting;
     bool xDown = !uiWantsKeyboard && input.isKeyPressed(SDL_SCANCODE_X);
-    if (xDown && !xKeyWasDown && !mounted_) {
+    // While swimming, X dives down instead of toggling sit
+    if (xDown && !xKeyWasDown && !mounted_ && !swimming) {
         sitting = !sitting;
     }
     if (mounted_) sitting = false;
@@ -539,7 +578,12 @@ void CameraController::update(float deltaTime) {
                 if (waterType && *waterType != 0) {
                     isOcean = (((*waterType - 1) % 4) == 1);
                 }
-                bool depthAllowed = isOcean || ((*waterH - targetPos.z) <= MAX_SWIM_DEPTH_FROM_SURFACE);
+                // Depth gate only applies when ENTERING swim (e.g. don't start
+                // swimming in a dry cave beneath a lake's water plane). Once
+                // swimming, any depth is fine — you can only get deep by
+                // deliberately diving through the water column.
+                bool depthAllowed = swimming || isOcean ||
+                                    ((*waterH - targetPos.z) <= MAX_SWIM_DEPTH_FROM_SURFACE);
                 if (depthAllowed) {
                     std::optional<float> terrainH;
                     std::optional<float> wmoH;
@@ -563,7 +607,7 @@ void CameraController::update(float deltaTime) {
                         bool nearSurface = depthFromFeet <= 1.45f;
                         bool reachableRamp = (floorDelta >= -0.30f && floorDelta <= 1.10f);
                         bool shallowRampWater = waterOverFloor <= 1.55f;
-                        bool notDiving = forward3D.z > -0.20f;
+                        bool notDiving = forward3D.z > -0.20f && !xDown;
                         if (nearSurface && reachableRamp && shallowRampWater && notDiving) {
                             inWater = false;
                         }
@@ -571,7 +615,7 @@ void CameraController::update(float deltaTime) {
 
                     // Forward plank/ramp assist: sample structure floors ahead so water exit
                     // can happen when the ramp is in front of us (not only under our feet).
-                    if (swimming && inWater && nowForward && forward3D.z > -0.20f) {
+                    if (swimming && inWater && nowForward && forward3D.z > -0.20f && !xDown) {
                         auto queryFloorAt = [&](float x, float y, float probeZ) -> std::optional<float> {
                             std::optional<float> best;
                             if (terrainManager) {
@@ -666,10 +710,13 @@ void CameraController::update(float deltaTime) {
                 targetPos += swimMove * applySpeed * physicsDeltaTime;
             }
 
-            // Spacebar = swim up (continuous, not a jump)
-            bool diveIntent = nowForward && (forward3D.z < -0.28f);
+            // Spacebar = swim up, X = swim down (both continuous, not a jump)
+            bool diveKey = xDown;
+            bool diveIntent = diveKey || (nowForward && (forward3D.z < -0.28f));
             if (nowJump) {
                 verticalVelocity = SWIM_BUOYANCY;
+            } else if (diveKey) {
+                verticalVelocity = -SWIM_BUOYANCY;
             } else {
                 // Gentle sink when not pressing space
                 verticalVelocity += SWIM_GRAVITY * physicsDeltaTime;
@@ -1063,8 +1110,24 @@ void CameraController::update(float deltaTime) {
                         } catch (const std::exception& e) { LOG_ERROR("M2 floor query: ", e.what()); }
                     }
 
-                    // Reject steep WMO slopes
-                    float minWalkableWmo = cachedInsideWMO ? MIN_WALKABLE_NORMAL_WMO : MIN_WALKABLE_NORMAL_TERRAIN;
+                    // A tunnel mouth can overlap the outdoor heightfield before the
+                    // player's eye point is inside the WMO bounds.  Treat a nearby WMO
+                    // floor below that terrain as transition space immediately; waiting
+                    // for cachedInsideWMO makes the outdoor terrain win one frame at a
+                    // time (climbing through the roof), while rejecting a steep entrance
+                    // ramp here makes the player fall through it.
+                    bool atTunnelSeam = false;
+                    if (terrainH && wmoH) {
+                        const float terrainAboveWmo = *terrainH - *wmoH;
+                        const float wmoDropFromPlayer = targetPos.z - *wmoH;
+                        atTunnelSeam = terrainAboveWmo > 1.2f && terrainAboveWmo < 12.0f &&
+                                       wmoDropFromPlayer >= -0.4f && wmoDropFromPlayer < 1.8f;
+                    }
+
+                    // Reject steep WMO slopes. Tunnel ramps use the more permissive WMO
+                    // limit even at the boundary, where isInsideWMO is not reliable yet.
+                    float minWalkableWmo = (cachedInsideWMO || atTunnelSeam)
+                        ? MIN_WALKABLE_NORMAL_WMO : MIN_WALKABLE_NORMAL_TERRAIN;
                     if (wmoH && wmoNormalZ < minWalkableWmo) {
                         wmoH = std::nullopt;  // Treat as unwalkable
                     }
@@ -1090,22 +1153,13 @@ void CameraController::update(float deltaTime) {
                         }
                     }
 
-                    if (cachedInsideWMO && wmoH) {
+                    if ((cachedInsideWMO || atTunnelSeam) && wmoH) {
                         // Transition seam (e.g. tunnel mouths): if terrain is much higher than
                         // nearby WMO walkable floor, prefer the WMO floor so we can enter.
-                        bool preferWmoAtSeam = false;
-                        if (terrainH) {
-                            float terrainAboveWmo = *terrainH - *wmoH;
-                            float wmoDropFromPlayer = targetPos.z - *wmoH;
-                            float playerVsTerrain = targetPos.z - *terrainH;
-                            bool descendingIntoTunnel = (verticalVelocity < -1.0f) || (playerVsTerrain < -0.35f);
-                            if (terrainAboveWmo > 1.2f && terrainAboveWmo < 8.0f &&
-                                wmoDropFromPlayer >= -0.4f && wmoDropFromPlayer < 1.8f &&
-                                *wmoH <= targetPos.z + stepUpBudget &&
-                                descendingIntoTunnel) {
-                                preferWmoAtSeam = true;
-                            }
-                        }
+                        // Do not require downward velocity or an already-inside state:
+                        // both arrive after a level tunnel entrance has begun choosing
+                        // between the two surfaces.
+                        bool preferWmoAtSeam = atTunnelSeam;
                         if (preferWmoAtSeam) {
                             groundH = wmoH;
                         } else if (terrainH) {
@@ -1532,19 +1586,29 @@ void CameraController::update(float deltaTime) {
             }
         }
 
-        // ===== Camera collision (WMO raycast) =====
+        // ===== Camera collision (WMO raycast + terrain heightfield march) =====
         // Cast a ray from the pivot toward the camera direction to find the
-        // nearest WMO wall.  Uses asymmetric smoothing: pull-in is fast (so
-        // the camera never visibly clips through a wall) but recovery is slow
-        // (so passing through a doorway doesn't cause a zoom-out snap).
+        // nearest WMO wall, and march the terrain heightfield along the same
+        // ray so hills between the pivot and camera pull the camera in too.
+        // Uses asymmetric smoothing: pull-in is fast (so the camera never
+        // visibly clips through geometry) but recovery is slow (so passing a
+        // doorway or hill crest doesn't cause a zoom-out snap).
         collisionDistance = currentDistance;
 
-        if (wmoRenderer && currentDistance > MIN_DISTANCE) {
-            float rawHitDist = wmoRenderer->raycastBoundingBoxes(pivot, camDir, currentDistance);
-            // rawHitDist == currentDistance means no hit (function returns maxDistance on miss)
-            float rawLimit = (rawHitDist < currentDistance)
-                ? std::max(MIN_DISTANCE, rawHitDist - CAM_SPHERE_RADIUS - CAM_EPSILON)
-                : currentDistance;
+        if ((wmoRenderer || terrainManager) && currentDistance > MIN_DISTANCE) {
+            float rawLimit = currentDistance;
+            if (wmoRenderer) {
+                float rawHitDist = wmoRenderer->raycastBoundingBoxes(pivot, camDir, currentDistance);
+                // rawHitDist == currentDistance means no hit (function returns maxDistance on miss)
+                if (rawHitDist < currentDistance) {
+                    rawLimit = std::max(MIN_DISTANCE, rawHitDist - CAM_SPHERE_RADIUS - CAM_EPSILON);
+                }
+            }
+            // Terrain samples above enclosed tunnels/caves are not real occluders.
+            if (!cachedInsideInteriorWMO) {
+                rawLimit = std::min(rawLimit,
+                    raymarchTerrainCameraLimit(pivot, camDir, currentDistance));
+            }
 
             // Initialise smoothed state on first use.
             if (smoothedCollisionDist_ < 0.0f) {
@@ -1553,14 +1617,20 @@ void CameraController::update(float deltaTime) {
 
             // Asymmetric smoothing:
             //   • Pull-in: τ ≈ 60 ms  — react quickly to prevent clipping
+            //     (instant while actively rotating, matching the 1:1 drag snap)
             //   • Recover: τ ≈ 400 ms — zoom out slowly after leaving geometry
-            const float tau = (rawLimit < smoothedCollisionDist_) ? 0.06f : 0.40f;
-            float alpha = 1.0f - std::exp(-deltaTime / tau);
-            smoothedCollisionDist_ += (rawLimit - smoothedCollisionDist_) * alpha;
+            bool rotatingNow = mouseButtonDown || nowTurnLeft || nowTurnRight;
+            if (rawLimit < smoothedCollisionDist_ && rotatingNow) {
+                smoothedCollisionDist_ = rawLimit;
+            } else {
+                const float tau = (rawLimit < smoothedCollisionDist_) ? 0.06f : 0.40f;
+                float alpha = 1.0f - std::exp(-deltaTime / tau);
+                smoothedCollisionDist_ += (rawLimit - smoothedCollisionDist_) * alpha;
+            }
 
             collisionDistance = std::min(collisionDistance, smoothedCollisionDist_);
         } else {
-            smoothedCollisionDist_ = -1.0f;   // Reset when wmoRenderer unavailable
+            smoothedCollisionDist_ = -1.0f;   // Reset when no collision sources available
         }
 
         // Camera collision: terrain-only floor clamping

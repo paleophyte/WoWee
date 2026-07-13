@@ -41,6 +41,7 @@ struct WeaponAttachment {
     uint32_t attachmentId;     // 1=RightHand, 2=LeftHand
     uint16_t boneIndex;
     glm::vec3 offset;
+    glm::mat4 localTransform{1.0f}; // sheath/hand orientation after attachment point
     std::vector<WeaponEffectAttachment> effects;
 };
 
@@ -112,7 +113,8 @@ public:
     /** Attach a weapon model to a character instance at the given attachment point. */
     bool attachWeapon(uint32_t charInstanceId, uint32_t attachmentId,
                       const pipeline::M2Model& weaponModel, uint32_t weaponModelId,
-                      const std::string& texturePath);
+                      const std::string& texturePath,
+                      const glm::mat4& localTransform = glm::mat4(1.0f));
 
     /** Detach a weapon from the given attachment point (drops its enchant effects too). */
     void detachWeapon(uint32_t charInstanceId, uint32_t attachmentId);
@@ -127,6 +129,10 @@ public:
 
     /** Remove all enchant visuals from the weapon at the given attachment point. */
     void detachWeaponEffects(uint32_t charInstanceId, uint32_t attachmentId);
+
+    /** Mark an instance as a scene backdrop: no culling, no character material heuristics. */
+    void setInstanceSceneModel(uint32_t instanceId, bool isScene);
+
 
     /** Get the world-space transform of an attachment point on an instance. */
     bool getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform);
@@ -229,6 +235,15 @@ private:
         // needs its animation advanced even though its transform comes from the parent.
         bool isEffectModel = false;
 
+        // A scene rather than a character: the glue-screen backdrops. Two things
+        // follow. Their origin can sit hundreds of units from their geometry, so
+        // culling on it would drop them. And the material heuristics below exist to
+        // rescue character textures — applied to a scene they erase it, because
+        // Stormwind's walls are DXT5 with an unused alpha channel that the opaque
+        // batches must ignore, exactly as the blend mode says.
+        bool isSceneModel = false;
+
+
         // Bone update throttling for characters outside normal gameplay range.
         uint32_t boneUpdateCounter = 0;
         const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
@@ -304,6 +319,10 @@ private:
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;
+    // Whole-instance fades (ghost form, spawn fade-in): alpha blend with depth
+    // write kept on, so the faded model still self-occludes instead of showing
+    // backfaces and under-armor skin through the body.
+    VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts

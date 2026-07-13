@@ -486,8 +486,9 @@ public:
     // Network latency (milliseconds, updated each PONG response)
     uint32_t getLatencyMs() const { return lastLatency; }
 
-    // Logout commands
-    void requestLogout();
+    // Logout commands. exitAfterLogout: /quit and /exit leave the game; /logout and
+    // /camp drop back to character select.
+    void requestLogout(bool exitAfterLogout = false);
     void cancelLogout();
 
     // Instance difficulty
@@ -937,6 +938,13 @@ public:
     // standState: 0=stand, 1-6=sit variants, 7=dead, 8=kneel
     using StandStateCallback = std::function<void(uint8_t standState)>;
     void setStandStateCallback(StandStateCallback cb) { standStateCallback_ = std::move(cb); }
+
+    // Logout complete callback — fired when SMSG_LOGOUT_COMPLETE says the character
+    // is out of the world. exiting is true for /quit and /exit (leave the game),
+    // false for /logout and /camp (back to character select).
+    using LogoutCompleteCallback = std::function<void(bool exiting)>;
+    void setLogoutCompleteCallback(LogoutCompleteCallback cb) { logoutCompleteCallback_ = std::move(cb); }
+    auto& logoutCompleteCallbackRef() { return logoutCompleteCallback_; }
 
     // Appearance changed callback — fired when PLAYER_BYTES or facial features update (barber shop, etc.)
     using AppearanceChangedCallback = std::function<void()>;
@@ -1577,10 +1585,34 @@ public:
         int32_t scale    = 0;     // +1 = counting up, -1 = counting down
         bool    paused   = false;
         bool    active   = false;
+        float   pendingMs = 0.0f; // sub-millisecond carry for the local countdown
     };
     const MirrorTimer& getMirrorTimer(int type) const {
         static MirrorTimer empty;
         return (type >= 0 && type < 3) ? mirrorTimers_[type] : empty;
+    }
+    /**
+     * Count the mirror timers (breath, fatigue, feign death) down locally.
+     *
+     * The server sends SMSG_START_MIRROR_TIMER once with the remaining time and a
+     * scale, then only speaks again when something changes — so without this the
+     * breath bar just sits at whatever value it was handed and never moves.
+     * scale is ms of timer per ms of real time: -1 while drowning, +1 while the
+     * bar refills at the surface.
+     */
+    void tickMirrorTimers(float dt) {
+        if (dt <= 0.0f) return;
+        const float elapsedMs = dt * 1000.0f;
+        for (auto& t : mirrorTimers_) {
+            if (!t.active || t.paused || t.scale == 0 || t.maxValue <= 0) continue;
+            // Carry the sub-millisecond remainder: truncating each frame would lose
+            // most of a 144fps frame's 6.94ms and run the timer visibly slow.
+            t.pendingMs += elapsedMs;
+            const int32_t wholeMs = static_cast<int32_t>(t.pendingMs);
+            if (wholeMs == 0) continue;
+            t.pendingMs -= static_cast<float>(wholeMs);
+            t.value = std::clamp(t.value + t.scale * wholeMs, 0, t.maxValue);
+        }
     }
 
     // Combo points
@@ -2980,6 +3012,9 @@ private:
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
     std::vector<MinimapPing> minimapPings_;
     uint64_t pendingGameObjectInteractGuid_ = 0;
+    // Owned fishing bobber whose bite animation has fired. Keeping this explicit
+    // lets the UI target/reel it even while GAMEOBJECT_QUERY metadata is pending.
+    uint64_t hookedFishingBobberGuid_ = 0;
 
     // Talents (dual-spec support)
     uint8_t activeTalentSpec_ = 0;                              // Currently active spec (0 or 1)
@@ -3497,6 +3532,7 @@ private:
     NpcAggroCallback npcAggroCallback_;
     NpcRespawnCallback npcRespawnCallback_;
     StandStateCallback standStateCallback_;
+    LogoutCompleteCallback logoutCompleteCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
     GhostStateCallback ghostStateCallback_;
     MeleeSwingCallback meleeSwingCallback_;

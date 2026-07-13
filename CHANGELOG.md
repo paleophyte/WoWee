@@ -1,5 +1,58 @@
 # Changelog
 
+## [v2.0.7-preview] — 2026-07-12
+
+### Camera
+- **Hills no longer clip through the third-person camera.** Terrain was only ever a floor clamp at the camera's final position, so a rise *between* the character and the camera sliced straight through the view and the clamp just popped the camera upward after the fact. The camera ray now marches the terrain heightfield (coarse ~1.25-unit steps, then bisection for a tight limit) and the resulting distance feeds the same asymmetric pull-in/recover smoothing as the WMO wall raycast. Worst case is ~28 bilinear height lookups a frame — negligible. Pull-in snaps 1:1 while the mouse or turn keys are actively rotating, since the 60 ms ease was exactly the window where a fast swing into a hillside still dipped underground
+- The terrain march is skipped inside interior WMOs (terrain above a tunnel is not a real occluder) and when the pivot itself sits below the heightfield (caves, WMO basements, ADT holes), so it cannot pin the camera to first-person where the heightfield is irrelevant
+- X now dives while swimming instead of toggling sit, water-exit assists are suppressed while diving, and the swim-depth gate only applies on water entry — deliberate dives can go arbitrarily deep
+
+### UI
+- Crafting panel reagent lines show live have/need counts, recounted every frame so consumption is visible mid-craft; Create/Create All disable when any reagent is short
+
+---
+
+## [v2.0.6-preview] — 2026-07-12
+
+### Networking
+- **Stop dropping every packet that has no payload.** `handlePacket()` ignored any packet whose body was empty, but `getSize()` is the payload length and the opcode is carried separately — for the many opcodes with no payload, the opcode *is* the message. All of them were swallowed before dispatch, which is also why no "unhandled opcode" warning ever fired for them. Eight registered opcodes were affected:
+  - `SMSG_LOGOUT_COMPLETE` — the server logged the character out and moved on while the client waited forever, so the logout countdown ended and nothing happened
+  - `SMSG_LOGOUT_CANCEL_ACK` — a cancelled logout was never confirmed
+  - `SMSG_ATTACKSWING_NOTINRANGE` / `_BADFACING` / `_DEADTARGET` / `_CANT_ATTACK` — none of the four auto-attack errors ever reached the player
+  - `SMSG_PET_BROKEN`, `SMSG_INVALIDATE_PLAYER`
+
+### Logout
+- `/quit` and `/exit` now leave the game when the server confirms the logout; `/logout` and `/camp` return to character select. They were all aliases of one command that did neither
+- `/logout` was not a command at all: `aliases()` is the complete name list and it only listed camp, quit and exit, so `/help` had been advertising a command that silently did nothing
+- The logout pose is a sit again. The server stuns the player to root them for the countdown, and we mapped `UNIT_FLAG_STUNNED` straight to the stun animation, which played over the sit and left the character slumped
+
+### UI
+- The breath, fatigue and feign-death bars count down. `SMSG_START_MIRROR_TIMER` hands the client a remaining time and a scale and the server then only re-syncs on change, but nothing ticked the value — so the breath bar sat frozen while you drowned. The sub-millisecond remainder is carried, so the timer does not run slow at high frame rates
+- Fix the tail of `SMSG_START_MIRROR_TIMER`: it is paused(1) + spellId(4), not the reverse
+
+---
+
+## [v2.0.5-preview] — 2026-07-12
+
+### Build
+- **The build was shipping shaders compiled on 4 April.** `compile_shaders()` wrote its SPIR-V into the runtime tree, and the POST_BUILD step then copied the whole source `assets/` directory over it — including the `.spv` files tracked in git. The stale committed shaders won every build, so three months of GLSL edits never reached the GPU. Seven shaders were affected: `character.frag`, `character.vert`, `terrain.frag`, `water.frag`, `m2_particle.frag`, and both FSR2 compute shaders. Shaders now compile in place next to the GLSL, so the tracked `.spv` and the shader the GPU runs cannot diverge
+
+### Character Select
+- Preview is larger (panel widened, render target raised to 640x800), shows the character's equipped weapons, and stands them in their racial glue scene — Stormwind for humans, Durotar for orcs, and so on
+- Scene backdrops are placed from the camera and attachment point the M2 carries (M2Loader now parses cameras); their geometry sits hundreds of units from the model origin, so nothing else can position them
+- Weapons and enchant visuals no longer leak between characters: weapon attachment ran past an early return for characters whose body skin could not be composited, and fixed model ids meant every character after the first was handed the first one's weapon model
+
+### Rendering
+- Backdrops are no longer erased by the character alpha heuristics. Stormwind's walls are DXT5 with an unused alpha channel (mean alpha 17/255, every texel below the cutoff), and inferring a cutout from "the texture has alpha" discarded the whole building, leaving the sky showing through it
+
+### Item Enhancements
+- Temporary weapon enchants show as the weapon's icon with its remaining time, in the right slot. SMSG_ITEM_ENCHANT_TIME_UPDATE carries the item's *enchantment* slot (TEMP_ENCHANTMENT_SLOT = 1), not the equipment slot, so every temporary enchant was labelled "Off Hand" — even on a two-hander
+
+### Merged
+- Extract `buildFactionHostilityMap()` into a shared free function (#95)
+
+---
+
 ## [v2.0.4-preview] — 2026-07-12
 
 ### UI
