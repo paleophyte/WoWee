@@ -349,9 +349,9 @@ network::Packet RealmListPacket::build() {
     return packet;
 }
 
-bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& response, uint8_t protocolVersion) {
+bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& response, bool legacyVanilla) {
     // Note: opcode byte already consumed by handlePacket()
-    const bool isLegacyVanilla = (protocolVersion <= 3);
+    const bool isLegacyVanilla = legacyVanilla;
 
     // Packet size (2 bytes) - we already know the size, skip it
     uint16_t packetSize = packet.readUInt16();

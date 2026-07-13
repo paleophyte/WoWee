@@ -22,6 +22,7 @@ struct ClientInfo {
     std::string os = "Win";
     std::string locale = "enUS";
     uint32_t timezone = 0;
+    bool legacyVanillaRealmList = false;
 };
 
 // LOGON_CHALLENGE packet builder
@@ -130,9 +131,9 @@ struct RealmListResponse {
 // REALM_LIST response parser
 class RealmListResponseParser {
 public:
-    // protocolVersion: 3 = legacy vanilla (uint8 realmCount, uint32 icon);
+    // legacyVanilla: vanilla realm list layout (uint8 realmCount, uint32 icon).
     // TBC/WotLK use uint16 realmCount and byte-sized icon/lock/flags.
-    [[nodiscard]] static bool parse(network::Packet& packet, RealmListResponse& response, uint8_t protocolVersion = 8);
+    [[nodiscard]] static bool parse(network::Packet& packet, RealmListResponse& response, bool legacyVanilla = false);
 };
 
 } // namespace auth
