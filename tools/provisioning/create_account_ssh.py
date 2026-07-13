@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a CMaNGOS account over SSH using the server-local SOAP endpoint."""
+"""Create a WoW account over SSH using the server-local SOAP endpoint."""
 
 from __future__ import annotations
 
@@ -20,6 +20,23 @@ DEFAULT_ENV = ROOT / ".env"
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
 
+SERVER_PROFILES = {
+    "cmangos": {
+        "label": "CMaNGOS",
+        "env_prefixes": ("MANGOS",),
+        "soap_namespace": "urn:MaNGOS",
+        "default_expansion": 1,
+        "default_soap_url": "http://127.0.0.1:7878/",
+    },
+    "azerothcore": {
+        "label": "AzerothCore",
+        "env_prefixes": ("AC", "AZEROTHCORE", "MANGOS"),
+        "soap_namespace": "urn:AC",
+        "default_expansion": 2,
+        "default_soap_url": "http://127.0.0.1:7879/",
+    },
+}
+
 
 REMOTE_SCRIPT = r"""
 import base64
@@ -33,6 +50,7 @@ payload = json.loads(sys.stdin.read())
 soap_url = payload.get("soap_url") or "http://127.0.0.1:7878/"
 soap_user = payload["soap_user"]
 soap_password = payload["soap_password"]
+soap_namespace = payload.get("soap_namespace") or "urn:MaNGOS"
 commands = payload["commands"]
 verbose = bool(payload.get("verbose"))
 
@@ -50,13 +68,16 @@ def call_soap(command):
                    xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/"
                    xmlns:xsi="http://www.w3.org/1999/XMLSchema-instance"
                    xmlns:xsd="http://www.w3.org/1999/XMLSchema"
-                   xmlns:ns1="urn:MaNGOS">
+                   xmlns:ns1="{soap_namespace}">
   <SOAP-ENV:Body>
     <ns1:executeCommand>
       <command>{command}</command>
     </ns1:executeCommand>
   </SOAP-ENV:Body>
-</SOAP-ENV:Envelope>'''.format(command=command.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+</SOAP-ENV:Envelope>'''.format(
+        soap_namespace=soap_namespace.replace("&", "&amp;").replace('"', "&quot;"),
+        command=command.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
     auth = base64.b64encode((soap_user + ":" + soap_password).encode("utf-8")).decode("ascii")
     headers = {
         "Authorization": "Basic " + auth,
@@ -100,7 +121,16 @@ for command in commands:
             if len(parts) == 4:
                 shown = " ".join(parts[:3] + ["********"])
         print("SOAP:", shown)
-    result = call_soap(command)
+    try:
+        result = call_soap(command)
+    except RuntimeError as exc:
+        lowered_error = str(exc).lower()
+        if command.lower().startswith("account create ") and (
+            "already exist" in lowered_error or "already exists" in lowered_error
+        ):
+            print("Account already exists; continuing.")
+            continue
+        raise
     lowered = result.lower()
     failed_markers = (" syntax", "error", "not exist", "not found", "incorrect", "already exist", "already exists")
     if any(marker in lowered for marker in failed_markers):
@@ -131,6 +161,14 @@ def require_env(env: dict[str, str], key: str) -> str:
     return value
 
 
+def env_value(env: dict[str, str], prefixes: tuple[str, ...], suffix: str, fallback: str = "") -> str:
+    for prefix in prefixes:
+        value = env.get(f"{prefix}_{suffix}", "").strip()
+        if value:
+            return value
+    return fallback
+
+
 def validate_account_username(username: str) -> str:
     username = username.strip()
     if not USERNAME_RE.match(username):
@@ -144,7 +182,7 @@ def validate_account_password(password: str) -> str:
     if not password:
         raise SystemExit("Account password cannot be empty.")
     if any(ch.isspace() for ch in password):
-        raise SystemExit("Account password cannot contain whitespace because CMaNGOS account commands are space-delimited.")
+        raise SystemExit("Account password cannot contain whitespace because account commands are space-delimited.")
     if len(password) > 64:
         raise SystemExit("Account password is too long for this helper; use 64 characters or fewer.")
     return password
@@ -152,12 +190,13 @@ def validate_account_password(password: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a WoW account on the MaNGOS server through SSH + server-local SOAP.",
+        description="Create a WoW account through SSH + server-local SOAP.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("username", help="WoW account username to create")
     parser.add_argument("--password", help="WoW account password. If omitted, prompt securely.")
-    parser.add_argument("--expansion", type=int, default=1, choices=(0, 1, 2), help="0=Classic, 1=TBC, 2=WotLK")
+    parser.add_argument("--server-type", choices=sorted(SERVER_PROFILES), default="cmangos")
+    parser.add_argument("--expansion", type=int, choices=(0, 1, 2), help="0=Classic, 1=TBC, 2=WotLK")
     parser.add_argument("--gmlevel", type=int, default=0, choices=(0, 1, 2, 3, 4), help="GM security level (1+ enables .bot add)")
     parser.add_argument("--realm-id", type=int, default=-1, help="Realm ID for gmlevel assignment (-1 = all realms)")
     parser.add_argument("--env", type=pathlib.Path, default=DEFAULT_ENV, help="Path to .env")
@@ -173,32 +212,42 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     env = load_env(args.env)
+    profile = SERVER_PROFILES[args.server_type]
+    env_prefixes = profile["env_prefixes"]
+    expansion = args.expansion if args.expansion is not None else int(profile["default_expansion"])
 
     account_name = validate_account_username(args.username)
     account_password = validate_account_password(args.password or getpass.getpass("New WoW account password: "))
 
-    soap_user = args.soap_user or env.get("MANGOS_SOAP_USERNAME", "").strip()
+    soap_user = args.soap_user or env_value(env, env_prefixes, "SOAP_USERNAME")
     if not soap_user:
         soap_user = input("SOAP admin username: ").strip()
     if not soap_user:
         raise SystemExit("SOAP admin username is required.")
 
-    soap_password = args.soap_password or env.get("MANGOS_SOAP_PASSWORD", "").strip()
+    soap_password = args.soap_password or env_value(env, env_prefixes, "SOAP_PASSWORD")
     if not soap_password:
         soap_password = getpass.getpass("SOAP admin password: ")
     if not soap_password:
         raise SystemExit("SOAP admin password is required.")
 
-    ssh_host = require_env(env, "MANGOS_HOST")
-    ssh_port = env.get("MANGOS_PORT", "22").strip() or "22"
-    ssh_user = require_env(env, "MANGOS_USER")
-    ssh_key = require_env(env, "MANGOS_SSH_KEY_PATH")
-    soap_url = args.soap_url or env.get("MANGOS_SOAP_URL", "http://127.0.0.1:7878/").strip()
+    ssh_host = env_value(env, env_prefixes, "HOST")
+    if not ssh_host:
+        raise SystemExit(f"{env_prefixes[0]}_HOST must be set in .env")
+    ssh_port = env_value(env, env_prefixes, "PORT", "22") or "22"
+    ssh_user = env_value(env, env_prefixes, "USER")
+    if not ssh_user:
+        raise SystemExit(f"{env_prefixes[0]}_USER must be set in .env")
+    ssh_key = env_value(env, env_prefixes, "SSH_KEY_PATH")
+    if not ssh_key:
+        raise SystemExit(f"{env_prefixes[0]}_SSH_KEY_PATH must be set in .env")
+    soap_url_prefixes = tuple(prefix for prefix in env_prefixes if prefix != "MANGOS") if args.server_type == "azerothcore" else env_prefixes
+    soap_url = args.soap_url or env_value(soap_url_prefixes and env or {}, soap_url_prefixes, "SOAP_URL", str(profile["default_soap_url"]))
 
     commands = []
     if not args.skip_create:
         commands.append(f"account create {account_name} {account_password}")
-    commands.append(f"account set addon {account_name} {args.expansion}")
+    commands.append(f"account set addon {account_name} {expansion}")
     if args.gmlevel > 0:
         commands.append(f"account set gmlevel {account_name} {args.gmlevel} {args.realm_id}")
 
@@ -206,13 +255,16 @@ def main() -> int:
         "soap_url": soap_url,
         "soap_user": soap_user,
         "soap_password": soap_password,
+        "soap_namespace": profile["soap_namespace"],
         "commands": commands,
         "verbose": args.verbose,
     }
 
     if args.dry_run:
         print(f"SSH target: {ssh_user}@{ssh_host}:{ssh_port}")
+        print(f"Server type: {profile['label']}")
         print(f"SOAP URL on server: {soap_url}")
+        print(f"SOAP namespace: {profile['soap_namespace']}")
         for command in commands:
             scrubbed = command.replace(account_password, "********")
             print(f"Would run: {scrubbed}")
@@ -246,7 +298,7 @@ def main() -> int:
             print(completed.stderr.strip(), file=sys.stderr)
         return completed.returncode
 
-    parts = [f"Created/updated account {account_name} with expansion {args.expansion}"]
+    parts = [f"Created/updated {profile['label']} account {account_name} with expansion {expansion}"]
     if args.gmlevel > 0:
         parts.append(f"GM level set to {args.gmlevel} (realm {args.realm_id})")
     print(".".join(parts) + ".")

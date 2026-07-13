@@ -41,6 +41,18 @@ def build_settings(args: argparse.Namespace) -> dict[str, Any]:
         set_nested(doc, "auth", "port", args.auth_port)
     if args.realm:
         set_nested(doc, "realm", "name", args.realm)
+    if args.client_expansion:
+        set_nested(doc, "client", "expansion", args.client_expansion)
+    for attr, key in (
+        ("client_major", "major"),
+        ("client_minor", "minor"),
+        ("client_patch", "patch"),
+        ("client_build", "build"),
+        ("client_protocol", "protocol"),
+    ):
+        value = getattr(args, attr)
+        if value is not None:
+            set_nested(doc, "client", key, value)
 
     set_nested(doc, "character", "name", args.name)
     doc["provision"] = {
@@ -96,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auth-host", help="Override auth.host")
     parser.add_argument("--auth-port", type=int, help="Override auth.port")
     parser.add_argument("--realm", help="Override realm.name")
+    parser.add_argument("--client-expansion", choices=("classic", "tbc", "wotlk", "turtle"), help="Override client.expansion")
+    parser.add_argument("--client-major", type=int, help="Override client.major")
+    parser.add_argument("--client-minor", type=int, help="Override client.minor")
+    parser.add_argument("--client-patch", type=int, help="Override client.patch")
+    parser.add_argument("--client-build", type=int, help="Override client.build")
+    parser.add_argument("--client-protocol", type=int, help="Override client.protocol")
     parser.add_argument("--name", required=True, help="Character name to create")
     parser.add_argument("--race", required=True, help="Race name or numeric race id")
     parser.add_argument("--class", required=True, dest="character_class", help="Class name or numeric class id")

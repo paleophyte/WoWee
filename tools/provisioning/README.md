@@ -1,10 +1,10 @@
 # WoWee Provisioning Tools
 
-These scripts create CMaNGOS test accounts and characters for headless automation.
+These scripts create CMaNGOS or AzerothCore test accounts and characters for headless automation.
 
 ## Account Creation
 
-Use CMaNGOS SOAP/server commands instead of direct SQL inserts. Modern CMaNGOS account rows include SRP verifier/salt fields, and the server already knows how to generate them correctly.
+Use SOAP/server commands instead of direct SQL inserts. Modern CMaNGOS and AzerothCore account rows include SRP verifier/salt fields, and the server already knows how to generate them correctly.
 
 There are two supported account creation paths:
 
@@ -29,12 +29,33 @@ MANGOS_SOAP_PASSWORD=GMPASSWORD
 
 `tools/.env` is ignored by git.
 
+For AzerothCore, you can either add AC-specific values or rely on the same SSH host/key values as `MANGOS_*`. AzerothCore SOAP uses the `urn:AC` namespace and is normally kept bound to `127.0.0.1`:
+
+```dotenv
+AC_HOST=10.0.0.10
+AC_PORT=22
+AC_USER=mangos
+AC_SSH_KEY_PATH=C:\Users\admin\.ssh\mangos_codex
+AC_SOAP_URL=http://127.0.0.1:7879/
+AC_SOAP_USERNAME=SERVERADMIN
+AC_SOAP_PASSWORD=GMPASSWORD
+```
+
 Create or update an account:
 
 ```bash
 python tools/provisioning/create_account_ssh.py BOT001 \
   --password bot-password \
   --expansion 1
+```
+
+Create or update an AzerothCore account:
+
+```bash
+python tools/provisioning/create_account_ssh.py BOT001 \
+  --server-type azerothcore \
+  --password bot-password \
+  --expansion 2
 ```
 
 For bot accounts that need to use `.bot add` commands, set GM level to 1 (Moderator):
@@ -46,7 +67,7 @@ python tools/provisioning/create_account_ssh.py BOT001 \
   --gmlevel 1
 ```
 
-The script runs:
+The script runs the server's account commands:
 
 ```text
 account create BOT001 ********
@@ -85,7 +106,7 @@ python tools/provisioning/create_account_ssh.py BOT001 \
   --skip-create
 ```
 
-For TBC, `--expansion 1` is normally the useful account expansion value.
+For TBC on CMaNGOS, `--expansion 1` is normally the useful account expansion value. For AzerothCore WotLK, use `--server-type azerothcore`; it defaults account expansion to `2`.
 
 ### GM Level for Bot Accounts
 
@@ -101,6 +122,7 @@ Enable SOAP in your CMaNGOS world server config, create or choose a GM account t
 
 ```bash
 python tools/provisioning/create_account_direct_soap.py create \
+  --server-type cmangos \
   --soap-url http://127.0.0.1:7878/ \
   --admin-user GMACCOUNT \
   --admin-pass GMPASSWORD \
@@ -108,6 +130,8 @@ python tools/provisioning/create_account_direct_soap.py create \
   --password bot-password \
   --expansion 1
 ```
+
+For AzerothCore direct SOAP, pass `--server-type azerothcore`.
 
 If the CMaNGOS host should expose a tiny provisioning endpoint, run this on the Linux box:
 
@@ -199,7 +223,7 @@ Example roster shape:
     "settings": "tools/headless_client/settings.json",
     "woweeHeadless": "build/bin/wowee_headless.exe",
     "accountPassword": "change-me",
-    "expansion": 1,
+    "serverType": "cmangos",
     "gmlevel": 1,
     "race": "human",
     "class": "warrior",
@@ -241,3 +265,13 @@ python tools/provisioning/provision_roster.py tools/provisioning/roster.json --c
 ```
 
 By default, roster provisioning uses `create_account_ssh.py` for account creation and `create_character.py` for character creation.
+
+To target AzerothCore from the command line:
+
+```bash
+python tools/provisioning/provision_roster.py tools/provisioning/roster.json \
+  --server-type azerothcore \
+  --auth-host 10.102.172.4
+```
+
+When `serverType` is `azerothcore`, or when `--server-type azerothcore` is passed, roster provisioning defaults to account expansion `2`, auth port `3725`, realm `AzerothCore`, client expansion `wotlk`, and client version `3.3.5.12340`. CMaNGOS defaults remain expansion `1`, auth port `3724`, realm `MaNGOS`, client expansion `tbc`, and client version `2.4.3.8606`. The CLI flag overrides the roster default for quick retargeting.

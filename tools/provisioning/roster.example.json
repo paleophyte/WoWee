@@ -3,7 +3,7 @@
     "settings": "tools/headless_client/settings.json",
     "woweeHeadless": "build/bin/wowee_headless.exe",
     "accountPassword": "change-me",
-    "expansion": 1,
+    "serverType": "cmangos",
     "race": "human",
     "class": "warrior",
     "gender": "male",

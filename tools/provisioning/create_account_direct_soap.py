@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create CMaNGOS accounts through the built-in SOAP command endpoint."""
+"""Create WoW accounts through the built-in SOAP command endpoint."""
 
 from __future__ import annotations
 
@@ -14,15 +14,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 
-SOAP_NS = "urn:MaNGOS"
 SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
+SERVER_SOAP_NAMESPACES = {
+    "cmangos": "urn:MaNGOS",
+    "azerothcore": "urn:AC",
+}
 
 
-def soap_execute_command(soap_url: str, admin_user: str, admin_pass: str, command: str, timeout: float = 15.0) -> str:
+def soap_execute_command(
+    soap_url: str,
+    admin_user: str,
+    admin_pass: str,
+    command: str,
+    timeout: float = 15.0,
+    soap_namespace: str = "urn:MaNGOS",
+) -> str:
     if not soap_url.startswith(("http://", "https://")):
         raise ValueError(f"refusing non-http(s) URL: {soap_url}")
     envelope = f"""<?xml version="1.0" encoding="UTF-8"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:ns1="{SOAP_NS}">
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="{SOAP_ENV}" xmlns:ns1="{xml_escape(soap_namespace)}">
   <SOAP-ENV:Body>
     <ns1:executeCommand>
       <command>{xml_escape(command)}</command>
@@ -80,14 +90,27 @@ def parse_soap_result(body: str) -> str:
 def create_account(args: argparse.Namespace) -> int:
     validate_command_arg(args.account, "account")
     validate_command_arg(args.password, "password")
-    expansion = f" {args.expansion}" if args.expansion is not None else ""
-    command = f"account create {args.account} {args.password}{expansion}"
-    result = soap_execute_command(args.soap_url, args.admin_user, args.admin_pass, command, args.timeout)
-    print(result or "Account created.")
+    command = f"account create {args.account} {args.password}"
+    try:
+        result = soap_execute_command(args.soap_url, args.admin_user, args.admin_pass, command, args.timeout, args.soap_namespace)
+        print(result or "Account created.")
+    except RuntimeError as exc:
+        lowered = str(exc).lower()
+        if "already exist" in lowered or "already exists" in lowered:
+            print("Account already exists; continuing.")
+        else:
+            raise
+
+    if args.expansion is not None:
+        expansion_cmd = f"account set addon {args.account} {args.expansion}"
+        expansion_result = soap_execute_command(
+            args.soap_url, args.admin_user, args.admin_pass, expansion_cmd, args.timeout, args.soap_namespace
+        )
+        print(expansion_result or f"Expansion set to {args.expansion}.")
 
     if args.gmlevel > 0:
         gm_cmd = f"account set gmlevel {args.account} {args.gmlevel} {args.realm_id}"
-        gm_result = soap_execute_command(args.soap_url, args.admin_user, args.admin_pass, gm_cmd, args.timeout)
+        gm_result = soap_execute_command(args.soap_url, args.admin_user, args.admin_pass, gm_cmd, args.timeout, args.soap_namespace)
         print(gm_result or f"GM level set to {args.gmlevel}.")
 
     return 0
@@ -115,16 +138,31 @@ class AccountService(BaseHTTPRequestHandler):
             validate_command_arg(password, "password")
             expansion = payload.get("expansion")
             command = f"account create {account} {password}"
-            if expansion is not None:
-                command += f" {int(expansion)}"
 
-            result = soap_execute_command(
-                self.server.soap_url,  # type: ignore[attr-defined]
-                self.server.admin_user,  # type: ignore[attr-defined]
-                self.server.admin_pass,  # type: ignore[attr-defined]
-                command,
-                self.server.soap_timeout,  # type: ignore[attr-defined]
-            )
+            try:
+                result = soap_execute_command(
+                    self.server.soap_url,  # type: ignore[attr-defined]
+                    self.server.admin_user,  # type: ignore[attr-defined]
+                    self.server.admin_pass,  # type: ignore[attr-defined]
+                    command,
+                    self.server.soap_timeout,  # type: ignore[attr-defined]
+                    self.server.soap_namespace,  # type: ignore[attr-defined]
+                )
+            except RuntimeError as exc:
+                lowered = str(exc).lower()
+                if "already exist" in lowered or "already exists" in lowered:
+                    result = "Account already exists."
+                else:
+                    raise
+            if expansion is not None:
+                soap_execute_command(
+                    self.server.soap_url,  # type: ignore[attr-defined]
+                    self.server.admin_user,  # type: ignore[attr-defined]
+                    self.server.admin_pass,  # type: ignore[attr-defined]
+                    f"account set addon {account} {int(expansion)}",
+                    self.server.soap_timeout,  # type: ignore[attr-defined]
+                    self.server.soap_namespace,  # type: ignore[attr-defined]
+                )
             self.send_json(200, {"ok": True, "result": result})
         except Exception as exc:
             self.send_json(400, {"ok": False, "error": str(exc)})
@@ -162,9 +200,10 @@ def serve(args: argparse.Namespace) -> int:
     httpd.admin_user = args.admin_user  # type: ignore[attr-defined]
     httpd.admin_pass = args.admin_pass  # type: ignore[attr-defined]
     httpd.soap_timeout = args.timeout  # type: ignore[attr-defined]
+    httpd.soap_namespace = args.soap_namespace  # type: ignore[attr-defined]
     httpd.provision_token = args.token  # type: ignore[attr-defined]
 
-    print(f"CMaNGOS account provisioning service listening on http://{args.bind}:{args.port}")
+    print(f"Account provisioning service listening on http://{args.bind}:{args.port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -173,7 +212,9 @@ def serve(args: argparse.Namespace) -> int:
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--soap-url", required=True, help="CMaNGOS SOAP URL, for example http://127.0.0.1:7878/")
+    parser.add_argument("--server-type", choices=sorted(SERVER_SOAP_NAMESPACES), default="cmangos")
+    parser.add_argument("--soap-namespace", default="", help="Override SOAP XML namespace; defaults from --server-type")
+    parser.add_argument("--soap-url", required=True, help="SOAP URL, for example http://127.0.0.1:7878/")
     parser.add_argument("--admin-user", required=True, help="GM account with SOAP command access")
     parser.add_argument("--admin-pass", required=True, help="GM account password")
     parser.add_argument("--timeout", type=float, default=15.0, help="SOAP timeout in seconds")
@@ -200,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     service.set_defaults(func=serve)
 
     args = parser.parse_args(argv)
+    args.soap_namespace = args.soap_namespace or SERVER_SOAP_NAMESPACES[args.server_type]
     return int(args.func(args))
 
 
