@@ -2175,6 +2175,8 @@ void WindowManager::renderTaxiWindow(game::GameHandler& gameHandler) {
 
         static uint32_t selectedNodeId = 0;
         int destCount = 0;
+        uint64_t playerMoney = gameHandler.getMoneyCopper();
+        uint32_t selectedCostCopper = 0;
         if (ImGui::BeginTable("TaxiNodes", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
             ImGui::TableSetupColumn("Destination", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Cost", ImGuiTableColumnFlags_WidthFixed, 120.0f);
@@ -2190,9 +2192,13 @@ void WindowManager::renderTaxiWindow(game::GameHandler& gameHandler) {
                 uint32_t gold = costCopper / 10000;
                 uint32_t silver = (costCopper / 100) % 100;
                 uint32_t copper = costCopper % 100;
+                bool affordable = costCopper <= playerMoney;
+                if (nodeId == selectedNodeId) selectedCostCopper = costCopper;
 
                 ImGui::PushID(static_cast<int>(nodeId));
                 ImGui::TableNextRow();
+
+                ImGui::BeginDisabled(!affordable);
 
                 ImGui::TableSetColumnIndex(0);
                 bool isSelected = (selectedNodeId == nodeId);
@@ -2201,7 +2207,7 @@ void WindowManager::renderTaxiWindow(game::GameHandler& gameHandler) {
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
                     selectedNodeId = nodeId;
                     LOG_INFO("Taxi UI: Selected dest=", nodeId);
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    if (affordable && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         LOG_INFO("Taxi UI: Double-click activate dest=", nodeId);
                         gameHandler.activateTaxi(nodeId);
                     }
@@ -2217,6 +2223,8 @@ void WindowManager::renderTaxiWindow(game::GameHandler& gameHandler) {
                     gameHandler.activateTaxi(nodeId);
                 }
 
+                ImGui::EndDisabled();
+
                 ImGui::PopID();
                 destCount++;
             }
@@ -2229,10 +2237,16 @@ void WindowManager::renderTaxiWindow(game::GameHandler& gameHandler) {
 
         ImGui::Spacing();
         ImGui::Separator();
-        if (selectedNodeId != 0 && ImGui::Button("Fly Selected", ImVec2(-1, 0))) {
+        bool selectedAffordable = selectedCostCopper <= playerMoney;
+        if (selectedNodeId != 0 && !selectedAffordable) {
+            ImGui::TextColored(colors::kLowHealthRed, "Not enough money for this destination.");
+        }
+        ImGui::BeginDisabled(selectedNodeId == 0 || !selectedAffordable);
+        if (ImGui::Button("Fly Selected", ImVec2(-1, 0))) {
             LOG_INFO("Taxi UI: Fly Selected dest=", selectedNodeId);
             gameHandler.activateTaxi(selectedNodeId);
         }
+        ImGui::EndDisabled();
         if (ImGui::Button("Close", ImVec2(-1, 0))) {
             gameHandler.closeTaxi();
         }
