@@ -41,9 +41,26 @@ was done this way and is already merged upstream as PR #91.
    checking what's actually in its diff.
 4. Build both `wowee` and `wowee_headless` targets against the new branch
    before committing.
-5. Push and open a PR against `paleophyte/WoWee` `master` (not upstream
-   directly - the user reviews and forwards to upstream themselves once
-   local CI is clean).
+5. Push and open a PR against `paleophyte/WoWee` `master` first - never
+   open the upstream PR before this one exists and its CI is clean.
+6. Once that PR's local CI is green, `git fetch upstream` again and check
+   `git log --oneline master..upstream/master`. This confirms the fix
+   branch is still current *at the moment of forwarding*, not just when it
+   was cut - upstream moves fast enough that new commits can land during
+   the CI run itself.
+   - **Not behind**: open the PR directly against `Kelsidavis/WoWee`
+     `master` - this is pre-authorized, no need to check back first.
+   - **Behind, and the new upstream commits don't touch this fix's files**:
+     open the PR anyway: unrelated upstream churn isn't a reason to hold it.
+   - **Behind, and a new upstream commit touches the same function/file**:
+     do not open the PR yet. Re-run the full sync cycle first - merge
+     upstream into `master`, merge `master` into every branch carrying this
+     fix (the feature branch *and* the shared-code fix branch), resolve
+     conflicts (favor whichever side has real, currently-working logic over
+     a duplicate/dead code path - see the `updateTaxiAndMountState()`
+     precedent from 2026-07-12 for the reasoning to apply), rebuild both
+     targets, push, and wait for CI to go green again before re-checking
+     upstream and opening the PR.
 
 Keep each branch to one logical fix - small and reviewable, matching the
 PR #91 precedent, not one giant "everything shared" branch.
