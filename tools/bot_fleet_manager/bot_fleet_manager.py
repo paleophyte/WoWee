@@ -496,13 +496,17 @@ def runtime_env(config: FleetConfig | None = None, leader: dict[str, Any] | None
         # wowee_headless is built with WOWEE_HEADLESS_DEFAULT=1, which makes the
         # client skip SMSG_UPDATE_OBJECT/SMSG_COMPRESSED_UPDATE_OBJECT (and other
         # world-simulation packets) entirely, so it never learns about nearby
-        # entities - other players, NPCs, or GameObjects like the Deeprun Tram.
-        # Setting fullWorldSimulation: true on a leader (or in defaults.automation)
-        # opts that leader back into full object tracking, at the cost of the
-        # per-bot CPU savings the skip exists for. Needed for anything that has to
-        # see/board a transport, not just walk to fixed coordinates.
+        # entities - other players, NPCs, or GameObjects like the Deeprun Tram or a
+        # Flight Master. Full simulation is the sane default: a leader that can't
+        # see anything around it is the "special", CPU-optimized case, not the
+        # normal one, and this exact default silently defeated an entire debugging
+        # session (learn-flight-path failing with "no Flight Master found nearby"
+        # while standing right in front of one, since entity tracking was off with
+        # no explicit signal that it was). Set fullWorldSimulation: false on a
+        # leader (or in defaults.automation) to opt back into the lightweight,
+        # entity-blind mode for large swarms that only need to walk fixed routes.
         automation_defaults = config.defaults.get("automation", {})
-        full_sim_default = bool(automation_defaults.get("fullWorldSimulation", False))
+        full_sim_default = bool(automation_defaults.get("fullWorldSimulation", True))
         full_sim = bool(leader.get("fullWorldSimulation", full_sim_default)) if leader else full_sim_default
         env["WOWEE_HEADLESS"] = "0" if full_sim else "1"
     return env
