@@ -16,6 +16,26 @@ This file itself is fork-specific context and belongs only on
 `master`, which should stay a clean upstream mirror so fix branches cut from
 it stay clean too.
 
+## Don't build the `wowee` GUI target on this machine
+
+This is a VM with no GUI testing use - the user pulls this repo to their Mac
+or Windows laptop (whichever matches the platform they want to test) and
+builds/runs `wowee` there. `wowee`'s compile time is significant, so treat
+that cycle as expensive and avoid spending it here by default.
+
+- Default to building only `wowee_headless` to verify shared-code changes
+  compile - that's almost always sufficient, since `wowee` and
+  `wowee_headless` share the same source for anything outside
+  `tools/headless_client/` and `WOWEE_HEADLESS`-gated branches.
+- CI (GitHub Actions, `Build (windows-x86-64)`/`(x86-64)`/`(macOS arm64)`/etc.)
+  already builds and validates `wowee` for every PR - that's the normal way
+  a `wowee`-side compile error gets caught, not a local build here.
+- If something seems like it could *specifically* require compiling `wowee`
+  locally to prove (e.g. a GUI-only code path CI can't exercise, or CI itself
+  is failing in a way that needs local repro) - stop and ask the user for
+  confirmation first, explaining exactly why the headless-only build or CI
+  isn't enough for this specific case. Don't just build it "to be thorough."
+
 ## When fixing a bug in shared code
 
 If a fix touches a file that also exists upstream (not just something under
@@ -39,8 +59,9 @@ was done this way and is already merged upstream as PR #91.
    (env-var gating, new headless-only methods) mixed in from other work, so
    don't blindly `git checkout <branch> -- <file>` a whole file without
    checking what's actually in its diff.
-4. Build both `wowee` and `wowee_headless` targets against the new branch
-   before committing.
+4. Build `wowee_headless` against the new branch before committing (see
+   "Don't build the `wowee` GUI target on this machine" above for why not
+   both - CI covers `wowee` once pushed).
 5. Push and open a PR against `paleophyte/WoWee` `master` first - never
    open the upstream PR before this one exists and its CI is clean.
 6. Once that PR's local CI is green, `git fetch upstream` again and check
@@ -58,9 +79,9 @@ was done this way and is already merged upstream as PR #91.
      fix (the feature branch *and* the shared-code fix branch), resolve
      conflicts (favor whichever side has real, currently-working logic over
      a duplicate/dead code path - see the `updateTaxiAndMountState()`
-     precedent from 2026-07-12 for the reasoning to apply), rebuild both
-     targets, push, and wait for CI to go green again before re-checking
-     upstream and opening the PR.
+     precedent from 2026-07-12 for the reasoning to apply), rebuild
+     `wowee_headless`, push, and wait for CI to go green again (covering
+     `wowee`) before re-checking upstream and opening the PR.
 
 Keep each branch to one logical fix - small and reviewable, matching the
 PR #91 precedent, not one giant "everything shared" branch.
