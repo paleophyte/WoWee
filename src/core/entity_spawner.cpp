@@ -845,6 +845,53 @@ bool EntitySpawner::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) c
     return renderer_->getCharacterRenderer()->getInstancePosition(instanceId, outPos);
 }
 
+EntitySpawner::CachedAttachmentModel
+EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidatePaths,
+                                        const std::string& texturePath) {
+    // 1) Geometry: first candidate that yields a valid model wins, parsed at most once.
+    std::shared_ptr<pipeline::M2Model> model;
+    std::string resolvedPath;
+    for (const auto& path : candidatePaths) {
+        auto it = attachmentModelData_.find(path);
+        if (it != attachmentModelData_.end()) {
+            if (!it->second) continue;  // known missing — try the next candidate
+            model = it->second;
+            resolvedPath = path;
+            break;
+        }
+
+        auto data = assetManager_->readFile(path);
+        if (data.empty()) {
+            attachmentModelData_[path] = nullptr;
+            continue;
+        }
+        auto parsed = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(data));
+        if (parsed->name.empty()) parsed->name = path;
+        // Skin is a sidecar file for WotLK M2s; vanilla embeds it.
+        if (parsed->version >= 264) {
+            std::string skinPath = path.substr(0, path.size() - 3) + "00.skin";
+            auto skinData = assetManager_->readFile(skinPath);
+            if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, *parsed);
+        }
+        if (!parsed->isValid()) {
+            attachmentModelData_[path] = nullptr;
+            continue;
+        }
+        attachmentModelData_[path] = parsed;
+        model = std::move(parsed);
+        resolvedPath = path;
+        break;
+    }
+    if (!model) return {};
+
+    // 2) Model id is per (geometry, texture) — see attachmentModelIds_.
+    const std::string key = resolvedPath + '|' + texturePath;
+    auto idIt = attachmentModelIds_.find(key);
+    if (idIt == attachmentModelIds_.end()) {
+        idIt = attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
+    }
+    return CachedAttachmentModel{idIt->second, std::move(model)};
+}
 
 void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return;
@@ -1718,52 +1765,38 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         }
 
                         // Try race/gender-specific variant first, then base name
-                        std::string helmPath;
-                        std::vector<uint8_t> helmData;
+                        std::vector<std::string> helmCandidates;
                         if (!raceSuffix.empty()) {
-                            helmPath = "Item\\ObjectComponents\\Head\\" + helmModelName + raceSuffix + ".m2";
-                            helmData = assetManager_->readFile(helmPath);
+                            helmCandidates.push_back("Item\\ObjectComponents\\Head\\" + helmModelName + raceSuffix + ".m2");
                         }
-                        if (helmData.empty()) {
-                            helmPath = "Item\\ObjectComponents\\Head\\" + helmModelName + ".m2";
-                            helmData = assetManager_->readFile(helmPath);
-                        }
+                        helmCandidates.push_back("Item\\ObjectComponents\\Head\\" + helmModelName + ".m2");
 
-                        if (!helmData.empty()) {
-                            auto helmModel = pipeline::M2Loader::load(helmData);
-                            if (helmModel.name.empty()) helmModel.name = helmPath;
-                            // Load skin (only for WotLK M2s)
-                            std::string skinPath = helmPath.substr(0, helmPath.size() - 3) + "00.skin";
-                            auto skinData = assetManager_->readFile(skinPath);
-                            if (!skinData.empty() && helmModel.version >= 264) {
-                                pipeline::M2Loader::loadSkin(skinData, helmModel);
+                        // Texture first: the cached model id is keyed by (geometry, texture).
+                        std::string helmTexName = itemDisplayDbc->getString(static_cast<uint32_t>(helmIdx), idiL ? (*idiL)["LeftModelTexture"] : 3);
+                        std::string helmTexPath;
+                        if (!helmTexName.empty()) {
+                            // Try race/gender suffixed texture first
+                            if (!raceSuffix.empty()) {
+                                std::string suffixedTex = "Item\\ObjectComponents\\Head\\" + helmTexName + raceSuffix + ".blp";
+                                if (assetManager_->fileExists(suffixedTex)) {
+                                    helmTexPath = suffixedTex;
+                                }
                             }
+                            if (helmTexPath.empty()) {
+                                helmTexPath = "Item\\ObjectComponents\\Head\\" + helmTexName + ".blp";
+                            }
+                        }
 
-                            if (helmModel.isValid()) {
-                                // Attachment point 11 = Head
-                                uint32_t helmModelId = nextCreatureModelId_++;
-                                // Get texture from ItemDisplayInfo (LeftModelTexture)
-                                std::string helmTexName = itemDisplayDbc->getString(static_cast<uint32_t>(helmIdx), idiL ? (*idiL)["LeftModelTexture"] : 3);
-                                std::string helmTexPath;
-                                if (!helmTexName.empty()) {
-                                    // Try race/gender suffixed texture first
-                                    if (!raceSuffix.empty()) {
-                                        std::string suffixedTex = "Item\\ObjectComponents\\Head\\" + helmTexName + raceSuffix + ".blp";
-                                        if (assetManager_->fileExists(suffixedTex)) {
-                                            helmTexPath = suffixedTex;
-                                        }
-                                    }
-                                    if (helmTexPath.empty()) {
-                                        helmTexPath = "Item\\ObjectComponents\\Head\\" + helmTexName + ".blp";
-                                    }
-                                }
-                                bool attached = charRenderer->attachWeapon(instanceId, 0, helmModel, helmModelId, helmTexPath);
-                                if (!attached) {
-                                    attached = charRenderer->attachWeapon(instanceId, 11, helmModel, helmModelId, helmTexPath);
-                                }
-                                if (attached) {
-                                    LOG_DEBUG("Attached helmet model: ", helmPath, " tex: ", helmTexPath);
-                                }
+                        auto helm = getOrLoadAttachmentModel(helmCandidates, helmTexPath);
+                        if (helm.modelId != 0) {
+                            const auto& helmModel = *helm.model;
+                            // Attachment point 11 = Head
+                            bool attached = charRenderer->attachWeapon(instanceId, 0, helmModel, helm.modelId, helmTexPath);
+                            if (!attached) {
+                                attached = charRenderer->attachWeapon(instanceId, 11, helmModel, helm.modelId, helmTexPath);
+                            }
+                            if (attached) {
+                                LOG_DEBUG("Attached helmet model: ", helmModel.name, " tex: ", helmTexPath);
                             }
                         }
                     }
@@ -1799,40 +1832,32 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         size_t dotPos = leftModelName.rfind('.');
                         if (dotPos != std::string::npos) leftModelName = leftModelName.substr(0, dotPos);
 
-                        std::string leftPath;
-                        std::vector<uint8_t> leftData;
+                        std::vector<std::string> leftCandidates;
                         if (!raceSuffix.empty()) {
-                            leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + raceSuffix + ".m2";
-                            leftData = assetManager_->readFile(leftPath);
+                            leftCandidates.push_back("Item\\ObjectComponents\\Shoulder\\" + leftModelName + raceSuffix + ".m2");
                         }
-                        if (leftData.empty()) {
-                            leftPath = "Item\\ObjectComponents\\Shoulder\\" + leftModelName + ".m2";
-                            leftData = assetManager_->readFile(leftPath);
-                        }
-                        if (!leftData.empty()) {
-                            auto leftModel = pipeline::M2Loader::load(leftData);
-                            if (leftModel.name.empty()) leftModel.name = leftPath;
-                            std::string skinPath = leftPath.substr(0, leftPath.size() - 3) + "00.skin";
-                            auto skinData = assetManager_->readFile(skinPath);
-                            if (!skinData.empty() && leftModel.version >= 264) {
-                                pipeline::M2Loader::loadSkin(skinData, leftModel);
+                        leftCandidates.push_back("Item\\ObjectComponents\\Shoulder\\" + leftModelName + ".m2");
+
+                        // Texture first: the cached model id is keyed by (geometry, texture).
+                        std::string leftTexName = itemDisplayDbc->getString(static_cast<uint32_t>(shoulderIdx), leftTexFieldS);
+                        std::string leftTexPath;
+                        if (!leftTexName.empty()) {
+                            if (!raceSuffix.empty()) {
+                                std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + raceSuffix + ".blp";
+                                if (assetManager_->fileExists(suffixedTex)) leftTexPath = suffixedTex;
                             }
-                            if (leftModel.isValid()) {
-                                uint32_t leftModelId = nextCreatureModelId_++;
-                                std::string leftTexName = itemDisplayDbc->getString(static_cast<uint32_t>(shoulderIdx), leftTexFieldS);
-                                std::string leftTexPath;
-                                if (!leftTexName.empty()) {
-                                    if (!raceSuffix.empty()) {
-                                        std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + raceSuffix + ".blp";
-                                        if (assetManager_->fileExists(suffixedTex)) leftTexPath = suffixedTex;
-                                    }
-                                    if (leftTexPath.empty()) {
-                                        leftTexPath = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + ".blp";
-                                    }
-                                }
-                                bool attached = charRenderer->attachWeapon(instanceId, 5, leftModel, leftModelId, leftTexPath);
+                            if (leftTexPath.empty()) {
+                                leftTexPath = "Item\\ObjectComponents\\Shoulder\\" + leftTexName + ".blp";
+                            }
+                        }
+
+                        auto leftAtt = getOrLoadAttachmentModel(leftCandidates, leftTexPath);
+                        if (leftAtt.modelId != 0) {
+                            const auto& leftModel = *leftAtt.model;
+                            {
+                                bool attached = charRenderer->attachWeapon(instanceId, 5, leftModel, leftAtt.modelId, leftTexPath);
                                 if (attached) {
-                                    LOG_DEBUG("NPC attached left shoulder: ", leftPath, " tex: ", leftTexPath);
+                                    LOG_DEBUG("NPC attached left shoulder: ", leftModel.name, " tex: ", leftTexPath);
                                 }
                             }
                         }
@@ -1844,40 +1869,32 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         size_t dotPos = rightModelName.rfind('.');
                         if (dotPos != std::string::npos) rightModelName = rightModelName.substr(0, dotPos);
 
-                        std::string rightPath;
-                        std::vector<uint8_t> rightData;
+                        std::vector<std::string> rightCandidates;
                         if (!raceSuffix.empty()) {
-                            rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + raceSuffix + ".m2";
-                            rightData = assetManager_->readFile(rightPath);
+                            rightCandidates.push_back("Item\\ObjectComponents\\Shoulder\\" + rightModelName + raceSuffix + ".m2");
                         }
-                        if (rightData.empty()) {
-                            rightPath = "Item\\ObjectComponents\\Shoulder\\" + rightModelName + ".m2";
-                            rightData = assetManager_->readFile(rightPath);
-                        }
-                        if (!rightData.empty()) {
-                            auto rightModel = pipeline::M2Loader::load(rightData);
-                            if (rightModel.name.empty()) rightModel.name = rightPath;
-                            std::string skinPath = rightPath.substr(0, rightPath.size() - 3) + "00.skin";
-                            auto skinData = assetManager_->readFile(skinPath);
-                            if (!skinData.empty() && rightModel.version >= 264) {
-                                pipeline::M2Loader::loadSkin(skinData, rightModel);
+                        rightCandidates.push_back("Item\\ObjectComponents\\Shoulder\\" + rightModelName + ".m2");
+
+                        // Texture first: the cached model id is keyed by (geometry, texture).
+                        std::string rightTexName = itemDisplayDbc->getString(static_cast<uint32_t>(shoulderIdx), rightTexFieldS);
+                        std::string rightTexPath;
+                        if (!rightTexName.empty()) {
+                            if (!raceSuffix.empty()) {
+                                std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + raceSuffix + ".blp";
+                                if (assetManager_->fileExists(suffixedTex)) rightTexPath = suffixedTex;
                             }
-                            if (rightModel.isValid()) {
-                                uint32_t rightModelId = nextCreatureModelId_++;
-                                std::string rightTexName = itemDisplayDbc->getString(static_cast<uint32_t>(shoulderIdx), rightTexFieldS);
-                                std::string rightTexPath;
-                                if (!rightTexName.empty()) {
-                                    if (!raceSuffix.empty()) {
-                                        std::string suffixedTex = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + raceSuffix + ".blp";
-                                        if (assetManager_->fileExists(suffixedTex)) rightTexPath = suffixedTex;
-                                    }
-                                    if (rightTexPath.empty()) {
-                                        rightTexPath = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + ".blp";
-                                    }
-                                }
-                                bool attached = charRenderer->attachWeapon(instanceId, 6, rightModel, rightModelId, rightTexPath);
+                            if (rightTexPath.empty()) {
+                                rightTexPath = "Item\\ObjectComponents\\Shoulder\\" + rightTexName + ".blp";
+                            }
+                        }
+
+                        auto rightAtt = getOrLoadAttachmentModel(rightCandidates, rightTexPath);
+                        if (rightAtt.modelId != 0) {
+                            const auto& rightModel = *rightAtt.model;
+                            {
+                                bool attached = charRenderer->attachWeapon(instanceId, 6, rightModel, rightAtt.modelId, rightTexPath);
                                 if (attached) {
-                                    LOG_DEBUG("NPC attached right shoulder: ", rightPath, " tex: ", rightTexPath);
+                                    LOG_DEBUG("NPC attached right shoulder: ", rightModel.name, " tex: ", rightTexPath);
                                 }
                             }
                         }
