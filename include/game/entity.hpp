@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/protocol_constants.hpp"
+
 #include <cstdint>
 #include <cmath>
 #include <string>
@@ -347,6 +349,11 @@ public:
     uint32_t getUnitFlags() const { return unitFlags; }
     void setUnitFlags(uint32_t f) { unitFlags = f; }
 
+    // Client presentation flags (byte 2 of UNIT_FIELD_BYTES_1).
+    uint8_t getVisibilityFlags() const { return visibilityFlags; }
+    void setVisibilityFlags(uint8_t f) { visibilityFlags = f; }
+    bool hasCreepVisibility() const { return (visibilityFlags & UNIT_VIS_FLAG_CREEP) != 0; }
+
     // Dynamic flags (UNIT_DYNAMIC_FLAGS, index 147)
     uint32_t getDynamicFlags() const { return dynamicFlags; }
     void setDynamicFlags(uint32_t f) { dynamicFlags = f; }
@@ -381,6 +388,7 @@ protected:
     uint32_t displayId = 0;
     uint32_t mountDisplayId = 0;
     uint32_t unitFlags = 0;
+    uint8_t visibilityFlags = 0;
     uint32_t dynamicFlags = 0;
     uint32_t npcFlags = 0;
     uint32_t npcEmoteState = 0;

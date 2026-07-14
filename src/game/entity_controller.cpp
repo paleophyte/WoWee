@@ -885,26 +885,29 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stunStateCallbackRef()(nowStunned);
                 }
             }
-            // Detect stealth state change on local player
-            constexpr uint32_t UNIT_FLAG_SNEAKING = 0x02000000;
-            if (block.guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
-                bool wasStealth = (oldFlags & UNIT_FLAG_SNEAKING) != 0;
-                bool nowStealth = (val & UNIT_FLAG_SNEAKING) != 0;
-                if (wasStealth != nowStealth) {
-                    owner_.stealthStateCallbackRef()(nowStealth);
-                }
-            }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
             unit->setAuraState(val);
         }
-        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1 && block.guid == owner_.getPlayerGuid()) {
-            uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
-            if (newForm != owner_.shapeshiftFormIdRef()) {
-                owner_.shapeshiftFormIdRef() = newForm;
-                LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
+        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
+            const uint8_t oldVisibilityFlags = unit->getVisibilityFlags();
+            const uint8_t newVisibilityFlags = static_cast<uint8_t>((val >> 16) & 0xFF);
+            unit->setVisibilityFlags(newVisibilityFlags);
+
+            if (block.guid == owner_.getPlayerGuid()) {
+                const bool wasStealthed = (oldVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
+                const bool nowStealthed = (newVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
+                if (wasStealthed != nowStealthed && owner_.stealthStateCallbackRef()) {
+                    owner_.stealthStateCallbackRef()(nowStealthed);
+                }
+
+                uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
+                if (newForm != owner_.shapeshiftFormIdRef()) {
+                    owner_.shapeshiftFormIdRef() = newForm;
+                    LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
+                }
             }
         }
         else if (key == ufi.dynFlags) {

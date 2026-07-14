@@ -77,6 +77,30 @@ void EntitySpawner::update() {
     processPendingTransportRegistrations();
     processPendingTransportDoodads();
     processPendingMount();
+    syncCreatureStealthVisuals();
+}
+
+void EntitySpawner::syncCreatureStealthVisuals() {
+    if (!renderer_ || !gameHandler_) return;
+    auto* characterRenderer = renderer_->getCharacterRenderer();
+    if (!characterRenderer) return;
+
+    // Undetected stealth is culled by the server. Units that are sent with the
+    // CREEP visibility flag use the translucent detected-stealth presentation.
+    constexpr float kDetectedStealthOpacity = 0.35f;
+    for (const auto& [guid, instanceId] : creatureInstances_) {
+        auto entity = gameHandler_->getEntityManager().getEntity(guid);
+        auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
+        if (!unit) continue;
+
+        const bool stealthed = unit->hasCreepVisibility();
+        auto [it, inserted] = creatureWasStealthed_.try_emplace(guid, stealthed);
+        if (!inserted && it->second == stealthed) continue;
+
+        it->second = stealthed;
+        characterRenderer->setInstanceOpacity(
+            instanceId, stealthed ? kDetectedStealthOpacity : 1.0f);
+    }
 }
 
 void EntitySpawner::shutdown() {
@@ -92,6 +116,7 @@ void EntitySpawner::shutdown() {
     creatureSwimmingState_.clear();
     creatureWalkingState_.clear();
     creatureFlyingState_.clear();
+    creatureWasStealthed_.clear();
     creatureWeaponsAttached_.clear();
     creatureWeaponAttachAttempts_.clear();
     playerInstances_.clear();
