@@ -1154,6 +1154,21 @@ void GameScreen::renderTargetFrame(game::GameHandler& gameHandler) {
             }
         }
 
+        // Player class, right-aligned on the name line and tinted with the class colour.
+        if (target->getType() == game::ObjectType::PLAYER) {
+            uint8_t cid = entityClassId(target.get());
+            if (cid != 0) {  // 0 = class not received yet; would read as "Unknown"
+                const char* cls = classNameStr(cid);
+                const float textW = ImGui::CalcTextSize(cls).x;
+                ImGui::SameLine();
+                // Right-align, but never let it run back over the name or the icons.
+                const float minX = ImGui::GetCursorPosX() + 8.0f;
+                const float rightEdge = ImGui::GetWindowContentRegionMax().x;
+                ImGui::SetCursorPosX(std::max(minX, rightEdge - textW));
+                ImGui::TextColored(classColorVec4(cid), "%s", cls);
+            }
+        }
+
         // Creature subtitle (e.g. "<Warchief of the Horde>", "Captain of the Guard")
         if (target->getType() == game::ObjectType::UNIT) {
             auto unit = std::static_pointer_cast<game::Unit>(target);
