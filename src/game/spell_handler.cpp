@@ -1,4 +1,5 @@
 #include "game/spell_handler.hpp"
+#include "game/spell_classification.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
@@ -507,9 +508,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // An unknown range (SpellRange.dbc unavailable) is not treated as melee, so the
     // server arbitrates rather than the client blocking a legitimate cast.
     if (!facingHandled) {
-        constexpr float kCombatRangeYards = 5.0f;
-        const float spellMaxRange = getSpellMaxRange(spellId);
-        const bool isMeleeAbility = (spellMaxRange > 0.0f && spellMaxRange <= kCombatRangeYards);
+        const bool isMeleeAbility = spellclass::isMeleeRange(getSpellMaxRange(spellId));
         if (isMeleeAbility && target != 0) {
             auto entity = owner_.getEntityManager().getEntity(target);
             if (entity) {
@@ -1298,9 +1297,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
         // play a melee swing.
         bool isMeleeAbility = false;
         if (!owner_.isProfessionSpell(sid) && !isRangedWeaponAttackSpell(sid)) {
-            constexpr float kCombatRangeYards = 5.0f;
-            const float sidRange = getSpellMaxRange(sid);
-            if (sidRange > 0.0f && sidRange <= kCombatRangeYards) {
+            if (spellclass::isMeleeRange(getSpellMaxRange(sid))) {
                 isMeleeAbility = (currentCastSpellId_ != sid);
             }
         }
@@ -2463,37 +2460,25 @@ uint32_t SpellHandler::getSpellTargetFlags(uint32_t spellId) const {
 }
 
 uint32_t SpellHandler::resolveHighestKnownRank(uint32_t spellId) const {
-    // Anything the server told us we know is castable as-is. Only spells absent from
-    // the known list can be superseded ranks. Item/gather/vehicle spells are also
-    // absent, but they have no known same-name sibling, so they fall through unchanged.
     if (spellId == 0 || knownSpells_.count(spellId) > 0) return spellId;
 
     loadSpellNameCache();
     const auto& cache = owner_.spellNameCacheRef();
-    auto it = cache.find(spellId);
-    if (it == cache.end() || it->second.name.empty()) return spellId;
-    const std::string& name = it->second.name;
 
-    // Spell.dbc stores the rank as a display string ("Rank 3"); rankless spells sort as 0.
-    auto rankValue = [](const std::string& rank) -> int {
-        size_t digit = rank.find_first_of("0123456789");
-        return (digit == std::string::npos) ? 0 : std::atoi(rank.c_str() + digit);
+    // Adapt the spell name cache to the pure resolver in spell_classification.hpp.
+    thread_local spellclass::SpellRankInfo scratch;
+    auto lookup = [&cache](uint32_t id) -> const spellclass::SpellRankInfo* {
+        auto it = cache.find(id);
+        if (it == cache.end()) return nullptr;
+        scratch.name = it->second.name;
+        scratch.rank = it->second.rank;
+        return &scratch;
     };
 
-    uint32_t best = 0;
-    int bestRank = -1;
-    for (uint32_t known : knownSpells_) {
-        auto kit = cache.find(known);
-        if (kit == cache.end() || kit->second.name != name) continue;
-        int rank = rankValue(kit->second.rank);
-        if (rank > bestRank) {
-            bestRank = rank;
-            best = known;
-        }
+    const uint32_t best = spellclass::resolveHighestKnownRank(spellId, knownSpells_, lookup);
+    if (best != spellId) {
+        LOG_INFO("Superseded rank: casting ", best, " instead of ", spellId);
     }
-    if (best == 0) return spellId;
-
-    LOG_INFO("Superseded rank: casting ", best, " instead of ", spellId, " (", name, ")");
     return best;
 }
 
@@ -2512,7 +2497,7 @@ bool SpellHandler::isSelfCastSpell(uint32_t spellId) const {
     // SpellRange "Self Only" has a max range of 0 — the spell cannot reach any
     // other unit, so it is cast on the caster no matter what is targeted.
     // A negative range means SpellRange.dbc was unavailable; assume not self-cast.
-    return it->second.maxRange == 0.0f;
+    return spellclass::isSelfCastRange(it->second.maxRange);
 }
 
 const std::string& SpellHandler::getSkillLineName(uint32_t spellId) const {

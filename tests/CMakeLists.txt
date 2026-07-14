@@ -543,6 +543,17 @@ target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
 
+# ── test_spell_classification ───────────────────────────────
+add_executable(test_spell_classification
+    test_spell_classification.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_spell_classification PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_spell_classification SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_spell_classification PRIVATE catch2_main)
+add_test(NAME spell_classification COMMAND test_spell_classification)
+register_test_target(test_spell_classification)
+
 # ── test_realm_list ─────────────────────────────────────────
 add_executable(test_realm_list
     test_realm_list.cpp
