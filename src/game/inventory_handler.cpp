@@ -3137,19 +3137,27 @@ void InventoryHandler::rebuildOnlineInventory() {
         if (contIt != owner_.containerContentsRef().end()) {
             numSlots = static_cast<int>(contIt->second.numSlots);
         }
-        if (numSlots <= 0) {
+        const ItemQueryResponseData* bagTemplate = nullptr;
+        {
             auto bagItemIt = owner_.onlineItemsRef().find(bagGuid);
             if (bagItemIt != owner_.onlineItemsRef().end()) {
                 auto bagInfoIt = owner_.itemInfoCacheRef().find(bagItemIt->second.entry);
-                if (bagInfoIt != owner_.itemInfoCacheRef().end()) {
-                    numSlots = bagInfoIt->second.containerSlots;
-                }
+                if (bagInfoIt != owner_.itemInfoCacheRef().end())
+                    bagTemplate = &bagInfoIt->second;
             }
+        }
+        if (numSlots <= 0 && bagTemplate) {
+            numSlots = bagTemplate->containerSlots;
         }
         if (numSlots <= 0) continue;
 
         // Set the bag size in the inventory bag data
         owner_.inventoryRef().setBagSize(bagIdx, numSlots);
+        // Quivers (class 11) and profession bags (class 1, subclass != 0) only
+        // accept their own item type — sorting and the combined grid must know.
+        owner_.inventoryRef().setBagSpecial(bagIdx, bagTemplate &&
+            (bagTemplate->itemClass == 11 ||
+             (bagTemplate->itemClass == 1 && bagTemplate->subClass != 0)));
 
         // Also set bagSlots on the equipped bag item (for UI display)
         auto& bagEquipSlot = owner_.inventoryRef().getEquipSlot(static_cast<EquipSlot>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIdx));

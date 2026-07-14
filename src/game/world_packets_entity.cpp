@@ -319,6 +319,21 @@ const char* getItemSubclassName(uint32_t itemClass, uint32_t subClass) {
             default: return "Armor";
         }
     }
+    if (itemClass == 1) { // Container (plain bags stay unnamed to avoid "Bag  Bag" tooltips)
+        switch (subClass) {
+            case 1: return "Soul Bag"; case 2: return "Herb Bag";
+            case 3: return "Enchanting Bag"; case 4: return "Engineering Bag";
+            case 5: return "Gem Bag"; case 6: return "Mining Bag";
+            case 7: return "Leatherworking Bag"; case 8: return "Inscription Bag";
+            default: return "";
+        }
+    }
+    if (itemClass == 11) { // Quiver
+        switch (subClass) {
+            case 3: return "Ammo Pouch";
+            default: return "Quiver";
+        }
+    }
     return "";
 }
 

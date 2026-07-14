@@ -160,6 +160,8 @@ private:
     void renderAggregateBags(game::Inventory& inventory, uint64_t moneyCopper);
     void renderBagWindow(const char* title, bool& isOpen, game::Inventory& inventory,
                          int bagIndex, float defaultX, float defaultY, uint64_t moneyCopper);
+    /// Shared footer for the backpack / All Bags windows: Sort Bags button + money display.
+    void renderBagsFooter(game::Inventory& inventory, uint64_t moneyCopper);
     void renderEquipmentPanel(game::Inventory& inventory);
     void renderBackpackPanel(game::Inventory& inventory, bool collapseEmptySections = false);
     void renderStatsPanel(game::Inventory& inventory, uint32_t playerLevel, int32_t serverArmor = 0,

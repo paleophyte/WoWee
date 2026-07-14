@@ -1078,7 +1078,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     }
 
     int rows = (totalSlots + columns - 1) / columns;
-    float bagContentH = rows * (slotSize + 4.0f) + 40.0f;
+    float bagContentH = rows * (slotSize + 4.0f) + 54.0f; // grid + footer (separator + sort button + money)
     int visibleKeySlots = 0;
     if (showKeyring_) {
         constexpr int keyColumns = 8;
@@ -1124,25 +1124,44 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
 
     // Draw one uninterrupted grid while retaining each slot's real container
     // and index for pickup, use, split, destroy, and server swap operations.
+    // Special containers (quivers, ammo pouches, profession bags) only accept
+    // their own item type, so their slots get a label and an amber wash.
     int gridIndex = 0;
     auto renderCombinedSlot = [&](const game::ItemSlot& slot, int backpackIndex,
-                                  int bagIndex, int bagSlotIndex) {
+                                  int bagIndex, int bagSlotIndex,
+                                  const char* restrictedLabel) {
         if (gridIndex % columns != 0) ImGui::SameLine();
         ImGui::PushID(gridIndex);
-        renderItemSlot(inventory, slot, slotSize, nullptr,
+        renderItemSlot(inventory, slot, slotSize, restrictedLabel,
                        SlotKind::BACKPACK, backpackIndex, game::EquipSlot::NUM_SLOTS,
                        bagIndex, bagSlotIndex);
+        if (restrictedLabel && slot.empty()) {
+            ImVec2 mn = ImGui::GetItemRectMin();
+            ImVec2 mx = ImGui::GetItemRectMax();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(mn, mx, IM_COL32(180, 140, 40, 40));
+            dl->AddRect(mn, mx, IM_COL32(180, 140, 40, 130));
+        }
         ImGui::PopID();
         ++gridIndex;
     };
 
     for (int slot = 0; slot < inventory.getBackpackSize(); ++slot)
-        renderCombinedSlot(inventory.getBackpackSlot(slot), slot, -1, -1);
+        renderCombinedSlot(inventory.getBackpackSlot(slot), slot, -1, -1, nullptr);
     for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; ++bag) {
         const int bagSize = inventory.getBagSize(bag);
         if (bagSize <= 0) continue;
+        const char* restrictedLabel = nullptr;
+        if (inventory.isBagSpecial(bag)) {
+            game::EquipSlot bagEquip = static_cast<game::EquipSlot>(
+                static_cast<int>(game::EquipSlot::BAG1) + bag);
+            const auto& bagItem = inventory.getEquipSlot(bagEquip);
+            restrictedLabel = (!bagItem.empty() && !bagItem.item.subclassName.empty())
+                ? bagItem.item.subclassName.c_str()
+                : "Special Bag";
+        }
         for (int slot = 0; slot < bagSize; ++slot)
-            renderCombinedSlot(inventory.getBagSlot(bag, slot), -1, bag, slot);
+            renderCombinedSlot(inventory.getBagSlot(bag, slot), -1, bag, slot, restrictedLabel);
     }
 
     if (visibleKeySlots > 0) {
@@ -1160,14 +1179,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
         }
     }
 
-    ImGui::Spacing();
-    uint64_t gold = moneyCopper / 10000;
-    uint64_t silver = (moneyCopper / 100) % 100;
-    uint64_t copper = moneyCopper % 100;
-    ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
-                       static_cast<unsigned long long>(gold),
-                       static_cast<unsigned long long>(silver),
-                       static_cast<unsigned long long>(copper));
+    renderBagsFooter(inventory, moneyCopper);
     ImGui::End();
 }
 
@@ -1352,10 +1364,28 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
             renderItemSlot(inventory, slot, slotSize, nullptr,
                            SlotKind::BACKPACK, i, game::EquipSlot::NUM_SLOTS);
         } else {
-            // Bag slot - pass bag index info for interactions
-            renderItemSlot(inventory, slot, slotSize, nullptr,
+            // Bag slot - pass bag index info for interactions. Special containers
+            // (quiver/ammo pouch/profession bag) get a label + amber wash so their
+            // restricted slots aren't mistaken for general-purpose space.
+            const char* restrictedLabel = nullptr;
+            if (inventory.isBagSpecial(bagIndex)) {
+                game::EquipSlot bagEquip = static_cast<game::EquipSlot>(
+                    static_cast<int>(game::EquipSlot::BAG1) + bagIndex);
+                const auto& bagItem = inventory.getEquipSlot(bagEquip);
+                restrictedLabel = (!bagItem.empty() && !bagItem.item.subclassName.empty())
+                    ? bagItem.item.subclassName.c_str()
+                    : "Special Bag";
+            }
+            renderItemSlot(inventory, slot, slotSize, restrictedLabel,
                            SlotKind::BACKPACK, -1, game::EquipSlot::NUM_SLOTS,
                            bagIndex, i);
+            if (restrictedLabel && slot.empty()) {
+                ImVec2 mn = ImGui::GetItemRectMin();
+                ImVec2 mx = ImGui::GetItemRectMax();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(mn, mx, IM_COL32(180, 140, 40, 40));
+                dl->AddRect(mn, mx, IM_COL32(180, 140, 40, 130));
+            }
         }
         ImGui::PopID();
     }
@@ -1388,48 +1418,48 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
 
     // Footer for backpack: sort button + money display
     if (bagIndex < 0) {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        // Sort Bags button — compute swaps, apply client-side preview, queue server packets
-        {
-            bool sorting = !sortSwapQueue_.empty();
-            if (sorting) ImGui::BeginDisabled();
-            if (ImGui::SmallButton(sorting ? "Sorting..." : "Sort Bags")) {
-                // Compute the swap operations before modifying local state
-                auto swaps = inventory.computeSortSwaps();
-                // Apply local preview immediately
-                inventory.sortBags();
-                // Queue server-side swaps (one per frame)
-                for (auto& s : swaps)
-                    sortSwapQueue_.push_back(s);
-            }
-            if (sorting) ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Sort all bag slots by quality (highest first),\nthen by item ID, then by stack size.");
-            }
-
-            // Process one queued swap per frame
-            if (!sortSwapQueue_.empty() && gameHandler_) {
-                auto op = sortSwapQueue_.front();
-                sortSwapQueue_.pop_front();
-                gameHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot);
-            }
-        }
-
-        if (moneyCopper > 0) {
-            ImGui::SameLine();
-            uint64_t gold   = moneyCopper / 10000;
-            uint64_t silver = (moneyCopper / 100) % 100;
-            uint64_t copper = moneyCopper % 100;
-            ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
-                               static_cast<unsigned long long>(gold),
-                               static_cast<unsigned long long>(silver),
-                               static_cast<unsigned long long>(copper));
-        }
+        renderBagsFooter(inventory, moneyCopper);
     }
 
     ImGui::End();
+}
+
+void InventoryScreen::renderBagsFooter(game::Inventory& inventory, uint64_t moneyCopper) {
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // Sort Bags button — compute swaps, apply client-side preview, queue server packets
+    bool sorting = !sortSwapQueue_.empty();
+    if (sorting) ImGui::BeginDisabled();
+    if (ImGui::SmallButton(sorting ? "Sorting..." : "Sort Bags")) {
+        // Compute the swap operations before modifying local state
+        auto swaps = inventory.computeSortSwaps();
+        // Apply local preview immediately
+        inventory.sortBags();
+        // Queue server-side swaps (one per frame)
+        for (auto& s : swaps)
+            sortSwapQueue_.push_back(s);
+    }
+    if (sorting) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Sort all bag slots by quality (highest first),\nthen by item ID, then by stack size.");
+    }
+
+    // Process one queued swap per frame
+    if (!sortSwapQueue_.empty() && gameHandler_) {
+        auto op = sortSwapQueue_.front();
+        sortSwapQueue_.pop_front();
+        gameHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot);
+    }
+
+    ImGui::SameLine();
+    uint64_t gold   = moneyCopper / 10000;
+    uint64_t silver = (moneyCopper / 100) % 100;
+    uint64_t copper = moneyCopper % 100;
+    ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
+                       static_cast<unsigned long long>(gold),
+                       static_cast<unsigned long long>(silver),
+                       static_cast<unsigned long long>(copper));
 }
 
 // ============================================================

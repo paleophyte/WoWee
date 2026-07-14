@@ -1675,38 +1675,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
 
     data.itemClass = itemClass;
     data.subClass = subClass;
-    data.subclassName = "";
-    if (itemClass == 2) { // Weapon
-        switch (subClass) {
-            case 0: data.subclassName = "Axe"; break;
-            case 1: data.subclassName = "Axe"; break;
-            case 2: data.subclassName = "Bow"; break;
-            case 3: data.subclassName = "Gun"; break;
-            case 4: data.subclassName = "Mace"; break;
-            case 5: data.subclassName = "Mace"; break;
-            case 6: data.subclassName = "Polearm"; break;
-            case 7: data.subclassName = "Sword"; break;
-            case 8: data.subclassName = "Sword"; break;
-            case 10: data.subclassName = "Staff"; break;
-            case 13: data.subclassName = "Fist Weapon"; break;
-            case 15: data.subclassName = "Dagger"; break;
-            case 16: data.subclassName = "Thrown"; break;
-            case 18: data.subclassName = "Crossbow"; break;
-            case 19: data.subclassName = "Wand"; break;
-            case 20: data.subclassName = "Fishing Pole"; break;
-            default: data.subclassName = "Weapon"; break;
-        }
-    } else if (itemClass == 4) { // Armor
-        switch (subClass) {
-            case 0: data.subclassName = "Miscellaneous"; break;
-            case 1: data.subclassName = "Cloth"; break;
-            case 2: data.subclassName = "Leather"; break;
-            case 3: data.subclassName = "Mail"; break;
-            case 4: data.subclassName = "Plate"; break;
-            case 6: data.subclassName = "Shield"; break;
-            default: data.subclassName = "Armor"; break;
-        }
-    }
+    data.subclassName = getItemSubclassName(itemClass, subClass);
 
     // 4 name strings
     data.name = packet.readString();

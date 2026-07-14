@@ -537,6 +537,18 @@ target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
 
+# ── test_inventory_sort ─────────────────────────────────────
+add_executable(test_inventory_sort
+    test_inventory_sort.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/inventory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+)
+target_include_directories(test_inventory_sort PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_inventory_sort SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_inventory_sort PRIVATE catch2_main)
+add_test(NAME inventory_sort COMMAND test_inventory_sort)
+register_test_target(test_inventory_sort)
+
 # ── ASAN / UBSan for test targets ────────────────────────────
 if(WOWEE_ENABLE_ASAN AND NOT MSVC)
     foreach(_t IN LISTS ALL_TEST_TARGETS)
