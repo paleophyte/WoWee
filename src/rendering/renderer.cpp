@@ -50,6 +50,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -2092,6 +2093,9 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (audioCoordinator_->getNpcVoiceManager()) {
             audioCoordinator_->getNpcVoiceManager()->initialize(assetManager);
         }
+        if (audioCoordinator_->getPlayerVoiceManager()) {
+            audioCoordinator_->getPlayerVoiceManager()->initialize(assetManager);
+        }
         if (!deferredWorldInitEnabled_) {
             if (audioCoordinator_->getAmbientSoundManager()) {
                 audioCoordinator_->getAmbientSoundManager()->initialize(assetManager);
@@ -2285,6 +2289,9 @@ bool Renderer::loadTerrainArea(const std::string& mapName, int centerX, int cent
     }
     if (audioCoordinator_->getNpcVoiceManager() && cachedAssetManager) {
         audioCoordinator_->getNpcVoiceManager()->initialize(cachedAssetManager);
+    }
+    if (audioCoordinator_->getPlayerVoiceManager() && cachedAssetManager) {
+        audioCoordinator_->getPlayerVoiceManager()->initialize(cachedAssetManager);
     }
     if (!deferredWorldInitEnabled_) {
         if (audioCoordinator_->getAmbientSoundManager() && cachedAssetManager) {
