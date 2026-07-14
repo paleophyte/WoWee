@@ -166,15 +166,12 @@ void AnimationCallbackHandler::setupCallbacks() {
         glm::vec3 chargeDir = glm::normalize(endRender - startRender);
         if (auto* ac = renderer_.getAnimationController()) ac->startChargeEffect(startRender, chargeDir);
 
-        // Play charge whoosh sound (try multiple paths)
+        // Charge's cast kit points at SoundEntries 3330 ("HeroicLeap"), whose file name
+        // carries Blizzard's own typo. There is no Sound\Spells\Charge.wav.
         auto& audio = audio::AudioEngine::instance();
-        if (!audio.playSound2D("Sound\\Spells\\Charge.wav", 0.8f)) {
-            if (!audio.playSound2D("Sound\\Spells\\charge.wav", 0.8f)) {
-                if (!audio.playSound2D("Sound\\Spells\\SpellCharge.wav", 0.8f)) {
-                    // Fallback: weapon whoosh
-                    audio.playSound2D("Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge1.wav", 0.9f);
-                }
-            }
+        if (!audio.playSound2D("Sound\\Spells\\HeroricLeap.wav", 0.8f)) {
+            // Fallback: weapon whoosh
+            audio.playSound2D("Sound\\Item\\Weapons\\WeaponSwings\\mWooshLarge1.wav", 0.9f);
         }
     });
 
