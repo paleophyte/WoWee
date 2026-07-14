@@ -419,9 +419,14 @@ bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& 
 
         // VMangos 1.12 can use auth protocol v8 while still sending the
         // vanilla realm-entry shape. If the caller forgot to opt into the
-        // vanilla layout, the TBC/WotLK parse shifts the fields and commonly
-        // produces name="" and address="<realm name>". Recover in-place.
-        if (!isLegacyVanilla && realm.name.empty() && !realm.address.empty()) {
+        // vanilla layout, the TBC/WotLK parse shifts the fields: the vanilla
+        // uint32 icon's trailing zero bytes get read as the name, so the name
+        // always comes out empty (the address then lands on either the real
+        // name or, when the vanilla flags byte is 0, another empty string).
+        // Key the recovery on the empty name alone — a nameless realm is never
+        // valid, and requiring a non-empty address here would miss every realm
+        // that sends flags=0, silently yielding garbage fields instead.
+        if (!isLegacyVanilla && realm.name.empty()) {
             LOG_WARNING("Realm list entry looked shifted; retrying as vanilla layout");
             packet.setReadPos(realmStart);
 

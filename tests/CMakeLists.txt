@@ -537,6 +537,22 @@ target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
 
+# ── test_realm_list ─────────────────────────────────────────
+add_executable(test_realm_list
+    test_realm_list.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/auth_packets.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/auth_opcodes.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/big_num.cpp
+)
+target_include_directories(test_realm_list PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_realm_list SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_realm_list PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME realm_list COMMAND test_realm_list)
+register_test_target(test_realm_list)
+
 # ── test_quest_rewards ──────────────────────────────────────
 add_executable(test_quest_rewards
     test_quest_rewards.cpp

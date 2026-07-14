@@ -554,12 +554,28 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
                 onSuccess();
             }
         } else if (state == auth::AuthState::FAILED) {
-            if (!failureReason.empty()) {
-                setStatus(failureReason, true);
+            // Protocol fallback: a 1.12 realm that speaks the other vanilla auth
+            // protocol byte rejects or drops our handshake rather than replying
+            // usefully. Retry once on the next candidate before giving up — but
+            // only for protocol-shaped failures, never for a rejected password
+            // (retrying those can trip server-side lockouts).
+            const bool haveFallback = (authProtocolAttempt_ + 1 < authProtocols_.size());
+            if (haveFallback && authHandler.lastFailureWasProtocol()) {
+                LOG_INFO("Auth failed on protocol ",
+                         static_cast<int>(authProtocols_[authProtocolAttempt_]),
+                         " (", failureReason, ") - retrying with protocol ",
+                         static_cast<int>(authProtocols_[authProtocolAttempt_ + 1]));
+                ++authProtocolAttempt_;
+                authHandler.disconnect();
+                beginAuthAttempt(authHandler);
             } else {
-                setStatus("Authentication failed", true);
+                if (!failureReason.empty()) {
+                    setStatus(failureReason, true);
+                } else {
+                    setStatus("Authentication failed", true);
+                }
+                authenticating = false;
             }
-            authenticating = false;
         } else if (state != auth::AuthState::PIN_REQUIRED && state != auth::AuthState::AUTHENTICATOR_REQUIRED
                    && authTimer >= AUTH_TIMEOUT) {
             setStatus("Connection timed out - server did not respond", true);
@@ -631,9 +647,46 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
         return;
     }
 
-    // Attempt connection
+    // Build the auth-protocol candidate chain for this attempt. The profile's
+    // own value is always tried first; vanilla-family profiles get the other
+    // vanilla protocol byte appended as a fallback, because 1.12 servers
+    // disagree on it (vmangos-derived: 8, stock mangos/cmangos: 3) and the
+    // profile can only name one. TBC/WotLK have no such ambiguity.
+    authProtocols_.clear();
+    authProtocolAttempt_ = 0;
+    {
+        uint8_t primary = 8;
+        bool vanillaFamily = false;
+        auto* reg = core::Application::getInstance().getExpansionRegistry();
+        if (reg) {
+            if (auto* profile = reg->getActive()) {
+                primary = profile->protocolVersion;
+                vanillaFamily = (profile->id == "classic" || profile->id == "turtle");
+            }
+        }
+        authProtocols_.push_back(primary);
+        if (vanillaFamily) {
+            const uint8_t alternate = (primary == 3) ? uint8_t{8} : uint8_t{3};
+            if (alternate != primary) authProtocols_.push_back(alternate);
+        }
+    }
+
+    beginAuthAttempt(authHandler);
+}
+
+void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
+    const bool useHash = usingStoredHash && std::strcmp(password, PASSWORD_PLACEHOLDER) == 0;
+    const uint8_t protocolVersion = (authProtocolAttempt_ < authProtocols_.size())
+        ? authProtocols_[authProtocolAttempt_] : uint8_t{8};
+    const bool isRetry = (authProtocolAttempt_ > 0);
+
     std::stringstream ss;
-    ss << "Connecting to " << hostname << ":" << port << "...";
+    if (isRetry) {
+        ss << "Retrying " << hostname << ":" << port
+           << " with auth protocol " << static_cast<int>(protocolVersion) << "...";
+    } else {
+        ss << "Connecting to " << hostname << ":" << port << "...";
+    }
     setStatus(ss.str(), false);
 
     // Wire up failure callback to capture specific error reason
@@ -652,15 +705,15 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
             info.minorVersion = profile->minorVersion;
             info.patchVersion = profile->patchVersion;
             info.build = profile->build;
-            info.protocolVersion = profile->protocolVersion;
+            info.protocolVersion = protocolVersion;
             info.game = profile->game;
             info.platform = profile->platform;
             info.os = profile->os;
             info.locale = profile->locale;
             info.timezone = profile->timezone;
             // Vanilla-family servers send the legacy realm-list layout even
-            // when the auth handshake itself uses protocol v8 (vmangos).
-            // Turtle keeps protocol 3, so cover both by id AND by version.
+            // when the auth handshake itself uses protocol v8 (vmangos), so key
+            // this on the expansion rather than on the protocol byte in play.
             info.legacyVanillaRealmList = (profile->id == "classic" ||
                                            profile->id == "turtle" ||
                                            profile->protocolVersion <= 3);
@@ -671,7 +724,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
     if (authHandler.connect(hostname, static_cast<uint16_t>(port))) {
         authenticating = true;
         authTimer = 0.0f;
-        setStatus("Connected, authenticating...", false);
+        setStatus(isRetry ? "Reconnected, authenticating..." : "Connected, authenticating...", false);
         pinAutoSubmitted_ = false;
 
         // Save login info for next session
@@ -695,6 +748,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
         errSs << "Failed to connect to " << hostname << ":" << port
               << " - check that the server is online and the address is correct";
         setStatus(errSs.str(), true);
+        authenticating = false;
     }
 }
 
