@@ -204,6 +204,12 @@ public:
     uint32_t getSpellSchoolMask(uint32_t spellId) const;
     /// Spell.dbc Targets mask (SpellCastTargetFlags): 0x10 = TARGET_FLAG_ITEM.
     uint32_t getSpellTargetFlags(uint32_t spellId) const;
+    /// True for "Self Only" range spells (shouts, self-buffs): they always land on
+    /// the caster, so they take no explicit target and skip melee range checks.
+    bool isSelfCastSpell(uint32_t spellId) const;
+    /// Maps a superseded spell rank to the highest rank we actually know. Returns
+    /// spellId unchanged when it is already known, or has no known same-name rank.
+    uint32_t resolveHighestKnownRank(uint32_t spellId) const;
     const std::string& getSkillLineName(uint32_t spellId) const;
 
     // Cast state

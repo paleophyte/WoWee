@@ -403,6 +403,11 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
 
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
 
+    // Action bars restored from the server can still hold a rank that a higher rank
+    // has since superseded. The server drops casts of superseded ranks without
+    // sending any error, so swap in the highest rank we actually know.
+    spellId = resolveHighestKnownRank(spellId);
+
     // Casting any spell while mounted → dismount instead
     if (owner_.isMounted()) {
         owner_.dismount();
@@ -430,8 +435,10 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     }
 
     uint64_t target = targetGuid != 0 ? targetGuid : owner_.getTargetGuid();
-    // Self-targeted spells like hearthstone should not send a target
-    if (spellId == 8690) target = 0;
+    // Self-targeted spells (hearthstone, shouts, self-buffs) always land on the
+    // caster, so they must not carry the current target along.
+    const bool selfCast = (spellId == 8690) || isSelfCastSpell(spellId);
+    if (selfCast) target = 0;
 
     // Track whether a spell-specific block already handled facing so the generic
     // facing block below doesn't send redundant SET_FACING packets.
@@ -447,6 +454,13 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         if (!entity) {
             owner_.addSystemChatMessage("You have no target.");
             return;
+        }
+        // Corpses cannot be charged.
+        if (auto unit = std::dynamic_pointer_cast<Unit>(entity)) {
+            if (unit->getHealth() == 0) {
+                owner_.addSystemChatMessage("You cannot attack that target.");
+                return;
+            }
         }
         float tx = entity->getX(), ty = entity->getY(), tz = entity->getZ();
         float dx = tx - owner_.movementInfoRef().x;
@@ -2158,6 +2172,7 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t ebp1Field = spellL ? spellL->field("EffectBasePoints1") : 0xFFFFFFFF;
     const uint32_t ebp2Field = spellL ? spellL->field("EffectBasePoints2") : 0xFFFFFFFF;
     const uint32_t durIdxField = spellL ? spellL->field("DurationIndex") : 0xFFFFFFFF;
+    const uint32_t rangeIdxField = spellL ? spellL->field("RangeIndex") : 0xFFFFFFFF;
     const uint32_t spellVisualIdField = spellL ? spellL->field("SpellVisualID") : 0xFFFFFFFF;
     const uint32_t recoveryField = spellL ? spellL->field("RecoveryTime") : 0xFFFFFFFF;
     const uint32_t categoryRecoveryField = spellL ? spellL->field("CategoryRecoveryTime") : 0xFFFFFFFF;
@@ -2198,6 +2213,9 @@ void SpellHandler::loadSpellNameCache() const {
             // Duration: read DurationIndex and resolve via SpellDuration.dbc later
             if (durIdxField != 0xFFFFFFFF)
                 entry.durationSec = static_cast<float>(dbc->getUInt32(i, durIdxField)); // store index temporarily
+            // Range: read RangeIndex and resolve via SpellRange.dbc later
+            if (rangeIdxField != 0xFFFFFFFF)
+                entry.maxRange = static_cast<float>(dbc->getUInt32(i, rangeIdxField)); // store index temporarily
             // SpellVisualID: references SpellVisual.dbc for cast/impact M2 effects
             if (spellVisualIdField != 0xFFFFFFFF && spellVisualIdField < dbc->getFieldCount())
                 entry.spellVisualId = dbc->getUInt32(i, spellVisualIdField);
@@ -2238,6 +2256,26 @@ void SpellHandler::loadSpellNameCache() const {
                 entry.durationSec = (it != durMap.end()) ? it->second : 0.0f;
             }
         }
+    }
+    // Resolve the stored RangeIndex into an actual max range. Entries that cannot
+    // be resolved fall back to -1 (unknown) so callers keep their old behaviour
+    // rather than mistaking a raw index for a distance in yards.
+    const auto* rangeL = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("SpellRange") : nullptr;
+    auto rangeDbc = am->loadDBC("SpellRange.dbc");
+    std::unordered_map<uint32_t, float> rangeMap;
+    if (rangeDbc && rangeDbc->isLoaded() && rangeL) {
+        const uint32_t maxRangeField = rangeL->field("MaxRange");
+        if (maxRangeField != 0xFFFFFFFF && maxRangeField < rangeDbc->getFieldCount()) {
+            for (uint32_t ri = 0; ri < rangeDbc->getRecordCount(); ++ri) {
+                rangeMap[rangeDbc->getUInt32(ri, 0)] = rangeDbc->getFloat(ri, maxRangeField);
+            }
+        }
+    }
+    for (auto& [sid, entry] : owner_.spellNameCacheRef()) {
+        if (entry.maxRange < 0.0f) continue; // no RangeIndex field in this layout
+        auto it = rangeMap.find(static_cast<uint32_t>(entry.maxRange));
+        entry.maxRange = (it != rangeMap.end()) ? it->second : -1.0f;
     }
     LOG_INFO("Trainer: Loaded ", owner_.spellNameCacheRef().size(), " spell names from Spell.dbc");
 }
@@ -2403,6 +2441,52 @@ uint32_t SpellHandler::getSpellTargetFlags(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.targetFlags : 0;
+}
+
+uint32_t SpellHandler::resolveHighestKnownRank(uint32_t spellId) const {
+    // Anything the server told us we know is castable as-is. Only spells absent from
+    // the known list can be superseded ranks. Item/gather/vehicle spells are also
+    // absent, but they have no known same-name sibling, so they fall through unchanged.
+    if (spellId == 0 || knownSpells_.count(spellId) > 0) return spellId;
+
+    loadSpellNameCache();
+    const auto& cache = owner_.spellNameCacheRef();
+    auto it = cache.find(spellId);
+    if (it == cache.end() || it->second.name.empty()) return spellId;
+    const std::string& name = it->second.name;
+
+    // Spell.dbc stores the rank as a display string ("Rank 3"); rankless spells sort as 0.
+    auto rankValue = [](const std::string& rank) -> int {
+        size_t digit = rank.find_first_of("0123456789");
+        return (digit == std::string::npos) ? 0 : std::atoi(rank.c_str() + digit);
+    };
+
+    uint32_t best = 0;
+    int bestRank = -1;
+    for (uint32_t known : knownSpells_) {
+        auto kit = cache.find(known);
+        if (kit == cache.end() || kit->second.name != name) continue;
+        int rank = rankValue(kit->second.rank);
+        if (rank > bestRank) {
+            bestRank = rank;
+            best = known;
+        }
+    }
+    if (best == 0) return spellId;
+
+    LOG_INFO("Superseded rank: casting ", best, " instead of ", spellId, " (", name, ")");
+    return best;
+}
+
+bool SpellHandler::isSelfCastSpell(uint32_t spellId) const {
+    if (spellId == 0) return false;
+    loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    if (it == owner_.spellNameCacheRef().end()) return false;
+    // SpellRange "Self Only" has a max range of 0 — the spell cannot reach any
+    // other unit, so it is cast on the caster no matter what is targeted.
+    // A negative range means SpellRange.dbc was unavailable; assume not self-cast.
+    return it->second.maxRange == 0.0f;
 }
 
 const std::string& SpellHandler::getSkillLineName(uint32_t spellId) const {

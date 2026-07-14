@@ -1474,6 +1474,8 @@ public:
     bool hasPendingGameObjectLootOpen(uint64_t guid) const;
     bool isGatherGameObject(uint64_t guid) const;
     void despawnGameObjectLocally(uint64_t guid);
+    /// Remove a creature corpse client-side once it has been looted empty.
+    void despawnCreatureLocally(uint64_t guid);
     void activateSpiritHealer(uint64_t npcGuid);
     bool isLootWindowOpen() const;
     const LootResponseData& getCurrentLoot() const;
@@ -2586,6 +2588,10 @@ public:
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
         // Spell.dbc Targets bitmask (SpellCastTargetFlags) — 0x10 = TARGET_FLAG_ITEM
         uint32_t targetFlags = 0;
+        // Spell.dbc RangeIndex resolved against SpellRange.dbc. A max range of 0
+        // means "Self Only" (shouts, self-buffs); negative means SpellRange.dbc
+        // was unavailable, so callers should not infer anything from it.
+        float maxRange = -1.0f;
         int32_t effectBasePoints[3] = {0, 0, 0};
         float durationSec = 0.0f;
         uint32_t spellVisualId = 0;
