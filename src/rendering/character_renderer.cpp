@@ -2244,7 +2244,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
             float ty = std::abs(instance.boneMatrices[i][3][1]);
             float tz = std::abs(instance.boneMatrices[i][3][2]);
             if (tx > 50.0f || ty > 50.0f || tz > 50.0f) {
-                LOG_WARNING("BONE DIAG: bone[", i, "] keyBone=", bone.keyBoneId,
+                LOG_DEBUG("BONE DIAG: bone[", i, "] keyBone=", bone.keyBoneId,
                             " flags=0x", std::hex, bone.flags, std::dec,
                             " parent=", bone.parentBone,
                             " pivot=(", bone.pivot.x, ",", bone.pivot.y, ",", bone.pivot.z, ")",
