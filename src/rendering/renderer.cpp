@@ -1566,9 +1566,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
             m2Renderer->setOnTaxi(cameraController->isOnTaxi());
         }
+        auto prepStart = std::chrono::steady_clock::now();
         if (wmoRenderer) wmoRenderer->prepareRender();
+        auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && camera) m2Renderer->prepareRender(frameIdx, *camera);
+        auto prepM2End = std::chrono::steady_clock::now();
         if (characterRenderer) characterRenderer->prepareRender(frameIdx);
+        auto prepEnd = std::chrono::steady_clock::now();
+        const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
+        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
+        const double prepCharMs = std::chrono::duration<double, std::milli>(prepEnd - prepM2End).count();
 
         // --- Dispatch worker threads (terrain + WMO + M2) ---
         std::future<double> terrainFuture, wmoFuture, charFuture, m2Future, postFuture;
@@ -1749,6 +1756,18 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what()); }
         try { if (postFuture.valid()) (void)postFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
+
+        // prepareRender() does the GPU allocations that are not thread-safe, so it runs
+        // on the main thread and is not covered by the worker timings. Name the culprit
+        // when a frame runs long instead of leaving renderWorld as one opaque number.
+        const double prepTotalMs = prepWmoMs + prepM2Ms + prepCharMs;
+        const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
+        if (prepTotalMs + worstWorkerMs > 40.0) {
+            LOG_WARNING("SLOW renderWorld breakdown: prepare=", prepTotalMs,
+                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms, " char=", prepCharMs,
+                        ") workers: terrain=", lastTerrainRenderMs,
+                        " wmo=", lastWMORenderMs, " m2=", lastM2RenderMs);
+        }
 
         // --- Execute all secondary buffers in correct draw order ---
         VkCommandBuffer validCmds[6];
