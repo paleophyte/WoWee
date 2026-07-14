@@ -804,6 +804,47 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
     // Recompute X from right offset every frame (handles window resize)
     questTrackerPos_.x = screenW - questTrackerRightOffset_;
 
+    // Collapsed: draw a small draggable bubble at the tracker anchor instead;
+    // click (without dragging) to expand back to the full tracker
+    if (questTrackerCollapsed_) {
+        ImGui::SetNextWindowPos(questTrackerPos_, ImGuiCond_Always);
+        ImGuiWindowFlags bubbleFlags = ImGuiWindowFlags_NoTitleBar |
+                                       ImGuiWindowFlags_NoCollapse |
+                                       ImGuiWindowFlags_NoNav |
+                                       ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                       ImGuiWindowFlags_AlwaysAutoResize |
+                                       ImGuiWindowFlags_NoScrollbar;
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.55f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(9.0f, 5.0f));
+        if (ImGui::Begin("##QuestTrackerBubble", nullptr, bubbleFlags)) {
+            ImGui::TextColored(colors::kWarmGold, "! %d", static_cast<int>(toShow.size()));
+            if (ImGui::IsWindowHovered()) {
+                ImGui::SetTooltip("Quest tracker — click to expand, drag to move");
+                // Expand on click, but not when the press was a drag
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                    ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 9.0f) {
+                    questTrackerCollapsed_ = false;
+                    saveSettings();
+                }
+            }
+            // Capture drag so the bubble and tracker share one anchor
+            ImVec2 newPos = ImGui::GetWindowPos();
+            newPos.x = std::clamp(newPos.x, 0.0f, screenW - ImGui::GetWindowSize().x);
+            newPos.y = std::clamp(newPos.y, 0.0f, screenH - 40.0f);
+            if (std::abs(newPos.x - questTrackerPos_.x) > 0.5f ||
+                std::abs(newPos.y - questTrackerPos_.y) > 0.5f) {
+                questTrackerPos_ = newPos;
+                questTrackerRightOffset_ = screenW - newPos.x;
+                saveSettings();
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        return;
+    }
+
     ImGui::SetNextWindowPos(questTrackerPos_, ImGuiCond_Always);
     ImGui::SetNextWindowSize(questTrackerSize_, ImGuiCond_FirstUseEver);
 
@@ -817,13 +858,16 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 2.0f));
 
     if (ImGui::Begin("##QuestTracker", nullptr, flags)) {
-        // Header row: quest count + completion filter (click to cycle)
+        // Header row: quest count + completion filter (click to cycle) + hide
         static const char* kFilterNames[] = {"All", "Active", "Done"};
         ImGui::TextDisabled("Quests (%d)", static_cast<int>(toShow.size()));
         {
-            float btnW = ImGui::CalcTextSize("Active").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const ImGuiStyle& style = ImGui::GetStyle();
+            float filterW = ImGui::CalcTextSize("Active").x + style.FramePadding.x * 2.0f;
+            float hideW = ImGui::CalcTextSize("-").x + style.FramePadding.x * 2.0f;
             ImGui::SameLine();
-            float off = ImGui::GetContentRegionAvail().x - btnW;
+            float off = ImGui::GetContentRegionAvail().x -
+                        (filterW + style.ItemSpacing.x + hideW);
             if (off > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off);
             if (ImGui::SmallButton(kFilterNames[questTrackerFilter_])) {
                 questTrackerFilter_ = (questTrackerFilter_ + 1) % 3;
@@ -831,6 +875,14 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Filter: All / Active / Done (click to cycle)");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("-")) {
+                questTrackerCollapsed_ = true;
+                saveSettings();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Hide (collapse to bubble)");
             }
         }
         ImGui::Separator();

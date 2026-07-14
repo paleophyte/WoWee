@@ -1547,6 +1547,7 @@ void GameScreen::saveSettings() {
     out << "quest_tracker_w=" << questTrackerSize_.x << "\n";
     out << "quest_tracker_h=" << questTrackerSize_.y << "\n";
     out << "quest_tracker_filter=" << questTrackerFilter_ << "\n";
+    out << "quest_tracker_collapsed=" << (questTrackerCollapsed_ ? 1 : 0) << "\n";
 
     // Chat
     out << "chat_active_tab=" << chatPanel_.activeChatTab << "\n";
@@ -1735,6 +1736,9 @@ void GameScreen::loadSettings() {
             }
             else if (key == "quest_tracker_filter") {
                 questTrackerFilter_ = std::clamp(std::stoi(val), 0, 2);
+            }
+            else if (key == "quest_tracker_collapsed") {
+                questTrackerCollapsed_ = (std::stoi(val) != 0);
             }
             // Chat
             else if (key == "chat_active_tab") chatPanel_.activeChatTab = std::clamp(std::stoi(val), 0, 3);
