@@ -179,7 +179,6 @@ public:
     const std::unordered_map<uint32_t, FacialHairGeosets>& getFacialHairGeosetMap() const { return facialHairGeosetMap_; }
 
     // Creature M2 sync loader (used by spawnPlayerCharacter in Application)
-    pipeline::M2Model loadCreatureM2Sync(const std::string& m2Path);
 
 private:
     // Dependencies (non-owning)

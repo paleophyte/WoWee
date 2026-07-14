@@ -565,6 +565,15 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             continue;
         }
 
+        // Guard the invariant spawnOnlineCreature relies on: it will not load a model
+        // itself, so a cache miss here must go back through the async path rather than
+        // silently dropping the creature.
+        if (displayIdModelCache_.find(s.displayId) == displayIdModelCache_.end()) {
+            pendingCreatureSpawns_.push_back(s);
+            rotationsLeft--;
+            continue;
+        }
+
         // Cached model — spawn is fast (no file I/O, just instance creation + texture setup)
         {
             auto spawnStart = std::chrono::steady_clock::now();

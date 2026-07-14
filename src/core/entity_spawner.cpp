@@ -846,48 +846,6 @@ bool EntitySpawner::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) c
 }
 
 
-pipeline::M2Model EntitySpawner::loadCreatureM2Sync(const std::string& m2Path) {
-    auto m2Data = assetManager_->readFile(m2Path);
-    if (m2Data.empty()) {
-        LOG_WARNING("Failed to read creature M2: ", m2Path);
-        return {};
-    }
-
-    pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-    if (model.name.empty()) model.name = m2Path;
-    if (model.vertices.empty()) {
-        LOG_WARNING("Failed to parse creature M2: ", m2Path);
-        return {};
-    }
-
-    // Load skin file (only for WotLK M2s - vanilla has embedded skin)
-    if (model.version >= 264) {
-        std::string skinPath = m2Path.substr(0, m2Path.size() - 3) + "00.skin";
-        auto skinData = assetManager_->readFile(skinPath);
-        if (!skinData.empty()) {
-            pipeline::M2Loader::loadSkin(skinData, model);
-        } else {
-            LOG_WARNING("Missing skin file for WotLK creature M2: ", skinPath);
-        }
-    }
-
-    // Load external .anim files for sequences without flag 0x20
-    std::string basePath = m2Path.substr(0, m2Path.size() - 3);
-    for (uint32_t si = 0; si < model.sequences.size(); si++) {
-        if (!(model.sequences[si].flags & 0x20)) {
-            char animFileName[256];
-            snprintf(animFileName, sizeof(animFileName), "%s%04u-%02u.anim",
-                basePath.c_str(), model.sequences[si].id, model.sequences[si].variationIndex);
-            auto animData = assetManager_->readFileOptional(animFileName);
-            if (!animData.empty()) {
-                pipeline::M2Loader::loadAnimFile(m2Data, animData, si, model);
-            }
-        }
-    }
-
-    return model;
-}
-
 void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float x, float y, float z, float orientation, float scale) {
     if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return;
 
@@ -923,31 +881,17 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
 
     auto* charRenderer = renderer_->getCharacterRenderer();
 
-    // Check model cache - reuse if same displayId was already loaded
-    uint32_t modelId = 0;
+    // The model must already be in the cache: callers spawn only once the async load
+    // has published it. Reading and parsing the M2 here instead would put file I/O on
+    // the main thread mid-frame, so treat a miss as "not ready" and let the caller
+    // re-queue the spawn through the async path.
     auto cacheIt = displayIdModelCache_.find(displayId);
-    if (cacheIt != displayIdModelCache_.end()) {
-        modelId = cacheIt->second;
-    } else {
-        // Load model from disk (only once per displayId)
-        modelId = nextCreatureModelId_++;
-
-        pipeline::M2Model model = loadCreatureM2Sync(m2Path);
-        if (!model.isValid()) {
-            nonRenderableCreatureDisplayIds_.insert(displayId);
-            creaturePermanentFailureGuids_.insert(guid);
-            return;
-        }
-
-        if (!charRenderer->loadModel(model, modelId)) {
-            LOG_WARNING("Failed to load creature model: ", m2Path);
-            nonRenderableCreatureDisplayIds_.insert(displayId);
-            creaturePermanentFailureGuids_.insert(guid);
-            return;
-        }
-
-        displayIdModelCache_[displayId] = modelId;
+    if (cacheIt == displayIdModelCache_.end()) {
+        LOG_WARNING("spawnOnlineCreature: model not loaded yet for displayId=", displayId,
+                    " — deferring to async load");
+        return;
     }
+    const uint32_t modelId = cacheIt->second;
 
     // Apply skin textures from CreatureDisplayInfo.dbc (only once per displayId model).
     // Track separately from model cache because async loading may upload the model
