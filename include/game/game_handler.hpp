@@ -48,6 +48,7 @@ namespace wowee::game {
 
 namespace wowee {
 namespace network { class WorldSocket; class Packet; }
+namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
 
@@ -1886,6 +1887,9 @@ public:
             if (auto* mgr = (ac->*getter)()) cb(mgr);
         }
     }
+    // Play the player character's spoken error response ("Not enough mana", ...)
+    // using the active character's race/gender. Gated by the Character Speech setting.
+    void playErrorSpeech(audio::PlayerErrorSpeech type);
 
     // Reputation change toast: factionName, delta, new standing
     using RepChangeCallback = std::function<void(const std::string& factionName, int32_t delta, int32_t standing)>;

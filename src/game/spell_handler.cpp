@@ -15,6 +15,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "audio/ui_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -112,6 +113,41 @@ std::string gatherCastFailureMessage(uint8_t result, const std::string& fallback
     if (result == kSpellFailedTryAgain) return "Failed.";
     if (result == kSpellFailedChestInUse) return "Already in use.";
     return fallback;
+}
+
+// Map a (WotLK-normalized) SpellCastResult to a character speech response.
+// Results without a matching voice line return nullopt.
+std::optional<audio::PlayerErrorSpeech> errorSpeechForCastResult(uint8_t result, int powerType) {
+    using audio::PlayerErrorSpeech;
+    switch (result) {
+        case 11:  // Bad implicit targets
+        case 178: // No valid targets
+            return PlayerErrorSpeech::GENERIC_NO_TARGET;
+        case 12:  // Invalid target
+            return PlayerErrorSpeech::INVALID_ATTACK_TARGET;
+        case 25:  // Chest in use
+            return PlayerErrorSpeech::CHEST_IN_USE;
+        case 45:  // Item not ready
+            return PlayerErrorSpeech::ITEM_COOLDOWN;
+        case 52:  // Need ammo
+        case 53:  // Need ammo pouch
+        case 54:  // Need exotic ammo
+        case 75:  // No ammo
+            return PlayerErrorSpeech::NO_AMMO;
+        case 67:  // Not ready
+            return PlayerErrorSpeech::SPELL_COOLDOWN;
+        case 85:  // Not enough power
+            switch (powerType) {
+                case 1:  return PlayerErrorSpeech::NO_RAGE;
+                case 3:  return PlayerErrorSpeech::NO_ENERGY;
+                case 2: case 6: return std::nullopt; // no focus/runic power voice lines
+                default: return PlayerErrorSpeech::NO_MANA;
+            }
+        case 97:  // Out of range
+            return PlayerErrorSpeech::OUT_OF_RANGE;
+        default:
+            return std::nullopt;
+    }
 }
 } // namespace
 
@@ -1100,6 +1136,13 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (auto* ac = owner_.services().audioCoordinator) {
         if (auto* sfx = ac->getUiSoundManager())
             sfx->playError();
+    }
+
+    // Character speech response ("Not enough mana", "I'm out of range", ...)
+    // Suppressed for gather casts, whose failures are routine and already rephrased.
+    if (!gatherCast) {
+        if (auto speech = errorSpeechForCastResult(data.result, powerType))
+            owner_.playErrorSpeech(*speech);
     }
 
     if (owner_.addonEventCallbackRef()) {

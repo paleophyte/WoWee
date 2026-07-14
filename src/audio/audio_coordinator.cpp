@@ -5,6 +5,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -38,13 +39,14 @@ bool AudioCoordinator::initialize() {
     activitySoundManager_ = std::make_unique<ActivitySoundManager>();
     mountSoundManager_ = std::make_unique<MountSoundManager>();
     npcVoiceManager_ = std::make_unique<NpcVoiceManager>();
+    playerVoiceManager_ = std::make_unique<PlayerVoiceManager>();
     ambientSoundManager_ = std::make_unique<AmbientSoundManager>();
     uiSoundManager_ = std::make_unique<UiSoundManager>();
     combatSoundManager_ = std::make_unique<CombatSoundManager>();
     spellSoundManager_ = std::make_unique<SpellSoundManager>();
     movementSoundManager_ = std::make_unique<MovementSoundManager>();
 
-    LOG_INFO("AudioCoordinator initialized with ", 10, " audio managers");
+    LOG_INFO("AudioCoordinator initialized with ", 11, " audio managers");
     return true;
 }
 
@@ -56,6 +58,7 @@ void AudioCoordinator::initializeWithAssets(pipeline::AssetManager* assetManager
     if (activitySoundManager_) activitySoundManager_->initialize(assetManager);
     if (mountSoundManager_) mountSoundManager_->initialize(assetManager);
     if (npcVoiceManager_) npcVoiceManager_->initialize(assetManager);
+    if (playerVoiceManager_) playerVoiceManager_->initialize(assetManager);
     if (ambientSoundManager_) ambientSoundManager_->initialize(assetManager);
     if (uiSoundManager_) uiSoundManager_->initialize(assetManager);
     if (combatSoundManager_) combatSoundManager_->initialize(assetManager);
@@ -72,6 +75,7 @@ void AudioCoordinator::shutdown() {
     combatSoundManager_.reset();
     uiSoundManager_.reset();
     ambientSoundManager_.reset();
+    playerVoiceManager_.reset();
     npcVoiceManager_.reset();
     mountSoundManager_.reset();
     activitySoundManager_.reset();

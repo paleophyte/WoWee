@@ -20,6 +20,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/activity_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -493,6 +494,17 @@ const Character* GameHandler::getActiveCharacter() const {
 const Character* GameHandler::getFirstCharacter() const {
     if (characters.empty()) return nullptr;
     return &characters.front();
+}
+
+void GameHandler::playErrorSpeech(audio::PlayerErrorSpeech type) {
+    auto* ac = services_.audioCoordinator;
+    if (!ac) return;
+    auto* voice = ac->getPlayerVoiceManager();
+    if (!voice) return;
+    const Character* ch = getActiveCharacter();
+    if (!ch) return;
+    voice->playError(type, static_cast<uint8_t>(ch->race),
+                     static_cast<uint8_t>(toServerGender(ch->gender)));
 }
 
 void GameHandler::handleCharLoginFailed(network::Packet& packet) {

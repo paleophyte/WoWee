@@ -6,6 +6,7 @@
 #include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "core/application.hpp"
 #include "core/logger.hpp"
 #include "network/world_socket.hpp"
@@ -429,6 +430,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             }
             owner_.addUIError(levelBuf);
             owner_.addSystemChatMessage(levelBuf);
+            owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_EQUIP_LEVEL);
             return;
         }
 
@@ -501,6 +503,26 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             if (auto* sfx = ac->getUiSoundManager())
                 sfx->playError();
         }
+
+        // Character speech response for errors with a matching voice line
+        using audio::PlayerErrorSpeech;
+        switch (error) {
+            case 4:  owner_.playErrorSpeech(PlayerErrorSpeech::BAG_FULL); break;
+            case 7:  owner_.playErrorSpeech(PlayerErrorSpeech::AMMO_ONLY); break;
+            case 8:  owner_.playErrorSpeech(PlayerErrorSpeech::CANT_USE_ITEM); break;
+            case 10:
+            case 11: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_EQUIP_EVER); break;
+            case 17: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_MAX_COUNT); break;
+            case 20: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_EQUIPPABLE); break;
+            case 24: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_DROP_SOULBOUND); break;
+            case 25: owner_.playErrorSpeech(PlayerErrorSpeech::OUT_OF_RANGE); break;
+            case 29: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_ENOUGH_MONEY); break;
+            case 30: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_A_BAG); break;
+            case 36: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_LOCKED); break;
+            case 50:
+            case 51: owner_.playErrorSpeech(PlayerErrorSpeech::INVENTORY_FULL); break;
+            default: break;
+        }
     };
 
     table[Opcode::SMSG_BUY_FAILED] = [this](network::Packet& packet) {
@@ -552,6 +574,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 if (auto* sfx = ac->getUiSoundManager())
                     sfx->playError();
             }
+            if (errCode == 2)
+                owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
+            else if (errCode == 6)
+                owner_.playErrorSpeech(audio::PlayerErrorSpeech::INVENTORY_FULL);
         }
     };
 
@@ -3844,6 +3870,10 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
     owner_.addSystemChatMessage(msg);
     if (auto* ac = owner_.services().audioCoordinator)
         if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
+    if (errorCode == 0)
+        owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
+    else
+        owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_LEARN_SPELL);
 }
 
 // ============================================================

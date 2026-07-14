@@ -29,6 +29,7 @@
 #include "audio/movement_sound_manager.hpp"
 #include "audio/footstep_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/activity_sound_manager.hpp"
 #include <imgui.h>
@@ -534,6 +535,13 @@ if (ImGui::SliderInt("##NpcVoiceVolume", &pendingNpcVoiceVolume, 0, 100, "%d%%")
 }
 
 ImGui::Spacing();
+if (ImGui::Checkbox("Character Speech", &pendingCharacterSpeech)) {
+    applyAudioSettings();
+}
+if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Your character speaks error responses (\"I can't do that\", \"Not enough mana\")");
+
+ImGui::Spacing();
 ImGui::Text("Mount Sounds");
 if (ImGui::SliderInt("##MountVolume", &pendingMountVolume, 0, 100, "%d%%")) {
     applyAudioSettings();
@@ -560,6 +568,7 @@ if (ImGui::Button("Restore Audio Defaults", ImVec2(-1, 0))) {
     pendingNpcVoiceVolume = 100;
     pendingMountVolume = 100;
     pendingActivityVolume = 100;
+    pendingCharacterSpeech = true;
     applyAudioSettings();
 }
 
@@ -1283,6 +1292,8 @@ void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
         footstep->setVolumeScale(pendingFootstepVolume / 100.0f);
     if (auto* npcVoice = ac->getNpcVoiceManager())
         npcVoice->setVolumeScale(pendingNpcVoiceVolume / 100.0f);
+    if (auto* playerVoice = ac->getPlayerVoiceManager())
+        playerVoice->setEnabled(pendingCharacterSpeech);
     if (auto* mount = ac->getMountSoundManager())
         mount->setVolumeScale(pendingMountVolume / 100.0f);
     if (auto* activity = ac->getActivitySoundManager())

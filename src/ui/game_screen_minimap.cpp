@@ -25,6 +25,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -1033,6 +1034,9 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         if (auto* npcVoice = ac->getNpcVoiceManager()) {
             npcVoice->setVolumeScale(settingsPanel_.pendingNpcVoiceVolume / 100.0f);
         }
+        if (auto* playerVoice = ac->getPlayerVoiceManager()) {
+            playerVoice->setEnabled(settingsPanel_.pendingCharacterSpeech);
+        }
         if (auto* mount = ac->getMountSoundManager()) {
             mount->setVolumeScale(settingsPanel_.pendingMountVolume / 100.0f);
         }
@@ -1506,6 +1510,7 @@ void GameScreen::saveSettings() {
     out << "npc_voice_volume=" << settingsPanel_.pendingNpcVoiceVolume << "\n";
     out << "mount_volume=" << settingsPanel_.pendingMountVolume << "\n";
     out << "activity_volume=" << settingsPanel_.pendingActivityVolume << "\n";
+    out << "character_speech=" << (settingsPanel_.pendingCharacterSpeech ? 1 : 0) << "\n";
 
     // Gameplay / display pacing
     out << "vsync=" << (settingsPanel_.pendingVsync ? 1 : 0) << "\n";
@@ -1664,6 +1669,7 @@ void GameScreen::loadSettings() {
             else if (key == "npc_voice_volume") settingsPanel_.pendingNpcVoiceVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "mount_volume") settingsPanel_.pendingMountVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "activity_volume") settingsPanel_.pendingActivityVolume = std::clamp(std::stoi(val), 0, 100);
+            else if (key == "character_speech") settingsPanel_.pendingCharacterSpeech = (std::stoi(val) != 0);
             // Gameplay / display pacing
             else if (key == "vsync") settingsPanel_.pendingVsync = (std::stoi(val) != 0);
             else if (key == "auto_loot") settingsPanel_.pendingAutoLoot = (std::stoi(val) != 0);

@@ -578,6 +578,7 @@ set(WOWEE_SOURCES
     src/audio/activity_sound_manager.cpp
     src/audio/mount_sound_manager.cpp
     src/audio/npc_voice_manager.cpp
+    src/audio/player_voice_manager.cpp
     src/audio/ambient_sound_manager.cpp
     src/audio/ui_sound_manager.cpp
     src/audio/combat_sound_manager.cpp
@@ -930,6 +931,7 @@ set(WOWEE_HEADERS
     include/audio/activity_sound_manager.hpp
     include/audio/mount_sound_manager.hpp
     include/audio/npc_voice_manager.hpp
+    include/audio/player_voice_manager.hpp
     include/audio/ambient_sound_manager.hpp
     include/audio/ui_sound_manager.hpp
     include/audio/combat_sound_manager.hpp

@@ -49,6 +49,7 @@ public:
     int pendingNpcVoiceVolume = 100;
     int pendingMountVolume = 100;
     int pendingActivityVolume = 100;
+    bool pendingCharacterSpeech = true;
 
     // ---- Pending camera / controls ----
     float pendingMouseSensitivity = 0.2f;

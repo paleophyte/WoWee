@@ -15,6 +15,7 @@ class FootstepManager;
 class ActivitySoundManager;
 class MountSoundManager;
 class NpcVoiceManager;
+class PlayerVoiceManager;
 class AmbientSoundManager;
 class UiSoundManager;
 class CombatSoundManager;
@@ -72,6 +73,7 @@ public:
     ActivitySoundManager* getActivitySoundManager() { return activitySoundManager_.get(); }
     MountSoundManager* getMountSoundManager() { return mountSoundManager_.get(); }
     NpcVoiceManager* getNpcVoiceManager() { return npcVoiceManager_.get(); }
+    PlayerVoiceManager* getPlayerVoiceManager() { return playerVoiceManager_.get(); }
     AmbientSoundManager* getAmbientSoundManager() { return ambientSoundManager_.get(); }
     UiSoundManager* getUiSoundManager() { return uiSoundManager_.get(); }
     CombatSoundManager* getCombatSoundManager() { return combatSoundManager_.get(); }
@@ -86,6 +88,7 @@ private:
     std::unique_ptr<ActivitySoundManager> activitySoundManager_;
     std::unique_ptr<MountSoundManager> mountSoundManager_;
     std::unique_ptr<NpcVoiceManager> npcVoiceManager_;
+    std::unique_ptr<PlayerVoiceManager> playerVoiceManager_;
     std::unique_ptr<AmbientSoundManager> ambientSoundManager_;
     std::unique_ptr<UiSoundManager> uiSoundManager_;
     std::unique_ptr<CombatSoundManager> combatSoundManager_;
