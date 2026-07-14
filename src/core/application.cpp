@@ -641,10 +641,8 @@ void Application::run() {
 
     auto lastTime = std::chrono::high_resolution_clock::now();
     std::atomic<bool> watchdogRunning{true};
-    std::atomic<int64_t> watchdogHeartbeatMs{
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()
-    };
+    beatWatchdog();
+    std::atomic<int64_t>& watchdogHeartbeatMs = watchdogHeartbeatMs_;
     // Signal flag: watchdog sets this when a stall is detected, main loop
     // handles the actual SDL calls. SDL2 video functions must only be called
     // from the main thread (the one that called SDL_Init); calling them from
@@ -675,10 +673,7 @@ void Application::run() {
     try {
         while (running && !window->shouldClose()) {
             const auto frameStart = std::chrono::steady_clock::now();
-            watchdogHeartbeatMs.store(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count(),
-                std::memory_order_release);
+            beatWatchdog();
 
             // Handle watchdog mouse-release request on the main thread where
             // SDL video calls are safe (required by SDL2 threading model).
@@ -2324,34 +2319,53 @@ void Application::update(float deltaTime) {
     }
 }
 
+void Application::beatWatchdog() {
+    watchdogHeartbeatMs_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_release);
+}
+
 void Application::render() {
     if (!renderer) {
         return;
     }
 
+    // Mirrors the IN_GAME update stages: a frame that blocks long enough to trip the
+    // watchdog needs to say which phase did it.
+    auto runRenderStage = [](const char* stageName, auto&& fn) {
+        auto stageStart = std::chrono::steady_clock::now();
+        fn();
+        float stageMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - stageStart).count();
+        if (stageMs > 50.0f) {
+            LOG_WARNING("SLOW render stage '", stageName, "': ", stageMs, "ms");
+        }
+    };
+
     renderingFrame_ = true;
-    renderer->beginFrame();
+    runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
     // Only render 3D world when in-game
     if (state == AppState::IN_GAME) {
-        if (world) {
-            renderer->renderWorld(world.get(), gameHandler.get());
-        } else {
-            renderer->renderWorld(nullptr, gameHandler.get());
-        }
+        runRenderStage("renderWorld", [&] {
+            renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
+        });
     }
 
     // Render performance HUD (within ImGui frame, before UI ends the frame)
     if (renderer) {
-        renderer->renderHUD();
+        runRenderStage("renderHUD", [&] { renderer->renderHUD(); });
     }
 
     // Render UI on top (ends ImGui frame with ImGui::Render())
     if (uiManager) {
-        uiManager->render(state, authHandler.get(), gameHandler.get());
+        runRenderStage("uiManager->render", [&] {
+            uiManager->render(state, authHandler.get(), gameHandler.get());
+        });
     }
 
-    renderer->endFrame();
+    runRenderStage("endFrame", [&] { renderer->endFrame(); });
     renderingFrame_ = false;
     processDeferredLogoutToLogin();
 }

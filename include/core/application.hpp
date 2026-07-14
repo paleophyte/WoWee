@@ -66,6 +66,11 @@ public:
     void run();
     void shutdown();
 
+    /// Tell the stall watchdog we are alive. Call from long synchronous work that
+    /// keeps presenting frames itself (e.g. the world load) so it is not mistaken
+    /// for a hung main loop.
+    void beatWatchdog();
+
     // State management
     AppState getState() const { return state; }
     void setState(AppState newState);
@@ -158,6 +163,11 @@ private:
     std::unique_ptr<TransportCallbackHandler> transportCallbacks_;
     std::unique_ptr<WorldEntryCallbackHandler> worldEntryCallbacks_;
     std::unique_ptr<UIScreenCallbackHandler> uiScreenCallbacks_;
+
+    // Beat by the main loop each iteration; the watchdog treats a long silence as a
+    // hang. Long but healthy work that renders its own frames (world load) must beat
+    // it too, or the watchdog mistakes the load for a hang.
+    std::atomic<int64_t> watchdogHeartbeatMs_{0};
 
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
