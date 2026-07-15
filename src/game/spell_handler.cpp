@@ -469,13 +469,26 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
                 owner_.addSystemChatMessage("You cannot attack that target.");
                 return;
             }
-            // Friendly creatures cannot be charged. Only creatures are filtered:
-            // players stay chargeable so duels and PvP still work, since a duel
-            // opponent shares the player's faction and so is not flagged hostile.
-            if (entity->getType() == ObjectType::UNIT &&
-                !unit->isHostile() && !owner_.isAggressiveTowardPlayer(target)) {
-                owner_.addSystemChatMessage("You cannot attack that target.");
-                return;
+            if (entity->getType() == ObjectType::UNIT) {
+                // Neutral combat creatures (yellow-name mobs such as Goretusks)
+                // are valid Charge targets even though they are not inherently
+                // hostile. Match normal right-click combat by rejecting only
+                // service NPCs and targets the server explicitly marks as
+                // non-attackable/immune, rather than requiring hostile faction.
+                constexpr uint32_t UNIT_FLAG_NON_ATTACKABLE = 0x00000002;
+                constexpr uint32_t UNIT_FLAG_IMMUNE_TO_PC   = 0x00000100;
+                constexpr uint32_t UNIT_FLAG_NOT_SELECTABLE = 0x02000000;
+                constexpr uint32_t kBlockedChargeFlags =
+                    UNIT_FLAG_NON_ATTACKABLE |
+                    UNIT_FLAG_IMMUNE_TO_PC |
+                    UNIT_FLAG_NOT_SELECTABLE;
+                const bool hostileOrAggressive =
+                    unit->isHostile() || owner_.isAggressiveTowardPlayer(target);
+                const bool clearlyFriendly = unit->isInteractable() && !hostileOrAggressive;
+                if (clearlyFriendly || (unit->getUnitFlags() & kBlockedChargeFlags) != 0) {
+                    owner_.addSystemChatMessage("You cannot attack that target.");
+                    return;
+                }
             }
         }
         float tx = entity->getX(), ty = entity->getY(), tz = entity->getZ();
