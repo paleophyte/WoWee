@@ -1079,7 +1079,6 @@ bool CombatHandler::isSelectableUnit(uint64_t guid) const {
     if (unit->getHealth() > 0) return true; // alive
 
     // A corpse is only worth selecting while it still has something to take.
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
     constexpr uint32_t UNIT_FLAG_SKINNABLE   = 0x04000000;
     if (unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE) return true;
     if (unit->getUnitFlags() & UNIT_FLAG_SKINNABLE) return true;

@@ -286,13 +286,12 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Lootable corpse dots: small yellow-green diamonds on dead, lootable units.
     // Shown whenever NPC dots are enabled (or always, since they're always useful).
     {
-        constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
         for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit) continue;
             // Must be dead (health == 0) and marked lootable
             if (unit->getHealth() != 0) continue;
-            if (!(unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE)) continue;
+            if (!(unit->getDynamicFlags() & game::UNIT_DYNFLAG_LOOTABLE)) continue;
 
             glm::vec3 npcRender = core::coords::canonicalToRender(
                 glm::vec3(entity->getX(), entity->getY(), entity->getZ()));

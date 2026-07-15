@@ -129,6 +129,17 @@ TEST_CASE("Unit flags", "[entity]") {
     REQUIRE_FALSE(u.isInteractable());
 }
 
+TEST_CASE("Corpse state uses the real dynamic dead bit", "[entity][corpse]") {
+    REQUIRE(isUnitCorpseState(0, 100, 0));
+    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_DEAD));
+    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_LOOTABLE));
+
+    REQUIRE_FALSE(isUnitCorpseState(100, 100, 0));
+    // Regression: 0x08 is tapped-by-player, not dead.
+    REQUIRE_FALSE(isUnitCorpseState(100, 100, UNIT_DYNFLAG_TAPPED_BY_PLAYER));
+    REQUIRE(UNIT_DYNFLAG_DEAD == 0x00000020);
+}
+
 TEST_CASE("Unit faction and hostility", "[entity]") {
     Unit u;
     u.setFactionTemplate(14); // Undercity

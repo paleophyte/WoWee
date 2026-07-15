@@ -47,6 +47,21 @@ enum class TypeMask : uint16_t {
     CORPSE = 0x0080
 };
 
+// UNIT_DYNAMIC_FLAGS values shared by the supported legacy expansions.
+// Keep these named: 0x08 is TAPPED_BY_PLAYER, while the actual DEAD bit is
+// 0x20. Confusing the two leaves pre-existing corpses standing after login.
+inline constexpr uint32_t UNIT_DYNFLAG_LOOTABLE         = 0x00000001;
+inline constexpr uint32_t UNIT_DYNFLAG_TAPPED           = 0x00000004;
+inline constexpr uint32_t UNIT_DYNFLAG_TAPPED_BY_PLAYER = 0x00000008;
+inline constexpr uint32_t UNIT_DYNFLAG_DEAD             = 0x00000020;
+
+/// CREATE updates may omit zero-valued health. In that case the dynamic corpse
+/// flags are the authoritative indication that the unit must spawn dead.
+inline bool isUnitCorpseState(uint32_t health, uint32_t maxHealth, uint32_t dynamicFlags) {
+    return (maxHealth > 0 && health == 0) ||
+           (dynamicFlags & (UNIT_DYNFLAG_DEAD | UNIT_DYNFLAG_LOOTABLE)) != 0;
+}
+
 /**
  * Update types for SMSG_UPDATE_OBJECT
  */

@@ -355,12 +355,16 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 uint32_t maxRange = spellbookScreen.getSpellMaxRange(rangeCheckSpellId, assetMgr);
                 if (maxRange > 5) {
                     auto& em = gameHandler.getEntityManager();
-                    auto playerEnt = em.getEntity(gameHandler.getPlayerGuid());
                     auto targetEnt = em.getEntity(gameHandler.getTargetGuid());
-                    if (playerEnt && targetEnt) {
-                        float dx = playerEnt->getX() - targetEnt->getX();
-                        float dy = playerEnt->getY() - targetEnt->getY();
-                        float dz = playerEnt->getZ() - targetEnt->getZ();
+                    if (targetEnt) {
+                        // The local player's network entity remains at its last
+                        // server-authored position while client movement updates
+                        // movementInfo. Using the entity here made every ranged
+                        // action appear out of range after walking away from login.
+                        const auto& playerPos = gameHandler.getMovementInfo();
+                        float dx = playerPos.x - targetEnt->getX();
+                        float dy = playerPos.y - targetEnt->getY();
+                        float dz = playerPos.z - targetEnt->getZ();
                         if (std::sqrt(dx*dx + dy*dy + dz*dz) > static_cast<float>(maxRange))
                             outOfRange = true;
                     }

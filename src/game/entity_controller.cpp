@@ -713,9 +713,6 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                                                  std::shared_ptr<Unit>& unit,
                                                  const UnitFieldIndices& ufi) {
     bool unitInitiallyDead = false;
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-
     for (const auto& [key, val] : block.fields) {
         // Check all specific fields BEFORE power/maxpower range checks.
         // In Classic, power indices (23-27) are adjacent to maxHealth (28),
@@ -724,7 +721,8 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         // incorrectly capture maxHealth/level/faction in Classic's tight layout.
         if (key == ufi.health) {
             unit->setHealth(val);
-            if (block.objectType == ObjectType::UNIT && val == 0) {
+            if ((block.objectType == ObjectType::UNIT ||
+                 block.objectType == ObjectType::PLAYER) && val == 0) {
                 unitInitiallyDead = true;
             }
             if (block.guid == owner_.getPlayerGuid() && val == 0) {
@@ -767,7 +765,8 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         else if (key == ufi.npcEmoteState) { unit->setNpcEmoteState(val); }
         else if (key == ufi.dynFlags) {
             unit->setDynamicFlags(val);
-            if (block.objectType == ObjectType::UNIT &&
+            if ((block.objectType == ObjectType::UNIT ||
+                 block.objectType == ObjectType::PLAYER) &&
                 ((val & UNIT_DYNFLAG_DEAD) != 0 || (val & UNIT_DYNFLAG_LOOTABLE) != 0)) {
                 unitInitiallyDead = true;
             }
@@ -784,6 +783,13 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             }
             unit->setMountDisplayId(val);
         }
+    }
+    // Initial update masks commonly omit fields whose value is zero. A dead unit
+    // can therefore arrive without UNIT_FIELD_HEALTH even though its default
+    // client-side health is zero; the dynamic corpse bits remain authoritative.
+    if ((block.objectType == ObjectType::UNIT || block.objectType == ObjectType::PLAYER) &&
+        isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags())) {
+        unitInitiallyDead = true;
     }
     return unitInitiallyDead;
 }
@@ -815,9 +821,6 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
     UnitFieldUpdateResult result;
     result.oldDisplayId = unit->getDisplayId();
     uint32_t oldHealth = unit->getHealth();
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-
     for (const auto& [key, val] : block.fields) {
         if (key == ufi.health) {
             unit->setHealth(val);
@@ -1506,7 +1509,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         }
     }
     if (block.guid == owner_.getPlayerGuid() &&
-        (unit->getDynamicFlags() & 0x0008 /*UNIT_DYNFLAG_DEAD*/) != 0) {
+        (unit->getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0) {
         owner_.playerDeadRef() = true;
         LOG_INFO("Player logged in dead (dynamic flags)");
     }
@@ -1695,10 +1698,8 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
         unit->getDisplayId() == result.oldDisplayId)
         return;
 
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-    bool isDeadNow = (unit->getHealth() == 0) ||
-        ((unit->getDynamicFlags() & (UNIT_DYNFLAG_DEAD | UNIT_DYNFLAG_LOOTABLE)) != 0);
+    bool isDeadNow = isUnitCorpseState(
+        unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags());
     dispatchEntitySpawn(block.guid, entity->getType(), entity, unit,
                         isDeadNow && !result.npcDeathNotified);
     if (owner_.addonEventCallbackRef()) {
