@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 
 namespace wowee { namespace ui {
@@ -684,10 +685,18 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         pendingResIndex = 0;
         int curW = window->getWidth();
         int curH = window->getHeight();
+        if (!displaySettingsLoaded_) {
+            pendingResolutionWidth = curW;
+            pendingResolutionHeight = curH;
+        }
+        long long bestDistance = std::numeric_limits<long long>::max();
         for (int i = 0; i < kResCount; i++) {
-            if (kResolutions[i][0] == curW && kResolutions[i][1] == curH) {
+            const long long dx = static_cast<long long>(kResolutions[i][0]) - pendingResolutionWidth;
+            const long long dy = static_cast<long long>(kResolutions[i][1]) - pendingResolutionHeight;
+            const long long distance = dx * dx + dy * dy;
+            if (distance < bestDistance) {
+                bestDistance = distance;
                 pendingResIndex = i;
-                break;
             }
         }
         pendingUiOpacity = static_cast<int>(std::lround(uiOpacity_ * 100.0f));
@@ -757,6 +766,9 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
 
                 if (ImGui::Checkbox("Fullscreen", &pendingFullscreen)) {
                     window->setFullscreen(pendingFullscreen);
+                    if (pendingFullscreen) {
+                        window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
+                    }
                     updateGraphicsPresetFromCurrentSettings();
                     saveCallback();
                 }
@@ -818,6 +830,10 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                         }
                     }
                 }
+                // AMD FidelityFX is not exposed on macOS/MoltenVK. Keep the
+                // controls and experimental frame-generation path off that
+                // platform rather than advertising unsupported settings.
+#ifndef __APPLE__
                 // FSR Upscaling
                 {
                     // FSR mode selection: Off, FSR 1.0 (Spatial), FSR 3.x (Temporal)
@@ -900,6 +916,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                         }
                     }
                 }
+#endif
                 if (ImGui::SliderInt("Ground Clutter Density", &pendingGroundClutterDensity, 0, 150, "%d%%")) {
                     if (renderer) {
                         if (auto* tm = renderer->getTerrainManager()) {
@@ -966,7 +983,9 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                     resItems[i] = resBuf[i];
                 }
                 if (ImGui::Combo(resLabel, &pendingResIndex, resItems, kResCount)) {
-                    window->applyResolution(kResolutions[pendingResIndex][0], kResolutions[pendingResIndex][1]);
+                    pendingResolutionWidth = kResolutions[pendingResIndex][0];
+                    pendingResolutionHeight = kResolutions[pendingResIndex][1];
+                    window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
                     saveCallback();
                 }
 
@@ -996,10 +1015,12 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                     pendingPOM = true;
                     pendingPOMQuality = 1;
                     pendingResIndex = defaultResIndex;
+                    pendingResolutionWidth = kDefaultResW;
+                    pendingResolutionHeight = kDefaultResH;
                     pendingBrightness = 50;
                     window->setFullscreen(pendingFullscreen);
                     window->setVsync(pendingVsync);
-                    window->applyResolution(kResolutions[pendingResIndex][0], kResolutions[pendingResIndex][1]);
+                    window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
                     if (renderer) renderer->getPostProcessPipeline()->setBrightness(1.0f);
                     pendingWaterRefraction = false;
                     if (renderer) {

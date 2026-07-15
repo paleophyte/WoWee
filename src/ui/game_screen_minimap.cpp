@@ -1499,6 +1499,9 @@ void GameScreen::saveSettings() {
     out << "character_speech=" << (settingsPanel_.pendingCharacterSpeech ? 1 : 0) << "\n";
 
     // Gameplay / display pacing
+    out << "fullscreen=" << (settingsPanel_.pendingFullscreen ? 1 : 0) << "\n";
+    out << "resolution_width=" << settingsPanel_.pendingResolutionWidth << "\n";
+    out << "resolution_height=" << settingsPanel_.pendingResolutionHeight << "\n";
     out << "vsync=" << (settingsPanel_.pendingVsync ? 1 : 0) << "\n";
     out << "auto_loot=" << (settingsPanel_.pendingAutoLoot ? 1 : 0) << "\n";
     out << "auto_sell_grey=" << (settingsPanel_.pendingAutoSellGrey ? 1 : 0) << "\n";
@@ -1659,6 +1662,18 @@ void GameScreen::loadSettings() {
             else if (key == "activity_volume") settingsPanel_.pendingActivityVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "character_speech") settingsPanel_.pendingCharacterSpeech = (std::stoi(val) != 0);
             // Gameplay / display pacing
+            else if (key == "fullscreen") {
+                settingsPanel_.pendingFullscreen = (std::stoi(val) != 0);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
+            else if (key == "resolution_width") {
+                settingsPanel_.pendingResolutionWidth = std::clamp(std::stoi(val), 640, 7680);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
+            else if (key == "resolution_height") {
+                settingsPanel_.pendingResolutionHeight = std::clamp(std::stoi(val), 480, 4320);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
             else if (key == "vsync") settingsPanel_.pendingVsync = (std::stoi(val) != 0);
             else if (key == "auto_loot") settingsPanel_.pendingAutoLoot = (std::stoi(val) != 0);
             else if (key == "auto_sell_grey") settingsPanel_.pendingAutoSellGrey = (std::stoi(val) != 0);

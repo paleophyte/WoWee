@@ -128,6 +128,11 @@ void GameScreen::setServices(const UIServices& services) {
         services_.window->isVsyncEnabled() != settingsPanel_.pendingVsync) {
         services_.window->setVsync(settingsPanel_.pendingVsync);
     }
+    if (services_.window && settingsPanel_.displaySettingsLoaded_) {
+        services_.window->setFullscreen(settingsPanel_.pendingFullscreen);
+        services_.window->applyResolution(settingsPanel_.pendingResolutionWidth,
+                                          settingsPanel_.pendingResolutionHeight);
+    }
     // Update legacy pointer for compatibility
     appearanceComposer_ = services.appearanceComposer;
     // Propagate to child panels
@@ -313,6 +318,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     if (!settingsPanel_.fsrSettingsApplied_) {
         auto* renderer = services_.renderer;
         if (renderer) {
+#ifdef __APPLE__
+            // FidelityFX and AMD frame generation are unsupported through the
+            // macOS MoltenVK path. Old settings files must not silently retain
+            // either feature after the controls are hidden.
+            settingsPanel_.pendingUpscalingMode = 0;
+            settingsPanel_.pendingFSR = false;
+            settingsPanel_.pendingAMDFramegen = false;
+            renderer->getPostProcessPipeline()->setAmdFsr3FramegenEnabled(false);
+            renderer->setFSREnabled(false);
+            renderer->setFSR2Enabled(false);
+            settingsPanel_.fsrSettingsApplied_ = true;
+#else
             static constexpr float fsrScales[] = { 0.77f, 0.67f, 0.59f, 1.00f };
             settingsPanel_.pendingFSRQuality = std::clamp(settingsPanel_.pendingFSRQuality, 0, 3);
             renderer->getPostProcessPipeline()->setFSRQuality(fsrScales[settingsPanel_.pendingFSRQuality]);
@@ -331,6 +348,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 renderer->setFSR2Enabled(effectiveMode == 2);
                 settingsPanel_.fsrSettingsApplied_ = true;
             }
+#endif
         }
     }
 

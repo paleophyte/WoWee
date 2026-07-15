@@ -32,6 +32,9 @@ public:
     bool pendingFullscreen = false;
     bool pendingVsync = true;
     int pendingResIndex = 0;
+    int pendingResolutionWidth = 1920;
+    int pendingResolutionHeight = 1080;
+    bool displaySettingsLoaded_ = false;
     bool pendingShadows = true;
     float pendingShadowDistance = 300.0f;
     bool pendingWaterRefraction = true;
@@ -84,7 +87,7 @@ public:
     float pendingBuffBarScale = 1.0f;
 
     // ---- Pending action bar layout ----
-    bool pendingShowActionBar2 = true;   // Show bottom-left extra action bar above main bar
+    bool pendingShowActionBar2 = false;  // Show bottom-left extra action bar above main bar
     float pendingActionBarScale = 1.0f;  // Multiplier for action bar slot size (0.5–1.5)
     float pendingActionBar2OffsetX = 0.0f;  // Horizontal offset from default center position
     float pendingActionBar2OffsetY = 0.0f;  // Vertical offset from default (above bar 1)

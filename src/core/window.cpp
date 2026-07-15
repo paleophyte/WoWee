@@ -239,13 +239,43 @@ void Window::applyResolution(int w, int h) {
     if (!window) return;
     if (w <= 0 || h <= 0) return;
     if (fullscreen) {
-        windowedWidth = w;
-        windowedHeight = h;
+        const int displayIndex = SDL_GetWindowDisplayIndex(window);
+        if (displayIndex < 0) {
+            LOG_WARNING("Could not determine display for fullscreen resolution ",
+                        w, "x", h, ": ", SDL_GetError());
+            return;
+        }
+
+        SDL_DisplayMode requested{};
+        requested.w = w;
+        requested.h = h;
+        SDL_DisplayMode closest{};
+        if (!SDL_GetClosestDisplayMode(displayIndex, &requested, &closest)) {
+            LOG_WARNING("No fullscreen display mode available near ", w, "x", h,
+                        ": ", SDL_GetError());
+            return;
+        }
+        if (SDL_SetWindowDisplayMode(window, &closest) != 0) {
+            LOG_WARNING("Failed to select fullscreen display mode ", closest.w,
+                        "x", closest.h, ": ", SDL_GetError());
+            return;
+        }
+        // FULLSCREEN_DESKTOP always uses the desktop mode and was silently
+        // ignoring the resolution selector (especially visible on macOS).
+        if (SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN) != 0) {
+            LOG_WARNING("Failed to apply fullscreen resolution ", closest.w,
+                        "x", closest.h, ": ", SDL_GetError());
+            return;
+        }
+        SDL_GetWindowSize(window, &width, &height);
+        if (vkContext) {
+            vkContext->markSwapchainDirty();
+        }
+        LOG_INFO("Fullscreen resolution applied: ", width, "x", height);
         return;
     }
     SDL_SetWindowSize(window, w, h);
-    width = w;
-    height = h;
+    SDL_GetWindowSize(window, &width, &height);
     windowedWidth = w;
     windowedHeight = h;
     if (vkContext) {
