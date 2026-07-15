@@ -3065,6 +3065,10 @@ private:
     bool areaTriggerSuppressFirst_ = false;  // suppress first check after map transfer
     float areaTriggerCooldown_ = 0.0f;       // seconds remaining — suppress ALL triggers
 
+    // Craft queue: seconds the expired cast bar has waited for SMSG_SPELL_GO
+    // (which re-casts the next queued item) before giving up
+    float craftCastGoGraceSec_ = 0.0f;
+
     std::array<ActionBarSlot, ACTION_BAR_SLOTS> actionBar{};
     std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
     std::vector<AuraSlot> playerAuras;

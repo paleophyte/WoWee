@@ -874,7 +874,7 @@ void GameHandler::update(float deltaTime) {
             addSystemChatMessage("Interrupted.");
         }
         // Check if client-side cast timer expired (tick-down is in SpellHandler::updateTimers).
-        // Two paths depending on whether this is a GO interaction cast:
+        // Three paths depending on whether this is a GO interaction or craft-queue cast:
         if (spellHandler_ && spellHandler_->isCasting() && spellHandler_->getCastTimeRemaining() <= 0.0f) {
             if (pendingGameObjectInteractGuid_ != 0) {
                 // GO interaction cast: do NOT call resetCastState() here. The server
@@ -885,10 +885,20 @@ void GameHandler::update(float deltaTime) {
                 // path (CMSG_LOOT via lastInteractedGoGuid_) never fires.
                 // Let the cast bar sit at 100% until SMSG_SPELL_GO arrives to clean up.
                 pendingGameObjectInteractGuid_ = 0;
+            } else if (spellHandler_->getCraftQueueRemaining() > 0 && craftCastGoGraceSec_ < 2.0f) {
+                // Craft queue cast: SMSG_SPELL_GO is what decrements the queue and
+                // re-casts the next item, and it races this client-side timer.
+                // resetCastState() here would wipe the queue mid-run ("Create All"
+                // stopping after one item), so let the cast bar sit at 100% briefly.
+                // The 2s grace bails out if SPELL_GO never arrives (cast failed
+                // without a result packet, e.g. reagents gone).
+                craftCastGoGraceSec_ += deltaTime;
             } else {
                 // Regular cast with no GO pending: clean up immediately.
                 spellHandler_->resetCastState();
             }
+        } else {
+            craftCastGoGraceSec_ = 0.0f;
         }
 
         // Unit cast states and spell cooldowns are ticked by SpellHandler::updateTimers()
