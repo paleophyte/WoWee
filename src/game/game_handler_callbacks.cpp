@@ -20,6 +20,7 @@
 #include "rendering/spell_visual_system.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/activity_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -495,6 +496,17 @@ const Character* GameHandler::getFirstCharacter() const {
     return &characters.front();
 }
 
+void GameHandler::playErrorSpeech(audio::PlayerErrorSpeech type) {
+    auto* ac = services_.audioCoordinator;
+    if (!ac) return;
+    auto* voice = ac->getPlayerVoiceManager();
+    if (!voice) return;
+    const Character* ch = getActiveCharacter();
+    if (!ch) return;
+    voice->playError(type, static_cast<uint8_t>(ch->race),
+                     static_cast<uint8_t>(toServerGender(ch->gender)));
+}
+
 void GameHandler::handleCharLoginFailed(network::Packet& packet) {
     uint8_t reason = packet.readUInt8();
 
@@ -600,8 +612,10 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     pendingQuestQueryIds_.clear();
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
-    pendingQuestAcceptTimeouts_.clear();
-    pendingQuestAcceptNpcGuids_.clear();
+    if (questHandler_) {
+        questHandler_->pendingQuestAcceptTimeoutsRef().clear();
+        questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
+    }
     npcQuestStatus_.clear();
     if (combatHandler_) combatHandler_->resetAllCombatState();
     // resetCastState() already called inside resetAllState() above
@@ -828,8 +842,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
             LOG_INFO("Auto-queried guild info (guildId=", activeChar->guildId, ")");
         }
 
-        pendingQuestAcceptTimeouts_.clear();
-        pendingQuestAcceptNpcGuids_.clear();
+        if (questHandler_) {
+            questHandler_->pendingQuestAcceptTimeoutsRef().clear();
+            questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
+        }
         pendingQuestQueryIds_.clear();
         pendingLoginQuestResync_ = true;
         pendingLoginQuestResyncTimeout_ = 10.0f;
@@ -2041,8 +2057,6 @@ void GameHandler::queryGuildInfo(uint32_t guildId) {
     if (socialHandler_) socialHandler_->queryGuildInfo(guildId);
 }
 
-static const std::string kEmptyString;
-
 const std::string& GameHandler::lookupGuildName(uint32_t guildId) {
     static const std::string kEmpty;
     if (socialHandler_) return socialHandler_->lookupGuildName(guildId);
@@ -2133,6 +2147,23 @@ bool GameHandler::isGatherGameObject(uint64_t guid) const {
     auto go = std::static_pointer_cast<GameObject>(entity);
     const GameObjectQueryResponseData* goInfo = getCachedGameObjectInfo(go->getEntry());
     return gatherSpellForGameObject(goInfo, go->getName()) != 0;
+}
+
+void GameHandler::despawnCreatureLocally(uint64_t guid) {
+    if (guid == 0 || !entityController_) return;
+
+    auto& entityManager = entityController_->getEntityManager();
+    auto entity = entityManager.getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::UNIT) return;
+
+    if (creatureDespawnCallback_) creatureDespawnCallback_(guid);
+    entityManager.removeEntity(guid);
+
+    if (combatHandler_ && guid == combatHandler_->getAutoAttackTargetGuid()) stopAutoAttack();
+    if (getTargetGuid() == guid) setTargetGuidRaw(0);
+    tabCycleStale = true;
+
+    LOG_INFO("Locally despawned looted corpse: 0x", std::hex, guid, std::dec);
 }
 
 void GameHandler::despawnGameObjectLocally(uint64_t guid) {
@@ -2431,9 +2462,9 @@ void GameHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
     if (questHandler_) questHandler_->applyQuestStateFromFields(fields);
 }
 
-// Extract packed 6-bit kill/objective counts from WotLK/TBC/Classic quest-log update fields
-// and populate quest.killCounts + quest.itemCounts using the structured objectives obtained
-// from a prior SMSG_QUEST_QUERY_RESPONSE.  Silently does nothing if objectives are absent.
+// Extract expansion-specific kill/objective counters from quest-log update fields
+// and populate quest.killCounts using the structured objectives obtained from a prior
+// SMSG_QUEST_QUERY_RESPONSE. Silently does nothing if objectives are absent.
 void GameHandler::applyPackedKillCountsFromFields(QuestLogEntry& quest) {
     if (questHandler_) questHandler_->applyPackedKillCountsFromFields(quest);
 }
@@ -2456,6 +2487,8 @@ void GameHandler::declineQuest() {
 
 void GameHandler::abandonQuest(uint32_t questId) {
     if (questHandler_) questHandler_->abandonQuest(questId);
+    setQuestTracked(questId, false);
+    setQuestShownOnMap(questId, false);
 }
 
 void GameHandler::shareQuestWithParty(uint32_t questId) {
@@ -2745,6 +2778,16 @@ const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
 
 const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellDescription(spellId);
+    return EMPTY_STRING;
+}
+
+const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
+    if (spellHandler_) return spellHandler_->getSpellFocusName(focusId);
+    return EMPTY_STRING;
+}
+
+const std::string& GameHandler::getTotemCategoryName(uint32_t categoryId) const {
+    if (spellHandler_) return spellHandler_->getTotemCategoryName(categoryId);
     return EMPTY_STRING;
 }
 

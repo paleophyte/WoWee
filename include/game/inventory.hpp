@@ -139,6 +139,10 @@ public:
     // Extra bags
     int getBagSize(int bagIndex) const;
     void setBagSize(int bagIndex, int size);
+    // Special containers (quivers, ammo pouches, profession bags) only accept
+    // their own item type: sorting skips them and the UI marks their slots.
+    bool isBagSpecial(int bagIndex) const;
+    void setBagSpecial(int bagIndex, bool special);
     const ItemSlot& getBagSlot(int bagIndex, int slotIndex) const;
     bool setBagSlot(int bagIndex, int slotIndex, const ItemDef& item);
     bool clearBagSlot(int bagIndex, int slotIndex);
@@ -192,6 +196,7 @@ private:
 
     struct BagData {
         int size = 0;
+        bool special = false;  // Quiver/ammo pouch/profession bag — restricted contents
         ItemSlot bagItem;  // The bag item itself (for icon/name/tooltip)
         std::array<ItemSlot, MAX_BAG_SIZE> slots{};
     };

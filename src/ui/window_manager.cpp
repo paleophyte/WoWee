@@ -39,7 +39,6 @@ namespace {
 
     constexpr auto& kColorRed         = kRed;
     constexpr auto& kColorGreen       = kGreen;
-    constexpr auto& kColorBrightGreen = kBrightGreen;
     constexpr auto& kColorYellow      = kYellow;
     constexpr auto& kColorGray        = kGray;
     constexpr auto& kColorDarkGray    = kDarkGray;
@@ -506,12 +505,12 @@ void WindowManager::renderQuestDetailsWindow(game::GameHandler& gameHandler,
             if (iconTex) {
                 ImGui::Image((void*)(intptr_t)iconTex, ImVec2(18, 18));
                 if (ImGui::IsItemHovered() && info && info->valid)
-                    inventoryScreen.renderItemTooltip(*info);
+                    inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
                 ImGui::SameLine();
             }
             ImGui::TextColored(nameCol, "  %s", label.c_str());
             if (ImGui::IsItemHovered() && info && info->valid)
-                inventoryScreen.renderItemTooltip(*info);
+                inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                 ImGui::GetIO().KeyShift && info && info->valid && !info->name.empty()) {
                 std::string link = buildItemChatLink(info->entry, info->quality, info->name);
@@ -720,13 +719,14 @@ void WindowManager::renderQuestOfferRewardWindow(game::GameHandler& gameHandler,
                 ImGui::EndTooltip();
                 return;
             }
-            inventoryScreen.renderItemTooltip(*info);
+            inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
         };
 
         if (!quest.choiceRewards.empty()) {
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::TextColored(ui::colors::kTooltipGold, "Choose a reward:");
+            ImGui::TextDisabled("Shift-click a reward to compare with equipped gear.");
 
             for (size_t i = 0; i < quest.choiceRewards.size(); ++i) {
                 const auto& item = quest.choiceRewards[i];
@@ -749,10 +749,10 @@ void WindowManager::renderQuestOfferRewardWindow(game::GameHandler& gameHandler,
                 }
                 ImGui::PushStyleColor(ImGuiCol_Text, qualityColor);
                 if (ImGui::Selectable(label.c_str(), selected, 0, ImVec2(0, 20))) {
-                    if (ImGui::GetIO().KeyShift && info && info->valid && !info->name.empty()) {
-                        std::string link = buildItemChatLink(info->entry, info->quality, info->name);
-                        chatPanel.insertChatLink(link);
-                    } else {
+                    // Shift is reserved for the equipped-item comparison tooltip.
+                    // Do not accidentally change the pending quest reward while
+                    // the player is comparing it.
+                    if (!ImGui::GetIO().KeyShift) {
                         selectedChoice = static_cast<int>(i);
                     }
                 }
@@ -1312,6 +1312,18 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
             };
             uint32_t playerLevel = gameHandler.getPlayerLevel();
 
+            // A recipe/spell may require a minimum skill value (e.g. Cooking 50).
+            // The server encodes this in reqSkill/reqSkillValue and reports the
+            // spell as unavailable (state=1) until the value is reached. Check it
+            // against the player's own skills so we don't promote a skill-gated
+            // recipe to a green "Train" button the server will reject.
+            auto skillMet = [&](const game::TrainerSpell& spell) {
+                if (spell.reqSkill == 0 || spell.reqSkillValue == 0) return true;
+                const auto& skills = gameHandler.getPlayerSkills();
+                auto it = skills.find(spell.reqSkill);
+                return it != skills.end() && it->second.effectiveValue() >= spell.reqSkillValue;
+            };
+
             // Renders spell rows into the current table
             auto renderSpellRows = [&](const std::vector<const game::TrainerSpell*>& spells) {
                 for (const auto* spell : spells) {
@@ -1325,8 +1337,9 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
 
                     // Dynamically determine effective state based on current prerequisites
                     // Server sends state, but we override if prerequisites are now met
+                    bool reqSkillMet = skillMet(*spell);
                     uint8_t effectiveState = spell->state;
-                    if (spell->state == 1 && prereqsMet && levelMet) {
+                    if (spell->state == 1 && prereqsMet && levelMet && reqSkillMet) {
                         // Server said unavailable, but we now meet all requirements
                         effectiveState = 0;  // Treat as available
                     }
@@ -1422,12 +1435,66 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                             ImGui::PopTextWrapPos();
                             ImGui::Spacing();
                         }
+                        // Recipes: show the full item the recipe creates and the
+                        // reagents it consumes, so the purchase is an informed one.
+                        auto seIt = gameHandler.spellNameCacheRef().find(spell->spellId);
+                        if (seIt != gameHandler.spellNameCacheRef().end()) {
+                            const auto& se = seIt->second;
+                            if (se.createdItemId != 0) {
+                                gameHandler.ensureItemInfo(se.createdItemId);
+                                const auto* prodInfo = gameHandler.getItemInfo(se.createdItemId);
+                                ImGui::Separator();
+                                ImGui::TextColored(kColorYellow, "Creates:");
+                                if (prodInfo && prodInfo->valid) {
+                                    ImGui::Indent(8.0f);
+                                    inventoryScreen.renderItemTooltip(*prodInfo, &gameHandler.getInventory());
+                                    ImGui::Unindent(8.0f);
+                                } else {
+                                    ImGui::Text("Item #%u", se.createdItemId);
+                                }
+                            }
+                            bool tooltipHasReagents = false;
+                            for (const auto& reagent : se.reagents) {
+                                if (reagent.itemId != 0) { tooltipHasReagents = true; break; }
+                            }
+                            if (tooltipHasReagents) {
+                                ImGui::Separator();
+                                ImGui::TextDisabled("Reagents:");
+                                for (const auto& reagent : se.reagents) {
+                                    if (reagent.itemId == 0 || reagent.count == 0) continue;
+                                    gameHandler.ensureItemInfo(reagent.itemId);
+                                    const auto* rInfo = gameHandler.getItemInfo(reagent.itemId);
+                                    uint32_t have = countItemInInventory(gameHandler.getInventory(), reagent.itemId);
+                                    ImVec4 haveCol = have >= reagent.count
+                                        ? colors::kLightGreen : ImVec4(1.0f, 0.6f, 0.6f, 1.0f);
+                                    if (rInfo && !rInfo->name.empty())
+                                        ImGui::TextColored(haveCol, "  %s (%u/%u)",
+                                            rInfo->name.c_str(), have, reagent.count);
+                                    else
+                                        ImGui::TextColored(haveCol, "  Item #%u (%u/%u)",
+                                            reagent.itemId, have, reagent.count);
+                                }
+                            }
+                            ImGui::Spacing();
+                        }
                         ImGui::TextDisabled("Status: %s", statusLabel);
                         if (spell->reqLevel > 0) {
                             ImVec4 lvlColor = levelMet ? ui::colors::kLightGray : kColorRed;
                             ImGui::TextColored(lvlColor, "Required Level: %u", spell->reqLevel);
                         }
-                        if (spell->reqSkill > 0) ImGui::Text("Required Skill: %u (value %u)", spell->reqSkill, spell->reqSkillValue);
+                        if (spell->reqSkill > 0 && spell->reqSkillValue > 0) {
+                            const auto& skills = gameHandler.getPlayerSkills();
+                            auto skIt = skills.find(spell->reqSkill);
+                            uint16_t curSkill = (skIt != skills.end()) ? skIt->second.effectiveValue() : 0;
+                            const std::string& skName = gameHandler.getSkillName(spell->reqSkill);
+                            ImVec4 skColor = reqSkillMet ? ui::colors::kLightGray : kColorRed;
+                            if (!skName.empty())
+                                ImGui::TextColored(skColor, "Requires %s %u (you have %u)",
+                                    skName.c_str(), spell->reqSkillValue, curSkill);
+                            else
+                                ImGui::TextColored(skColor, "Required Skill: %u (need %u, have %u)",
+                                    spell->reqSkill, spell->reqSkillValue, curSkill);
+                        }
                         auto showPrereq = [&](uint32_t node) {
                             if (node == 0) return;
                             bool met = isKnown(node);
@@ -1576,7 +1643,7 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                 bool levelMet = (spell.reqLevel == 0 || playerLevel >= spell.reqLevel);
                 bool alreadyKnown = isKnown(spell.spellId);
                 uint8_t effectiveState = spell.state;
-                if (spell.state == 1 && prereqsMet && levelMet) effectiveState = 0;
+                if (spell.state == 1 && prereqsMet && levelMet && skillMet(spell)) effectiveState = 0;
                 bool canTrain = !alreadyKnown && effectiveState == 0
                                && prereqsMet && levelMet
                                && (money >= spell.spellCost);
@@ -1611,7 +1678,7 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                     bool levelMet = (spell.reqLevel == 0 || playerLevel >= spell.reqLevel);
                     bool alreadyKnown = isKnown(spell.spellId);
                     uint8_t effectiveState = spell.state;
-                    if (spell.state == 1 && prereqsMet && levelMet) effectiveState = 0;
+                    if (spell.state == 1 && prereqsMet && levelMet && skillMet(spell)) effectiveState = 0;
                     bool canTrain = !alreadyKnown && effectiveState == 0
                                    && prereqsMet && levelMet
                                    && (money >= spell.spellCost);
@@ -1630,44 +1697,13 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
 
                 gameHandler.loadSpellNameCache();
 
-                // Difficulty color from skill thresholds
-                // orange < (minSkill + trivialLow) / 2, yellow < trivialLow, green < trivialHigh, gray >= trivialHigh
+                // Difficulty color/label from skill thresholds — shared with
+                // the standalone crafting window (crafting_window.cpp)
                 auto getDifficultyColor = [&](uint32_t spellId) -> ImVec4 {
-                    auto cit = gameHandler.spellNameCacheRef().find(spellId);
-                    if (cit == gameHandler.spellNameCacheRef().end()) return ui::colors::kWhite;
-                    const auto& se = cit->second;
-                    if (se.trivialSkillHigh == 0 && se.trivialSkillLow == 0)
-                        return ImVec4(1.0f, 0.5f, 0.0f, 1.0f); // orange (no thresholds = always useful)
-                    auto slIt = gameHandler.spellToSkillLineRef().find(spellId);
-                    if (slIt == gameHandler.spellToSkillLineRef().end()) return ui::colors::kWhite;
-                    auto skIt = gameHandler.getPlayerSkills().find(slIt->second);
-                    if (skIt == gameHandler.getPlayerSkills().end()) return ui::colors::kWhite;
-                    uint32_t skill = skIt->second.effectiveValue();
-                    if (skill >= se.trivialSkillHigh)
-                        return ImVec4(0.5f, 0.5f, 0.5f, 1.0f); // gray
-                    if (skill >= se.trivialSkillLow)
-                        return ImVec4(0.3f, 0.8f, 0.3f, 1.0f); // green
-                    uint32_t yellowThresh = se.minSkillRank + (se.trivialSkillLow - se.minSkillRank) / 2;
-                    if (skill >= yellowThresh)
-                        return ImVec4(1.0f, 1.0f, 0.0f, 1.0f); // yellow
-                    return ImVec4(1.0f, 0.5f, 0.0f, 1.0f); // orange
+                    return recipeDifficultyColor(gameHandler, spellId);
                 };
-
                 auto getDifficultyLabel = [&](uint32_t spellId) -> const char* {
-                    auto cit = gameHandler.spellNameCacheRef().find(spellId);
-                    if (cit == gameHandler.spellNameCacheRef().end()) return "";
-                    const auto& se = cit->second;
-                    if (se.trivialSkillHigh == 0 && se.trivialSkillLow == 0) return "Orange";
-                    auto slIt = gameHandler.spellToSkillLineRef().find(spellId);
-                    if (slIt == gameHandler.spellToSkillLineRef().end()) return "";
-                    auto skIt = gameHandler.getPlayerSkills().find(slIt->second);
-                    if (skIt == gameHandler.getPlayerSkills().end()) return "";
-                    uint32_t skill = skIt->second.effectiveValue();
-                    if (skill >= se.trivialSkillHigh) return "Gray";
-                    if (skill >= se.trivialSkillLow) return "Green";
-                    uint32_t yellowThresh = se.minSkillRank + (se.trivialSkillLow - se.minSkillRank) / 2;
-                    if (skill >= yellowThresh) return "Yellow";
-                    return "Orange";
+                    return recipeDifficultyLabel(gameHandler, spellId);
                 };
 
                 std::vector<const game::TrainerSpell*> craftable;

@@ -234,7 +234,7 @@ bool LightingManager::loadLightBandDbcs(pipeline::AssetManager* assetManager) {
     return true;
 }
 
-void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId,
+void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                               float gameTime,
                               bool isRaining, bool isUnderwater) {
     if (!initialized_) return;
@@ -257,8 +257,14 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId,
     }
     // else: manualTime_ is set, use timeOfDay_ as-is
 
-    // Convert time to half-minutes (WoW DBC format: 0-2879)
-    uint16_t timeHalfMinutes = static_cast<uint16_t>(timeOfDay_ * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
+    // Duskwood's visible sky is permanently late-night even while the global
+    // world clock continues normally for gameplay and every other zone.
+    visualTimeOfDayHours_ = resolveZoneVisualTimeHours(
+        zoneId, isIndoors_, timeOfDay_ * 24.0f);
+
+    // Convert visual time to half-minutes (WoW DBC format: 0-2879).
+    const float visualDayFraction = visualTimeOfDayHours_ / 24.0f;
+    uint16_t timeHalfMinutes = static_cast<uint16_t>(visualDayFraction * static_cast<float>(kHalfMinutesPerDay)) % kHalfMinutesPerDay;
 
     // Update player position and map
     currentPlayerPos_ = playerPos;
@@ -338,6 +344,10 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId,
             newParams.diffuseColor *= (0.2f + 0.8f * (1.0f - nightness));
             newParams.ambientColor.b += nightness * 0.1f;
         }
+    }
+
+    if (!isIndoors_) {
+        applyZoneAmbienceOverride(zoneId, newParams);
     }
 
     // Smooth temporal blending to avoid snapping (5.0 = blend rate)

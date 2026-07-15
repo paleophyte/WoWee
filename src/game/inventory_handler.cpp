@@ -6,6 +6,7 @@
 #include "rendering/renderer.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "core/application.hpp"
 #include "core/logger.hpp"
 #include "network/world_socket.hpp"
@@ -227,7 +228,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         uint32_t lootSlot = packet.readUInt32();
         uint32_t itemId   = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
-        /*int32_t  randProp   =*/ static_cast<int32_t>(packet.readUInt32());
+        (void)packet.readUInt32(); // random property
         uint32_t countdown = packet.readUInt32();
         uint8_t  voteMask  = packet.readUInt8();
 
@@ -260,7 +261,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         /*uint32_t lootSlot   =*/ packet.readUInt32();
         uint32_t itemId     = packet.readUInt32();
         /*uint32_t randSuffix =*/ packet.readUInt32();
-        /*int32_t  randProp   =*/ static_cast<int32_t>(packet.readUInt32());
+        (void)packet.readUInt32(); // random property
         owner_.ensureItemInfo(itemId);
         auto* allPassInfo = owner_.getItemInfo(itemId);
         std::string allPassName = (allPassInfo && !allPassInfo->name.empty())
@@ -299,7 +300,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         }
     };
 
-    table[Opcode::SMSG_LOOT_SLOT_CHANGED] = [this](network::Packet& packet) {
+    table[Opcode::SMSG_LOOT_SLOT_CHANGED] = [](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t slotIdx = packet.readUInt8();
             LOG_DEBUG("SMSG_LOOT_SLOT_CHANGED: slot=", (int)slotIdx);
@@ -355,7 +356,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
     };
 
     // ---- Open container ----
-    table[Opcode::SMSG_OPEN_CONTAINER] = [this](network::Packet& packet) {
+    table[Opcode::SMSG_OPEN_CONTAINER] = [](network::Packet& packet) {
         if (packet.hasRemaining(8)) {
             uint64_t containerGuid = packet.readUInt64();
             LOG_DEBUG("SMSG_OPEN_CONTAINER: guid=0x", std::hex, containerGuid, std::dec);
@@ -445,6 +446,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             }
             owner_.addUIError(levelBuf);
             owner_.addSystemChatMessage(levelBuf);
+            owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_EQUIP_LEVEL);
             return;
         }
 
@@ -517,6 +519,26 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
             if (auto* sfx = ac->getUiSoundManager())
                 sfx->playError();
         }
+
+        // Character speech response for errors with a matching voice line
+        using audio::PlayerErrorSpeech;
+        switch (error) {
+            case 4:  owner_.playErrorSpeech(PlayerErrorSpeech::BAG_FULL); break;
+            case 7:  owner_.playErrorSpeech(PlayerErrorSpeech::AMMO_ONLY); break;
+            case 8:  owner_.playErrorSpeech(PlayerErrorSpeech::CANT_USE_ITEM); break;
+            case 10:
+            case 11: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_EQUIP_EVER); break;
+            case 17: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_MAX_COUNT); break;
+            case 20: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_EQUIPPABLE); break;
+            case 24: owner_.playErrorSpeech(PlayerErrorSpeech::CANT_DROP_SOULBOUND); break;
+            case 25: owner_.playErrorSpeech(PlayerErrorSpeech::OUT_OF_RANGE); break;
+            case 29: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_ENOUGH_MONEY); break;
+            case 30: owner_.playErrorSpeech(PlayerErrorSpeech::NOT_A_BAG); break;
+            case 36: owner_.playErrorSpeech(PlayerErrorSpeech::ITEM_LOCKED); break;
+            case 50:
+            case 51: owner_.playErrorSpeech(PlayerErrorSpeech::INVENTORY_FULL); break;
+            default: break;
+        }
     };
 
     table[Opcode::SMSG_BUY_FAILED] = [this](network::Packet& packet) {
@@ -568,6 +590,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
                 if (auto* sfx = ac->getUiSoundManager())
                     sfx->playError();
             }
+            if (errCode == 2)
+                owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
+            else if (errCode == 6)
+                owner_.playErrorSpeech(audio::PlayerErrorSpeech::INVENTORY_FULL);
         }
     };
 
@@ -575,7 +601,7 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         if (packet.hasRemaining(20)) {
             /*uint64_t vendorGuid =*/ packet.readUInt64();
             /*uint32_t vendorSlot =*/ packet.readUInt32();
-            /*int32_t  newCount   =*/ static_cast<int32_t>(packet.readUInt32());
+            (void)packet.readUInt32(); // new count
             uint32_t itemCount  = packet.readUInt32();
             // Successful buyback: remove the entry from the local buyback list.
             // Without this the pending slot lingered and a later unrelated
@@ -922,20 +948,10 @@ void InventoryHandler::handleLootRemoved(network::Packet& packet) {
     uint8_t slotIndex = packet.readUInt8();
     for (auto it = currentLoot_.items.begin(); it != currentLoot_.items.end(); ++it) {
         if (it->slotIndex == slotIndex) {
-            std::string itemName = "item #" + std::to_string(it->itemId);
-            uint32_t quality = 1;
-            if (const ItemQueryResponseData* info = owner_.getItemInfo(it->itemId)) {
-                if (!info->name.empty()) itemName = info->name;
-                quality = info->quality;
-            }
-            std::string link = buildItemLink(it->itemId, quality, itemName);
-            std::string msgStr = "Looted: " + link;
-            if (it->count > 1) msgStr += " x" + std::to_string(it->count);
-            owner_.addSystemChatMessage(msgStr);
-            if (auto* ac = owner_.services().audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager())
-                    sfx->playLootItem();
-            }
+            // SMSG_ITEM_PUSH_RESULT is the authoritative inventory receipt and
+            // emits the single "Received item" notification. Slot removal only
+            // updates the open loot window; announcing here duplicated chat and
+            // the loot sound for the same item.
             currentLoot_.items.erase(it);
             if (owner_.addonEventCallbackRef())
                 owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
@@ -968,7 +984,7 @@ void InventoryHandler::handleLootRoll(network::Packet& packet) {
     uint64_t playerGuid = packet.readUInt64();
     /*uint32_t itemId     =*/ packet.readUInt32();
     /*uint32_t randSuffix =*/ packet.readUInt32();
-    /*int32_t  randProp   =*/ static_cast<int32_t>(packet.readUInt32());
+    (void)packet.readUInt32(); // random property
     uint8_t rollNumber  = packet.readUInt8();
     uint8_t rollType    = packet.readUInt8();
     /*uint8_t autoPass   =*/ packet.readUInt8();
@@ -2023,8 +2039,18 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
     uint32_t mailId = packet.readUInt32();
     uint32_t action = packet.readUInt32();
     uint32_t error  = packet.readUInt32();
-    (void)mailId;
-    if (action == 0) { // SEND
+    // WotLK MailResponseType values from SharedDefines.h.
+    constexpr uint32_t MAIL_SEND = 0;
+    constexpr uint32_t MAIL_MONEY_TAKEN = 1;
+    constexpr uint32_t MAIL_ITEM_TAKEN = 2;
+    constexpr uint32_t MAIL_RETURNED_TO_SENDER = 3;
+    constexpr uint32_t MAIL_DELETED = 4;
+    constexpr uint32_t MAIL_MADE_PERMANENT = 5;
+
+    auto mailIt = std::find_if(mailInbox_.begin(), mailInbox_.end(),
+        [mailId](const MailMessage& mail) { return mail.messageId == mailId; });
+
+    if (action == MAIL_SEND) {
         if (error == 0) {
             owner_.addSystemChatMessage("Mail sent.");
             clearMailAttachments();
@@ -2032,22 +2058,37 @@ void InventoryHandler::handleSendMailResult(network::Packet& packet) {
         } else {
             owner_.addSystemChatMessage("Failed to send mail (error " + std::to_string(error) + ").");
         }
-    } else if (action == 4) { // TAKE_ITEM
+    } else if (action == MAIL_ITEM_TAKEN) {
         if (error == 0) {
             owner_.addSystemChatMessage("Item taken from mail.");
             if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("BAG_UPDATE", {});
         } else {
             owner_.addSystemChatMessage("Failed to take item (error " + std::to_string(error) + ").");
         }
-    } else if (action == 5) { // TAKE_MONEY
+    } else if (action == MAIL_MONEY_TAKEN) {
         if (error == 0) {
+            if (mailIt != mailInbox_.end()) mailIt->money = 0;
             owner_.addSystemChatMessage("Money taken from mail.");
-            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+            if (owner_.addonEventCallbackRef()) {
+                owner_.addonEventCallbackRef()("PLAYER_MONEY", {});
+                owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+            }
+        } else {
+            owner_.addSystemChatMessage("Failed to take money (error " + std::to_string(error) + ").");
         }
-    } else if (action == 2) { // DELETE
+    } else if (action == MAIL_DELETED || action == MAIL_RETURNED_TO_SENDER) {
         if (error == 0) {
-            owner_.addSystemChatMessage("Mail deleted.");
+            owner_.addSystemChatMessage(action == MAIL_DELETED ? "Mail deleted." : "Mail returned.");
+            if (mailIt != mailInbox_.end()) {
+                const int erasedIndex = static_cast<int>(std::distance(mailInbox_.begin(), mailIt));
+                mailInbox_.erase(mailIt);
+                if (selectedMailIndex_ == erasedIndex) selectedMailIndex_ = -1;
+                else if (selectedMailIndex_ > erasedIndex) --selectedMailIndex_;
+            }
+            if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
         }
+    } else if (action == MAIL_MADE_PERMANENT && error == 0) {
+        owner_.addSystemChatMessage("Mail text copied.");
     }
     refreshMailList();
 }
@@ -2792,7 +2833,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             if (it->itemId == data.entry) {
                 std::string itemName = data.name.empty() ? ("item #" + std::to_string(data.entry)) : data.name;
                 std::string link = buildItemLink(data.entry, data.quality, itemName);
-                std::string msg = "Received: " + link;
+                std::string msg = "Received item: " + link;
                 if (it->count > 1) msg += " x" + std::to_string(it->count);
                 owner_.addSystemChatMessage(msg);
                 if (auto* ac = owner_.services().audioCoordinator) {
@@ -3159,19 +3200,27 @@ void InventoryHandler::rebuildOnlineInventory() {
         if (contIt != owner_.containerContentsRef().end()) {
             numSlots = static_cast<int>(contIt->second.numSlots);
         }
-        if (numSlots <= 0) {
+        const ItemQueryResponseData* bagTemplate = nullptr;
+        {
             auto bagItemIt = owner_.onlineItemsRef().find(bagGuid);
             if (bagItemIt != owner_.onlineItemsRef().end()) {
                 auto bagInfoIt = owner_.itemInfoCacheRef().find(bagItemIt->second.entry);
-                if (bagInfoIt != owner_.itemInfoCacheRef().end()) {
-                    numSlots = bagInfoIt->second.containerSlots;
-                }
+                if (bagInfoIt != owner_.itemInfoCacheRef().end())
+                    bagTemplate = &bagInfoIt->second;
             }
+        }
+        if (numSlots <= 0 && bagTemplate) {
+            numSlots = bagTemplate->containerSlots;
         }
         if (numSlots <= 0) continue;
 
         // Set the bag size in the inventory bag data
         owner_.inventoryRef().setBagSize(bagIdx, numSlots);
+        // Quivers (class 11) and profession bags (class 1, subclass != 0) only
+        // accept their own item type — sorting and the combined grid must know.
+        owner_.inventoryRef().setBagSpecial(bagIdx, bagTemplate &&
+            (bagTemplate->itemClass == 11 ||
+             (bagTemplate->itemClass == 1 && bagTemplate->subClass != 0)));
 
         // Also set bagSlots on the equipped bag item (for UI display)
         auto& bagEquipSlot = owner_.inventoryRef().getEquipSlot(static_cast<EquipSlot>(Inventory::FIRST_BAG_EQUIP_SLOT + bagIdx));
@@ -3850,14 +3899,21 @@ void InventoryHandler::handleTrainerBuyFailed(network::Packet& packet) {
     std::string msg = "Cannot learn ";
     if (!spellName.empty()) msg += spellName;
     else msg += "spell #" + std::to_string(spellId);
-    if (errorCode == 0) msg += " (not enough money)";
-    else if (errorCode == 1) msg += " (not enough skill)";
-    else if (errorCode == 2) msg += " (already known)";
-    else if (errorCode != 0) msg += " (error " + std::to_string(errorCode) + ")";
+    // SMSG_TRAINER_BUY_FAILED reason codes (WoW 3.3.5a):
+    //   0 = trainer service unavailable / cannot learn (requirements unmet, e.g. skill too low)
+    //   1 = not enough money
+    //   2 = does not meet requirements (class/race/level/skill)
+    if (errorCode == 1) msg += " (not enough money)";
+    else if (errorCode == 2) msg += " (requirements not met)";
+    else msg += " (requirements not met)";
     owner_.addUIError(msg);
     owner_.addSystemChatMessage(msg);
     if (auto* ac = owner_.services().audioCoordinator)
         if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
+    if (errorCode == 1)
+        owner_.playErrorSpeech(audio::PlayerErrorSpeech::NOT_ENOUGH_MONEY);
+    else
+        owner_.playErrorSpeech(audio::PlayerErrorSpeech::CANT_LEARN_SPELL);
 }
 
 // ============================================================

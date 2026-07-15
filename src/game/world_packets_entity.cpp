@@ -319,6 +319,21 @@ const char* getItemSubclassName(uint32_t itemClass, uint32_t subClass) {
             default: return "Armor";
         }
     }
+    if (itemClass == 1) { // Container (plain bags stay unnamed to avoid "Bag  Bag" tooltips)
+        switch (subClass) {
+            case 1: return "Soul Bag"; case 2: return "Herb Bag";
+            case 3: return "Enchanting Bag"; case 4: return "Engineering Bag";
+            case 5: return "Gem Bag"; case 6: return "Mining Bag";
+            case 7: return "Leatherworking Bag"; case 8: return "Inscription Bag";
+            default: return "";
+        }
+    }
+    if (itemClass == 11) { // Quiver
+        switch (subClass) {
+            case 3: return "Ammo Pouch";
+            default: return "Quiver";
+        }
+    }
     return "";
 }
 
@@ -1097,6 +1112,9 @@ bool CastFailedParser::parse(network::Packet& packet, CastFailedData& data) {
     data.castCount = packet.readUInt8();
     data.spellId = packet.readUInt32();
     data.result = packet.readUInt8();
+    // Spell-focus and totem failures append ids naming the missing
+    // station/tool so the client can surface them.
+    readCastResultArgs(packet, data.result, data.miscArg, data.miscArg2);
     LOG_INFO("Cast failed: spell=", data.spellId, " result=", static_cast<int>(data.result));
     return true;
 }

@@ -56,20 +56,8 @@ namespace {
     using namespace wowee::ui::colors;
     using namespace wowee::ui::helpers;
     constexpr auto& kColorRed        = kRed;
-    constexpr auto& kColorGreen      = kGreen;
     constexpr auto& kColorBrightGreen= kBrightGreen;
     constexpr auto& kColorYellow     = kYellow;
-    constexpr auto& kColorGray       = kGray;
-    constexpr auto& kColorDarkGray   = kDarkGray;
-
-    // Abbreviated month names (indexed 0-11)
-    constexpr const char* kMonthAbbrev[12] = {
-        "Jan","Feb","Mar","Apr","May","Jun",
-        "Jul","Aug","Sep","Oct","Nov","Dec"
-    };
-
-    // Common ImGui window flags for popup dialogs
-    const ImGuiWindowFlags kDialogFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize;
 
     bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
         glm::vec3 oc = ray.origin - center;
@@ -140,6 +128,11 @@ void GameScreen::setServices(const UIServices& services) {
         services_.window->isVsyncEnabled() != settingsPanel_.pendingVsync) {
         services_.window->setVsync(settingsPanel_.pendingVsync);
     }
+    if (services_.window && settingsPanel_.displaySettingsLoaded_) {
+        services_.window->setFullscreen(settingsPanel_.pendingFullscreen);
+        services_.window->applyResolution(settingsPanel_.pendingResolutionWidth,
+                                          settingsPanel_.pendingResolutionHeight);
+    }
     // Update legacy pointer for compatibility
     appearanceComposer_ = services.appearanceComposer;
     // Propagate to child panels
@@ -165,6 +158,7 @@ void GameScreen::applyCameraControlSettings() {
         cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
         cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
         cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
+        cam->setSmoothCameraFollow(settingsPanel_.pendingSmoothCameraFollow);
     }
 }
 
@@ -252,6 +246,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         if (auto* renderer = services_.renderer) {
             renderer->setShadowsEnabled(settingsPanel_.pendingShadows);
             renderer->setShadowDistance(settingsPanel_.pendingShadowDistance);
+            renderer->setViewDistance(settingsPanel_.pendingViewDistance);
             if (auto* post = renderer->getPostProcessPipeline()) {
                 post->setBrightness(static_cast<float>(settingsPanel_.pendingBrightness) / 50.0f);
             }
@@ -325,6 +320,18 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     if (!settingsPanel_.fsrSettingsApplied_) {
         auto* renderer = services_.renderer;
         if (renderer) {
+#ifdef __APPLE__
+            // FidelityFX and AMD frame generation are unsupported through the
+            // macOS MoltenVK path. Old settings files must not silently retain
+            // either feature after the controls are hidden.
+            settingsPanel_.pendingUpscalingMode = 0;
+            settingsPanel_.pendingFSR = false;
+            settingsPanel_.pendingAMDFramegen = false;
+            renderer->getPostProcessPipeline()->setAmdFsr3FramegenEnabled(false);
+            renderer->setFSREnabled(false);
+            renderer->setFSR2Enabled(false);
+            settingsPanel_.fsrSettingsApplied_ = true;
+#else
             static constexpr float fsrScales[] = { 0.77f, 0.67f, 0.59f, 1.00f };
             settingsPanel_.pendingFSRQuality = std::clamp(settingsPanel_.pendingFSRQuality, 0, 3);
             renderer->getPostProcessPipeline()->setFSRQuality(fsrScales[settingsPanel_.pendingFSRQuality]);
@@ -343,6 +350,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 renderer->setFSR2Enabled(effectiveMode == 2);
                 settingsPanel_.fsrSettingsApplied_ = true;
             }
+#endif
         }
     }
 
@@ -402,6 +410,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         chatPanel_.getSpellIcon = [this](uint32_t id, pipeline::AssetManager* am) {
             return getSpellIcon(id, am);
         };
+        if (!chatPanel_.saveSettingsFn)
+            chatPanel_.saveSettingsFn = [this]() { saveSettings(); };
         chatPanel_.render(gameHandler, inventoryScreen, spellbookScreen, questLogScreen);
         // Process slash commands that affect GameScreen state
         auto cmds = chatPanel_.consumeSlashCommands();
@@ -445,7 +455,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     dialogManager_.renderDialogs(gameHandler, inventoryScreen, chatPanel_);
     socialPanel_.renderGuildRoster(gameHandler, chatPanel_);
     socialPanel_.renderSocialFrame(gameHandler, chatPanel_);
-    combatUI_.renderBuffBar(gameHandler, spellbookScreen, inventoryScreen, spellIconFn);
+    combatUI_.renderBuffBar(gameHandler, spellbookScreen, inventoryScreen, settingsPanel_, spellIconFn);
     windowManager_.renderLootWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderGossipWindow(gameHandler, chatPanel_);
     windowManager_.renderQuestDetailsWindow(gameHandler, chatPanel_, inventoryScreen);
@@ -453,6 +463,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     windowManager_.renderQuestOfferRewardWindow(gameHandler, chatPanel_, inventoryScreen);
     windowManager_.renderVendorWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderTrainerWindow(gameHandler,
+        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
+        inventoryScreen);
+    windowManager_.renderCraftingWindow(gameHandler,
         [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
         inventoryScreen);
     windowManager_.renderBarberShopWindow(gameHandler);
@@ -708,6 +721,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     // Screen edge damage flash — red vignette that fires on HP decrease
     {
+        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
         uint32_t currentHp = 0;
         if (playerEntity && (playerEntity->getType() == game::ObjectType::PLAYER ||
@@ -718,9 +732,17 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
 
         // Detect HP drop (ignore transitions from 0 — entity just spawned or uninitialized)
-        if (settingsPanel_.damageFlashEnabled_ && lastPlayerHp_ > 0 && currentHp < lastPlayerHp_ && currentHp > 0)
+        if (!deadOrGhost && settingsPanel_.damageFlashEnabled_ &&
+            lastPlayerHp_ > 0 && currentHp < lastPlayerHp_ && currentHp > 0) {
             damageFlashAlpha_ = 1.0f;
+        }
         lastPlayerHp_ = currentHp;
+
+        // Spirit release can leave a low/non-zero health value on the local
+        // entity. Never carry a pre-death damage flash into ghost form.
+        if (deadOrGhost) {
+            damageFlashAlpha_ = 0.0f;
+        }
 
         // Fade out over ~0.5 seconds
         if (damageFlashAlpha_ > 0.0f) {
@@ -734,9 +756,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Persistent low-health vignette — pulsing red edges when HP < 20%
     {
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
-        bool isDead = gameHandler.isPlayerDead();
+        const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
         float hpPct = 1.0f;
-        if (!isDead && playerEntity &&
+        if (!deadOrGhost && playerEntity &&
             (playerEntity->getType() == game::ObjectType::PLAYER ||
              playerEntity->getType() == game::ObjectType::UNIT)) {
             auto unit = std::static_pointer_cast<game::Unit>(playerEntity);
@@ -745,7 +767,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
 
         // Only show when alive and below 20% HP; intensity increases as HP drops
-        if (settingsPanel_.lowHealthVignetteEnabled_ && !isDead && hpPct < 0.20f && hpPct > 0.0f) {
+        if (settingsPanel_.lowHealthVignetteEnabled_ && !deadOrGhost &&
+            hpPct < 0.20f && hpPct > 0.0f) {
             // Base intensity from HP deficit (0 at 20%, 1 at 0%); pulse at ~1.5 Hz
             float danger = (0.20f - hpPct) / 0.20f;
             float pulse  = 0.55f + 0.45f * std::sin(static_cast<float>(ImGui::GetTime()) * 9.4f);

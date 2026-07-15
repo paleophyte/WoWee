@@ -112,11 +112,17 @@ void renderItemTypeWarningIfNeeded(const game::GameHandler* gameHandler,
 
 // Socket types from shared ui_colors.hpp (ui::kSocketTypes)
 
-const game::ItemSlot* findComparableEquipped(const game::Inventory& inventory, uint8_t inventoryType) {
+struct ComparableEquipped {
+    const game::ItemSlot* slot = nullptr;
+    game::EquipSlot equipSlot = game::EquipSlot::HEAD;
+    explicit operator bool() const { return slot != nullptr; }
+};
+
+ComparableEquipped findComparableEquipped(const game::Inventory& inventory, uint8_t inventoryType) {
     using ES = game::EquipSlot;
-    auto slotPtr = [&](ES slot) -> const game::ItemSlot* {
+    auto slotPtr = [&](ES slot) -> ComparableEquipped {
         const auto& s = inventory.getEquipSlot(slot);
-        return s.empty() ? nullptr : &s;
+        return s.empty() ? ComparableEquipped{} : ComparableEquipped{&s, slot};
     };
 
     switch (inventoryType) {
@@ -132,15 +138,15 @@ const game::ItemSlot* findComparableEquipped(const game::Inventory& inventory, u
         case 9: return slotPtr(ES::WRISTS);
         case 10: return slotPtr(ES::HANDS);
         case 11: {
-            if (auto* s = slotPtr(ES::RING1)) return s;
+            if (auto s = slotPtr(ES::RING1)) return s;
             return slotPtr(ES::RING2);
         }
         case 12: {
-            if (auto* s = slotPtr(ES::TRINKET1)) return s;
+            if (auto s = slotPtr(ES::TRINKET1)) return s;
             return slotPtr(ES::TRINKET2);
         }
         case 13: // One-hand
-            if (auto* s = slotPtr(ES::MAIN_HAND)) return s;
+            if (auto s = slotPtr(ES::MAIN_HAND)) return s;
             return slotPtr(ES::OFF_HAND);
         case 14:
         case 22:
@@ -154,12 +160,40 @@ const game::ItemSlot* findComparableEquipped(const game::Inventory& inventory, u
         case 18: // bag
             for (int i = 0; i < game::Inventory::NUM_BAG_SLOTS; ++i) {
                 auto slot = static_cast<ES>(static_cast<int>(ES::BAG1) + i);
-                if (auto* s = slotPtr(slot)) return s;
+                if (auto s = slotPtr(slot)) return s;
             }
-            return nullptr;
+            return {};
         case 19: return slotPtr(ES::TABARD);
-        default: return nullptr;
+        default: return {};
     }
+}
+
+void renderEquippedEnhancements(
+        game::GameHandler* gameHandler,
+        const ComparableEquipped& equipped,
+        const std::unordered_map<uint32_t, std::string>& enchantNames) {
+    if (!gameHandler || !equipped) return;
+
+    const uint64_t guid = gameHandler->getEquipSlotGuid(
+        static_cast<int>(equipped.equipSlot));
+    if (guid == 0) return;
+
+    auto renderEnchant = [&](const char* label, uint32_t enchantId, const ImVec4& color) {
+        if (enchantId == 0) return;
+        auto it = enchantNames.find(enchantId);
+        if (it != enchantNames.end() && !it->second.empty())
+            ImGui::TextColored(color, "%s: %s", label, it->second.c_str());
+        else
+            ImGui::TextColored(color, "%s: Enchantment %u", label, enchantId);
+    };
+
+    const auto [permanent, temporary] = gameHandler->getItemEnchantIds(guid);
+    renderEnchant("Enchanted", permanent, ui::colors::kCyan);
+    renderEnchant("Temporary", temporary, ImVec4(0.8f, 1.0f, 0.4f, 1.0f));
+
+    const auto sockets = gameHandler->getItemSocketEnchantIds(guid);
+    for (uint32_t socketEnchant : sockets)
+        renderEnchant("Gem", socketEnchant, ui::colors::kSocketGreen);
 }
 
 } // namespace
@@ -1078,7 +1112,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     }
 
     int rows = (totalSlots + columns - 1) / columns;
-    float bagContentH = rows * (slotSize + 4.0f) + 40.0f;
+    float bagContentH = rows * (slotSize + 4.0f) + 54.0f; // grid + footer (separator + sort button + money)
     int visibleKeySlots = 0;
     if (showKeyring_) {
         constexpr int keyColumns = 8;
@@ -1124,25 +1158,44 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
 
     // Draw one uninterrupted grid while retaining each slot's real container
     // and index for pickup, use, split, destroy, and server swap operations.
+    // Special containers (quivers, ammo pouches, profession bags) only accept
+    // their own item type, so their slots get a label and an amber wash.
     int gridIndex = 0;
     auto renderCombinedSlot = [&](const game::ItemSlot& slot, int backpackIndex,
-                                  int bagIndex, int bagSlotIndex) {
+                                  int bagIndex, int bagSlotIndex,
+                                  const char* restrictedLabel) {
         if (gridIndex % columns != 0) ImGui::SameLine();
         ImGui::PushID(gridIndex);
-        renderItemSlot(inventory, slot, slotSize, nullptr,
+        renderItemSlot(inventory, slot, slotSize, restrictedLabel,
                        SlotKind::BACKPACK, backpackIndex, game::EquipSlot::NUM_SLOTS,
                        bagIndex, bagSlotIndex);
+        if (restrictedLabel && slot.empty()) {
+            ImVec2 mn = ImGui::GetItemRectMin();
+            ImVec2 mx = ImGui::GetItemRectMax();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(mn, mx, IM_COL32(180, 140, 40, 40));
+            dl->AddRect(mn, mx, IM_COL32(180, 140, 40, 130));
+        }
         ImGui::PopID();
         ++gridIndex;
     };
 
     for (int slot = 0; slot < inventory.getBackpackSize(); ++slot)
-        renderCombinedSlot(inventory.getBackpackSlot(slot), slot, -1, -1);
+        renderCombinedSlot(inventory.getBackpackSlot(slot), slot, -1, -1, nullptr);
     for (int bag = 0; bag < game::Inventory::NUM_BAG_SLOTS; ++bag) {
         const int bagSize = inventory.getBagSize(bag);
         if (bagSize <= 0) continue;
+        const char* restrictedLabel = nullptr;
+        if (inventory.isBagSpecial(bag)) {
+            game::EquipSlot bagEquip = static_cast<game::EquipSlot>(
+                static_cast<int>(game::EquipSlot::BAG1) + bag);
+            const auto& bagItem = inventory.getEquipSlot(bagEquip);
+            restrictedLabel = (!bagItem.empty() && !bagItem.item.subclassName.empty())
+                ? bagItem.item.subclassName.c_str()
+                : "Special Bag";
+        }
         for (int slot = 0; slot < bagSize; ++slot)
-            renderCombinedSlot(inventory.getBagSlot(bag, slot), -1, bag, slot);
+            renderCombinedSlot(inventory.getBagSlot(bag, slot), -1, bag, slot, restrictedLabel);
     }
 
     if (visibleKeySlots > 0) {
@@ -1160,14 +1213,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
         }
     }
 
-    ImGui::Spacing();
-    uint64_t gold = moneyCopper / 10000;
-    uint64_t silver = (moneyCopper / 100) % 100;
-    uint64_t copper = moneyCopper % 100;
-    ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
-                       static_cast<unsigned long long>(gold),
-                       static_cast<unsigned long long>(silver),
-                       static_cast<unsigned long long>(copper));
+    renderBagsFooter(inventory, moneyCopper);
     ImGui::End();
 }
 
@@ -1352,10 +1398,28 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
             renderItemSlot(inventory, slot, slotSize, nullptr,
                            SlotKind::BACKPACK, i, game::EquipSlot::NUM_SLOTS);
         } else {
-            // Bag slot - pass bag index info for interactions
-            renderItemSlot(inventory, slot, slotSize, nullptr,
+            // Bag slot - pass bag index info for interactions. Special containers
+            // (quiver/ammo pouch/profession bag) get a label + amber wash so their
+            // restricted slots aren't mistaken for general-purpose space.
+            const char* restrictedLabel = nullptr;
+            if (inventory.isBagSpecial(bagIndex)) {
+                game::EquipSlot bagEquip = static_cast<game::EquipSlot>(
+                    static_cast<int>(game::EquipSlot::BAG1) + bagIndex);
+                const auto& bagItem = inventory.getEquipSlot(bagEquip);
+                restrictedLabel = (!bagItem.empty() && !bagItem.item.subclassName.empty())
+                    ? bagItem.item.subclassName.c_str()
+                    : "Special Bag";
+            }
+            renderItemSlot(inventory, slot, slotSize, restrictedLabel,
                            SlotKind::BACKPACK, -1, game::EquipSlot::NUM_SLOTS,
                            bagIndex, i);
+            if (restrictedLabel && slot.empty()) {
+                ImVec2 mn = ImGui::GetItemRectMin();
+                ImVec2 mx = ImGui::GetItemRectMax();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(mn, mx, IM_COL32(180, 140, 40, 40));
+                dl->AddRect(mn, mx, IM_COL32(180, 140, 40, 130));
+            }
         }
         ImGui::PopID();
     }
@@ -1388,48 +1452,48 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
 
     // Footer for backpack: sort button + money display
     if (bagIndex < 0) {
-        ImGui::Spacing();
-        ImGui::Separator();
-
-        // Sort Bags button — compute swaps, apply client-side preview, queue server packets
-        {
-            bool sorting = !sortSwapQueue_.empty();
-            if (sorting) ImGui::BeginDisabled();
-            if (ImGui::SmallButton(sorting ? "Sorting..." : "Sort Bags")) {
-                // Compute the swap operations before modifying local state
-                auto swaps = inventory.computeSortSwaps();
-                // Apply local preview immediately
-                inventory.sortBags();
-                // Queue server-side swaps (one per frame)
-                for (auto& s : swaps)
-                    sortSwapQueue_.push_back(s);
-            }
-            if (sorting) ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Sort all bag slots by quality (highest first),\nthen by item ID, then by stack size.");
-            }
-
-            // Process one queued swap per frame
-            if (!sortSwapQueue_.empty() && gameHandler_) {
-                auto op = sortSwapQueue_.front();
-                sortSwapQueue_.pop_front();
-                gameHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot);
-            }
-        }
-
-        if (moneyCopper > 0) {
-            ImGui::SameLine();
-            uint64_t gold   = moneyCopper / 10000;
-            uint64_t silver = (moneyCopper / 100) % 100;
-            uint64_t copper = moneyCopper % 100;
-            ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
-                               static_cast<unsigned long long>(gold),
-                               static_cast<unsigned long long>(silver),
-                               static_cast<unsigned long long>(copper));
-        }
+        renderBagsFooter(inventory, moneyCopper);
     }
 
     ImGui::End();
+}
+
+void InventoryScreen::renderBagsFooter(game::Inventory& inventory, uint64_t moneyCopper) {
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // Sort Bags button — compute swaps, apply client-side preview, queue server packets
+    bool sorting = !sortSwapQueue_.empty();
+    if (sorting) ImGui::BeginDisabled();
+    if (ImGui::SmallButton(sorting ? "Sorting..." : "Sort Bags")) {
+        // Compute the swap operations before modifying local state
+        auto swaps = inventory.computeSortSwaps();
+        // Apply local preview immediately
+        inventory.sortBags();
+        // Queue server-side swaps (one per frame)
+        for (auto& s : swaps)
+            sortSwapQueue_.push_back(s);
+    }
+    if (sorting) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Sort all bag slots by quality (highest first),\nthen by item ID, then by stack size.");
+    }
+
+    // Process one queued swap per frame
+    if (!sortSwapQueue_.empty() && gameHandler_) {
+        auto op = sortSwapQueue_.front();
+        sortSwapQueue_.pop_front();
+        gameHandler_->swapContainerItems(op.srcBag, op.srcSlot, op.dstBag, op.dstSlot);
+    }
+
+    ImGui::SameLine();
+    uint64_t gold   = moneyCopper / 10000;
+    uint64_t silver = (moneyCopper / 100) % 100;
+    uint64_t copper = moneyCopper % 100;
+    ImGui::TextColored(ui::colors::kWarmGold, "%llug %llus %lluc",
+                       static_cast<unsigned long long>(gold),
+                       static_cast<unsigned long long>(silver),
+                       static_cast<unsigned long long>(copper));
 }
 
 // ============================================================
@@ -2796,8 +2860,11 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
         if (ImGui::IsItemHovered() && !holdingItem) {
             // Pass inventory for backpack/bag items only; equipped items compare against themselves otherwise
             const game::Inventory* tooltipInv = (kind == SlotKind::EQUIPMENT) ? nullptr : &inventory;
-            uint64_t slotGuid = 0;
-            if (kind == SlotKind::EQUIPMENT && gameHandler_)
+            // ItemDef carries the exact object GUID for backpack and bag items.
+            // Previously only equipment supplied a GUID, so hovered candidate
+            // enchants/gems disappeared as soon as Shift comparison was used.
+            uint64_t slotGuid = item.guid;
+            if (slotGuid == 0 && kind == SlotKind::EQUIPMENT && gameHandler_)
                 slotGuid = gameHandler_->getEquipSlotGuid(static_cast<int>(equipSlot));
             renderItemTooltip(item, tooltipInv, slotGuid);
         }
@@ -3264,7 +3331,8 @@ void InventoryScreen::renderItemTooltip(const game::ItemDef& item, const game::I
 
     // Shift-hover comparison with currently equipped equivalent.
     if (inventory && ImGui::GetIO().KeyShift && item.inventoryType > 0) {
-        if (const game::ItemSlot* eq = findComparableEquipped(*inventory, item.inventoryType)) {
+        if (const auto equipped = findComparableEquipped(*inventory, item.inventoryType)) {
+            const game::ItemSlot* eq = equipped.slot;
             ImGui::Separator();
             ImGui::TextDisabled("Equipped:");
             VkDescriptorSet eqIcon = getItemIcon(eq->item.displayInfoId);
@@ -3273,6 +3341,7 @@ void InventoryScreen::renderItemTooltip(const game::ItemDef& item, const game::I
                 ImGui::SameLine();
             }
             ImGui::TextColored(getQualityColor(eq->item.quality), "%s", eq->item.name.c_str());
+            renderEquippedEnhancements(gameHandler_, equipped, s_enchLookupB);
 
             // Item level comparison (always shown when different)
             if (eq->item.itemLevel > 0 || item.itemLevel > 0) {
@@ -3760,12 +3829,15 @@ void InventoryScreen::renderItemTooltip(const game::ItemQueryResponseData& info,
 
     // Shift-hover: compare with currently equipped item
     if (inventory && ImGui::GetIO().KeyShift && info.inventoryType > 0) {
-        if (const game::ItemSlot* eq = findComparableEquipped(*inventory, static_cast<uint8_t>(info.inventoryType))) {
+        if (const auto equipped = findComparableEquipped(
+                *inventory, static_cast<uint8_t>(info.inventoryType))) {
+            const game::ItemSlot* eq = equipped.slot;
             ImGui::Separator();
             ImGui::TextDisabled("Equipped:");
             VkDescriptorSet eqIcon = getItemIcon(eq->item.displayInfoId);
             if (eqIcon) { ImGui::Image((ImTextureID)(uintptr_t)eqIcon, ImVec2(18.0f, 18.0f)); ImGui::SameLine(); }
             ImGui::TextColored(getQualityColor(eq->item.quality), "%s", eq->item.name.c_str());
+            renderEquippedEnhancements(gameHandler_, equipped, s_enchLookup);
 
             auto showDiff = [](const char* label, float nv, float ev) {
                 if (nv == 0.0f && ev == 0.0f) return;

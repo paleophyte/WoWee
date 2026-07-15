@@ -51,6 +51,7 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
         glm::vec3 localMin, localMax;
         getTightCollisionBounds(*inst.cachedModel, localMin, localMax);
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
+        inst.recomputeCachedCullFactors();
     }
 
     // Incrementally update spatial grid
@@ -159,6 +160,7 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
         glm::vec3 localMin, localMax;
         getTightCollisionBounds(*inst.cachedModel, localMin, localMax);
         transformAABB(inst.modelMatrix, localMin, localMax, inst.worldBoundsMin, inst.worldBoundsMax);
+        inst.recomputeCachedCullFactors();
     }
 
     // Incrementally update spatial grid (remove old cells, add new cells)
@@ -559,7 +561,7 @@ void M2Renderer::cleanupUnusedModels() {
         vkDeviceWaitIdle(vkCtx_->getDevice());
         const float waitMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - waitStart).count();
-        LOG_INFO("M2 cleanup: vkDeviceWaitIdle took ", waitMs, "ms (", toRemove.size(), " models to remove)");
+        LOG_DEBUG("M2 cleanup: vkDeviceWaitIdle took ", waitMs, "ms (", toRemove.size(), " models to remove)");
     }
     for (uint32_t id : toRemove) {
         auto it = models.find(id);

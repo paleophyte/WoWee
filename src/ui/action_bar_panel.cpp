@@ -17,6 +17,7 @@
 #include "rendering/vk_context.hpp"
 #include "core/window.hpp"
 #include "game/game_handler.hpp"
+#include "game/spell_classification.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "audio/ui_sound_manager.hpp"
@@ -30,11 +31,6 @@
 namespace {
     using namespace wowee::ui::colors;
     constexpr auto& kColorRed         = kRed;
-    constexpr auto& kColorGreen       = kGreen;
-    constexpr auto& kColorBrightGreen = kBrightGreen;
-    constexpr auto& kColorYellow      = kYellow;
-    constexpr auto& kColorGray        = kGray;
-    constexpr auto& kColorDarkGray    = kDarkGray;
 
     // Collect all non-comment, non-empty lines from a macro body.
     std::vector<std::string> allMacroCommands(const std::string& macroText) {
@@ -359,12 +355,16 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 uint32_t maxRange = spellbookScreen.getSpellMaxRange(rangeCheckSpellId, assetMgr);
                 if (maxRange > 5) {
                     auto& em = gameHandler.getEntityManager();
-                    auto playerEnt = em.getEntity(gameHandler.getPlayerGuid());
                     auto targetEnt = em.getEntity(gameHandler.getTargetGuid());
-                    if (playerEnt && targetEnt) {
-                        float dx = playerEnt->getX() - targetEnt->getX();
-                        float dy = playerEnt->getY() - targetEnt->getY();
-                        float dz = playerEnt->getZ() - targetEnt->getZ();
+                    if (targetEnt) {
+                        // The local player's network entity remains at its last
+                        // server-authored position while client movement updates
+                        // movementInfo. Using the entity here made every ranged
+                        // action appear out of range after walking away from login.
+                        const auto& playerPos = gameHandler.getMovementInfo();
+                        float dx = playerPos.x - targetEnt->getX();
+                        float dy = playerPos.y - targetEnt->getY();
+                        float dz = playerPos.z - targetEnt->getZ();
                         if (std::sqrt(dx*dx + dy*dy + dz*dz) > static_cast<float>(maxRange))
                             outOfRange = true;
                     }
@@ -383,7 +383,10 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             else if (slot.type == game::ActionBarSlot::MACRO && slot.id != 0)
                 powerCheckSpellId = resolveMacroPrimarySpellId(slot.id, gameHandler);
             uint32_t spellCost = 0, spellPowerType = 0;
-            if (powerCheckSpellId != 0 && !onCooldown)
+            // Auto Shot, Shoot and Throw have a dummy 1-rage/1-cost value in the
+            // legacy Spell.dbc. Their actual readiness is server/weapon driven.
+            if (powerCheckSpellId != 0 && !onCooldown &&
+                !game::spellclass::isRangedWeaponAutoAttack(powerCheckSpellId))
                 spellbookScreen.getSpellPowerInfo(powerCheckSpellId, assetMgr, spellCost, spellPowerType);
             if (spellCost > 0) {
                 auto playerEnt = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());

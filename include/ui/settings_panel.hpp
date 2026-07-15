@@ -32,8 +32,12 @@ public:
     bool pendingFullscreen = false;
     bool pendingVsync = true;
     int pendingResIndex = 0;
+    int pendingResolutionWidth = 1920;
+    int pendingResolutionHeight = 1080;
+    bool displaySettingsLoaded_ = false;
     bool pendingShadows = true;
     float pendingShadowDistance = 300.0f;
+    float pendingViewDistance = 1200.0f;
     bool pendingWaterRefraction = true;
     int pendingBrightness = 50; // 0-100, maps to 0.0-2.0 (50 = 1.0 default)
 
@@ -49,6 +53,7 @@ public:
     int pendingNpcVoiceVolume = 100;
     int pendingMountVolume = 100;
     int pendingActivityVolume = 100;
+    bool pendingCharacterSpeech = true;
 
     // ---- Pending camera / controls ----
     float pendingMouseSensitivity = 0.2f;
@@ -56,6 +61,7 @@ public:
     bool pendingExtendedZoom = false;
     float pendingCameraStiffness = 30.0f;  // Camera smooth speed (higher = tighter, less sway)
     float pendingPivotHeight = 1.6f;       // Camera pivot height above feet (lower = less detached feel)
+    bool pendingSmoothCameraFollow = false; // Keep lerping while turning (floaty, detached follow)
     float pendingFov = 70.0f;  // degrees, default matches WoW's ~70° horizontal FOV
 
     // ---- Pending UI / interface ----
@@ -63,6 +69,8 @@ public:
     bool pendingMinimapRotate = false;
     bool pendingMinimapSquare = false;
     bool pendingMinimapNpcDots = false;
+    bool pendingShowMinimapClock = false;
+    bool pendingShowMinimapCoordinates = false;
     bool pendingShowLatencyMeter = true;
     bool pendingSeparateBags = true;
     bool pendingShowKeyring = true;
@@ -77,8 +85,13 @@ public:
     // ---- Pending soundtrack ----
     bool pendingUseOriginalSoundtrack = true;
 
+    // ---- Pending buff bar layout ----
+    // Multiplier for the buff/debuff bar icons, on top of the automatic
+    // resolution scaling (0.75–1.5).
+    float pendingBuffBarScale = 1.0f;
+
     // ---- Pending action bar layout ----
-    bool pendingShowActionBar2 = true;   // Show bottom-left extra action bar above main bar
+    bool pendingShowActionBar2 = false;  // Show bottom-left extra action bar above main bar
     float pendingActionBarScale = 1.0f;  // Multiplier for action bar slot size (0.5–1.5)
     float pendingActionBar2OffsetX = 0.0f;  // Horizontal offset from default center position
     float pendingActionBar2OffsetY = 0.0f;  // Vertical offset from default (above bar 1)
@@ -121,6 +134,8 @@ public:
     bool minimapRotate_ = false;
     bool minimapSquare_ = false;
     bool minimapNpcDots_ = false;
+    bool showMinimapClock_ = false;
+    bool showMinimapCoordinates_ = false;
     bool showLatencyMeter_ = true;           // Show server latency indicator
     bool minimapSettingsApplied_ = false;
     bool volumeSettingsApplied_ = false;  // True once saved volume settings applied to audio managers

@@ -17,6 +17,7 @@
 #include <random>
 #include <chrono>
 #include <future>
+#include <algorithm>
 
 namespace wowee {
 
@@ -220,6 +221,8 @@ struct M2Instance {
     bool cachedIsValid = false;
     bool skipCollision = false;    // WMO interior doodads — skip player wall collision
     float cachedBoundRadius = 0.0f;
+    glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
+    float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
     // Pre-computed per-instance cull factors (depend only on static flags + scale +
     // bound radius), populated by recomputeCachedCullFactors(). The per-frame SSBO
     // upload just multiplies by the smoothed render distance and packs the rest.
@@ -322,6 +325,12 @@ public:
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, const Camera& camera);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera);
 
+    /** Gather the nearest authored glow cards as inexpensive scene point lights. */
+    uint32_t gatherLocalLights(const glm::vec3& cameraPos,
+                               glm::vec4* outPosRadius,
+                               glm::vec4* outColorIntensity,
+                               uint32_t maxLights) const;
+
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
     void setForceNoCull(bool v) { forceNoCull_ = v; }
@@ -404,6 +413,9 @@ public:
 
     void setInsideInterior(bool inside) { insideInterior = inside; }
     void setOnTaxi(bool onTaxi) { onTaxi_ = onTaxi; }
+    void setViewDistance(float distance) {
+        viewDistanceScale_ = std::clamp(distance, 400.0f, 2400.0f) / 1200.0f;
+    }
 
     std::vector<glm::vec3> getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const;
 
@@ -565,7 +577,7 @@ private:
     VmaAllocation m2ParticleVBAlloc_ = VK_NULL_HANDLE;
     void* m2ParticleVBMapped_ = nullptr;
     // Dedicated glow sprite vertex buffer (separate from particle VB to avoid data race)
-    static constexpr size_t MAX_GLOW_SPRITES = 2000;
+    static constexpr size_t MAX_GLOW_SPRITES = 8000;
     ::VkBuffer glowVB_ = VK_NULL_HANDLE;
     VmaAllocation glowVBAlloc_ = VK_NULL_HANDLE;
     void* glowVBMapped_ = nullptr;
@@ -749,6 +761,7 @@ private:
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
     float cachedMaxRenderDistSq_ = 0.0f;
     float smoothedRenderDist_ = 1000.0f;  // Smoothed render distance to prevent flickering
+    float viewDistanceScale_ = 1.0f;
     bool forceNoCull_ = false;
 
     // Thread count for parallel bone animation

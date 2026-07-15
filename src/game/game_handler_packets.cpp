@@ -315,7 +315,7 @@ void GameHandler::registerOpcodeHandlers() {
         LOG_DEBUG("SMSG_UPDATE_WORLD_STATE: field=", field, " value=", value);
         fireAddonEvent("UPDATE_WORLD_STATES", {});
     };
-    dispatchTable_[Opcode::SMSG_WORLD_STATE_UI_TIMER_UPDATE] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_WORLD_STATE_UI_TIMER_UPDATE] = [](network::Packet& packet) {
         if (packet.hasRemaining(4)) {
             uint32_t serverTime = packet.readUInt32();
             LOG_DEBUG("SMSG_WORLD_STATE_UI_TIMER_UPDATE: serverTime=", serverTime);
@@ -430,7 +430,7 @@ void GameHandler::registerOpcodeHandlers() {
         addSystemChatMessage(msg);
         LOG_INFO("SMSG_TITLE_EARNED: bit=", titleBit, " lost=", isLost, " title='", titleStr, "'");
     };
-    dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_LEARNED_DANCE_MOVES] = [](network::Packet& packet) {
         LOG_DEBUG("SMSG_LEARNED_DANCE_MOVES: ignored (size=", packet.getSize(), ")");
     };
     dispatchTable_[Opcode::SMSG_CHAR_RENAME] = [this](network::Packet& packet) {
@@ -515,7 +515,7 @@ void GameHandler::registerOpcodeHandlers() {
             LOG_DEBUG("SMSG_CROSSED_INEBRIATION_THRESHOLD: guid=0x", std::hex, guid, std::dec, " threshold=", threshold);
         }
     };
-    dispatchTable_[Opcode::SMSG_CLEAR_FAR_SIGHT_IMMEDIATE] = [this](network::Packet& /*packet*/) {
+    dispatchTable_[Opcode::SMSG_CLEAR_FAR_SIGHT_IMMEDIATE] = [](network::Packet& /*packet*/) {
         LOG_DEBUG("SMSG_CLEAR_FAR_SIGHT_IMMEDIATE");
     };
     registerSkipHandler(Opcode::SMSG_COMBAT_EVENT_FAILED);
@@ -573,7 +573,7 @@ void GameHandler::registerOpcodeHandlers() {
             LOG_INFO("SMSG_CORPSE_RECLAIM_DELAY: ", delayMs, "ms");
         }
     };
-    dispatchTable_[Opcode::SMSG_DEATH_RELEASE_LOC] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_DEATH_RELEASE_LOC] = [](network::Packet& packet) {
         if (packet.hasRemaining(16)) {
             uint32_t relMapId = packet.readUInt32();
             float relX = packet.readFloat(), relY = packet.readFloat(), relZ = packet.readFloat();
@@ -610,7 +610,7 @@ void GameHandler::registerOpcodeHandlers() {
         addUIError("Your Feign Death was resisted.");
         addSystemChatMessage("Your Feign Death attempt was resisted.");
     };
-    dispatchTable_[Opcode::SMSG_CHANNEL_MEMBER_COUNT] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_CHANNEL_MEMBER_COUNT] = [](network::Packet& packet) {
         std::string chanName = packet.readString();
         if (packet.hasRemaining(5)) {
             /*uint8_t flags =*/ packet.readUInt8();
@@ -636,7 +636,7 @@ void GameHandler::registerOpcodeHandlers() {
         }
         packet.skipAll();
     };
-    dispatchTable_[Opcode::SMSG_GAMETIMEBIAS_SET] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_GAMETIMEBIAS_SET] = [](network::Packet& packet) {
         packet.skipAll();
     };
     dispatchTable_[Opcode::SMSG_ACHIEVEMENT_DELETED] = [this](network::Packet& packet) {
@@ -887,7 +887,7 @@ void GameHandler::registerOpcodeHandlers() {
 
     // (SMSG_INITIALIZE_FACTIONS, SMSG_SET_FACTION_STANDING,
     //  SMSG_SET_FACTION_ATWAR, SMSG_SET_FACTION_VISIBLE → moved to SocialHandler)
-    dispatchTable_[Opcode::SMSG_FEATURE_SYSTEM_STATUS] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_FEATURE_SYSTEM_STATUS] = [](network::Packet& packet) {
         packet.skipAll();
     };
 
@@ -927,7 +927,7 @@ void GameHandler::registerOpcodeHandlers() {
     // ---- Batch 5: Teleport, taxi, BG, LFG, arena, movement relay, mail, bank, auction, quests ----
 
     // Teleport
-    dispatchTable_[Opcode::SMSG_TRANSFER_PENDING] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_TRANSFER_PENDING] = [](network::Packet& packet) {
         uint32_t pendingMapId = packet.readUInt32();
         if (packet.hasRemaining(8)) {
             packet.readUInt32(); // transportEntry
@@ -974,14 +974,9 @@ void GameHandler::registerOpcodeHandlers() {
         addSystemChatMessage("New flight path discovered!");
     };
 
-    // Arena
-    dispatchTable_[Opcode::MSG_TALENT_WIPE_CONFIRM] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        talentWipeNpcGuid_ = packet.readUInt64();
-        talentWipeCost_    = packet.readUInt32();
-        talentWipePending_ = true;
-                    fireAddonEvent("CONFIRM_TALENT_WIPE", {std::to_string(talentWipeCost_)});
-    };
+    // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
+    // pending-wipe state the confirm dialog reads. Handling it here wrote to
+    // dead duplicate members and the dialog never appeared.)
 
     // (SMSG_CHANNEL_LIST → moved to ChatHandler)
     // (SMSG_GROUP_SET_LEADER → moved to SocialHandler)
@@ -1034,7 +1029,7 @@ void GameHandler::registerOpcodeHandlers() {
             else addSystemChatMessage("Failed to socket gems.");
         }
     };
-    dispatchTable_[Opcode::SMSG_ITEM_TIME_UPDATE] = [this](network::Packet& packet) {
+    dispatchTable_[Opcode::SMSG_ITEM_TIME_UPDATE] = [](network::Packet& packet) {
         if (packet.hasRemaining(12)) {
             packet.readUInt64(); // itemGuid
             packet.readUInt32(); // durationMs
@@ -1058,7 +1053,7 @@ void GameHandler::registerOpcodeHandlers() {
     };
 
     // ---- Auto-repeat / auras / dispel / totem ----
-    dispatchTable_[Opcode::SMSG_CANCEL_AUTO_REPEAT] = [this](network::Packet& /*packet*/) {
+    dispatchTable_[Opcode::SMSG_CANCEL_AUTO_REPEAT] = [](network::Packet& /*packet*/) {
         // Server signals to stop a repeating spell (wand/shoot); no client action needed
     };
 
@@ -1525,7 +1520,7 @@ void GameHandler::registerOpcodeHandlers() {
         }
         packet.skipAll();
     };
-    dispatchTable_[Opcode::SMSG_MOUNTSPECIAL_ANIM] = [this](network::Packet& packet) { (void)packet.readPackedGuid(); };
+    dispatchTable_[Opcode::SMSG_MOUNTSPECIAL_ANIM] = [](network::Packet& packet) { (void)packet.readPackedGuid(); };
     dispatchTable_[Opcode::SMSG_CHAR_CUSTOMIZE] = [this](network::Packet& packet) {
         if (packet.hasRemaining(1)) {
             uint8_t result = packet.readUInt8();
@@ -2014,16 +2009,9 @@ void GameHandler::registerOpcodeHandlers() {
         packet.skipAll();
     };
 
-    // SMSG_PET_UNLEARN_CONFIRM: uint64 petGuid + uint32 cost (copper).
-    // The other pet opcodes have different formats and must NOT set unlearn state.
-    dispatchTable_[Opcode::SMSG_PET_UNLEARN_CONFIRM] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(12)) {
-            petUnlearnGuid_ = packet.readUInt64();
-            petUnlearnCost_ = packet.readUInt32();
-            petUnlearnPending_ = true;
-        }
-        packet.skipAll();
-    };
+    // (SMSG_PET_UNLEARN_CONFIRM → registered by SpellHandler, which owns the
+    // pending-unlearn state the confirm dialog reads. Handling it here wrote
+    // to dead duplicate members and the dialog never appeared.)
     // These pet opcodes have incompatible formats — just consume the packet.
     // Previously they shared the unlearn handler, which misinterpreted sound IDs
     // or GUID lists as unlearn costs and could trigger a bogus unlearn dialog.
@@ -2860,74 +2848,6 @@ void GameHandler::handlePacket(network::Packet& packet) {
             uint32_t soundId = packet.readUInt32();
             LOG_INFO("SMSG_PLAY_MUSIC (0x0103 alias): soundId=", soundId);
             if (playMusicCallback_) playMusicCallback_(soundId);
-            return;
-        }
-    } else if (opcode == 0x0480) {
-        // Observed on this WotLK profile immediately after CMSG_BUYBACK_ITEM.
-        // Treat as vendor/buyback transaction result (7-byte payload on this core).
-        if (packet.hasRemaining(7)) {
-            uint8_t opType = packet.readUInt8();
-            uint8_t resultCode = packet.readUInt8();
-            uint8_t slotOrCount = packet.readUInt8();
-            uint32_t itemId = packet.readUInt32();
-            LOG_INFO("Vendor txn result (0x480): opType=", static_cast<int>(opType),
-                     " result=", static_cast<int>(resultCode),
-                     " slot/count=", static_cast<int>(slotOrCount),
-                     " itemId=", itemId,
-                     " pendingBuybackSlot=", pendingBuybackSlot_,
-                     " pendingBuyItemId=", pendingBuyItemId_,
-                     " pendingBuyItemSlot=", pendingBuyItemSlot_);
-
-            if (pendingBuybackSlot_ >= 0) {
-                if (resultCode == 0) {
-                    // Success: remove the bought-back slot from our local UI cache.
-                    if (pendingBuybackSlot_ < static_cast<int>(buybackItems_.size())) {
-                        buybackItems_.erase(buybackItems_.begin() + pendingBuybackSlot_);
-                    }
-                } else {
-                    const char* msg = "Buyback failed.";
-                    // Best-effort mapping; keep raw code visible for unknowns.
-                    switch (resultCode) {
-                        case 2: msg = "Buyback failed: not enough money."; break;
-                        case 4: msg = "Buyback failed: vendor too far away."; break;
-                        case 5: msg = "Buyback failed: item unavailable."; break;
-                        case 6: msg = "Buyback failed: inventory full."; break;
-                        case 8: msg = "Buyback failed: requirements not met."; break;
-                        default: break;
-                    }
-                    addSystemChatMessage(std::string(msg) + " (code " + std::to_string(resultCode) + ")");
-                }
-                pendingBuybackSlot_ = -1;
-                pendingBuybackWireSlot_ = 0;
-
-                // Refresh vendor list so UI state stays in sync after buyback result.
-                if (getVendorItems().vendorGuid != 0 && socket && state == WorldState::IN_WORLD) {
-                    auto pkt = ListInventoryPacket::build(getVendorItems().vendorGuid);
-                    socket->send(pkt);
-                }
-            } else if (pendingBuyItemId_ != 0) {
-                if (resultCode != 0) {
-                    const char* msg = "Purchase failed.";
-                    switch (resultCode) {
-                        case 2: msg = "Purchase failed: not enough money."; break;
-                        case 4: msg = "Purchase failed: vendor too far away."; break;
-                        case 5: msg = "Purchase failed: item sold out."; break;
-                        case 6: msg = "Purchase failed: inventory full."; break;
-                        case 8: msg = "Purchase failed: requirements not met."; break;
-                        default: break;
-                    }
-                    addSystemChatMessage(std::string(msg) + " (code " + std::to_string(resultCode) + ")");
-                }
-                pendingBuyItemId_ = 0;
-                pendingBuyItemSlot_ = 0;
-            }
-            return;
-        }
-    } else if (opcode == 0x046A) {
-        // Server-specific vendor/buyback state packet (observed 25-byte records).
-        // Consume to keep stream aligned; currently not used for gameplay logic.
-        if (packet.hasRemaining(25)) {
-            packet.setReadPos(packet.getReadPos() + 25);
             return;
         }
     }

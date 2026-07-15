@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/protocol_constants.hpp"
+
 #include <cstdint>
 #include <cmath>
 #include <string>
@@ -44,6 +46,21 @@ enum class TypeMask : uint16_t {
     DYNAMICOBJECT = 0x0040,
     CORPSE = 0x0080
 };
+
+// UNIT_DYNAMIC_FLAGS values shared by the supported legacy expansions.
+// Keep these named: 0x08 is TAPPED_BY_PLAYER, while the actual DEAD bit is
+// 0x20. Confusing the two leaves pre-existing corpses standing after login.
+inline constexpr uint32_t UNIT_DYNFLAG_LOOTABLE         = 0x00000001;
+inline constexpr uint32_t UNIT_DYNFLAG_TAPPED           = 0x00000004;
+inline constexpr uint32_t UNIT_DYNFLAG_TAPPED_BY_PLAYER = 0x00000008;
+inline constexpr uint32_t UNIT_DYNFLAG_DEAD             = 0x00000020;
+
+/// CREATE updates may omit zero-valued health. In that case the dynamic corpse
+/// flags are the authoritative indication that the unit must spawn dead.
+inline bool isUnitCorpseState(uint32_t health, uint32_t maxHealth, uint32_t dynamicFlags) {
+    return (maxHealth > 0 && health == 0) ||
+           (dynamicFlags & (UNIT_DYNFLAG_DEAD | UNIT_DYNFLAG_LOOTABLE)) != 0;
+}
 
 /**
  * Update types for SMSG_UPDATE_OBJECT
@@ -347,6 +364,11 @@ public:
     uint32_t getUnitFlags() const { return unitFlags; }
     void setUnitFlags(uint32_t f) { unitFlags = f; }
 
+    // Client presentation flags (byte 2 of UNIT_FIELD_BYTES_1).
+    uint8_t getVisibilityFlags() const { return visibilityFlags; }
+    void setVisibilityFlags(uint8_t f) { visibilityFlags = f; }
+    bool hasCreepVisibility() const { return (visibilityFlags & UNIT_VIS_FLAG_CREEP) != 0; }
+
     // Dynamic flags (UNIT_DYNAMIC_FLAGS, index 147)
     uint32_t getDynamicFlags() const { return dynamicFlags; }
     void setDynamicFlags(uint32_t f) { dynamicFlags = f; }
@@ -381,6 +403,7 @@ protected:
     uint32_t displayId = 0;
     uint32_t mountDisplayId = 0;
     uint32_t unitFlags = 0;
+    uint8_t visibilityFlags = 0;
     uint32_t dynamicFlags = 0;
     uint32_t npcFlags = 0;
     uint32_t npcEmoteState = 0;

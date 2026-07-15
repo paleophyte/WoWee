@@ -48,6 +48,7 @@ namespace wowee::game {
 
 namespace wowee {
 namespace network { class WorldSocket; class Packet; }
+namespace audio { enum class PlayerErrorSpeech : uint8_t; }
 
 namespace game {
 
@@ -816,6 +817,11 @@ public:
     int getCraftQueueRemaining() const;
     uint32_t getCraftQueueSpellId() const;
 
+    // Crafting window (opened client-side by casting a profession spell)
+    bool isCraftingWindowOpen() const { return spellHandler_ ? spellHandler_->isCraftingWindowOpen() : false; }
+    uint32_t getCraftingSkillLine() const { return spellHandler_ ? spellHandler_->getCraftingSkillLine() : 0; }
+    void closeCraftingWindow() { if (spellHandler_) spellHandler_->closeCraftingWindow(); }
+
     // 400ms spell-queue window: next spell to cast when current finishes
     uint32_t getQueuedSpellId() const;
     void cancelQueuedSpell() { if (spellHandler_) spellHandler_->cancelQueuedSpell(); }
@@ -1482,6 +1488,8 @@ public:
     bool hasPendingGameObjectLootOpen(uint64_t guid) const;
     bool isGatherGameObject(uint64_t guid) const;
     void despawnGameObjectLocally(uint64_t guid);
+    /// Remove a creature corpse client-side once it has been looted empty.
+    void despawnCreatureLocally(uint64_t guid);
     void activateSpiritHealer(uint64_t npcGuid);
     bool isLootWindowOpen() const;
     const LootResponseData& getCurrentLoot() const;
@@ -1553,6 +1561,9 @@ public:
     // Quest log
     using QuestLogEntry = QuestHandler::QuestLogEntry;
     const std::vector<QuestLogEntry>& getQuestLog() const;
+    int getMaxQuestLogSlots() const;
+    // QuestSort.dbc name for negative ZoneOrSort values (class/profession/seasonal)
+    const std::string& getQuestSortName(uint32_t sortId) const;
     int getSelectedQuestLogIndex() const;
     void setSelectedQuestLogIndex(int idx) { selectedQuestLogIndex_ = idx; }
     void abandonQuest(uint32_t questId);
@@ -1560,11 +1571,22 @@ public:
     bool requestQuestQuery(uint32_t questId, bool force = false);
     bool isQuestTracked(uint32_t questId) const { return trackedQuestIds_.count(questId) > 0; }
     void setQuestTracked(uint32_t questId, bool tracked) {
-        if (tracked) trackedQuestIds_.insert(questId);
-        else trackedQuestIds_.erase(questId);
-        saveCharacterConfig();
+        const bool changed = tracked ? trackedQuestIds_.insert(questId).second
+                                     : trackedQuestIds_.erase(questId) > 0;
+        if (changed) saveCharacterConfig();
     }
     const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
+    bool isQuestShownOnMap(uint32_t questId) const {
+        return mapVisibleQuestIds_.count(questId) > 0;
+    }
+    void setQuestShownOnMap(uint32_t questId, bool shown) {
+        const bool changed = shown ? mapVisibleQuestIds_.insert(questId).second
+                                   : mapVisibleQuestIds_.erase(questId) > 0;
+        if (changed) saveCharacterConfig();
+    }
+    const std::unordered_set<uint32_t>& getMapVisibleQuestIds() const {
+        return mapVisibleQuestIds_;
+    }
     bool isQuestQueryPending(uint32_t questId) const {
         return pendingQuestQueryIds_.count(questId) > 0;
     }
@@ -1899,6 +1921,9 @@ public:
             if (auto* mgr = (ac->*getter)()) cb(mgr);
         }
     }
+    // Play the player character's spoken error response ("Not enough mana", ...)
+    // using the active character's race/gender. Gated by the Character Speech setting.
+    void playErrorSpeech(audio::PlayerErrorSpeech type);
 
     // Reputation change toast: factionName, delta, new standing
     using RepChangeCallback = std::function<void(const std::string& factionName, int32_t delta, int32_t standing)>;
@@ -2160,6 +2185,12 @@ public:
     const std::string& getSpellRank(uint32_t spellId) const;
     /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
     const std::string& getSpellDescription(uint32_t spellId) const;
+    // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
+    // requires-spell-focus cast failures; empty if unknown.
+    const std::string& getSpellFocusName(uint32_t focusId) const;
+    // TotemCategory.dbc name ("Blacksmith Hammer", "Mining Pick", ...) for
+    // totem-category cast failures; empty if unknown.
+    const std::string& getTotemCategoryName(uint32_t categoryId) const;
     const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
     float getSpellDuration(uint32_t spellId) const;
     std::string getEnchantName(uint32_t enchantId) const;
@@ -2596,6 +2627,10 @@ public:
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
         // Spell.dbc Targets bitmask (SpellCastTargetFlags) — 0x10 = TARGET_FLAG_ITEM
         uint32_t targetFlags = 0;
+        // Spell.dbc RangeIndex resolved against SpellRange.dbc. A max range of 0
+        // means "Self Only" (shouts, self-buffs); negative means SpellRange.dbc
+        // was unavailable, so callers should not infer anything from it.
+        float maxRange = -1.0f;
         int32_t effectBasePoints[3] = {0, 0, 0};
         float durationSec = 0.0f;
         uint32_t spellVisualId = 0;
@@ -3053,6 +3088,10 @@ private:
     bool areaTriggerSuppressFirst_ = false;  // suppress first check after map transfer
     float areaTriggerCooldown_ = 0.0f;       // seconds remaining — suppress ALL triggers
 
+    // Craft queue: seconds the expired cast bar has waited for SMSG_SPELL_GO
+    // (which re-casts the next queued item) before giving up
+    float craftCastGoGraceSec_ = 0.0f;
+
     std::array<ActionBarSlot, ACTION_BAR_SLOTS> actionBar{};
     std::unordered_map<uint32_t, std::string> macros_;  // client-side macro text (persisted in char config)
     std::vector<AuraSlot> playerAuras;
@@ -3287,8 +3326,7 @@ private:
     uint32_t pendingTurnInQuestId_ = 0;
     uint64_t pendingTurnInNpcGuid_ = 0;
     bool pendingTurnInRewardRequest_ = false;
-    std::unordered_map<uint32_t, float> pendingQuestAcceptTimeouts_;
-    std::unordered_map<uint32_t, uint64_t> pendingQuestAcceptNpcGuids_;
+    // (pending quest accept timeout state lives in QuestHandler)
     bool questOfferRewardOpen_ = false;
     QuestOfferRewardData currentQuestOfferReward_;
 
@@ -3297,6 +3335,7 @@ private:
     int selectedQuestLogIndex_ = 0;
     std::unordered_set<uint32_t> pendingQuestQueryIds_;
     std::unordered_set<uint32_t> trackedQuestIds_;
+    std::unordered_set<uint32_t> mapVisibleQuestIds_;
     bool pendingLoginQuestResync_ = false;
     float pendingLoginQuestResyncTimeout_ = 0.0f;
 
@@ -3434,8 +3473,9 @@ private:
     mutable bool areaNameCacheLoaded_ = false;
     void loadAreaNameCache() const;
 
-    // Map name cache (lazy-loaded from Map.dbc; maps mapId → localized display name)
+    // Map metadata cache (lazy-loaded from Map.dbc).
     mutable std::unordered_map<uint32_t, std::string> mapNameCache_;
+    mutable std::unordered_map<uint32_t, uint32_t> mapInstanceTypeCache_;
     mutable bool mapNameCacheLoaded_ = false;
     void loadMapNameCache() const;
 
@@ -3618,13 +3658,9 @@ private:
     bool resurrectRequestPending_ = false;
     bool selfResAvailable_ = false;  // SMSG_PRE_RESURRECT received — Reincarnation/Twisting Nether
     // ---- Talent wipe confirm dialog ----
-    bool talentWipePending_ = false;
-    uint64_t talentWipeNpcGuid_ = 0;
-    uint32_t talentWipeCost_ = 0;
+    // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----
-    bool petUnlearnPending_ = false;
-    uint64_t petUnlearnGuid_ = 0;
-    uint32_t petUnlearnCost_ = 0;
+    // (pet unlearn confirm state lives in SpellHandler)
     bool resurrectIsSpiritHealer_ = false;  // true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST
     uint64_t resurrectCasterGuid_ = 0;
     std::string resurrectCasterName_;

@@ -1862,10 +1862,41 @@ public:
 };
 
 /** SMSG_CAST_FAILED data */
+// Normalized (WotLK-numbered) SpellCastResults whose SMSG_CAST_RESULT /
+// SMSG_CAST_FAILED payload carries trailing uint32 ids the client can surface:
+//  - requires-spell-focus: one SpellFocusObject id (forge, anvil, cooking fire)
+//  - totems / totem-category: up to two ids naming the missing crafting tool —
+//    item ids for totems, TotemCategory.dbc ids (Blacksmith Hammer, Mining
+//    Pick, ...) for totem-category.
+inline constexpr uint8_t kCastResultRequiresSpellFocus = 102;
+inline constexpr uint8_t kCastResultTotemCategory = 130;
+inline constexpr uint8_t kCastResultTotems = 131;
+
+/// Read the optional trailing ids of a cast failure payload (see above).
+inline void readCastResultArgs(network::Packet& packet, uint8_t result,
+                               uint32_t& arg1, uint32_t& arg2) {
+    arg1 = 0;
+    arg2 = 0;
+    switch (result) {
+        case kCastResultRequiresSpellFocus:
+            if (packet.hasRemaining(4)) arg1 = packet.readUInt32();
+            break;
+        case kCastResultTotems:
+        case kCastResultTotemCategory:
+            if (packet.hasRemaining(4)) arg1 = packet.readUInt32();
+            if (packet.hasRemaining(4)) arg2 = packet.readUInt32();
+            break;
+        default:
+            break;
+    }
+}
+
 struct CastFailedData {
     uint8_t castCount = 0;
     uint32_t spellId = 0;
     uint8_t result = 0;
+    uint32_t miscArg = 0;   // first trailing id (see readCastResultArgs)
+    uint32_t miscArg2 = 0;  // second trailing id (totem failures only)
 
     bool isValid() const { return spellId != 0; }
 };
@@ -2287,10 +2318,33 @@ struct QuestOfferRewardData {
     std::vector<QuestRewardItem> fixedRewards;   // Always given
 };
 
+/** Protocol era for quest packets whose layout differs per expansion. */
+enum class QuestPacketEra { CLASSIC, TBC, WOTLK };
+
 /** SMSG_QUESTGIVER_OFFER_REWARD parser */
 class QuestOfferRewardParser {
 public:
+    /** Era resolved from the active expansion profile. */
     static bool parse(network::Packet& packet, QuestOfferRewardData& data);
+    static bool parse(network::Packet& packet, QuestOfferRewardData& data, QuestPacketEra era);
+};
+
+/** Reward block extracted from SMSG_QUEST_QUERY_RESPONSE (quest log rewards). */
+struct QuestQueryRewardsData {
+    int32_t  rewardMoney = 0;
+    std::array<uint32_t, 4> itemId{};
+    std::array<uint32_t, 4> itemCount{};
+    std::array<uint32_t, 6> choiceItemId{};
+    std::array<uint32_t, 6> choiceItemCount{};
+    bool valid = false;
+};
+
+/** Fixed-offset reward extractor for SMSG_QUEST_QUERY_RESPONSE.
+ *  `data` is the full packet payload (starting at questId);
+ *  `questLogStride` selects the expansion layout (3=Classic, 4=TBC, 5=WotLK). */
+class QuestQueryRewardsParser {
+public:
+    static QuestQueryRewardsData parse(const std::vector<uint8_t>& data, uint8_t questLogStride);
 };
 
 /** CMSG_QUESTGIVER_COMPLETE_QUEST packet builder */

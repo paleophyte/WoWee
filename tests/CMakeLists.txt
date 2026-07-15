@@ -15,8 +15,14 @@ target_compile_features(catch2_main PUBLIC cxx_std_17)
 set(ALL_TEST_TARGETS "")
 
 # Helper: register a test target for ASAN/UBSan if enabled.
+# Also links Winsock on Windows: several tests pull in networking sources
+# (auth, socket code) whose symbols live in ws2_32 there rather than libc.
+# Linking it for every test keeps a new test from breaking the Windows build.
 macro(register_test_target _target)
     list(APPEND ALL_TEST_TARGETS ${_target})
+    if(WIN32)
+        target_link_libraries(${_target} PRIVATE ws2_32)
+    endif()
 endmacro()
 
 # Shared source files used across multiple tests
@@ -136,6 +142,37 @@ if(TARGET Vulkan::Vulkan)
 endif()
 add_test(NAME use_item_packet COMMAND test_use_item_packet)
 register_test_target(test_use_item_packet)
+
+# ── test_mail_packets ───────────────────────────────────────
+add_executable(test_mail_packets
+    test_mail_packets.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/opcode_table.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/expansion_profile.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/character.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_world.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_entity.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_social.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_economy.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_classic.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_tbc.cpp
+)
+target_include_directories(test_mail_packets PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_mail_packets SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_mail_packets PRIVATE catch2_main SDL2::SDL2 ZLIB::ZLIB
+                                                 OpenSSL::SSL OpenSSL::Crypto)
+if(TARGET glm::glm)
+    target_link_libraries(test_mail_packets PRIVATE glm::glm)
+endif()
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_mail_packets PRIVATE Vulkan::Vulkan)
+endif()
+add_test(NAME mail_packets COMMAND test_mail_packets)
+register_test_target(test_mail_packets)
 
 # ── test_entity ──────────────────────────────────────────────
 add_executable(test_entity
@@ -280,6 +317,20 @@ if(TARGET glm::glm)
 endif()
 add_test(NAME indoor_shadows COMMAND test_indoor_shadows)
 register_test_target(test_indoor_shadows)
+
+# ── test_zone_ambience ─────────────────────────────────────────
+add_executable(test_zone_ambience
+    test_zone_ambience.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp
+)
+target_include_directories(test_zone_ambience PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_zone_ambience SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_zone_ambience PRIVATE catch2_main)
+if(TARGET glm::glm)
+    target_link_libraries(test_zone_ambience PRIVATE glm::glm)
+endif()
+add_test(NAME zone_ambience COMMAND test_zone_ambience)
+register_test_target(test_zone_ambience)
 
 # ── test_transport_components ────────────────────────────────
 add_executable(test_transport_components
@@ -536,6 +587,113 @@ target_include_directories(test_expansion_profile SYSTEM PRIVATE ${TEST_SYSTEM_I
 target_link_libraries(test_expansion_profile PRIVATE catch2_main)
 add_test(NAME expansion_profile COMMAND test_expansion_profile)
 register_test_target(test_expansion_profile)
+
+# ── test_buff_bar_layout ────────────────────────────────────
+# Header-only layout arithmetic — no ImGui needed.
+add_executable(test_buff_bar_layout
+    test_buff_bar_layout.cpp
+)
+target_include_directories(test_buff_bar_layout PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_buff_bar_layout SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_buff_bar_layout PRIVATE catch2_main)
+add_test(NAME buff_bar_layout COMMAND test_buff_bar_layout)
+register_test_target(test_buff_bar_layout)
+
+# ── test_dbc_layouts ────────────────────────────────────────
+# Reads the layout files shipped in Data/expansions, so it needs the source dir.
+add_executable(test_dbc_layouts
+    test_dbc_layouts.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_layout.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+)
+target_include_directories(test_dbc_layouts PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_dbc_layouts SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_dbc_layouts PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_dbc_layouts PRIVATE catch2_main)
+add_test(NAME dbc_layouts COMMAND test_dbc_layouts)
+register_test_target(test_dbc_layouts)
+
+# ── test_spell_classification ───────────────────────────────
+add_executable(test_spell_classification
+    test_spell_classification.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_spell_classification PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_spell_classification SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_spell_classification PRIVATE catch2_main)
+add_test(NAME spell_classification COMMAND test_spell_classification)
+register_test_target(test_spell_classification)
+
+# ── test_realm_list ─────────────────────────────────────────
+add_executable(test_realm_list
+    test_realm_list.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/auth_packets.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/auth_opcodes.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/big_num.cpp
+)
+target_include_directories(test_realm_list PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_realm_list SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_realm_list PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+add_test(NAME realm_list COMMAND test_realm_list)
+register_test_target(test_realm_list)
+
+# ── test_quest_rewards ──────────────────────────────────────
+add_executable(test_quest_rewards
+    test_quest_rewards.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/network/packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/opcode_table.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/expansion_profile.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/character.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/spline_packet.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_world.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_entity.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_social.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/world_packets_economy.cpp
+    ${CMAKE_SOURCE_DIR}/src/auth/crypto.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_classic.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/packet_parsers_tbc.cpp
+)
+target_include_directories(test_quest_rewards PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_quest_rewards SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_quest_rewards PRIVATE catch2_main SDL2::SDL2 ZLIB::ZLIB
+                                                 OpenSSL::SSL OpenSSL::Crypto)
+if(TARGET glm::glm)
+    target_link_libraries(test_quest_rewards PRIVATE glm::glm)
+endif()
+if(TARGET Vulkan::Vulkan)
+    target_link_libraries(test_quest_rewards PRIVATE Vulkan::Vulkan)
+endif()
+add_test(NAME quest_rewards COMMAND test_quest_rewards)
+register_test_target(test_quest_rewards)
+
+# ── test_inventory_sort ─────────────────────────────────────
+add_executable(test_inventory_sort
+    test_inventory_sort.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/inventory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+)
+target_include_directories(test_inventory_sort PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_inventory_sort SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_inventory_sort PRIVATE catch2_main)
+add_test(NAME inventory_sort COMMAND test_inventory_sort)
+register_test_target(test_inventory_sort)
+
+# ── test_quest_progress ─────────────────────────────────────
+add_executable(test_quest_progress
+    test_quest_progress.cpp
+)
+target_include_directories(test_quest_progress PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_quest_progress SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_quest_progress PRIVATE catch2_main)
+add_test(NAME quest_progress COMMAND test_quest_progress)
+register_test_target(test_quest_progress)
 
 # ── ASAN / UBSan for test targets ────────────────────────────
 if(WOWEE_ENABLE_ASAN AND NOT MSVC)

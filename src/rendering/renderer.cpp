@@ -50,6 +50,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -474,6 +475,18 @@ void Renderer::updatePerFrameUBO() {
     float shadowBias = glm::clamp(0.8f * (shadowDistance_ / 300.0f), 0.0f, 1.0f);
     currentFrameData.shadowParams = glm::vec4(shadowsEnabled ? 1.0f : 0.0f, shadowBias, 0.0f, 0.0f);
 
+    for (uint32_t i = 0; i < MAX_LOCAL_LIGHTS; ++i) {
+        currentFrameData.localLightPosRadius[i] = glm::vec4(0.0f);
+        currentFrameData.localLightColorIntensity[i] = glm::vec4(0.0f);
+    }
+    const uint32_t localLightCount = m2Renderer
+        ? m2Renderer->gatherLocalLights(camera->getPosition(),
+              currentFrameData.localLightPosRadius,
+              currentFrameData.localLightColorIntensity,
+              MAX_LOCAL_LIGHTS)
+        : 0;
+    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount), 0, 0, 0);
+
     // Player water ripple data: pack player XY into shadowParams.zw, ripple strength into fogParams.w
     if (cameraController) {
         currentFrameData.shadowParams.z = characterPosition.x;
@@ -561,7 +574,7 @@ bool Renderer::initialize(core::Window* win) {
 
     // LightingManager doesn't use GL — initialize for data-only use
     lightingManager = std::make_unique<LightingManager>();
-    [[maybe_unused]] auto* assetManager = core::Application::getInstance().getAssetManager();
+    auto* assetManager = core::Application::getInstance().getAssetManager();
 
     // Create zone manager; enrich music paths from DBC if available
     zoneManager = std::make_unique<game::ZoneManager>();
@@ -1149,7 +1162,24 @@ const std::string& Renderer::getCurrentZoneName() const {
 }
 
 uint32_t Renderer::getCurrentZoneId() const {
-    return audioCoordinator_ ? audioCoordinator_->getCurrentZoneId() : 0;
+    uint32_t tileZoneId = 0;
+    if (zoneManager && terrainManager) {
+        if (const auto areaId = terrainManager->getAreaIdAt(
+                characterPosition.x, characterPosition.y)) {
+            return zoneManager->resolveAreaZoneId(*areaId);
+        }
+        const auto tile = terrainManager->getCurrentTile();
+        tileZoneId = zoneManager->getZoneId(tile.x, tile.y);
+    }
+
+    const auto* gh = core::Application::getInstance().getGameHandler();
+    if (gh && gh->getWorldStateZoneId() != 0) {
+        const uint32_t areaId = gh->getWorldStateZoneId();
+        return zoneManager ? zoneManager->resolveAreaZoneId(areaId) : areaId;
+    }
+    if (audioCoordinator_ && audioCoordinator_->getCurrentZoneId() != 0)
+        return audioCoordinator_->getCurrentZoneId();
+    return tileZoneId;
 }
 
 void Renderer::update(float deltaTime) {
@@ -1207,14 +1237,22 @@ void Renderer::update(float deltaTime) {
         float gameTime    = gh ? gh->getGameTime() : -1.0f;
         bool isRaining    = gh ? gh->isRaining() : false;
         bool isUnderwater = cameraController ? cameraController->isSwimming() : false;
+        const uint32_t resolvedZoneId = getCurrentZoneId();
 
-        lightingManager->update(characterPosition, mapId, gameTime, isRaining, isUnderwater);
+        lightingManager->update(characterPosition, mapId, resolvedZoneId,
+                                gameTime, isRaining, isUnderwater);
 
         // Sync weather visual renderer with game state
         if (weather && gh) {
             uint32_t wType = gh->getWeatherType();
             float wInt = gh->getWeatherIntensity();
-            if (wType != 0) {
+            if (resolvedZoneId == 10) {
+                // Duskwood's defining effect is persistent ground fog. Some
+                // realms continuously report rain here; suppress those streak
+                // particles so they cannot replace the authored fog ambience.
+                weather->setWeatherType(Weather::Type::NONE);
+                weather->setIntensity(0.0f);
+            } else if (wType != 0) {
                 // Server-driven weather (SMSG_WEATHER) — authoritative
                 if (wType == 1)      weather->setWeatherType(Weather::Type::RAIN);
                 else if (wType == 2) weather->setWeatherType(Weather::Type::SNOW);
@@ -1402,14 +1440,18 @@ void Renderer::update(float deltaTime) {
             else if (wt == Weather::Type::STORM) zctx.weatherType = 3;
             zctx.weatherIntensity = weather->getIntensity();
         }
+        if (lightingManager) {
+            zctx.gameTimeHours = lightingManager->getVisualTimeOfDayHours();
+        }
         if (terrainManager) {
             auto tile = terrainManager->getCurrentTile();
             zctx.tileX = tile.x;
             zctx.tileY = tile.y;
             zctx.hasTile = true;
         }
-        const auto* gh2 = core::Application::getInstance().getGameHandler();
-        zctx.serverZoneId = gh2 ? gh2->getWorldStateZoneId() : 0;
+        // Use the precise MCNK area classification when available; this avoids
+        // stale server world-state zones and whole-ADT ambiguity at river banks.
+        zctx.serverZoneId = getCurrentZoneId();
         zctx.zoneManager = zoneManager.get();
         audioCoordinator_->updateZoneAudio(zctx);
     }
@@ -1551,7 +1593,9 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
     // Get time of day for sky-related rendering
     auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
-    float timeOfDay = skybox ? skybox->getTimeOfDay() : 12.0f;
+    float timeOfDay = lightingManager
+        ? lightingManager->getVisualTimeOfDayHours()
+        : (skybox ? skybox->getTimeOfDay() : 12.0f);
 
     // ── Multithreaded secondary command buffer recording ──
     // Terrain, WMO, and M2 record on worker threads while main thread handles
@@ -1565,9 +1609,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             m2Renderer->setInsideInterior(cameraController->isInsideInteriorWMO());
             m2Renderer->setOnTaxi(cameraController->isOnTaxi());
         }
+        auto prepStart = std::chrono::steady_clock::now();
         if (wmoRenderer) wmoRenderer->prepareRender();
+        auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && camera) m2Renderer->prepareRender(frameIdx, *camera);
+        auto prepM2End = std::chrono::steady_clock::now();
         if (characterRenderer) characterRenderer->prepareRender(frameIdx);
+        auto prepEnd = std::chrono::steady_clock::now();
+        const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
+        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
+        const double prepCharMs = std::chrono::duration<double, std::milli>(prepEnd - prepM2End).count();
 
         // --- Dispatch worker threads (terrain + WMO + M2) ---
         std::future<double> terrainFuture, wmoFuture, charFuture, m2Future, postFuture;
@@ -1748,6 +1799,18 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         catch (const std::exception& e) { LOG_ERROR("Character render worker: ", e.what()); }
         try { if (postFuture.valid()) (void)postFuture.get(); }
         catch (const std::exception& e) { LOG_ERROR("Post render worker: ", e.what()); }
+
+        // prepareRender() does the GPU allocations that are not thread-safe, so it runs
+        // on the main thread and is not covered by the worker timings. Name the culprit
+        // when a frame runs long instead of leaving renderWorld as one opaque number.
+        const double prepTotalMs = prepWmoMs + prepM2Ms + prepCharMs;
+        const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
+        if (prepTotalMs + worstWorkerMs > 40.0) {
+            LOG_WARNING("SLOW renderWorld breakdown: prepare=", prepTotalMs,
+                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms, " char=", prepCharMs,
+                        ") workers: terrain=", lastTerrainRenderMs,
+                        " wmo=", lastWMORenderMs, " m2=", lastM2RenderMs);
+        }
 
         // --- Execute all secondary buffers in correct draw order ---
         VkCommandBuffer validCmds[6];
@@ -2003,6 +2066,10 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
     }
 
+    // Renderer components can be recreated during map transitions. Restore the
+    // configured view distance instead of falling back to their defaults.
+    setViewDistance(viewDistance_);
+
     // Initialize shadow pipelines for M2 if not yet done
     if (m2Renderer && shadowRenderPass != VK_NULL_HANDLE && !m2Renderer->hasShadowPipeline()) {
         if (!m2Renderer->initializeShadow(shadowRenderPass))
@@ -2091,6 +2158,9 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         }
         if (audioCoordinator_->getNpcVoiceManager()) {
             audioCoordinator_->getNpcVoiceManager()->initialize(assetManager);
+        }
+        if (audioCoordinator_->getPlayerVoiceManager()) {
+            audioCoordinator_->getPlayerVoiceManager()->initialize(assetManager);
         }
         if (!deferredWorldInitEnabled_) {
             if (audioCoordinator_->getAmbientSoundManager()) {
@@ -2223,6 +2293,23 @@ void Renderer::setWireframeMode(bool enabled) {
     }
 }
 
+void Renderer::setViewDistance(float distance) {
+    viewDistance_ = glm::clamp(distance, 400.0f, 2400.0f);
+
+    if (terrainRenderer) terrainRenderer->setViewDistance(viewDistance_);
+    if (wmoRenderer) wmoRenderer->setViewDistance(viewDistance_);
+    if (m2Renderer) m2Renderer->setViewDistance(viewDistance_);
+    if (terrainManager) {
+        terrainManager->setLoadRadius(getTerrainLoadRadius());
+        terrainManager->setUnloadRadius(getTerrainUnloadRadius());
+    }
+}
+
+int Renderer::getTerrainLoadRadius() const {
+    constexpr float kAdtTileSize = 533.33333f;
+    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
+}
+
 bool Renderer::loadTerrainArea(const std::string& mapName, int centerX, int centerY, int radius) {
     // Create terrain renderer if not already created
     if (!terrainRenderer) {
@@ -2285,6 +2372,9 @@ bool Renderer::loadTerrainArea(const std::string& mapName, int centerX, int cent
     }
     if (audioCoordinator_->getNpcVoiceManager() && cachedAssetManager) {
         audioCoordinator_->getNpcVoiceManager()->initialize(cachedAssetManager);
+    }
+    if (audioCoordinator_->getPlayerVoiceManager() && cachedAssetManager) {
+        audioCoordinator_->getPlayerVoiceManager()->initialize(cachedAssetManager);
     }
     if (!deferredWorldInitEnabled_) {
         if (audioCoordinator_->getAmbientSoundManager() && cachedAssetManager) {
@@ -2387,8 +2477,21 @@ glm::mat4 Renderer::computeLightSpaceMatrix() {
         sunDir = glm::normalize(sunDir);
     }
 
-    // Shadow center follows the player directly; texel snapping below
-    // prevents shimmer without needing to freeze the projection.
+    // Lighting transitions are deliberately smoothed every frame. Feeding that
+    // continuously rotating direction straight into the shadow camera rotates
+    // the entire shadow texel grid and makes otherwise stationary shadows
+    // shimmer. Hold the projection direction until the lighting has moved by a
+    // visible amount; diffuse lighting can continue to transition smoothly.
+    constexpr float kShadowDirectionUpdateCos = 0.9999619f; // cos(0.5 degrees)
+    if (!shadowLightDirectionInitialized_ ||
+        glm::dot(shadowLightDirection_, sunDir) < kShadowDirectionUpdateCos) {
+        shadowLightDirection_ = sunDir;
+        shadowLightDirectionInitialized_ = true;
+    }
+    sunDir = shadowLightDirection_;
+
+    // Shadow center follows the player directly; texel snapping below keeps
+    // translation aligned with the now-stable projection axes.
     glm::vec3 desiredCenter = characterPosition;
     if (!shadowCenterInitialized) {
         if (glm::dot(desiredCenter, desiredCenter) < 1.0f) {
@@ -2615,7 +2718,9 @@ void Renderer::renderReflectionPass() {
         if (skySystem) {
             rendering::SkyParams skyParams;
             auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f;
+            skyParams.timeOfDay = lightingManager
+                ? lightingManager->getVisualTimeOfDayHours()
+                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
             if (lightingManager) {
                 const auto& lp = lightingManager->getLightingParams();
                 skyParams.directionalDir = lp.directionalDir;

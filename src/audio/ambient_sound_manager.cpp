@@ -20,7 +20,6 @@ namespace {
     // Volume settings
     constexpr float FIRE_VOLUME = 0.7f;
     constexpr float WATER_VOLUME = 0.5f;
-    constexpr float WIND_VOLUME = 0.35f;
     constexpr float BIRD_VOLUME = 0.6f;
     constexpr float CRICKET_VOLUME = 0.5f;
 
@@ -438,7 +437,7 @@ void AmbientSoundManager::updatePeriodicSounds(float deltaTime, bool isIndoor, b
     if (isIndoor || isSwimming) return;
 
     // Bird sounds during daytime
-    if (isDaytime()) {
+    if (isDaytime() && currentZoneId_ != 10) {
         birdTimer_ += deltaTime;
         if (birdTimer_ >= randomFloat(BIRD_MIN_INTERVAL, BIRD_MAX_INTERVAL)) {
             birdTimer_ = 0.0f;
@@ -526,6 +525,12 @@ void AmbientSoundManager::updateWindAmbience(float deltaTime, bool isIndoor) {
     }
     // Outdoor wind ambience
     else {
+        // This generic loop is ForestNormalDay.wav and contains prominent
+        // birdsong. Duskwood already has its authored night forest ambience.
+        if (currentZoneId_ == 10) {
+            windLoopTime_ = 0.0f;
+            return;
+        }
         if (!windSounds_.empty() && windSounds_[0].loaded) {
             windLoopTime_ += deltaTime;
             if (windLoopTime_ >= 30.0f) {
@@ -591,6 +596,8 @@ void AmbientSoundManager::setZoneType(ZoneType type) {
 }
 
 void AmbientSoundManager::setZoneId(uint32_t zoneId) {
+    currentZoneId_ = zoneId;
+
     // Map WoW zone ID to ZoneType + CityType.
     // City zones: set CityType and clear ZoneType.
     // Outdoor zones: set ZoneType and clear CityType.
@@ -618,6 +625,7 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 267:  // Hillsbrad Foothills
         case 36:   // Alterac Mountains
         case 45:   // Arathi Highlands
+        case 10:   // Duskwood (forced to the night library by its visual clock)
             zone = ZoneType::FOREST_NORMAL; break;
 
         case 1:    // Dun Morogh
@@ -634,7 +642,6 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 40:   // Westfall
         case 215:  // Mulgore
         case 44:   // Redridge Mountains
-        case 10:   // Duskwood (counts as grassland night)
         case 38:   // Loch Modan
             zone = ZoneType::GRASSLANDS; break;
 

@@ -25,6 +25,7 @@
 #include "audio/activity_sound_manager.hpp"
 #include "audio/mount_sound_manager.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/player_voice_manager.hpp"
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "audio/combat_sound_manager.hpp"
@@ -56,21 +57,6 @@
 namespace {
     using namespace wowee::ui::colors;
     using namespace wowee::ui::helpers;
-    constexpr auto& kColorRed        = kRed;
-    constexpr auto& kColorGreen      = kGreen;
-    constexpr auto& kColorBrightGreen= kBrightGreen;
-    constexpr auto& kColorYellow     = kYellow;
-    constexpr auto& kColorGray       = kGray;
-    constexpr auto& kColorDarkGray   = kDarkGray;
-
-    // Abbreviated month names (indexed 0-11)
-    constexpr const char* kMonthAbbrev[12] = {
-        "Jan","Feb","Mar","Apr","May","Jun",
-        "Jul","Aug","Sep","Oct","Nov","Dec"
-    };
-
-    // Common ImGui window flags for popup dialogs
-    const ImGuiWindowFlags kDialogFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize;
 
     bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
         glm::vec3 oc = ray.origin - center;
@@ -109,11 +95,11 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
         signature ^= value;
         signature *= 1099511628211ull;
     };
-    const auto& tracked = gameHandler.getTrackedQuestIds();
-    mix(tracked.size());
+    const auto& mapVisible = gameHandler.getMapVisibleQuestIds();
+    mix(mapVisible.size());
     for (const auto& quest : gameHandler.getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
-            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+            !mapVisible.count(quest.questId)) continue;
         mix(quest.questId);
         for (const auto& objective : quest.killObjectives) {
             if (objective.required == 0) continue;
@@ -132,7 +118,7 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
     minimapQuestGameObjectEntries_.clear();
     for (const auto& quest : gameHandler.getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
-            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+            !mapVisible.count(quest.questId)) continue;
         for (const auto& objective : quest.killObjectives) {
             if (objective.required == 0 || objective.npcOrGoId == 0) continue;
             const uint32_t entry = static_cast<uint32_t>(objective.npcOrGoId > 0
@@ -300,13 +286,12 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     // Lootable corpse dots: small yellow-green diamonds on dead, lootable units.
     // Shown whenever NPC dots are enabled (or always, since they're always useful).
     {
-        constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
         for (const auto& entity : minimapUnits) {
             auto unit = std::static_pointer_cast<game::Unit>(entity);
             if (!unit) continue;
             // Must be dead (health == 0) and marked lootable
             if (unit->getHealth() != 0) continue;
-            if (!(unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE)) continue;
+            if (!(unit->getDynamicFlags() & game::UNIT_DYNFLAG_LOOTABLE)) continue;
 
             glm::vec3 npcRender = core::coords::canonicalToRender(
                 glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
@@ -496,10 +481,10 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         // Build map of NPC entry → (quest title, current, required) for tooltips
         struct KillInfo { std::string questTitle; uint32_t current = 0; uint32_t required = 0; };
         std::unordered_map<uint32_t, KillInfo> killInfoMap;
-        const auto& trackedIds = gameHandler.getTrackedQuestIds();
+        const auto& mapVisibleIds = gameHandler.getMapVisibleQuestIds();
         for (const auto& quest : gameHandler.getQuestLog()) {
             if (quest.complete) continue;
-            if (!trackedIds.empty() && !trackedIds.count(quest.questId)) continue;
+            if (!mapVisibleIds.count(quest.questId)) continue;
             for (const auto& obj : quest.killObjectives) {
                 if (obj.npcOrGoId <= 0 || obj.required == 0) continue;
                 uint32_t npcEntry = static_cast<uint32_t>(obj.npcOrGoId);
@@ -557,6 +542,10 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
     // Gossip POI markers (quest / NPC navigation targets)
     for (const auto& poi : gameHandler.getGossipPois()) {
+        if (poi.questObjectiveIndex != -2 &&
+            !gameHandler.isQuestShownOnMap(poi.data)) {
+            continue;
+        }
         // Convert WoW canonical coords to render coords for minimap projection
         glm::vec3 poiRender = core::coords::canonicalToRender(glm::vec3(poi.x, poi.y, 0.0f));
         float sx = 0.0f, sy = 0.0f;
@@ -868,8 +857,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
     }
 
-    // Persistent coordinate display below the minimap
-    {
+    // Optional persistent coordinate display below the minimap.
+    if (settingsPanel_.showMinimapCoordinates_) {
         glm::vec3 playerCanon = core::coords::renderToCanonical(playerRender);
         char coordBuf[32];
         std::snprintf(coordBuf, sizeof(coordBuf), "%.1f, %.1f", playerCanon.x, playerCanon.y);
@@ -893,13 +882,42 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
     // Zone name display — drawn inside the top edge of the minimap circle
     {
-        auto* zmRenderer = renderer ? renderer->getZoneManager() : nullptr;
-        uint32_t zoneId = gameHandler.getWorldStateZoneId();
-        const game::ZoneInfo* zi = (zmRenderer && zoneId != 0) ? zmRenderer->getZoneInfo(zoneId) : nullptr;
-        if (zi && !zi->name.empty()) {
+        std::string zoneName;
+        const uint32_t zoneId = gameHandler.getWorldStateZoneId();
+        if (zoneId != 0) {
+            zoneName = gameHandler.getWhoAreaName(zoneId);
+            if (zoneName.empty()) {
+                if (auto* zmRenderer = renderer ? renderer->getZoneManager() : nullptr) {
+                    if (const game::ZoneInfo* zi = zmRenderer->getZoneInfo(zoneId)) {
+                        zoneName = zi->name;
+                    }
+                }
+            }
+        }
+        if (zoneName.empty() && renderer) {
+            zoneName = renderer->getCurrentZoneName();
+        }
+        if (!zoneName.empty()) {
             ImFont* font = ImGui::GetFont();
             float fontSize = ImGui::GetFontSize();
-            ImVec2 ts = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, zi->name.c_str());
+
+            const char* weatherIcon = nullptr;
+            ImU32 weatherColor = IM_COL32(255, 255, 255, 200);
+            const uint32_t weatherType = gameHandler.getWeatherType();
+            const float weatherIntensity = gameHandler.getWeatherIntensity();
+            if (weatherType == 1 && weatherIntensity > 0.05f) {
+                weatherIcon = " \xe2\x9b\x86"; // Rain
+                weatherColor = IM_COL32(140, 180, 240, 220);
+            } else if (weatherType == 2 && weatherIntensity > 0.05f) {
+                weatherIcon = " \xe2\x9d\x84"; // Snow
+                weatherColor = IM_COL32(210, 230, 255, 220);
+            } else if (weatherType == 3 && weatherIntensity > 0.05f) {
+                weatherIcon = " \xe2\x98\x81"; // Storm/fog
+                weatherColor = IM_COL32(160, 160, 190, 220);
+            }
+
+            const std::string fullLabel = weatherIcon ? zoneName + weatherIcon : zoneName;
+            ImVec2 ts = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, fullLabel.c_str());
             float tx = centerX - ts.x * 0.5f;
             float ty = centerY - mapRadius + 4.0f;  // just inside top edge of the circle
             float pad = 2.0f;
@@ -908,9 +926,15 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
                 ImVec2(tx + ts.x + pad, ty + ts.y + pad),
                 IM_COL32(0, 0, 0, 160), 2.0f);
             drawList->AddText(font, fontSize, ImVec2(tx + 1.0f, ty + 1.0f),
-                              IM_COL32(0, 0, 0, 180), zi->name.c_str());
+                              IM_COL32(0, 0, 0, 180), zoneName.c_str());
             drawList->AddText(font, fontSize, ImVec2(tx, ty),
-                              IM_COL32(255, 230, 150, 220), zi->name.c_str());
+                              IM_COL32(255, 230, 150, 220), zoneName.c_str());
+            if (weatherIcon) {
+                const ImVec2 nameSize = font->CalcTextSizeA(
+                    fontSize, FLT_MAX, 0.0f, zoneName.c_str());
+                drawList->AddText(font, fontSize, ImVec2(tx + nameSize.x, ty),
+                                  weatherColor, weatherIcon);
+            }
         }
     }
 
@@ -948,20 +972,19 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
         if (overMinimap) {
             ImGui::BeginTooltip();
-            // Compute the world coordinate under the mouse cursor
-            // Inverse of projectToMinimap: pixel offset → world offset in render space → canonical
-            float rxW = mdx / mapRadius * viewRadius;
-            float ryW = mdy / mapRadius * viewRadius;
-            // Invert the minimap projection used above to recover render-space
-            // world coordinates under the mouse.
-            float hoverOldRx = -rxW;
-            float hoverRotX = hoverOldRx * cosB - ryW * sinB;
-            float hoverRotY = hoverOldRx * sinB + ryW * cosB;
-            float hoverDx = -hoverRotY;
-            float hoverDy =  hoverRotX;
-            glm::vec3 hoverRender(playerRender.x + hoverDx, playerRender.y + hoverDy, playerRender.z);
-            glm::vec3 hoverCanon = core::coords::renderToCanonical(hoverRender);
-            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.5f, 1.0f), "%.1f, %.1f", hoverCanon.x, hoverCanon.y);
+            if (settingsPanel_.showMinimapCoordinates_) {
+                // Compute the world coordinate under the mouse cursor.
+                float rxW = mdx / mapRadius * viewRadius;
+                float ryW = mdy / mapRadius * viewRadius;
+                float hoverOldRx = -rxW;
+                float hoverRotX = hoverOldRx * cosB - ryW * sinB;
+                float hoverRotY = hoverOldRx * sinB + ryW * cosB;
+                float hoverDx = -hoverRotY;
+                float hoverDy =  hoverRotX;
+                glm::vec3 hoverRender(playerRender.x + hoverDx, playerRender.y + hoverDy, playerRender.z);
+                glm::vec3 hoverCanon = core::coords::renderToCanonical(hoverRender);
+                ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.5f, 1.0f), "%.1f, %.1f", hoverCanon.x, hoverCanon.y);
+            }
             ImGui::TextColored(colors::kMediumGray, "Ctrl+click to ping");
             ImGui::EndTooltip();
 
@@ -1033,6 +1056,9 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         if (auto* npcVoice = ac->getNpcVoiceManager()) {
             npcVoice->setVolumeScale(settingsPanel_.pendingNpcVoiceVolume / 100.0f);
         }
+        if (auto* playerVoice = ac->getPlayerVoiceManager()) {
+            playerVoice->setEnabled(settingsPanel_.pendingCharacterSpeech);
+        }
         if (auto* mount = ac->getMountSoundManager()) {
             mount->setVolumeScale(settingsPanel_.pendingMountVolume / 100.0f);
         }
@@ -1040,57 +1066,6 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
             activity->setVolumeScale(settingsPanel_.pendingActivityVolume / 100.0f);
         }
     };
-
-    // Zone name label above the minimap (centered, WoW-style)
-    // Prefer the server-reported zone/area name (from SMSG_INIT_WORLD_STATES) so sub-zones
-    // like Ironforge or Wailing Caverns display correctly; fall back to renderer zone name.
-    {
-        std::string wsZoneName;
-        uint32_t wsZoneId = gameHandler.getWorldStateZoneId();
-        if (wsZoneId != 0)
-            wsZoneName = gameHandler.getWhoAreaName(wsZoneId);
-        const std::string& rendererZoneName = renderer ? renderer->getCurrentZoneName() : std::string{};
-        const std::string& zoneName = !wsZoneName.empty() ? wsZoneName : rendererZoneName;
-        if (!zoneName.empty()) {
-            auto* fgDl = ImGui::GetForegroundDrawList();
-            float zoneTextY = centerY - mapRadius - 16.0f;
-            ImFont* font = ImGui::GetFont();
-
-            // Weather icon appended to zone name when active
-            uint32_t wType = gameHandler.getWeatherType();
-            float wIntensity = gameHandler.getWeatherIntensity();
-            const char* weatherIcon = nullptr;
-            ImU32 weatherColor = IM_COL32(255, 255, 255, 200);
-            if (wType == 1 && wIntensity > 0.05f) {           // Rain
-                weatherIcon = " \xe2\x9b\x86";               // U+26C6 ⛆
-                weatherColor = IM_COL32(140, 180, 240, 220);
-            } else if (wType == 2 && wIntensity > 0.05f) {    // Snow
-                weatherIcon = " \xe2\x9d\x84";               // U+2744 ❄
-                weatherColor = IM_COL32(210, 230, 255, 220);
-            } else if (wType == 3 && wIntensity > 0.05f) {    // Storm/Fog
-                weatherIcon = " \xe2\x98\x81";               // U+2601 ☁
-                weatherColor = IM_COL32(160, 160, 190, 220);
-            }
-
-            std::string displayName = zoneName;
-            // Build combined string if weather active
-            std::string fullLabel = weatherIcon ? (zoneName + weatherIcon) : zoneName;
-            ImVec2 tsz = font->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, fullLabel.c_str());
-            float tzx = centerX - tsz.x * 0.5f;
-
-            // Shadow pass
-            fgDl->AddText(font, 12.0f, ImVec2(tzx + 1.0f, zoneTextY + 1.0f),
-                IM_COL32(0, 0, 0, 180), zoneName.c_str());
-            // Zone name in gold
-            fgDl->AddText(font, 12.0f, ImVec2(tzx, zoneTextY),
-                IM_COL32(255, 220, 120, 230), zoneName.c_str());
-            // Weather symbol in its own color appended after
-            if (weatherIcon) {
-                ImVec2 nameSz = font->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, zoneName.c_str());
-                fgDl->AddText(font, 12.0f, ImVec2(tzx + nameSz.x, zoneTextY), weatherColor, weatherIcon);
-            }
-        }
-    }
 
     // Speaker mute button at the minimap top-right corner
     ImGui::SetNextWindowPos(ImVec2(centerX + mapRadius - 26.0f, centerY - mapRadius + 4.0f), ImGuiCond_Always);
@@ -1204,8 +1179,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     }
     ImGui::End();
 
-    // Clock display at bottom-right of minimap (local time)
-    {
+    // Optional clock display at bottom-right of minimap (local time).
+    if (settingsPanel_.showMinimapClock_) {
         auto now = std::chrono::system_clock::now();
         auto tt  = std::chrono::system_clock::to_time_t(now);
         std::tm tmBuf{};
@@ -1472,6 +1447,8 @@ void GameScreen::saveSettings() {
     out << "minimap_rotate=" << (settingsPanel_.pendingMinimapRotate ? 1 : 0) << "\n";
     out << "minimap_square=" << (settingsPanel_.pendingMinimapSquare ? 1 : 0) << "\n";
     out << "minimap_npc_dots=" << (settingsPanel_.pendingMinimapNpcDots ? 1 : 0) << "\n";
+    out << "show_minimap_clock=" << (settingsPanel_.pendingShowMinimapClock ? 1 : 0) << "\n";
+    out << "show_minimap_coordinates=" << (settingsPanel_.pendingShowMinimapCoordinates ? 1 : 0) << "\n";
     out << "show_latency_meter=" << (settingsPanel_.pendingShowLatencyMeter ? 1 : 0) << "\n";
     out << "show_dps_meter=" << (settingsPanel_.showDPSMeter_ ? 1 : 0) << "\n";
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
@@ -1479,6 +1456,7 @@ void GameScreen::saveSettings() {
     out << "show_keyring=" << (settingsPanel_.pendingShowKeyring ? 1 : 0) << "\n";
     out << "show_micro_menu=" << (settingsPanel_.pendingShowMicroMenu ? 1 : 0) << "\n";
     out << "idle_camera_orbit=" << (settingsPanel_.pendingIdleCameraOrbit ? 1 : 0) << "\n";
+    out << "buff_bar_scale=" << settingsPanel_.pendingBuffBarScale << "\n";
     out << "action_bar_scale=" << settingsPanel_.pendingActionBarScale << "\n";
     out << "nameplate_scale=" << settingsPanel_.nameplateScale_ << "\n";
     out << "show_friendly_nameplates=" << (settingsPanel_.showFriendlyNameplates_ ? 1 : 0) << "\n";
@@ -1506,8 +1484,12 @@ void GameScreen::saveSettings() {
     out << "npc_voice_volume=" << settingsPanel_.pendingNpcVoiceVolume << "\n";
     out << "mount_volume=" << settingsPanel_.pendingMountVolume << "\n";
     out << "activity_volume=" << settingsPanel_.pendingActivityVolume << "\n";
+    out << "character_speech=" << (settingsPanel_.pendingCharacterSpeech ? 1 : 0) << "\n";
 
     // Gameplay / display pacing
+    out << "fullscreen=" << (settingsPanel_.pendingFullscreen ? 1 : 0) << "\n";
+    out << "resolution_width=" << settingsPanel_.pendingResolutionWidth << "\n";
+    out << "resolution_height=" << settingsPanel_.pendingResolutionHeight << "\n";
     out << "vsync=" << (settingsPanel_.pendingVsync ? 1 : 0) << "\n";
     out << "auto_loot=" << (settingsPanel_.pendingAutoLoot ? 1 : 0) << "\n";
     out << "auto_sell_grey=" << (settingsPanel_.pendingAutoSellGrey ? 1 : 0) << "\n";
@@ -1516,6 +1498,7 @@ void GameScreen::saveSettings() {
     out << "ground_clutter_density=" << settingsPanel_.pendingGroundClutterDensity << "\n";
     out << "shadows=" << (settingsPanel_.pendingShadows ? 1 : 0) << "\n";
     out << "shadow_distance=" << settingsPanel_.pendingShadowDistance << "\n";
+    out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
     out << "brightness=" << settingsPanel_.pendingBrightness << "\n";
     out << "water_refraction=" << (settingsPanel_.pendingWaterRefraction ? 1 : 0) << "\n";
     out << "antialiasing=" << settingsPanel_.pendingAntiAliasing << "\n";
@@ -1539,6 +1522,7 @@ void GameScreen::saveSettings() {
     out << "extended_zoom=" << (settingsPanel_.pendingExtendedZoom ? 1 : 0) << "\n";
     out << "camera_stiffness=" << settingsPanel_.pendingCameraStiffness << "\n";
     out << "camera_pivot_height=" << settingsPanel_.pendingPivotHeight << "\n";
+    out << "camera_smooth_follow=" << (settingsPanel_.pendingSmoothCameraFollow ? 1 : 0) << "\n";
     out << "fov=" << settingsPanel_.pendingFov << "\n";
 
     // Quest tracker position/size
@@ -1546,6 +1530,8 @@ void GameScreen::saveSettings() {
     out << "quest_tracker_y=" << questTrackerPos_.y << "\n";
     out << "quest_tracker_w=" << questTrackerSize_.x << "\n";
     out << "quest_tracker_h=" << questTrackerSize_.y << "\n";
+    out << "quest_tracker_filter=" << questTrackerFilter_ << "\n";
+    out << "quest_tracker_collapsed=" << (questTrackerCollapsed_ ? 1 : 0) << "\n";
 
     // Chat
     out << "chat_active_tab=" << chatPanel_.activeChatTab << "\n";
@@ -1600,6 +1586,12 @@ void GameScreen::loadSettings() {
                 int v = std::stoi(val);
                 settingsPanel_.minimapNpcDots_ = (v != 0);
                 settingsPanel_.pendingMinimapNpcDots = settingsPanel_.minimapNpcDots_;
+            } else if (key == "show_minimap_clock") {
+                settingsPanel_.showMinimapClock_ = (std::stoi(val) != 0);
+                settingsPanel_.pendingShowMinimapClock = settingsPanel_.showMinimapClock_;
+            } else if (key == "show_minimap_coordinates") {
+                settingsPanel_.showMinimapCoordinates_ = (std::stoi(val) != 0);
+                settingsPanel_.pendingShowMinimapCoordinates = settingsPanel_.showMinimapCoordinates_;
             } else if (key == "show_latency_meter") {
                 settingsPanel_.showLatencyMeter_ = (std::stoi(val) != 0);
                 settingsPanel_.pendingShowLatencyMeter = settingsPanel_.showLatencyMeter_;
@@ -1617,6 +1609,8 @@ void GameScreen::loadSettings() {
                 settingsPanel_.pendingShowMicroMenu = (std::stoi(val) != 0);
             } else if (key == "idle_camera_orbit") {
                 settingsPanel_.pendingIdleCameraOrbit = (std::stoi(val) != 0);
+            } else if (key == "buff_bar_scale") {
+                settingsPanel_.pendingBuffBarScale = std::clamp(std::stof(val), 0.75f, 1.5f);
             } else if (key == "action_bar_scale") {
                 settingsPanel_.pendingActionBarScale = std::clamp(std::stof(val), 0.5f, 1.5f);
             } else if (key == "nameplate_scale") {
@@ -1662,7 +1656,20 @@ void GameScreen::loadSettings() {
             else if (key == "npc_voice_volume") settingsPanel_.pendingNpcVoiceVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "mount_volume") settingsPanel_.pendingMountVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "activity_volume") settingsPanel_.pendingActivityVolume = std::clamp(std::stoi(val), 0, 100);
+            else if (key == "character_speech") settingsPanel_.pendingCharacterSpeech = (std::stoi(val) != 0);
             // Gameplay / display pacing
+            else if (key == "fullscreen") {
+                settingsPanel_.pendingFullscreen = (std::stoi(val) != 0);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
+            else if (key == "resolution_width") {
+                settingsPanel_.pendingResolutionWidth = std::clamp(std::stoi(val), 640, 7680);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
+            else if (key == "resolution_height") {
+                settingsPanel_.pendingResolutionHeight = std::clamp(std::stoi(val), 480, 4320);
+                settingsPanel_.displaySettingsLoaded_ = true;
+            }
             else if (key == "vsync") settingsPanel_.pendingVsync = (std::stoi(val) != 0);
             else if (key == "auto_loot") settingsPanel_.pendingAutoLoot = (std::stoi(val) != 0);
             else if (key == "auto_sell_grey") settingsPanel_.pendingAutoSellGrey = (std::stoi(val) != 0);
@@ -1675,6 +1682,7 @@ void GameScreen::loadSettings() {
             else if (key == "ground_clutter_density") settingsPanel_.pendingGroundClutterDensity = std::clamp(std::stoi(val), 0, 150);
             else if (key == "shadows") settingsPanel_.pendingShadows = (std::stoi(val) != 0);
             else if (key == "shadow_distance") settingsPanel_.pendingShadowDistance = std::clamp(std::stof(val), 40.0f, 500.0f);
+            else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), 400.0f, 2400.0f);
             else if (key == "brightness") {
                 settingsPanel_.pendingBrightness = std::clamp(std::stoi(val), 0, 100);
                 if (auto* r = services_.renderer)
@@ -1707,6 +1715,7 @@ void GameScreen::loadSettings() {
             else if (key == "extended_zoom") settingsPanel_.pendingExtendedZoom = (std::stoi(val) != 0);
             else if (key == "camera_stiffness") settingsPanel_.pendingCameraStiffness = std::clamp(std::stof(val), 5.0f, 100.0f);
             else if (key == "camera_pivot_height") settingsPanel_.pendingPivotHeight = std::clamp(std::stof(val), 0.0f, 3.0f);
+            else if (key == "camera_smooth_follow") settingsPanel_.pendingSmoothCameraFollow = (std::stoi(val) != 0);
             else if (key == "fov") {
                 settingsPanel_.pendingFov = std::clamp(std::stof(val), 45.0f, 110.0f);
                 if (auto* renderer = services_.renderer) {
@@ -1731,6 +1740,12 @@ void GameScreen::loadSettings() {
             }
             else if (key == "quest_tracker_h") {
                 questTrackerSize_.y = std::max(60.0f, std::stof(val));
+            }
+            else if (key == "quest_tracker_filter") {
+                questTrackerFilter_ = std::clamp(std::stoi(val), 0, 2);
+            }
+            else if (key == "quest_tracker_collapsed") {
+                questTrackerCollapsed_ = (std::stoi(val) != 0);
             }
             // Chat
             else if (key == "chat_active_tab") chatPanel_.activeChatTab = std::clamp(std::stoi(val), 0, 3);

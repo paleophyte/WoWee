@@ -113,6 +113,11 @@ TEST_CASE("Unit flags", "[entity]") {
     u.setUnitFlags(0x01);
     REQUIRE(u.getUnitFlags() == 0x01);
 
+    REQUIRE_FALSE(u.hasCreepVisibility());
+    u.setVisibilityFlags(UNIT_VIS_FLAG_CREEP);
+    REQUIRE(u.getVisibilityFlags() == UNIT_VIS_FLAG_CREEP);
+    REQUIRE(u.hasCreepVisibility());
+
     u.setDynamicFlags(0x02);
     REQUIRE(u.getDynamicFlags() == 0x02);
 
@@ -122,6 +127,17 @@ TEST_CASE("Unit flags", "[entity]") {
 
     u.setNpcFlags(0);
     REQUIRE_FALSE(u.isInteractable());
+}
+
+TEST_CASE("Corpse state uses the real dynamic dead bit", "[entity][corpse]") {
+    REQUIRE(isUnitCorpseState(0, 100, 0));
+    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_DEAD));
+    REQUIRE(isUnitCorpseState(0, 0, UNIT_DYNFLAG_LOOTABLE));
+
+    REQUIRE_FALSE(isUnitCorpseState(100, 100, 0));
+    // Regression: 0x08 is tapped-by-player, not dead.
+    REQUIRE_FALSE(isUnitCorpseState(100, 100, UNIT_DYNFLAG_TAPPED_BY_PLAYER));
+    REQUIRE(UNIT_DYNFLAG_DEAD == 0x00000020);
 }
 
 TEST_CASE("Unit faction and hostility", "[entity]") {

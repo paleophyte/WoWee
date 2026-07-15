@@ -20,7 +20,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 if(WIN32)
     # Needed for Vulkan Win32 external memory/semaphore handle types used by FSR3 interop.
-    add_compile_definitions(VK_USE_PLATFORM_WIN32_KHR)
+    add_compile_definitions(VK_USE_PLATFORM_WIN32_KHR WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
 # Options
@@ -78,6 +78,7 @@ if(WOWEE_ENABLE_AMD_FSR2 AND EXISTS ${WOWEE_AMD_FSR2_HEADER} AND EXISTS ${WOWEE_
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(wowee_fsr2_amd_vk PRIVATE
             "-include${WOWEE_FFX_COMPAT_HEADER}"
+            -Wno-deprecated-declarations
         )
     elseif(MSVC)
         target_compile_options(wowee_fsr2_amd_vk PRIVATE
@@ -391,7 +392,7 @@ endif()
 # GLM GTX extensions (quaternion, norm, etc.) require this flag on newer GLM versions
 add_compile_definitions(GLM_ENABLE_EXPERIMENTAL GLM_FORCE_DEPTH_ZERO_TO_ONE)
 if(WIN32)
-    add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 # SPIR-V shader compilation via glslc
@@ -580,6 +581,7 @@ set(WOWEE_SOURCES
     src/audio/activity_sound_manager.cpp
     src/audio/mount_sound_manager.cpp
     src/audio/npc_voice_manager.cpp
+    src/audio/player_voice_manager.cpp
     src/audio/ambient_sound_manager.cpp
     src/audio/ui_sound_manager.cpp
     src/audio/combat_sound_manager.cpp
@@ -775,6 +777,7 @@ set(WOWEE_SOURCES
     src/rendering/weather.cpp
     src/rendering/lightning.cpp
     src/rendering/lighting_manager.cpp
+    src/rendering/zone_ambience.cpp
     src/rendering/sky_system.cpp
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
@@ -871,6 +874,7 @@ set(WOWEE_SOURCES
     src/ui/social_panel.cpp
     src/ui/action_bar_panel.cpp
     src/ui/window_manager.cpp
+    src/ui/crafting_window.cpp
     src/ui/inventory_screen.cpp
     src/ui/quest_log_screen.cpp
     src/ui/spellbook_screen.cpp
@@ -932,6 +936,7 @@ set(WOWEE_HEADERS
     include/audio/activity_sound_manager.hpp
     include/audio/mount_sound_manager.hpp
     include/audio/npc_voice_manager.hpp
+    include/audio/player_voice_manager.hpp
     include/audio/ambient_sound_manager.hpp
     include/audio/ui_sound_manager.hpp
     include/audio/combat_sound_manager.hpp
@@ -1176,8 +1181,11 @@ if(HAVE_UNICORN)
     target_compile_definitions(wowee PRIVATE HAVE_UNICORN)
 endif()
 
-# Link GLM if found
-if(TARGET glm::glm)
+# Prefer GLM's explicit header-only target. GLM 1.0 may build glm::glm as a
+# shared library, which creates an unnecessary runtime dependency in app bundles.
+if(TARGET glm::glm-header-only)
+    target_link_libraries(wowee PRIVATE glm::glm-header-only)
+elseif(TARGET glm::glm)
     target_link_libraries(wowee PRIVATE glm::glm)
 elseif(glm_FOUND)
     target_include_directories(wowee PRIVATE ${GLM_INCLUDE_DIRS})
@@ -2034,7 +2042,9 @@ target_link_libraries(wowee_editor PRIVATE
     imgui
     vk-bootstrap
 )
-if(TARGET glm::glm)
+if(TARGET glm::glm-header-only)
+    target_link_libraries(wowee_editor PRIVATE glm::glm-header-only)
+elseif(TARGET glm::glm)
     target_link_libraries(wowee_editor PRIVATE glm::glm)
 elseif(glm_FOUND)
     target_include_directories(wowee_editor PRIVATE ${GLM_INCLUDE_DIRS})

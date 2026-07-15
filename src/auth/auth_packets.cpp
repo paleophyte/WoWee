@@ -349,9 +349,9 @@ network::Packet RealmListPacket::build() {
     return packet;
 }
 
-bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& response, bool legacyVanilla) {
+bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& response, bool legacyVanillaLayout) {
     // Note: opcode byte already consumed by handlePacket()
-    const bool isLegacyVanilla = legacyVanilla;
+    const bool isLegacyVanilla = legacyVanillaLayout;
 
     // Packet size (2 bytes) - we already know the size, skip it
     uint16_t packetSize = packet.readUInt16();
@@ -374,6 +374,7 @@ bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& 
 
     for (uint16_t i = 0; i < realmCount; ++i) {
         Realm realm;
+        const size_t realmStart = packet.getReadPos();
 
         // Icon/type: uint32 for legacy vanilla, uint8 for TBC/WotLK.
         if (isLegacyVanilla) {
@@ -414,6 +415,43 @@ bool RealmListResponseParser::parse(network::Packet& packet, RealmListResponse& 
             realm.minorVersion = packet.readUInt8();
             realm.patchVersion = packet.readUInt8();
             realm.build = packet.readUInt16();
+        }
+
+        // VMangos 1.12 can use auth protocol v8 while still sending the
+        // vanilla realm-entry shape. If the caller forgot to opt into the
+        // vanilla layout, the TBC/WotLK parse shifts the fields: the vanilla
+        // uint32 icon's trailing zero bytes get read as the name, so the name
+        // always comes out empty (the address then lands on either the real
+        // name or, when the vanilla flags byte is 0, another empty string).
+        // Key the recovery on the empty name alone — a nameless realm is never
+        // valid, and requiring a non-empty address here would miss every realm
+        // that sends flags=0, silently yielding garbage fields instead.
+        if (!isLegacyVanilla && realm.name.empty()) {
+            LOG_WARNING("Realm list entry looked shifted; retrying as vanilla layout");
+            packet.setReadPos(realmStart);
+
+            realm = Realm{};
+            realm.icon = static_cast<uint8_t>(packet.readUInt32());
+            realm.lock = 0;
+            realm.flags = packet.readUInt8();
+            realm.name = packet.readString();
+            realm.address = packet.readString();
+
+            uint32_t populationBits = packet.readUInt32();
+            std::memcpy(&realm.population, &populationBits, sizeof(float));
+            realm.characters = packet.readUInt8();
+            realm.timezone = packet.readUInt8();
+            realm.id = packet.readUInt8();
+
+            if (realm.hasVersionInfo()) {
+                realm.majorVersion = packet.readUInt8();
+                realm.minorVersion = packet.readUInt8();
+                realm.patchVersion = packet.readUInt8();
+                realm.build = packet.readUInt16();
+            }
+        }
+
+        if (realm.hasVersionInfo()) {
 
             LOG_DEBUG("  Realm ", static_cast<int>(i), " (", realm.name, ") version: ",
                       static_cast<int>(realm.majorVersion), ".", static_cast<int>(realm.minorVersion), ".",

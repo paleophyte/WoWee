@@ -815,9 +815,6 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                                                  std::shared_ptr<Unit>& unit,
                                                  const UnitFieldIndices& ufi) {
     bool unitInitiallyDead = false;
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-
     for (const auto& [key, val] : block.fields) {
         // Check all specific fields BEFORE power/maxpower range checks.
         // In Classic, power indices (23-27) are adjacent to maxHealth (28),
@@ -826,7 +823,8 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         // incorrectly capture maxHealth/level/faction in Classic's tight layout.
         if (key == ufi.health) {
             unit->setHealth(val);
-            if (block.objectType == ObjectType::UNIT && val == 0) {
+            if ((block.objectType == ObjectType::UNIT ||
+                 block.objectType == ObjectType::PLAYER) && val == 0) {
                 unitInitiallyDead = true;
             }
             if (block.guid == owner_.getPlayerGuid() && val == 0) {
@@ -869,7 +867,8 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         else if (key == ufi.npcEmoteState) { unit->setNpcEmoteState(val); }
         else if (key == ufi.dynFlags) {
             unit->setDynamicFlags(val);
-            if (block.objectType == ObjectType::UNIT &&
+            if ((block.objectType == ObjectType::UNIT ||
+                 block.objectType == ObjectType::PLAYER) &&
                 ((val & UNIT_DYNFLAG_DEAD) != 0 || (val & UNIT_DYNFLAG_LOOTABLE) != 0)) {
                 unitInitiallyDead = true;
             }
@@ -886,6 +885,13 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             }
             unit->setMountDisplayId(val);
         }
+    }
+    // Initial update masks commonly omit fields whose value is zero. A dead unit
+    // can therefore arrive without UNIT_FIELD_HEALTH even though its default
+    // client-side health is zero; the dynamic corpse bits remain authoritative.
+    if ((block.objectType == ObjectType::UNIT || block.objectType == ObjectType::PLAYER) &&
+        isUnitCorpseState(unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags())) {
+        unitInitiallyDead = true;
     }
     return unitInitiallyDead;
 }
@@ -917,8 +923,6 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
     UnitFieldUpdateResult result;
     result.oldDisplayId = unit->getDisplayId();
     uint32_t oldHealth = unit->getHealth();
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-
     for (const auto& [key, val] : block.fields) {
         if (key == ufi.health) {
             unit->setHealth(val);
@@ -986,26 +990,29 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stunStateCallbackRef()(nowStunned);
                 }
             }
-            // Detect stealth state change on local player
-            constexpr uint32_t UNIT_FLAG_SNEAKING = 0x02000000;
-            if (block.guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
-                bool wasStealth = (oldFlags & UNIT_FLAG_SNEAKING) != 0;
-                bool nowStealth = (val & UNIT_FLAG_SNEAKING) != 0;
-                if (wasStealth != nowStealth) {
-                    owner_.stealthStateCallbackRef()(nowStealth);
-                }
-            }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
             unit->setAuraState(val);
         }
-        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1 && block.guid == owner_.getPlayerGuid()) {
-            uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
-            if (newForm != owner_.shapeshiftFormIdRef()) {
-                owner_.shapeshiftFormIdRef() = newForm;
-                LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
+        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
+            const uint8_t oldVisibilityFlags = unit->getVisibilityFlags();
+            const uint8_t newVisibilityFlags = static_cast<uint8_t>((val >> 16) & 0xFF);
+            unit->setVisibilityFlags(newVisibilityFlags);
+
+            if (block.guid == owner_.getPlayerGuid()) {
+                const bool wasStealthed = (oldVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
+                const bool nowStealthed = (newVisibilityFlags & UNIT_VIS_FLAG_CREEP) != 0;
+                if (wasStealthed != nowStealthed && owner_.stealthStateCallbackRef()) {
+                    owner_.stealthStateCallbackRef()(nowStealthed);
+                }
+
+                uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
+                if (newForm != owner_.shapeshiftFormIdRef()) {
+                    owner_.shapeshiftFormIdRef() = newForm;
+                    LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
+                }
             }
         }
         else if (key == ufi.dynFlags) {
@@ -1035,6 +1042,11 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                         owner_.npcRespawnCallbackRef()(block.guid);
                         result.npcRespawnNotified = true;
                     }
+                }
+                if (entity->getType() == ObjectType::UNIT &&
+                    (oldDyn & UNIT_DYNFLAG_LOOTABLE) != 0 &&
+                    (val & UNIT_DYNFLAG_LOOTABLE) == 0) {
+                    result.lootableCleared = true;
                 }
             }
         } else if (key == ufi.level) {
@@ -1599,7 +1611,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
         }
     }
     if (block.guid == owner_.getPlayerGuid() &&
-        (unit->getDynamicFlags() & 0x0008 /*UNIT_DYNFLAG_DEAD*/) != 0) {
+        (unit->getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0) {
         owner_.playerDeadRef() = true;
         LOG_INFO("Player logged in dead (dynamic flags)");
     }
@@ -1788,10 +1800,8 @@ void EntityController::handleDisplayIdChange(const UpdateBlock& block,
         unit->getDisplayId() == result.oldDisplayId)
         return;
 
-    constexpr uint32_t UNIT_DYNFLAG_DEAD = 0x0008;
-    constexpr uint32_t UNIT_DYNFLAG_LOOTABLE = 0x0001;
-    bool isDeadNow = (unit->getHealth() == 0) ||
-        ((unit->getDynamicFlags() & (UNIT_DYNFLAG_DEAD | UNIT_DYNFLAG_LOOTABLE)) != 0);
+    bool isDeadNow = isUnitCorpseState(
+        unit->getHealth(), unit->getMaxHealth(), unit->getDynamicFlags());
     dispatchEntitySpawn(block.guid, entity->getType(), entity, unit,
                         isDeadNow && !result.npcDeathNotified);
     if (owner_.addonEventCallbackRef()) {
@@ -1809,6 +1819,15 @@ void EntityController::onValuesUpdateUnit(const UpdateBlock& block, std::shared_
     UnitFieldIndices ufi = UnitFieldIndices::resolve();
     UnitFieldUpdateResult result = applyUnitFieldsOnUpdate(block, entity, unit, ufi);
     handleDisplayIdChange(block, entity, unit, result);
+
+    // A corpse that has been looted empty has nothing left to offer, so drop it.
+    // Skinnable corpses stay until they have been skinned. Done here rather than
+    // inside the field loop so the entity is not removed while it is being read.
+    constexpr uint32_t UNIT_FLAG_SKINNABLE = 0x04000000;
+    if (result.lootableCleared && unit->getHealth() == 0 &&
+        (unit->getUnitFlags() & UNIT_FLAG_SKINNABLE) == 0) {
+        owner_.despawnCreatureLocally(block.guid);
+    }
 }
 
 void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity) {

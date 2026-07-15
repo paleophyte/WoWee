@@ -322,6 +322,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 }
             }
         }
+        // The world load blocks the main loop for over a second while presenting its
+        // own frames. Beat the watchdog so it does not read a healthy load as a hang
+        // and force-release the player's mouse capture.
+        app_.beatWatchdog();
         if (!loadingScreenOk) return;
         loadingScreen.setStatus(msg);
         loadingScreen.setProgress(progress);
@@ -860,6 +864,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
             // Wait until all pending + ready-queue tiles are finalized
             while (terrainMgr->getRemainingTileCount() > 0) {
+                // This loop presents its own frames but never reaches showProgress,
+                // so it must beat the watchdog itself or the whole tile stream reads
+                // as a hung main loop.
+                app_.beatWatchdog();
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
                     if (event.type == SDL_QUIT) {

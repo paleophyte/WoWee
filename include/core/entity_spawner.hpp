@@ -179,7 +179,6 @@ public:
     const std::unordered_map<uint32_t, FacialHairGeosets>& getFacialHairGeosetMap() const { return facialHairGeosetMap_; }
 
     // Creature M2 sync loader (used by spawnPlayerCharacter in Application)
-    pipeline::M2Model loadCreatureM2Sync(const std::string& m2Path);
 
 private:
     // Dependencies (non-owning)
@@ -244,9 +243,13 @@ private:
     std::unordered_map<uint64_t, bool> creatureSwimmingState_;
     std::unordered_map<uint64_t, bool> creatureWalkingState_;
     std::unordered_map<uint64_t, bool> creatureFlyingState_;
+    std::unordered_map<uint64_t, bool> creatureWasStealthed_;
+    uint32_t stealthSyncFrameCounter_ = 0;  // throttles syncCreatureStealthVisuals()
     std::unordered_set<uint64_t> creatureWeaponsAttached_;
     std::unordered_map<uint64_t, uint8_t> creatureWeaponAttachAttempts_;
     std::unordered_map<uint32_t, bool> modelIdIsWolfLike_;
+
+    void syncCreatureStealthVisuals();
 
     // --- Creature async loads ---
     struct PreparedCreatureModel {
@@ -268,6 +271,28 @@ private:
     void processAsyncCreatureResults(bool unlimited = false);
     static constexpr int MAX_ASYNC_CREATURE_LOADS = 4;
     std::unordered_set<uint64_t> deadCreatureGuids_;
+
+    // --- NPC equipment attachment models (helm, shoulders) ---
+    // Equipment is shared across NPCs, so a crowd wearing the same gear would
+    // otherwise re-read, re-parse and re-upload the same M2 once per spawn. Cache
+    // it by resolved path. A modelId of 0 negative-caches a path that has no model,
+    // so a missing file is not retried against the disk on every spawn.
+    struct CachedAttachmentModel {
+        uint32_t modelId = 0;                      // 0 = no usable model
+        std::shared_ptr<pipeline::M2Model> model;  // shared_ptr: M2Model is incomplete here
+    };
+    // Parsed geometry, keyed by path. A null value negative-caches a missing file so
+    // it is not probed against the disk on every spawn.
+    std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> attachmentModelData_;
+    // Renderer model id, keyed by "path|texture". attachWeapon() binds the texture to
+    // the model id, so two recolours of one mesh must not share an id or the last
+    // NPC spawned would retexture every other NPC wearing that mesh.
+    std::unordered_map<std::string, uint32_t> attachmentModelIds_;
+    /// Resolve the first candidate path with a usable model, reading and parsing it
+    /// at most once. Returns modelId == 0 when no candidate yields a valid model.
+    CachedAttachmentModel getOrLoadAttachmentModel(
+        const std::vector<std::string>& candidatePaths, const std::string& texturePath);
+
     std::unordered_map<uint32_t, uint32_t> displayIdModelCache_;
     std::unordered_set<uint32_t> displayIdTexturesApplied_;
     std::unordered_map<uint32_t, std::unordered_map<std::string, pipeline::BLPImage>> displayIdPredecodedTextures_;

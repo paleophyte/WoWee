@@ -8,6 +8,7 @@
 #include "core/transport_callback_handler.hpp"
 #include "core/world_entry_callback_handler.hpp"
 #include "core/ui_screen_callback_handler.hpp"
+#include "game/spell_classification.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation_controller.hpp"
 #include <unordered_set>
@@ -33,6 +34,7 @@
 #include "rendering/clouds.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/weather.hpp"
+#include "rendering/lighting_manager.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -275,6 +277,14 @@ bool Application::initialize() {
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
+
+        // Renderer creation precedes AssetManager creation, so DBC-driven
+        // lighting must be initialized here rather than in Renderer::initialize.
+        if (renderer && renderer->getLightingManager() &&
+            !renderer->getLightingManager()->initialize(assetManager.get())) {
+            LOG_WARNING("Lighting manager initialization failed; using fallback lighting");
+        }
+
         // Eagerly load creature display DBC lookups so first spawn doesn't stall
         entitySpawner_ = std::make_unique<EntitySpawner>(
             renderer.get(), assetManager.get(), gameHandler.get(),
@@ -641,10 +651,8 @@ void Application::run() {
 
     auto lastTime = std::chrono::high_resolution_clock::now();
     std::atomic<bool> watchdogRunning{true};
-    std::atomic<int64_t> watchdogHeartbeatMs{
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()
-    };
+    beatWatchdog();
+    std::atomic<int64_t>& watchdogHeartbeatMs = watchdogHeartbeatMs_;
     // Signal flag: watchdog sets this when a stall is detected, main loop
     // handles the actual SDL calls. SDL2 video functions must only be called
     // from the main thread (the one that called SDL_Init); calling them from
@@ -675,10 +683,7 @@ void Application::run() {
     try {
         while (running && !window->shouldClose()) {
             const auto frameStart = std::chrono::steady_clock::now();
-            watchdogHeartbeatMs.store(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count(),
-                std::memory_order_release);
+            beatWatchdog();
 
             // Handle watchdog mouse-release request on the main thread where
             // SDL video calls are safe (required by SDL2 threading model).
@@ -1012,7 +1017,7 @@ void Application::setState(AppState newState) {
                 gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
                     if (renderer) {
                         // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
-                        if (spellId == 75 || spellId == 5019 || spellId == 2764) {
+                        if (game::spellclass::isRangedWeaponAutoAttack(spellId)) {
                             if (appearanceComposer_ && !appearanceComposer_->isShowingRanged())
                                 appearanceComposer_->showRangedWeapon(true);
                             if (auto* ac = renderer->getAnimationController()) ac->triggerRangedShot();
@@ -1030,6 +1035,11 @@ void Application::setState(AppState newState) {
                 gameHandler->setRangedWeaponSwapCallback([this](bool show) {
                     if (appearanceComposer_) appearanceComposer_->showRangedWeapon(show);
                 });
+                if (renderer && renderer->getAnimationController()) {
+                    renderer->getAnimationController()->setRangedShotCompleteCallback([this]() {
+                        if (appearanceComposer_) appearanceComposer_->showRangedWeapon(false);
+                    });
+                }
                 // The logout countdown finishing is not the end of it: the server
                 // confirms with SMSG_LOGOUT_COMPLETE, and only then does the client
                 // leave. Without this the countdown ran out and nothing happened.
@@ -1655,8 +1665,12 @@ void Application::update(float deltaTime) {
                 // Taxi flights move fast (32 u/s) — load further ahead so terrain is ready
                 // before the camera arrives.  Keep updates frequent to spot new tiles early.
                 renderer->getTerrainManager()->setUpdateInterval(onTaxi ? 0.033f : 0.033f);
-                renderer->getTerrainManager()->setLoadRadius(onTaxi ? 8 : 4);
-                renderer->getTerrainManager()->setUnloadRadius(onTaxi ? 12 : 7);
+                const int configuredLoadRadius = renderer->getTerrainLoadRadius();
+                const int configuredUnloadRadius = renderer->getTerrainUnloadRadius();
+                renderer->getTerrainManager()->setLoadRadius(
+                    onTaxi ? std::max(8, configuredLoadRadius) : configuredLoadRadius);
+                renderer->getTerrainManager()->setUnloadRadius(
+                    onTaxi ? std::max(12, configuredUnloadRadius) : configuredUnloadRadius);
                 renderer->getTerrainManager()->setTaxiStreamingMode(onTaxi);
                 }
                 if (worldEntryCallbacks_) worldEntryCallbacks_->setLastTaxiFlight(actuallyFlying);
@@ -2324,34 +2338,53 @@ void Application::update(float deltaTime) {
     }
 }
 
+void Application::beatWatchdog() {
+    watchdogHeartbeatMs_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_release);
+}
+
 void Application::render() {
     if (!renderer) {
         return;
     }
 
+    // Mirrors the IN_GAME update stages: a frame that blocks long enough to trip the
+    // watchdog needs to say which phase did it.
+    auto runRenderStage = [](const char* stageName, auto&& fn) {
+        auto stageStart = std::chrono::steady_clock::now();
+        fn();
+        float stageMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - stageStart).count();
+        if (stageMs > 50.0f) {
+            LOG_WARNING("SLOW render stage '", stageName, "': ", stageMs, "ms");
+        }
+    };
+
     renderingFrame_ = true;
-    renderer->beginFrame();
+    runRenderStage("beginFrame", [&] { renderer->beginFrame(); });
 
     // Only render 3D world when in-game
     if (state == AppState::IN_GAME) {
-        if (world) {
-            renderer->renderWorld(world.get(), gameHandler.get());
-        } else {
-            renderer->renderWorld(nullptr, gameHandler.get());
-        }
+        runRenderStage("renderWorld", [&] {
+            renderer->renderWorld(world ? world.get() : nullptr, gameHandler.get());
+        });
     }
 
     // Render performance HUD (within ImGui frame, before UI ends the frame)
     if (renderer) {
-        renderer->renderHUD();
+        runRenderStage("renderHUD", [&] { renderer->renderHUD(); });
     }
 
     // Render UI on top (ends ImGui frame with ImGui::Render())
     if (uiManager) {
-        uiManager->render(state, authHandler.get(), gameHandler.get());
+        runRenderStage("uiManager->render", [&] {
+            uiManager->render(state, authHandler.get(), gameHandler.get());
+        });
     }
 
-    renderer->endFrame();
+    runRenderStage("endFrame", [&] { renderer->endFrame(); });
     renderingFrame_ = false;
     processDeferredLogoutToLogin();
 }

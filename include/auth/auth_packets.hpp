@@ -17,12 +17,12 @@ struct ClientInfo {
     uint8_t patchVersion = 5;
     uint16_t build = 12340;  // 3.3.5a
     uint8_t protocolVersion = 8; // SRP auth protocol version
+    bool legacyVanillaRealmList = false; // Vanilla realm list layout can pair with auth protocol 8.
     std::string game = "WoW";
     std::string platform = "x86";
     std::string os = "Win";
     std::string locale = "enUS";
     uint32_t timezone = 0;
-    bool legacyVanillaRealmList = false;
 };
 
 // LOGON_CHALLENGE packet builder
@@ -131,9 +131,9 @@ struct RealmListResponse {
 // REALM_LIST response parser
 class RealmListResponseParser {
 public:
-    // legacyVanilla: vanilla realm list layout (uint8 realmCount, uint32 icon).
+    // legacyVanillaLayout: vanilla/classic uses uint8 realmCount and uint32 icon;
     // TBC/WotLK use uint16 realmCount and byte-sized icon/lock/flags.
-    [[nodiscard]] static bool parse(network::Packet& packet, RealmListResponse& response, bool legacyVanilla = false);
+    [[nodiscard]] static bool parse(network::Packet& packet, RealmListResponse& response, bool legacyVanillaLayout = false);
 };
 
 } // namespace auth

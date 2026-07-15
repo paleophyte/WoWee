@@ -61,7 +61,35 @@ void M2Instance::updateModelMatrix() {
 }
 
 void M2Instance::recomputeCachedCullFactors() {
-    float worldRadius = cachedBoundRadius * scale;
+    // Matrix instances (notably ADT tree doodads) can have an offset pivot and
+    // arbitrary scale. A sphere centered at the placement origin with the M2
+    // header radius can therefore exclude much of the visible canopy. Derive
+    // the render-cull sphere from transformed vertex bounds instead. The
+    // separate worldBounds fields intentionally remain collision bounds.
+    if (cachedModel) {
+        glm::vec3 visualMin(std::numeric_limits<float>::max());
+        glm::vec3 visualMax(std::numeric_limits<float>::lowest());
+        for (int x = 0; x < 2; ++x) {
+            for (int y = 0; y < 2; ++y) {
+                for (int z = 0; z < 2; ++z) {
+                    const glm::vec3 local(
+                        x ? cachedModel->boundMax.x : cachedModel->boundMin.x,
+                        y ? cachedModel->boundMax.y : cachedModel->boundMin.y,
+                        z ? cachedModel->boundMax.z : cachedModel->boundMin.z);
+                    const glm::vec3 world = glm::vec3(modelMatrix * glm::vec4(local, 1.0f));
+                    visualMin = glm::min(visualMin, world);
+                    visualMax = glm::max(visualMax, world);
+                }
+            }
+        }
+        cachedCullCenter = (visualMin + visualMax) * 0.5f;
+        cachedVisualRadius = glm::length(visualMax - visualMin) * 0.5f;
+    } else {
+        cachedCullCenter = position;
+        cachedVisualRadius = cachedBoundRadius * scale;
+    }
+
+    float worldRadius = cachedVisualRadius;
     float cullRadius = worldRadius;
     if (cachedDisableAnimation) cullRadius = std::max(cullRadius, 3.0f);
     float factor = std::max(1.0f, cullRadius / rendering::M2_CULL_RADIUS_SCALE_DIVISOR);
@@ -77,6 +105,56 @@ M2Renderer::M2Renderer() {
 
 M2Renderer::~M2Renderer() {
     shutdown();
+}
+
+uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
+                                       glm::vec4* outPosRadius,
+                                       glm::vec4* outColorIntensity,
+                                       uint32_t maxLights) const {
+    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
+
+    struct Candidate {
+        float distSq;
+        glm::vec4 posRadius;
+        glm::vec4 colorIntensity;
+    };
+    std::vector<Candidate> candidates;
+
+    for (const auto& instance : instances) {
+        const M2ModelGPU* model = instance.cachedModel;
+        if (!model || (!model->isLanternLike && !model->isTorch)) continue;
+
+        for (const auto& batch : model->batches) {
+            if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
+
+            const glm::vec3 worldPos = glm::vec3(
+                instance.modelMatrix * glm::vec4(batch.center, 1.0f));
+            const glm::vec3 delta = worldPos - cameraPos;
+            const float distSq = glm::dot(delta, delta);
+            // Keep tunnel/interior fixtures resident well before their lit
+            // surfaces enter view; the shader's radius still bounds the work.
+            if (distSq > 300.0f * 300.0f) continue;
+
+            const float radius = std::clamp(batch.glowSize * instance.scale * 8.0f,
+                                            5.0f, 12.0f);
+            glm::vec3 color(1.0f, 0.58f, 0.22f);
+            if (batch.glowTint == 1) color = glm::vec3(0.42f, 0.68f, 1.0f);
+            else if (batch.glowTint == 2) color = glm::vec3(1.0f, 0.24f, 0.14f);
+            candidates.push_back({distSq, glm::vec4(worldPos, radius),
+                                  glm::vec4(color, 1.35f)});
+        }
+    }
+
+    const uint32_t count = std::min<uint32_t>(maxLights,
+        static_cast<uint32_t>(candidates.size()));
+    if (count == 0) return 0;
+    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
+    for (uint32_t i = 0; i < count; ++i) {
+        outPosRadius[i] = candidates[i].posRadius;
+        outColorIntensity[i] = candidates[i].colorIntensity;
+    }
+    return count;
 }
 
 bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
@@ -1571,8 +1649,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             bgpu.texture = tex;
             const auto tcls = classifyBatchTexture(batchTexKeyLower);
             const bool modelLanternFamily = gpuModel.isLanternLike;
+            const bool torchGlowCard = gpuModel.isTorch &&
+                tcls.hasGlowToken && tcls.hasGlowCardToken;
             bgpu.lanternGlowHint =
                 tcls.exactLanternGlowTex ||
+                torchGlowCard ||
                 ((tcls.hasGlowToken || (modelLanternFamily && tcls.hasFlameToken)) &&
                  (tcls.lanternFamily || modelLanternFamily) &&
                  (!tcls.likelyFlame || modelLanternFamily));
@@ -1611,7 +1692,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             }
 
             // Compute batch center and radius for glow sprite positioning
-            if ((bgpu.blendMode >= 3 || bgpu.colorKeyBlack) && batch.indexCount > 0) {
+            if ((bgpu.blendMode >= 3 || bgpu.colorKeyBlack || bgpu.glowCardLike) && batch.indexCount > 0) {
                 glm::vec3 sum(0.0f);
                 uint32_t counted = 0;
                 for (uint32_t j = batch.indexStart; j < batch.indexStart + batch.indexCount; j++) {

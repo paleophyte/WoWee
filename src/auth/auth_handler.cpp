@@ -138,6 +138,7 @@ void AuthHandler::authenticate(const std::string& user, const std::string& pass,
     username = user;
     password = pass;
     pendingSecurityCode_ = pin;
+    protocolFailureSuspected_ = false;
     securityFlags_ = 0;
     pinGridSeed_ = 0;
     pinServerSalt_ = {};
@@ -173,6 +174,7 @@ void AuthHandler::authenticateWithHash(const std::string& user, const std::vecto
     username = user;
     password.clear();
     pendingSecurityCode_ = pin;
+    protocolFailureSuspected_ = false;
     securityFlags_ = 0;
     pinGridSeed_ = 0;
     pinServerSalt_ = {};
@@ -200,7 +202,10 @@ void AuthHandler::handleLogonChallengeResponse(network::Packet& packet) {
 
     LogonChallengeResponse response;
     if (!LogonChallengeResponseParser::parse(packet, response)) {
-        fail("Server sent an invalid response - it may use an incompatible protocol version");
+        // An unparseable challenge response is the classic symptom of the
+        // server speaking a different auth protocol than we announced.
+        fail("Server sent an invalid response - it may use an incompatible protocol version",
+             /*protocolRelated=*/true);
         return;
     }
 
@@ -213,8 +218,10 @@ void AuthHandler::handleLogonChallengeResponse(network::Packet& packet) {
                << static_cast<int>(clientInfo.patchVersion)
                << " build " << clientInfo.build
                << ", auth protocol " << static_cast<int>(clientInfo.protocolVersion) << ")";
-            fail(ss.str());
+            fail(ss.str(), /*protocolRelated=*/true);
         } else {
+            // Account-level rejections (unknown account, wrong password, banned,
+            // suspended, in use) are NOT protocol problems — never retry those.
             fail(std::string("LOGON_CHALLENGE failed: ") + getAuthResultString(response.result));
         }
         return;
@@ -363,20 +370,26 @@ void AuthHandler::handleLogonProofResponse(network::Packet& packet) {
 
     LogonProofResponse response;
     if (!LogonProofResponseParser::parse(packet, response)) {
-        fail("Server sent an invalid login response - it may use an incompatible protocol");
+        fail("Server sent an invalid login response - it may use an incompatible protocol",
+             /*protocolRelated=*/true);
         return;
     }
 
     if (!response.isSuccess()) {
+        // Credential/account rejection — a different protocol won't help, and
+        // retrying can trip the server's failed-login lockout.
         std::string reason = "Login failed: ";
         reason += getAuthResultString(static_cast<AuthResult>(response.status));
         fail(reason);
         return;
     }
 
-    // Verify server proof
+    // Verify server proof. A mismatch here means our SRP inputs differ from the
+    // server's — a wrong password is rejected above, so this points at the
+    // handshake shape (i.e. protocol) instead.
     if (!srp->verifyServerProof(response.M2)) {
-        fail("Server identity verification failed - the server may be running an incompatible version");
+        fail("Server identity verification failed - the server may be running an incompatible version",
+             /*protocolRelated=*/true);
         return;
     }
 
@@ -542,7 +555,14 @@ void AuthHandler::update(float /*deltaTime*/) {
             state != AuthState::FAILED &&
             state != AuthState::AUTHENTICATED &&
             state != AuthState::REALM_LIST_RECEIVED) {
-            fail("Disconnected by auth server");
+            // A server that doesn't recognise the announced protocol version
+            // frequently just closes the socket instead of replying, so treat a
+            // drop during the challenge as a protocol candidate. Once we've sent
+            // proof the credentials were already accepted at challenge time, so a
+            // drop there is a server-side/network problem, not our protocol.
+            const bool duringChallenge = (state == AuthState::CHALLENGE_SENT ||
+                                          state == AuthState::CONNECTED);
+            fail("Disconnected by auth server", /*protocolRelated=*/duringChallenge);
         }
     }
 }
@@ -554,8 +574,9 @@ void AuthHandler::setState(AuthState newState) {
     }
 }
 
-void AuthHandler::fail(const std::string& reason) {
+void AuthHandler::fail(const std::string& reason, bool protocolRelated) {
     LOG_ERROR("Authentication failed: ", reason);
+    protocolFailureSuspected_ = protocolRelated;
     setState(AuthState::FAILED);
 
     if (onFailure) {

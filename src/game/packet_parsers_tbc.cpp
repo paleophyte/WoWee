@@ -12,7 +12,6 @@ namespace TbcMoveFlags {
     constexpr uint32_t ON_TRANSPORT     = 0x00000200;  // Gates transport data (same as WotLK)
     constexpr uint32_t JUMPING          = 0x00002000;  // Gates jump data (WotLK: FALLING=0x1000)
     constexpr uint32_t SWIMMING         = 0x00200000;  // Same as WotLK
-    constexpr uint32_t FLYING           = 0x01000000;  // WotLK: 0x02000000
     constexpr uint32_t ONTRANSPORT      = 0x02000000;  // Secondary pitch check
     constexpr uint32_t SPLINE_ELEVATION = 0x04000000;  // Same as WotLK
     constexpr uint32_t SPLINE_ENABLED   = 0x08000000;  // Same as WotLK
@@ -804,7 +803,19 @@ network::Packet TbcPacketParsers::buildAcceptQuestPacket(uint64_t npcGuid, uint3
 //   + rewardCount(4) + [itemId(4)+count(4)+displayInfo(4)] × rewardCount
 //   + rewardMoney(4) + rewardXp(4)
 // ============================================================================
-bool TbcPacketParsers::parseQuestDetails(network::Packet& packet, QuestDetailsData& data) {
+// Verified against vmangos (Server/Packets/Quest.cpp) and cmangos-tbc
+// (Entities/GossipDef.cpp):
+//   guid(8) + questId(4) + title + details + objectives +
+//   activateAccept(u32)                     ← uint32 on BOTH, not uint8
+//   [TBC only] suggestedPlayers(u32)
+//   choiceCount(u32) + choiceCount × (itemId, count, displayId)   ← variable
+//   rewardCount(u32) + rewardCount × (itemId, count, displayId)   ← variable
+//   money(u32)
+//   trailing: Classic = rewSpell; TBC = honor + rewSpell + rewSpellCast + title
+//   emote block LAST (count + pairs) — never before the reward arrays.
+// QUEST_FLAGS_HIDDEN_REWARDS quests serialize counts of 0 and money 0.
+bool TbcPacketParsers::parseQuestDetailsPreWotlk(network::Packet& packet, QuestDetailsData& data,
+                                                 bool hasSuggestedPlayers) {
     if (packet.getSize() < 16) return false;
 
     data.npcGuid = packet.readUInt64();
@@ -813,26 +824,19 @@ bool TbcPacketParsers::parseQuestDetails(network::Packet& packet, QuestDetailsDa
     data.details    = normalizeWowTextTokens(packet.readString());
     data.objectives = normalizeWowTextTokens(packet.readString());
 
-    if (!packet.hasRemaining(5)) {
+    if (!packet.hasRemaining(4)) {
         LOG_DEBUG("Quest details tbc/classic (short): id=", data.questId, " title='", data.title, "'");
         return !data.title.empty() || data.questId != 0;
     }
 
-    /*activateAccept*/ packet.readUInt8();
-    data.suggestedPlayers = packet.readUInt32();
-
-    // TBC/Classic: emote section before reward items
-    if (packet.hasRemaining(4)) {
-        uint32_t emoteCount = packet.readUInt32();
-        for (uint32_t i = 0; i < emoteCount && packet.hasRemaining(8); ++i) {
-            packet.readUInt32(); // delay
-            packet.readUInt32(); // type
-        }
-    }
+    /*activateAccept*/ packet.readUInt32();
+    if (hasSuggestedPlayers && packet.hasRemaining(4))
+        data.suggestedPlayers = packet.readUInt32();
 
     // Choice reward items (variable count, up to QUEST_REWARD_CHOICES_COUNT)
     if (packet.hasRemaining(4)) {
         uint32_t choiceCount = packet.readUInt32();
+        if (choiceCount > 6) choiceCount = 0; // misaligned stream guard
         for (uint32_t i = 0; i < choiceCount && packet.hasRemaining(12); ++i) {
             uint32_t itemId = packet.readUInt32();
             uint32_t count  = packet.readUInt32();
@@ -849,6 +853,7 @@ bool TbcPacketParsers::parseQuestDetails(network::Packet& packet, QuestDetailsDa
     // Fixed reward items (variable count, up to QUEST_REWARDS_COUNT)
     if (packet.hasRemaining(4)) {
         uint32_t rewardCount = packet.readUInt32();
+        if (rewardCount > 4) rewardCount = 0; // misaligned stream guard
         for (uint32_t i = 0; i < rewardCount && packet.hasRemaining(12); ++i) {
             uint32_t itemId = packet.readUInt32();
             uint32_t count  = packet.readUInt32();
@@ -863,10 +868,12 @@ bool TbcPacketParsers::parseQuestDetails(network::Packet& packet, QuestDetailsDa
 
     if (packet.hasRemaining(4))
         data.rewardMoney = packet.readUInt32();
-    if (packet.hasRemaining(4))
-        data.rewardXp = packet.readUInt32();
+    // Remaining bytes are spell/honor/title trailing fields plus the emote
+    // block — no XP field exists pre-WotLK.
+    data.rewardXp = 0;
 
-    LOG_DEBUG("Quest details tbc/classic: id=", data.questId, " title='", data.title, "'");
+    LOG_DEBUG("Quest details tbc/classic: id=", data.questId, " title='", data.title,
+              "' choices=", data.rewardChoiceItems.size(), " fixed=", data.rewardItems.size());
     return true;
 }
 
@@ -1158,11 +1165,10 @@ bool TbcPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQuery
 //
 // Differences from WotLK 3.3.5a (base implementation):
 //   - Header: uint8 count only (WotLK: uint32 totalCount + uint8 shownCount)
-//   - No body field — subject IS the full text (WotLK added body when mailTemplateId==0)
-//   - Attachment item GUID: full uint64 (WotLK: uint32 low GUID)
-//   - Attachment enchants: 7 × uint32 id only (WotLK: 7 × {id+duration+charges} = 84 bytes)
-//   - Header fields: cod + itemTextId + stationery (WotLK has extra unknown uint32 between
-//     itemTextId and stationery)
+//   - No body field; the body is fetched separately through itemTextId
+//   - Header includes itemTextId + package before stationery
+//   - Attachment enchants are 6 × {charges, duration, id}
+//   - Attachment stack count is uint8 rather than uint32
 // ============================================================================
 bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessage>& inbox) {
     size_t remaining = packet.getRemainingSize();
@@ -1182,13 +1188,26 @@ bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMe
         size_t startPos = packet.getReadPos();
 
         MailMessage msg;
-        if (remaining < static_cast<size_t>(msgSize) + 2) {
-            LOG_WARNING("[TBC] Mail entry ", i, " truncated");
+        if (msgSize < 7 || remaining < 7) {
+            LOG_WARNING("[TBC] Mail entry ", static_cast<int>(i), " truncated");
             break;
         }
 
         msg.messageId = packet.readUInt32();
         msg.messageType = packet.readUInt8();
+
+        // CMaNGOS includes the uint16 size field in msgSize.  Its 2.4.3 size
+        // calculation always budgets an 8-byte sender even though non-player
+        // mail emits a uint32 sender, so those entries overstate their size by
+        // four bytes.
+        const size_t senderSizeAdjustment = msg.messageType == 0 ? 0 : 4;
+        if (msgSize < 2 + senderSizeAdjustment ||
+            remaining < static_cast<size_t>(msgSize) - senderSizeAdjustment) {
+            LOG_WARNING("[TBC] Mail entry ", static_cast<int>(i), " truncated");
+            break;
+        }
+        const size_t payloadSize = static_cast<size_t>(msgSize) - 2 - senderSizeAdjustment;
+        const size_t entryEnd = startPos + payloadSize;
 
         switch (msg.messageType) {
             case 0: msg.senderGuid = packet.readUInt64(); break;
@@ -1196,8 +1215,8 @@ bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMe
         }
 
         msg.cod          = packet.readUInt32();
-        packet.readUInt32();         // itemTextId
-        // NOTE: TBC has NO extra unknown uint32 here (WotLK added one between itemTextId and stationery)
+        packet.readUInt32();         // itemTextId (body fetched separately)
+        packet.readUInt32();         // package (Package.dbc)
         msg.stationeryId = packet.readUInt32();
         msg.money        = packet.readUInt32();
         msg.flags        = packet.readUInt32();
@@ -1211,17 +1230,17 @@ bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMe
         for (uint8_t j = 0; j < attachCount; ++j) {
             MailAttachment att;
             att.slot         = packet.readUInt8();
-            uint64_t itemGuid = packet.readUInt64();   // full 64-bit GUID (TBC)
-            att.itemGuidLow  = static_cast<uint32_t>(itemGuid & 0xFFFFFFFF);
+            att.itemGuidLow  = packet.readUInt32();
             att.itemId       = packet.readUInt32();
-            // TBC: 7 × uint32 enchant ID only (no duration/charges per slot)
-            for (int e = 0; e < 7; ++e) {
+            for (int e = 0; e < 6; ++e) {
+                packet.readUInt32(); // charges
+                packet.readUInt32(); // duration
                 uint32_t enchId = packet.readUInt32();
                 if (e == 0) att.enchantId = enchId;
             }
             att.randomPropertyId     = packet.readUInt32();
             att.randomSuffix         = packet.readUInt32();
-            att.stackCount           = packet.readUInt32();
+            att.stackCount           = packet.readUInt8();
             att.chargesOrDurability  = packet.readUInt32();
             att.maxDurability        = packet.readUInt32();
             packet.readUInt32();  // current durability (separate from chargesOrDurability)
@@ -1231,10 +1250,11 @@ bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMe
         msg.read = (msg.flags & 0x01) != 0;
         inbox.push_back(std::move(msg));
 
-        // Skip any unread bytes within this mail entry
-        size_t consumed = packet.getReadPos() - startPos;
-        if (consumed < static_cast<size_t>(msgSize)) {
-            packet.setReadPos(startPos + msgSize);
+        if (packet.getReadPos() < entryEnd) {
+            packet.setReadPos(entryEnd);
+        } else if (packet.getReadPos() > entryEnd) {
+            LOG_WARNING("[TBC] Mail entry ", static_cast<int>(i),
+                        " exceeded declared size by ", packet.getReadPos() - entryEnd, " bytes");
         }
     }
 
@@ -1493,12 +1513,15 @@ static uint8_t translateTbcCastFailure(uint8_t tbcResult) {
 //
 // TBC format: spellId(u32) + result(u8) + castCount(u8).
 // ============================================================================
-bool TbcPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) {
+bool TbcPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                                       uint32_t& miscArg, uint32_t& miscArg2) {
     if (!packet.hasRemaining(5)) return false;
     spellId = packet.readUInt32();
     uint8_t tbcResult = packet.readUInt8();
     result = translateTbcCastFailure(tbcResult);
     if (packet.hasRemaining(1)) packet.readUInt8(); // castCount
+    // Spell-focus and totem failures append ids naming the missing station/tool
+    readCastResultArgs(packet, result, miscArg, miscArg2);
     LOG_DEBUG("[TBC] Cast result: spell=", spellId,
               " tbcResult=", static_cast<int>(tbcResult),
               " mappedResult=", static_cast<int>(result));
@@ -1517,6 +1540,8 @@ bool TbcPacketParsers::parseCastFailed(network::Packet& packet, CastFailedData& 
     uint8_t tbcResult = packet.readUInt8();
     data.result = translateTbcCastFailure(tbcResult);
     if (packet.hasRemaining(1)) data.castCount = packet.readUInt8();
+    // Spell-focus and totem failures append ids naming the missing station/tool
+    readCastResultArgs(packet, data.result, data.miscArg, data.miscArg2);
     LOG_DEBUG("[TBC] Cast failed: spell=", data.spellId,
               " tbcResult=", static_cast<int>(tbcResult),
               " mappedResult=", static_cast<int>(data.result));

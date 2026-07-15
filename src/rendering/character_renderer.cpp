@@ -2244,7 +2244,7 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
             float ty = std::abs(instance.boneMatrices[i][3][1]);
             float tz = std::abs(instance.boneMatrices[i][3][2]);
             if (tx > 50.0f || ty > 50.0f || tz > 50.0f) {
-                LOG_WARNING("BONE DIAG: bone[", i, "] keyBone=", bone.keyBoneId,
+                LOG_DEBUG("BONE DIAG: bone[", i, "] keyBone=", bone.keyBoneId,
                             " flags=0x", std::hex, bone.flags, std::dec,
                             " parent=", bone.parentBone,
                             " pivot=(", bone.pivot.x, ",", bone.pivot.y, ",", bone.pivot.z, ")",
@@ -2659,7 +2659,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
                 const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
                 const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
-                const bool hairGeoset = (submeshGroup == 1) ||
+                const bool hairGeoset = (submeshGroup >= 1 && submeshGroup <= 3) ||
                                         (submeshGroup == 0 && batch.submeshId > 0 && batch.submeshId <= 99);
                 // Scene models have no hair, and their submesh ids are all 0, which
                 // would otherwise satisfy the hair-geoset guess for every batch.
@@ -2810,12 +2810,43 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 matData.emissiveTintB = emissiveTint.b;
                 matData.specularIntensity = 0.5f;
                 matData.enableNormalMap = (useAdvancedMaterials && normalMappingEnabled_) ? 1 : 0;
-                matData.enablePOM = (useAdvancedMaterials && pomEnabled_) ? 1 : 0;
+                // Character textures are layered/mirrored atlases, not coherent
+                // height fields. Parallax offsets cross face seams and reveal
+                // underlying armor through tabards, so keep POM out of the
+                // character path even when it is enabled for the world.
+                matData.enablePOM = 0;
                 matData.pomScale = 0.06f;
                 matData.pomMaxSamples = pomSamples;
                 matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
                 matData.normalMapStrength = normalMapStrength_;
                 matData.hairMaterial = hairMaterial ? 1 : 0;
+
+                // The base humanoid mesh samples a mirrored character atlas,
+                // with the face sitting directly beside a UV seam. Parallax
+                // displacement moves each mirrored half in opposite screen
+                // directions, producing crossed eyes and a center-squashed
+                // mouth at oblique angles. Keep normal lighting, but never
+                // displace UVs on group 0 body/head surfaces.
+                if (batchGroup == 0) {
+                    normalMap = flatNormalTexture_.get();
+                    matData.specularIntensity = 0.20f;
+                    matData.enableNormalMap = 0;
+                    matData.enablePOM = 0;
+                    matData.heightMapVariance = 0.0f;
+                }
+
+                // Tabards are a thin cloth layer over the torso. Reusing the
+                // body composite's generated height/normal response makes the
+                // armor underneath appear embossed and reflective through the
+                // cloth as the camera moves. Keep the diffuse tabard artwork,
+                // but give group 12 a flat, low-specular cloth material.
+                if (batchGroup == 12) {
+                    normalMap = flatNormalTexture_.get();
+                    matData.specularIntensity = 0.08f;
+                    matData.enableNormalMap = 0;
+                    matData.enablePOM = 0;
+                    matData.heightMapVariance = 0.0f;
+                }
                 if (usePreviewSimpleShader) {
                     matData.enableNormalMap = 0;
                     matData.enablePOM = kPreviewSimpleTextureMode;
@@ -3349,9 +3380,28 @@ void CharacterRenderer::startFadeIn(uint32_t instanceId, float durationSeconds) 
 void CharacterRenderer::setInstanceOpacity(uint32_t instanceId, float opacity) {
     auto it = instances.find(instanceId);
     if (it != instances.end()) {
-        it->second.opacity = std::clamp(opacity, 0.0f, 1.0f);
+        const float clampedOpacity = std::clamp(opacity, 0.0f, 1.0f);
+        it->second.opacity = clampedOpacity;
         // Cancel any fade-in in progress to avoid overwriting the new opacity
         it->second.fadeInDuration = 0.0f;
+
+        // Equipment is rendered as independent character instances. Keep the
+        // whole visual together instead of leaving opaque weapons floating on
+        // a translucent stealthed creature.
+        for (const auto& attachment : it->second.weaponAttachments) {
+            auto weaponIt = instances.find(attachment.weaponInstanceId);
+            if (weaponIt != instances.end()) {
+                weaponIt->second.opacity = clampedOpacity;
+                weaponIt->second.fadeInDuration = 0.0f;
+            }
+            for (const auto& effect : attachment.effects) {
+                auto effectIt = instances.find(effect.effectInstanceId);
+                if (effectIt != instances.end()) {
+                    effectIt->second.opacity = clampedOpacity;
+                    effectIt->second.fadeInDuration = 0.0f;
+                }
+            }
+        }
     }
 }
 
@@ -3604,6 +3654,7 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     auto weapIt = instances.find(weaponInstanceId);
     if (weapIt != instances.end()) {
         weapIt->second.hasOverrideModelMatrix = true;
+        weapIt->second.opacity = charInstance.opacity;
     }
 
     // Store attachment on parent character instance
@@ -3718,6 +3769,7 @@ bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t att
     fxIt->second.hasOverrideModelMatrix = true;
     fxIt->second.isEffectModel = true;
     fxIt->second.animationLoop = true;
+    fxIt->second.opacity = charIt->second.opacity;
 
     WeaponEffectAttachment fx;
     fx.effectModelId = effectModelId;

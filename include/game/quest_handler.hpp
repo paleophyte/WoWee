@@ -77,6 +77,10 @@ public:
         uint32_t questId = 0;
         std::string title;
         std::string objectives;
+        int32_t level = 0;   // quest level from query response; 0 = unknown, -1 = player-scaling
+        // ZoneOrSort from query response: >0 = AreaTable zone id, <0 = QuestSort.dbc
+        // category (negated), 0 = unknown
+        int32_t zoneOrSort = 0;
         bool complete = false;
         std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> killCounts;
         std::unordered_map<uint32_t, uint32_t> itemCounts;
@@ -96,6 +100,11 @@ public:
         std::array<QuestRewardItem, 6> rewardChoiceItems{};
     };
     const std::vector<QuestLogEntry>& getQuestLog() const { return questLog_; }
+    // Server-side quest log capacity: 20 slots in Vanilla/Turtle, 25 from TBC on
+    int maxQuestLogSlots() const;
+    // QuestSort.dbc name ("Seasonal", class/profession sorts, ...) for negative
+    // ZoneOrSort values; empty if unknown
+    const std::string& getQuestSortName(uint32_t sortId);
     int getSelectedQuestLogIndex() const { return selectedQuestLogIndex_; }
     void setSelectedQuestLogIndex(int idx) { selectedQuestLogIndex_ = idx; }
     void abandonQuest(uint32_t questId);
@@ -134,8 +143,7 @@ public:
     // Pending quest accept timeout state (used by GameHandler::update)
     std::unordered_map<uint32_t, float>& pendingQuestAcceptTimeoutsRef() { return pendingQuestAcceptTimeouts_; }
     std::unordered_map<uint32_t, uint64_t>& pendingQuestAcceptNpcGuidsRef() { return pendingQuestAcceptNpcGuids_; }
-    bool& pendingLoginQuestResyncRef() { return pendingLoginQuestResync_; }
-    float& pendingLoginQuestResyncTimeoutRef() { return pendingLoginQuestResyncTimeout_; }
+    // (login quest resync state lives in GameHandler, which drives its timing)
 
     // Direct state access for vendor/gossip interaction in GameHandler
     bool& gossipWindowOpenRef() { return gossipWindowOpen_; }
@@ -174,6 +182,10 @@ private:
     uint32_t pendingTurnInQuestId_ = 0;
     uint64_t pendingTurnInNpcGuid_ = 0;
     bool pendingTurnInRewardRequest_ = false;
+    // QuestSort.dbc names, loaded lazily
+    std::unordered_map<uint32_t, std::string> questSortNames_;
+    bool questSortDbcLoaded_ = false;
+
     std::unordered_map<uint32_t, float> pendingQuestAcceptTimeouts_;
     std::unordered_map<uint32_t, uint64_t> pendingQuestAcceptNpcGuids_;
     bool questOfferRewardOpen_ = false;
@@ -184,8 +196,6 @@ private:
     int selectedQuestLogIndex_ = 0;
     std::unordered_set<uint32_t> pendingQuestQueryIds_;
     std::unordered_set<uint32_t> trackedQuestIds_;
-    bool pendingLoginQuestResync_ = false;
-    float pendingLoginQuestResyncTimeout_ = 0.0f;
 
     // Quest giver status per NPC
     std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;

@@ -290,9 +290,10 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 
     // Cache camera state for frustum-culling bone computation
     cachedCamPos_ = cameraPos;
-    const float maxRenderDistance = (instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
-                                     ? rendering::M2_MAX_RENDER_DISTANCE_HIGH_DENSITY
-                                     : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY;
+    const float maxRenderDistance = viewDistanceScale_ *
+        ((instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
+             ? rendering::M2_MAX_RENDER_DISTANCE_HIGH_DENSITY
+             : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY);
     cachedMaxRenderDistSq_ = maxRenderDistance * maxRenderDistance;
 
     // Build frustum for culling bones
@@ -469,7 +470,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
         if (distSq > effectiveMaxDistSq) continue;
         float paddedRadius = instance.cachedPaddedRadius;
-        if (paddedRadius > 0.0f && !updateFrustum.intersectsSphere(instance.position, paddedRadius)) continue;
+        if (paddedRadius > 0.0f && !updateFrustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
 
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
@@ -626,9 +627,10 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     const uint32_t numInstances = std::min(static_cast<uint32_t>(instances.size()), MAX_CULL_INSTANCES);
 
     // --- Compute per-instance adaptive distances (same formula as old CPU cull) ---
-    const float targetRenderDist = (instances.size() > 2000) ? 300.0f
-                                 : (instances.size() > 1000) ? 500.0f
-                                 : 1000.0f;
+    const float targetRenderDist = viewDistanceScale_ *
+        ((instances.size() > 2000) ? 300.0f
+         : (instances.size() > 1000) ? 500.0f
+                                     : 1000.0f);
     const float shrinkRate = 0.005f;
     const float growRate   = 0.05f;
     float blendRate = (targetRenderDist < smoothedRenderDist_) ? shrinkRate : growRate;
@@ -726,7 +728,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
             if (i < prevFrameVisible_.size() && prevFrameVisible_[i] < 2)
                 flags |= 8u;
 
-            input[i].sphere = glm::vec4(inst.position, inst.cachedPaddedRadius);
+            input[i].sphere = glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius);
             input[i].effectiveMaxDistSq = effectiveMaxDistSq;
             input[i].flags = flags;
         }
@@ -838,9 +840,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // If GPU culling was not dispatched, fallback: compute distances on CPU
     float maxRenderDistanceSq;
     if (!gpuCullAvailable) {
-        const float targetRenderDist = (instances.size() > 2000) ? 300.0f
-                                     : (instances.size() > 1000) ? 500.0f
-                                     : 1000.0f;
+        const float targetRenderDist = viewDistanceScale_ *
+            ((instances.size() > 2000) ? 300.0f
+             : (instances.size() > 1000) ? 500.0f
+                                         : 1000.0f);
         const float shrinkRate = 0.005f;
         const float growRate = 0.05f;
         float blendRate = (targetRenderDist < smoothedRenderDist_) ? shrinkRate : growRate;
@@ -912,7 +915,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 effectiveMaxDistSq = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
                 if (distSq > effectiveMaxDistSq) continue;
                 float paddedRadius = instance.cachedPaddedRadius;
-                if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.position, paddedRadius)) continue;
+                if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
             }
 
             if (instance.cachedIsSkyBird && instance.cachedHasAnimation && !instance.cachedDisableAnimation) {
@@ -961,6 +964,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // Pass 1: sort by modelId for minimum buffer rebinds (opaque batches)
     std::sort(sortedVisible_.begin(), sortedVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.modelId < b.modelId; });
+
 
     uint32_t currentModelId = UINT32_MAX;
     const M2ModelGPU* currentModel = nullptr;
@@ -1154,13 +1158,6 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     if (!model.isGroundDetail && batch.submeshLevel != lod) continue;
                     if (batch.batchOpacity < 0.01f) continue;
 
-                    // Opaque gate — skip transparent batches
-                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect;
-                    if (rawTransparent) continue;
-
-                    // Particle-dominant effects: emission geometry — skip opaque
-                    if (particleDominantEffect && batch.blendMode <= 1) continue;
-
                     // Glow sprite check (per model+batch, sprites generated per instance)
                     const bool koboldFlameCard = batch.colorKeyBlack && model.isKoboldFlame;
                     const bool smallCardLikeBatch =
@@ -1169,7 +1166,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
                     const bool shouldUseGlowSprite =
                         !koboldFlameCard &&
-                        (model.isElvenLike || (model.isLanternLike && batch.lanternGlowHint)) &&
+                        (model.isElvenLike || ((model.isLanternLike || model.isTorch) && batch.lanternGlowHint)) &&
                         !model.isSpellEffect &&
                         smallCardLikeBatch &&
                         (batch.lanternGlowHint ||
@@ -1179,33 +1176,41 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         // Generate glow sprites for each instance in the group
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             auto& inst = instances[pending[j].instanceIdx];
-                            float distSq = sortedVisible_[visStart].distSq; // approximate with group
-                            if (distSq < 180.0f * 180.0f) {
-                                glm::vec3 worldPos = glm::vec3(inst.modelMatrix * glm::vec4(batch.center, 1.0f));
-                                GlowSprite gs;
-                                gs.worldPos = worldPos;
-                                if (batch.glowTint == 1 || model.isElvenLike)
-                                    gs.color = glm::vec4(0.48f, 0.72f, 1.0f, 1.05f);
-                                else if (batch.glowTint == 2)
-                                    gs.color = glm::vec4(1.0f, 0.28f, 0.22f, 1.10f);
-                                else
-                                    gs.color = glm::vec4(1.0f, 0.82f, 0.46f, 1.15f);
-                                gs.size = batch.glowSize * inst.scale * 1.45f;
-                                glowSprites_.push_back(gs);
-                                GlowSprite halo = gs;
-                                halo.color.a *= 0.42f;
-                                halo.size *= 1.8f;
-                                glowSprites_.push_back(halo);
-                            }
+                            glm::vec3 worldPos = glm::vec3(inst.modelMatrix * glm::vec4(batch.center, 1.0f));
+                            GlowSprite gs;
+                            gs.worldPos = worldPos;
+                            if (batch.glowTint == 1 || model.isElvenLike)
+                                gs.color = glm::vec4(0.48f, 0.72f, 1.0f, 1.05f);
+                            else if (batch.glowTint == 2)
+                                gs.color = glm::vec4(1.0f, 0.28f, 0.22f, 1.10f);
+                            else
+                                gs.color = glm::vec4(1.0f, 0.82f, 0.46f, 1.15f);
+                            // Match the parent M2's distance fade instead of a separate
+                            // hard 180-unit cutoff, which made tunnel lights pop on.
+                            gs.color.a *= pending[j].fadeAlpha;
+                            gs.size = batch.glowSize * inst.scale * 1.45f;
+                            glowSprites_.push_back(gs);
+                            GlowSprite halo = gs;
+                            halo.color.a *= 0.42f;
+                            halo.size *= 1.8f;
+                            glowSprites_.push_back(halo);
                         }
                         const bool cardLikeSkipMesh =
-                            (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
+                            batch.glowCardLike || (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
                         const bool lanternGlowCardSkip =
-                            model.isLanternLike && batch.lanternGlowHint &&
+                            (model.isLanternLike || model.isTorch) && batch.lanternGlowHint &&
                             smallCardLikeBatch && cardLikeSkipMesh;
                         if (lanternGlowCardSkip || (cardLikeSkipMesh && !model.isLanternLike))
                             continue;
                     }
+
+                    // Opaque gate — transparent glow cards were handled above so their
+                    // sprites are generated before the mesh moves to pass 2.
+                    const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect;
+                    if (rawTransparent) continue;
+
+                    // Particle-dominant effects: emission geometry — skip opaque
+                    if (particleDominantEffect && batch.blendMode <= 1) continue;
 
                     // Handle texture animation: if this batch has per-instance uvOffset,
                     // write a separate SSBO range with the correct offsets.
@@ -1228,7 +1233,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             }
                         }
                         for (size_t j = lodIdx; j < lodEnd; j++) {
-                            auto& inst = instances[pending[j].instanceIdx];
+                            const auto& p = pending[j];
+                            auto& inst = instances[p.instanceIdx];
                             glm::vec2 uvOffset(0.0f);
                             if (tt) {
                                 glm::vec3 trans = interpVec3(tt->translation,
@@ -1240,9 +1246,17 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 uvOffset = glm::vec2(lavaAnimSeconds * 0.03f,
                                                      -lavaAnimSeconds * 0.08f);
                             }
-                            // Copy base entry and override uvOffset
-                            instSSBO[instanceDataCount_] = instSSBO[groupSSBOOffset + (j - lodIdx)];
-                            instSSBO[instanceDataCount_].uvOffset = uvOffset;
+                            // Rebuild the entry from CPU-side data rather than copying it
+                            // out of the base entry. instSSBO lives in write-combined
+                            // upload memory: writing it is cheap, but reading it back is
+                            // uncached and costs microseconds per instance.
+                            auto& e = instSSBO[instanceDataCount_];
+                            e.model = inst.modelMatrix;
+                            e.uvOffset = uvOffset;
+                            e.fadeAlpha = p.fadeAlpha;
+                            e.useBones = p.useBones ? 1 : 0;
+                            e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
+                            std::memset(e._pad, 0, sizeof(e._pad));
                             instanceDataCount_++;
                         }
                     }
@@ -1404,15 +1418,15 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 (batch.lanternGlowHint && batch.glowSize <= 6.0f);
             const bool shouldUseGlowSprite =
                 !koboldFlameCard &&
-                (model.isElvenLike || model.isLanternLike) &&
+                (model.isElvenLike || model.isLanternLike || model.isTorch) &&
                 !model.isSpellEffect &&
                 smallCardLikeBatch &&
                 (batch.lanternGlowHint || (batch.blendMode >= 3) ||
                  (batch.colorKeyBlack && batchUnlit && batch.blendMode >= 1));
             if (shouldUseGlowSprite) {
-                const bool cardLikeSkipMesh = (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
+                const bool cardLikeSkipMesh = batch.glowCardLike || (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
                 const bool lanternGlowCardSkip =
-                    model.isLanternLike &&
+                    (model.isLanternLike || model.isTorch) &&
                     batch.lanternGlowHint &&
                     smallCardLikeBatch &&
                     cardLikeSkipMesh;

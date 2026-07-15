@@ -238,9 +238,12 @@ private:
     VkImageLayout shadowDepthLayout_[2] = {};
     glm::mat4 lightSpaceMatrix = glm::mat4(1.0f);
     glm::vec3 shadowCenter = glm::vec3(0.0f);
+    glm::vec3 shadowLightDirection_ = glm::vec3(0.0f);
     bool shadowCenterInitialized = false;
+    bool shadowLightDirectionInitialized_ = false;
     bool shadowsEnabled = true;
     float shadowDistance_ = 300.0f;  // Shadow frustum half-extent (default: 300 units)
+    float viewDistance_ = 1200.0f;
     uint32_t shadowFrameCounter_ = 0;
 
 
@@ -253,6 +256,10 @@ public:
     bool areShadowsEnabled() const { return shadowsEnabled; }
     void setShadowDistance(float dist) { shadowDistance_ = glm::clamp(dist, 40.0f, 500.0f); }
     float getShadowDistance() const { return shadowDistance_; }
+    void setViewDistance(float distance);
+    float getViewDistance() const { return viewDistance_; }
+    int getTerrainLoadRadius() const;
+    int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
     void setMsaaSamples(VkSampleCountFlagBits samples);
 
     // Post-process pipeline API — delegates to PostProcessPipeline (§4.3)

@@ -5,6 +5,7 @@
 // battleground score HUD, combat log, threat window, BG scoreboard.
 // ============================================================
 #include "ui/combat_ui.hpp"
+#include "ui/buff_bar_layout.hpp"
 #include "ui/settings_panel.hpp"
 #include "ui/spellbook_screen.hpp"
 #include "ui/inventory_screen.hpp"
@@ -845,6 +846,7 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
 void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
                              SpellbookScreen& spellbookScreen,
                              InventoryScreen& inventoryScreen,
+                             const SettingsPanel& settings,
                              SpellIconFn getSpellIcon) {
     const auto& auras = gameHandler.getPlayerAuras();
 
@@ -853,27 +855,45 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
     for (const auto& a : auras) {
         if (!a.isEmpty()) activeCount++;
     }
-    if (activeCount == 0 && !gameHandler.hasPet()) return;
+
+    // Temporary weapon enchants (sharpening stones, poisons, imbues) share the row with
+    // the auras, so they have to be counted before the row is sized and positioned.
+    const uint64_t nowMsForWidth = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    int enchantCount = 0;
+    for (const auto& t : gameHandler.getTempEnchantTimers()) {
+        if (t.slot > 2) continue;
+        if (t.expireMs > nowMsForWidth) enchantCount++;
+    }
+
+    if (activeCount == 0 && enchantCount == 0 && !gameHandler.hasPet()) return;
 
     auto* assetMgr = services_.assetManager;
 
-    // Position below the minimap (minimap: 200x200 at top-right, bottom edge at Y≈210)
-    // Anchored to the right side to stay away from party frames on the left
-    constexpr float ICON_SIZE = 32.0f;
-    constexpr int ICONS_PER_ROW = 8;
-    float barW = ICONS_PER_ROW * (ICON_SIZE + 4.0f) + 8.0f;
+    // Layout arithmetic lives in buff_bar_layout.hpp so it can be tested.
     ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    float screenW = displaySize.x > 0.0f ? displaySize.x : 1280.0f;
-    // Y=215 puts us just below the minimap's bottom edge (minimap bottom ≈ 210)
-    ImGui::SetNextWindowPos(ImVec2(screenW - barW - 10.0f, 215.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(barW, 0), ImGuiCond_Always);
+    const float screenW = displaySize.x > 0.0f ? displaySize.x : 1280.0f;
+    const float screenH = displaySize.y > 0.0f ? displaySize.y : 720.0f;
+    const BuffBarLayout layout = computeBuffBarLayout(
+        screenW, screenH, settings.pendingBuffBarScale, activeCount, enchantCount);
 
+    const float uiScale = buffBarScale(screenH, settings.pendingBuffBarScale);
+    const float ICON_SIZE = layout.iconSize;
+    const float ICON_SPACING = layout.iconSpacing;
+    const int enchantShown = layout.enchantShown;
+    const int auraShown = layout.auraShown;
+
+    ImGui::SetNextWindowPos(ImVec2(layout.barX, layout.barY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(layout.barWidth, 0), ImGuiCond_Always);
+
+    // No AlwaysAutoResize: the width is computed above so the row can be right-aligned.
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
-                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar;
+                             ImGuiWindowFlags_NoScrollbar;
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ICON_SPACING, ICON_SPACING));
 
     if (ImGui::Begin("##BuffBar", nullptr, flags)) {
         // Pre-sort auras: buffs first, then debuffs; within each group, shorter remaining first
@@ -897,11 +917,12 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
             return ra < rb;
         });
 
-        // Render one pass for buffs, one for debuffs
+        // Render one pass for buffs, one for debuffs — both on a single continuous row.
+        int shown = 0;
         for (int pass = 0; pass < 2; ++pass) {
             bool wantBuff = (pass == 0);
-            int shown = 0;
-        for (size_t si = 0; si < buffSortedIdx.size() && shown < 40; ++si) {
+            bool firstOfPass = true;
+        for (size_t si = 0; si < buffSortedIdx.size() && shown < auraShown; ++si) {
             size_t i = buffSortedIdx[si];
             const auto& aura = auras[i];
             if (aura.isEmpty()) continue;
@@ -909,7 +930,11 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
             bool isBuff = (aura.flags & 0x80) == 0;  // 0x80 = negative/debuff flag
             if (isBuff != wantBuff) continue;  // only render matching pass
 
-            if (shown > 0 && shown % ICONS_PER_ROW != 0) ImGui::SameLine();
+            // Stay on one row; widen the gap where the debuff group begins.
+            if (shown > 0) {
+                ImGui::SameLine(0.0f, (pass == 1 && firstOfPass) ? 10.0f * uiScale : ICON_SPACING);
+            }
+            firstOfPass = false;
 
             ImGui::PushID(static_cast<int>(i) + (pass * 256));
 
@@ -1062,20 +1087,9 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
             ImGui::PopID();
             shown++;
         }  // end aura loop
-        // Add visual gap between buffs and debuffs
-        if (pass == 0 && shown > 0) ImGui::Spacing();
         }  // end pass loop
-
-        // Dismiss Pet button
-        if (gameHandler.hasPet()) {
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 0.9f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
-            if (ImGui::Button("Dismiss Pet", ImVec2(-1, 0))) {
-                gameHandler.dismissPet();
-            }
-            ImGui::PopStyleColor(2);
-        }
+        // The buff/debuff gap is horizontal now (see SameLine above) — a vertical
+        // Spacing() here would push debuffs onto a second row.
 
         // Temporary weapon enchant timers (Shaman imbues, Rogue poisons, sharpening
         // stones, oils). Shown as the enchanted weapon's icon with its remaining time
@@ -1083,8 +1097,8 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
         {
             const auto& timers = gameHandler.getTempEnchantTimers();
             if (!timers.empty()) {
-                ImGui::Spacing();
-                ImGui::Separator();
+                // Continue the aura row rather than starting a second one — a Spacing()
+                // or Separator() here is what used to push these onto their own line.
                 static constexpr game::EquipSlot kWeaponEquipSlots[] = {
                     game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND, game::EquipSlot::RANGED
                 };
@@ -1126,7 +1140,11 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
                     const game::EquipSlot equipSlot = kWeaponEquipSlots[t.slot];
                     const auto& weapon = inventory.getEquipSlot(equipSlot);
 
-                    if (enchantsShown > 0 && enchantsShown % ICONS_PER_ROW != 0) ImGui::SameLine();
+                    if (enchantsShown >= enchantShown) break;
+                    // Stay on the shared row; widen the gap where the enchants begin.
+                    if (shown > 0) {
+                        ImGui::SameLine(0.0f, (enchantsShown == 0) ? 10.0f * uiScale : ICON_SPACING);
+                    }
                     ImGui::PushID(static_cast<int>(t.slot) + 5000);
 
                     ImVec2 iconPos = ImGui::GetCursorScreenPos();
@@ -1179,9 +1197,21 @@ void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
                     }
                     ImGui::PopID();
                     ++enchantsShown;
+                    ++shown;  // shared row counter — drives the SameLine above
                 }
             }
         }
+        // Dismiss Pet button
+        if (gameHandler.hasPet()) {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
+            if (ImGui::Button("Dismiss Pet", ImVec2(-1, 0))) {
+                gameHandler.dismissPet();
+            }
+            ImGui::PopStyleColor(2);
+        }
+
     }
     ImGui::End();
 

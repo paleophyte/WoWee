@@ -258,7 +258,7 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
                 loginMusicVolumeAdjusted_ = true;
             }
             music->update(ImGui::GetIO().DeltaTime);
-            if (!music->isPlaying()) {
+            if (!music->isPlaying() && !music->isLoading()) {
                 static std::mt19937 rng(std::random_device{}());
                 if (!introTracksScanned_) {
                     introTracksScanned_ = true;
@@ -308,7 +308,9 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
                     const size_t idx = pick(rng);
                     const std::string path = introTracks_[idx];
                     music->playFilePath(path, true, 1800.0f);
-                    musicPlaying = music->isPlaying();
+                    // The read runs on a worker, so the track is not playing yet.
+                    // Treat a load in flight as success or the track gets dropped below.
+                    musicPlaying = music->isPlaying() || music->isLoading();
                     if (musicPlaying) {
                         LOG_INFO("AuthScreen: Playing login intro track: ", path);
                     } else {
@@ -554,12 +556,28 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
                 onSuccess();
             }
         } else if (state == auth::AuthState::FAILED) {
-            if (!failureReason.empty()) {
-                setStatus(failureReason, true);
+            // Protocol fallback: a 1.12 realm that speaks the other vanilla auth
+            // protocol byte rejects or drops our handshake rather than replying
+            // usefully. Retry once on the next candidate before giving up — but
+            // only for protocol-shaped failures, never for a rejected password
+            // (retrying those can trip server-side lockouts).
+            const bool haveFallback = (authProtocolAttempt_ + 1 < authProtocols_.size());
+            if (haveFallback && authHandler.lastFailureWasProtocol()) {
+                LOG_INFO("Auth failed on protocol ",
+                         static_cast<int>(authProtocols_[authProtocolAttempt_]),
+                         " (", failureReason, ") - retrying with protocol ",
+                         static_cast<int>(authProtocols_[authProtocolAttempt_ + 1]));
+                ++authProtocolAttempt_;
+                authHandler.disconnect();
+                beginAuthAttempt(authHandler);
             } else {
-                setStatus("Authentication failed", true);
+                if (!failureReason.empty()) {
+                    setStatus(failureReason, true);
+                } else {
+                    setStatus("Authentication failed", true);
+                }
+                authenticating = false;
             }
-            authenticating = false;
         } else if (state != auth::AuthState::PIN_REQUIRED && state != auth::AuthState::AUTHENTICATOR_REQUIRED
                    && authTimer >= AUTH_TIMEOUT) {
             setStatus("Connection timed out - server did not respond", true);
@@ -631,9 +649,46 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
         return;
     }
 
-    // Attempt connection
+    // Build the auth-protocol candidate chain for this attempt. The profile's
+    // own value is always tried first; vanilla-family profiles get the other
+    // vanilla protocol byte appended as a fallback, because 1.12 servers
+    // disagree on it (vmangos-derived: 8, stock mangos/cmangos: 3) and the
+    // profile can only name one. TBC/WotLK have no such ambiguity.
+    authProtocols_.clear();
+    authProtocolAttempt_ = 0;
+    {
+        uint8_t primary = 8;
+        bool vanillaFamily = false;
+        auto* reg = core::Application::getInstance().getExpansionRegistry();
+        if (reg) {
+            if (auto* profile = reg->getActive()) {
+                primary = profile->protocolVersion;
+                vanillaFamily = (profile->id == "classic" || profile->id == "turtle");
+            }
+        }
+        authProtocols_.push_back(primary);
+        if (vanillaFamily) {
+            const uint8_t alternate = (primary == 3) ? uint8_t{8} : uint8_t{3};
+            if (alternate != primary) authProtocols_.push_back(alternate);
+        }
+    }
+
+    beginAuthAttempt(authHandler);
+}
+
+void AuthScreen::beginAuthAttempt(auth::AuthHandler& authHandler) {
+    const bool useHash = usingStoredHash && std::strcmp(password, PASSWORD_PLACEHOLDER) == 0;
+    const uint8_t protocolVersion = (authProtocolAttempt_ < authProtocols_.size())
+        ? authProtocols_[authProtocolAttempt_] : uint8_t{8};
+    const bool isRetry = (authProtocolAttempt_ > 0);
+
     std::stringstream ss;
-    ss << "Connecting to " << hostname << ":" << port << "...";
+    if (isRetry) {
+        ss << "Retrying " << hostname << ":" << port
+           << " with auth protocol " << static_cast<int>(protocolVersion) << "...";
+    } else {
+        ss << "Connecting to " << hostname << ":" << port << "...";
+    }
     setStatus(ss.str(), false);
 
     // Wire up failure callback to capture specific error reason
@@ -652,12 +707,18 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
             info.minorVersion = profile->minorVersion;
             info.patchVersion = profile->patchVersion;
             info.build = profile->build;
-            info.protocolVersion = profile->protocolVersion;
+            info.protocolVersion = protocolVersion;
             info.game = profile->game;
             info.platform = profile->platform;
             info.os = profile->os;
             info.locale = profile->locale;
             info.timezone = profile->timezone;
+            // Vanilla-family servers send the legacy realm-list layout even
+            // when the auth handshake itself uses protocol v8 (vmangos), so key
+            // this on the expansion rather than on the protocol byte in play.
+            info.legacyVanillaRealmList = (profile->id == "classic" ||
+                                           profile->id == "turtle" ||
+                                           profile->protocolVersion <= 3);
             authHandler.setClientInfo(info);
         }
     }
@@ -665,7 +726,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
     if (authHandler.connect(hostname, static_cast<uint16_t>(port))) {
         authenticating = true;
         authTimer = 0.0f;
-        setStatus("Connected, authenticating...", false);
+        setStatus(isRetry ? "Reconnected, authenticating..." : "Connected, authenticating...", false);
         pinAutoSubmitted_ = false;
 
         // Save login info for next session
@@ -689,6 +750,7 @@ void AuthScreen::attemptAuth(auth::AuthHandler& authHandler) {
         errSs << "Failed to connect to " << hostname << ":" << port
               << " - check that the server is online and the address is correct";
         setStatus(errSs.str(), true);
+        authenticating = false;
     }
 }
 
@@ -1047,25 +1109,25 @@ void AuthScreen::destroyBackgroundImage() {
 void AuthScreen::applyPresetToState(LoginGraphicsState& s, int preset) {
     switch (preset) {
     case 1: // Low
-        s.shadows = false; s.shadowDistance = 75.0f; s.antiAliasing = 0;
+        s.shadows = false; s.shadowDistance = 75.0f; s.viewDistance = 600.0f; s.antiAliasing = 0;
         s.fxaa = false; s.normalMapping = false; s.pom = false; s.pomQuality = 1;
         s.upscalingMode = 0; s.waterRefraction = false; s.groundClutter = 25;
         s.brightness = 50; s.vsync = true; s.fullscreen = false;
         break;
     case 2: // Medium
-        s.shadows = true; s.shadowDistance = 150.0f; s.antiAliasing = 0;
+        s.shadows = true; s.shadowDistance = 150.0f; s.viewDistance = 1000.0f; s.antiAliasing = 0;
         s.fxaa = false; s.normalMapping = true; s.pom = true; s.pomQuality = 1;
         s.upscalingMode = 0; s.waterRefraction = true; s.groundClutter = 100;
         s.brightness = 50; s.vsync = true; s.fullscreen = false;
         break;
     case 3: // High
-        s.shadows = true; s.shadowDistance = 250.0f; s.antiAliasing = 1;
+        s.shadows = true; s.shadowDistance = 250.0f; s.viewDistance = 1600.0f; s.antiAliasing = 1;
         s.fxaa = true; s.normalMapping = true; s.pom = true; s.pomQuality = 1;
         s.upscalingMode = 0; s.waterRefraction = true; s.groundClutter = 130;
         s.brightness = 50; s.vsync = true; s.fullscreen = false;
         break;
     case 4: // Ultra
-        s.shadows = true; s.shadowDistance = 400.0f; s.antiAliasing = 2;
+        s.shadows = true; s.shadowDistance = 400.0f; s.viewDistance = 2400.0f; s.antiAliasing = 2;
         s.fxaa = true; s.normalMapping = true; s.pom = true; s.pomQuality = 2;
         s.upscalingMode = 0; s.waterRefraction = true; s.groundClutter = 150;
         s.brightness = 50; s.vsync = true; s.fullscreen = false;
@@ -1092,6 +1154,7 @@ void AuthScreen::loadLoginGraphicsState() {
         if (key == "graphics_preset")       loginGfx_.preset        = std::stoi(val);
         else if (key == "shadows")          loginGfx_.shadows        = (val == "1");
         else if (key == "shadow_distance")  loginGfx_.shadowDistance = std::stof(val);
+        else if (key == "view_distance")    loginGfx_.viewDistance   = std::stof(val);
         else if (key == "antialiasing")     loginGfx_.antiAliasing   = std::stoi(val);
         else if (key == "fxaa")             loginGfx_.fxaa           = (val == "1");
         else if (key == "normal_mapping")   loginGfx_.normalMapping  = (val == "1");
@@ -1124,6 +1187,7 @@ void AuthScreen::saveLoginGraphicsState() {
     cfg["graphics_preset"]       = std::to_string(loginGfx_.preset);
     cfg["shadows"]               = loginGfx_.shadows        ? "1" : "0";
     cfg["shadow_distance"]       = std::to_string(static_cast<int>(loginGfx_.shadowDistance));
+    cfg["view_distance"]         = std::to_string(static_cast<int>(loginGfx_.viewDistance));
     cfg["antialiasing"]          = std::to_string(loginGfx_.antiAliasing);
     cfg["fxaa"]                  = loginGfx_.fxaa           ? "1" : "0";
     cfg["normal_mapping"]        = loginGfx_.normalMapping  ? "1" : "0";
@@ -1188,6 +1252,10 @@ void AuthScreen::renderLoginSettingsWindow() {
             if (ImGui::SliderFloat("Shadow Distance", &sd, 50.0f, 600.0f, "%.0f"))
                 loginGfx_.shadowDistance = sd;
         }
+
+        ImGui::SetNextItemWidth(240.0f);
+        ImGui::SliderFloat("View Distance", &loginGfx_.viewDistance,
+                           400.0f, 2400.0f, "%.0f");
 
         // Anti-aliasing
         const char* aaNames[] = {"Off", "2x MSAA", "4x MSAA"};

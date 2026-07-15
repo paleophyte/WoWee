@@ -32,6 +32,12 @@ struct LightingParams {
     float horizonGlow = 0.3f;                       // Horizon glow intensity
 };
 
+/** Apply any authored ambience that must remain stable regardless of world time. */
+void applyZoneAmbienceOverride(uint32_t zoneId, LightingParams& params);
+
+/** Resolve the sky clock shown for a zone without changing the world clock. */
+float resolveZoneVisualTimeHours(uint32_t zoneId, bool isIndoors, float worldTimeHours);
+
 /**
  * Light set keyframe for time-of-day interpolation
  */
@@ -153,7 +159,7 @@ public:
      * Note: WoW uses server-sent game time, not local PC time.
      * Pass gameTime from SMSG_LOGIN_SETTIMESPEED or similar.
      */
-    void update(const glm::vec3& playerPos, uint32_t mapId,
+    void update(const glm::vec3& playerPos, uint32_t mapId, uint32_t zoneId,
                 float gameTime = -1.0f,
                 bool isRaining = false, bool isUnderwater = false);
 
@@ -171,6 +177,9 @@ public:
      * Get current time of day (0.0-1.0)
      */
     float getTimeOfDay() const { return timeOfDay_; }
+
+    /** Time used by the visible sky, including persistent zone ambience. */
+    float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
 
     /**
      * Manually set time of day for testing
@@ -251,6 +260,7 @@ private:
     glm::vec3 currentPlayerPos_{0.0f};
     uint32_t currentMapId_ = 0;
     float timeOfDay_ = 0.5f;  // Start at noon
+    float visualTimeOfDayHours_ = 12.0f;
     bool isIndoors_ = false;
     bool manualTime_ = false;
     bool initialized_ = false;

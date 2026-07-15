@@ -20,7 +20,7 @@ enum class UF : uint16_t {
     UNIT_FIELD_TARGET_LO,
     UNIT_FIELD_TARGET_HI,
     UNIT_FIELD_BYTES_0,
-    UNIT_FIELD_BYTES_1,  // byte3 = shapeshift form ID
+    UNIT_FIELD_BYTES_1,  // byte2 = visibility flags; byte3 is expansion-dependent
     UNIT_FIELD_HEALTH,
     UNIT_FIELD_POWER1,
     UNIT_FIELD_MAXHEALTH,

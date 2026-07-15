@@ -136,13 +136,17 @@ public:
      *  WotLK: castCount(u8) + spellId(u32) + result(u8)
      *  TBC/Classic: spellId(u32) + result(u8)  (no castCount prefix).
      *  Classic/TBC result enums have no SUCCESS entry, so parsers shift +1.
+     *  miscArg/miscArg2 receive the trailing ids of spell-focus and totem
+     *  failures (0 otherwise) — see readCastResultArgs.
      */
-    virtual bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) {
+    virtual bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                                 uint32_t& miscArg, uint32_t& miscArg2) {
         // WotLK default: skip castCount, read spellId + result
         if (packet.getSize() - packet.getReadPos() < 6) return false;
         packet.readUInt8();  // castCount
         spellId = packet.readUInt32();
         result  = packet.readUInt8();
+        readCastResultArgs(packet, result, miscArg, miscArg2);
         return true;
     }
 
@@ -352,7 +356,8 @@ public:
     // TBC 2.4.3 SMSG_GOSSIP_MESSAGE quests lack questFlags(u32)+isRepeatable(u8) (WotLK added them)
     bool parseGossipMessage(network::Packet& packet, GossipMessageData& data) override;
     // TBC 2.4.3 SMSG_CAST_RESULT: spellId(u32) + result(u8) + castCount(u8)
-    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) override;
+    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                         uint32_t& miscArg, uint32_t& miscArg2) override;
     // TBC 2.4.3 SMSG_CAST_FAILED: spellId(u32) + result(u8) + castCount(u8)
     bool parseCastFailed(network::Packet& packet, CastFailedData& data) override;
     // TBC 2.4.3 SMSG_INITIAL_SPELLS: uint16 spellId + uint16 unk per entry.
@@ -378,9 +383,15 @@ public:
     // TBC 2.4.3 CMSG_QUESTGIVER_QUERY_QUEST: guid(8) + questId(4) — no trailing
     // isDialogContinued byte that WotLK added
     network::Packet buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) override;
-    // TBC/Classic SMSG_QUESTGIVER_QUEST_DETAILS lacks informUnit(u64), flags(u32),
-    // isFinished(u8) that WotLK added; uses variable item counts + emote section.
-    bool parseQuestDetails(network::Packet& packet, QuestDetailsData& data) override;
+    // TBC 2.4.3 SMSG_QUESTGIVER_QUEST_DETAILS (cmangos-tbc GossipDef.cpp):
+    // u32 activateAccept + u32 suggestedPlayers, variable reward arrays, money,
+    // then honor/spell/title trailing and the emote block LAST.
+    bool parseQuestDetails(network::Packet& packet, QuestDetailsData& data) override {
+        return parseQuestDetailsPreWotlk(packet, data, /*hasSuggestedPlayers=*/true);
+    }
+    // Shared vanilla/TBC quest-details layout; vanilla omits suggestedPlayers.
+    static bool parseQuestDetailsPreWotlk(network::Packet& packet, QuestDetailsData& data,
+                                          bool hasSuggestedPlayers);
     // TBC 2.4.3 SMSG_GUILD_ROSTER: same rank structure as WotLK (variable rankCount +
     // goldLimit + bank tabs), but NO gender byte per member (WotLK added it)
     bool parseGuildRoster(network::Packet& packet, GuildRosterData& data) override;
@@ -430,7 +441,8 @@ public:
                                  uint64_t itemGuid, uint32_t spellId = 0,
                                  uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0) override;
     bool parseCastFailed(network::Packet& packet, CastFailedData& data) override;
-    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) override;
+    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                         uint32_t& miscArg, uint32_t& miscArg2) override;
     bool parseMessageChat(network::Packet& packet, MessageChatData& data) override;
     bool parseGameObjectQueryResponse(network::Packet& packet, GameObjectQueryResponseData& data) override;
     // Classic 1.12 SMSG_CREATURE_QUERY_RESPONSE lacks the iconName string that TBC/WotLK include
@@ -452,7 +464,11 @@ public:
     uint8_t readQuestGiverStatus(network::Packet& packet) override;
     network::Packet buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) override;
     network::Packet buildAcceptQuestPacket(uint64_t npcGuid, uint32_t questId) override;
-    // parseQuestDetails inherited from TbcPacketParsers (same format as TBC 2.4.3)
+    // Classic 1.12 SMSG_QUESTGIVER_QUEST_DETAILS (vmangos Quest.cpp): like TBC
+    // but WITHOUT the suggestedPlayers field after activateAccept.
+    bool parseQuestDetails(network::Packet& packet, QuestDetailsData& data) override {
+        return parseQuestDetailsPreWotlk(packet, data, /*hasSuggestedPlayers=*/false);
+    }
     uint8_t questLogStride() const override { return 3; }
     // Classic 1.12 has 64 explored-zone uint32 fields (zone IDs fit in 2048 bits).
     // TBC/WotLK use 128 (needed for Outland/Northrend zone IDs up to 4095).

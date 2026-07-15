@@ -91,9 +91,25 @@ private:
     std::function<void()> onSuccess;
 
     /**
-     * Attempt authentication
+     * Attempt authentication (starts a fresh attempt, resetting the protocol
+     * fallback chain).
      */
     void attemptAuth(auth::AuthHandler& authHandler);
+
+    /**
+     * Connect + authenticate using authProtocols_[authProtocolAttempt_].
+     * Shared by the initial attempt and each protocol fallback retry.
+     */
+    void beginAuthAttempt(auth::AuthHandler& authHandler);
+
+    // Auth protocol versions to try, in order. Vanilla-family servers disagree
+    // on this byte — vmangos-derived 1.12 realms speak protocol 8 while stock
+    // mangos/cmangos 1.12 speak 3 — and the profile can only name one of them,
+    // so a mismatch is retried on the next candidate instead of hard-failing.
+    // Retries only fire for protocol-shaped failures (see
+    // AuthHandler::lastFailureWasProtocol) — never for a rejected password.
+    std::vector<uint8_t> authProtocols_;
+    size_t authProtocolAttempt_ = 0;
 
     /**
      * Update status message
@@ -143,6 +159,7 @@ private:
         int  preset          = 2;   // 0=Custom 1=Low 2=Medium 3=High 4=Ultra
         bool shadows         = true;
         float shadowDistance = 300.0f;
+        float viewDistance   = 1200.0f;
         int  antiAliasing    = 0;   // 0=Off 1=2x 2=4x 3=8x
         bool fxaa            = false;
         bool normalMapping   = true;
