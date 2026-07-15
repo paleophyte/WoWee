@@ -33,6 +33,8 @@ struct ZoneAudioContext {
     // Visual weather state for ambient audio sync
     int weatherType = 0;      // 0=none, 1=rain, 2=snow, 3=storm
     float weatherIntensity = 0.0f;
+    // Visible sky clock after zone ambience overrides (hours in [0, 24)).
+    float gameTimeHours = 12.0f;
     // Terrain tile for offline zone lookup
     int tileX = 0, tileY = 0;
     bool hasTile = false;

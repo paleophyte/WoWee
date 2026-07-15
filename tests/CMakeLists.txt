@@ -318,6 +318,20 @@ endif()
 add_test(NAME indoor_shadows COMMAND test_indoor_shadows)
 register_test_target(test_indoor_shadows)
 
+# ── test_zone_ambience ─────────────────────────────────────────
+add_executable(test_zone_ambience
+    test_zone_ambience.cpp
+    ${CMAKE_SOURCE_DIR}/src/rendering/zone_ambience.cpp
+)
+target_include_directories(test_zone_ambience PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_zone_ambience SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_zone_ambience PRIVATE catch2_main)
+if(TARGET glm::glm)
+    target_link_libraries(test_zone_ambience PRIVATE glm::glm)
+endif()
+add_test(NAME zone_ambience COMMAND test_zone_ambience)
+register_test_target(test_zone_ambience)
+
 # ── test_transport_components ────────────────────────────────
 add_executable(test_transport_components
     test_transport_components.cpp

@@ -1162,7 +1162,21 @@ const std::string& Renderer::getCurrentZoneName() const {
 }
 
 uint32_t Renderer::getCurrentZoneId() const {
-    return audioCoordinator_ ? audioCoordinator_->getCurrentZoneId() : 0;
+    uint32_t tileZoneId = 0;
+    if (zoneManager && terrainManager) {
+        const auto tile = terrainManager->getCurrentTile();
+        tileZoneId = zoneManager->getZoneId(tile.x, tile.y);
+    }
+
+    // Prefer the corrected spatial classification for Duskwood. World-state
+    // zone IDs can lag behind movement across a zone boundary.
+    if (tileZoneId == 10) return tileZoneId;
+
+    const auto* gh = core::Application::getInstance().getGameHandler();
+    if (gh && gh->getWorldStateZoneId() != 0) return gh->getWorldStateZoneId();
+    if (audioCoordinator_ && audioCoordinator_->getCurrentZoneId() != 0)
+        return audioCoordinator_->getCurrentZoneId();
+    return tileZoneId;
 }
 
 void Renderer::update(float deltaTime) {
@@ -1221,7 +1235,8 @@ void Renderer::update(float deltaTime) {
         bool isRaining    = gh ? gh->isRaining() : false;
         bool isUnderwater = cameraController ? cameraController->isSwimming() : false;
 
-        lightingManager->update(characterPosition, mapId, gameTime, isRaining, isUnderwater);
+        lightingManager->update(characterPosition, mapId, getCurrentZoneId(),
+                                gameTime, isRaining, isUnderwater);
 
         // Sync weather visual renderer with game state
         if (weather && gh) {
@@ -1415,6 +1430,9 @@ void Renderer::update(float deltaTime) {
             else if (wt == Weather::Type::STORM) zctx.weatherType = 3;
             zctx.weatherIntensity = weather->getIntensity();
         }
+        if (lightingManager) {
+            zctx.gameTimeHours = lightingManager->getVisualTimeOfDayHours();
+        }
         if (terrainManager) {
             auto tile = terrainManager->getCurrentTile();
             zctx.tileX = tile.x;
@@ -1564,7 +1582,9 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
     // Get time of day for sky-related rendering
     auto* skybox = skySystem ? skySystem->getSkybox() : nullptr;
-    float timeOfDay = skybox ? skybox->getTimeOfDay() : 12.0f;
+    float timeOfDay = lightingManager
+        ? lightingManager->getVisualTimeOfDayHours()
+        : (skybox ? skybox->getTimeOfDay() : 12.0f);
 
     // ── Multithreaded secondary command buffer recording ──
     // Terrain, WMO, and M2 record on worker threads while main thread handles
@@ -2687,7 +2707,9 @@ void Renderer::renderReflectionPass() {
         if (skySystem) {
             rendering::SkyParams skyParams;
             auto* reflSkybox = skySystem->getSkybox();
-            skyParams.timeOfDay = reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f;
+            skyParams.timeOfDay = lightingManager
+                ? lightingManager->getVisualTimeOfDayHours()
+                : (reflSkybox ? reflSkybox->getTimeOfDay() : 12.0f);
             if (lightingManager) {
                 const auto& lp = lightingManager->getLightingParams();
                 skyParams.directionalDir = lp.directionalDir;

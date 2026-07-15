@@ -617,6 +617,7 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 267:  // Hillsbrad Foothills
         case 36:   // Alterac Mountains
         case 45:   // Arathi Highlands
+        case 10:   // Duskwood (forced to the night library by its visual clock)
             zone = ZoneType::FOREST_NORMAL; break;
 
         case 1:    // Dun Morogh
@@ -633,7 +634,6 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 40:   // Westfall
         case 215:  // Mulgore
         case 44:   // Redridge Mountains
-        case 10:   // Duskwood (counts as grassland night)
         case 38:   // Loch Modan
             zone = ZoneType::GRASSLANDS; break;
 
