@@ -35,6 +35,10 @@ def build_settings(args: argparse.Namespace) -> dict[str, Any]:
         set_nested(doc, "auth", "account", args.account)
     if args.password:
         set_nested(doc, "auth", "password", args.password)
+    if args.pin:
+        set_nested(doc, "auth", "pin", args.pin)
+    if args.totp_secret:
+        set_nested(doc, "auth", "totpSecret", args.totp_secret)
     if args.auth_host:
         set_nested(doc, "auth", "host", args.auth_host)
     if args.auth_port:
@@ -48,6 +52,7 @@ def build_settings(args: argparse.Namespace) -> dict[str, Any]:
         ("client_minor", "minor"),
         ("client_patch", "patch"),
         ("client_build", "build"),
+        ("client_world_build", "worldBuild"),
         ("client_protocol", "protocol"),
     ):
         value = getattr(args, attr)
@@ -105,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--msys-ucrt-bin", type=Path, help="MSYS2 UCRT runtime bin directory; defaults to C:/msys64/ucrt64/bin on Windows if present")
     parser.add_argument("--account", help="Override auth.account")
     parser.add_argument("--password", help="Override auth.password")
+    parser.add_argument("--pin", help="Override auth.pin for PIN/TOTP challenge login")
+    parser.add_argument("--totp-secret", help="Override auth.totpSecret for runtime TOTP generation")
     parser.add_argument("--auth-host", help="Override auth.host")
     parser.add_argument("--auth-port", type=int, help="Override auth.port")
     parser.add_argument("--realm", help="Override realm.name")
@@ -113,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client-minor", type=int, help="Override client.minor")
     parser.add_argument("--client-patch", type=int, help="Override client.patch")
     parser.add_argument("--client-build", type=int, help="Override client.build")
+    parser.add_argument("--client-world-build", type=int, help="Override client.worldBuild")
     parser.add_argument("--client-protocol", type=int, help="Override client.protocol")
     parser.add_argument("--name", required=True, help="Character name to create")
     parser.add_argument("--race", required=True, help="Race name or numeric race id")

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import pathlib
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -43,6 +45,15 @@ SERVER_PROFILES = {
         "default_soap_url": "http://127.0.0.1:7880/",
         "default_soap_username": "SERVERADMIN",
         "max_soap_password_len": 16,
+    },
+    "turtle": {
+        "label": "Turtle WoW",
+        "env_prefixes": ("TURTLE", "MANGOS"),
+      "backend": "turtle_sql",
+      "default_expansion": 0,
+      "default_login_db": "tw_logon",
+      "default_character_db": "tw_chars",
+      "default_mysql_command": "sudo mysql",
     },
 }
 
@@ -149,6 +160,111 @@ for command in commands:
 """
 
 
+REMOTE_TURTLE_SQL_SCRIPT = r"""
+import json
+import shlex
+import subprocess
+import sys
+
+payload = json.loads(sys.stdin.read())
+mysql_command = payload.get("mysql_command") or "sudo mysql"
+login_db = payload.get("login_db") or "tw_logon"
+character_db = payload.get("character_db") or "tw_chars"
+account = payload["account"]
+password_hash = payload["password_hash"]
+verifier = payload.get("verifier", "")
+salt = payload.get("salt", "")
+expansion = int(payload["expansion"])
+gmlevel = int(payload["gmlevel"])
+realm_id = int(payload["realm_id"])
+pin = str(payload.get("pin") or "").strip()
+totp_secret = str(payload.get("totp_secret") or "").strip()
+skip_create = bool(payload.get("skip_create"))
+verbose = bool(payload.get("verbose"))
+
+
+def sql_string(value):
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def sql_identifier(value):
+    return "`" + str(value).replace("`", "``") + "`"
+
+
+statements = [
+    "USE {}".format(sql_identifier(login_db)),
+]
+
+if not skip_create:
+    statements.append(
+        "INSERT INTO account(username, sha_pass_hash, v, s, `rank`, expansion, joindate) "
+        "SELECT {account}, {password_hash}, {verifier}, {salt}, {gmlevel}, {expansion}, NOW() "
+        "WHERE NOT EXISTS (SELECT 1 FROM account WHERE username = {account})".format(
+            account=sql_string(account),
+            password_hash=sql_string(password_hash),
+            verifier=sql_string(verifier),
+            salt=sql_string(salt),
+            gmlevel=gmlevel,
+            expansion=expansion,
+        )
+    )
+    statements.append(
+        "UPDATE account SET sha_pass_hash = {password_hash}, v = {verifier}, s = {salt} "
+        "WHERE username = {account}".format(
+            account=sql_string(account),
+            password_hash=sql_string(password_hash),
+            verifier=sql_string(verifier),
+            salt=sql_string(salt),
+        )
+    )
+
+statements.extend(
+    [
+        "UPDATE account SET expansion = {expansion} WHERE username = {account}".format(
+            expansion=expansion,
+            account=sql_string(account),
+        ),
+        "UPDATE account SET `rank` = {gmlevel} WHERE username = {account}".format(
+            gmlevel=gmlevel,
+            account=sql_string(account),
+        ),
+        "UPDATE account SET geolock_pin = {pin} WHERE username = {account}".format(
+            pin=int(pin) if pin else 0,
+            account=sql_string(account),
+        ),
+        "UPDATE account SET security = {totp_secret} WHERE username = {account}".format(
+            totp_secret=sql_string(totp_secret) if totp_secret else "security",
+            account=sql_string(account),
+        ),
+        "REPLACE INTO realmcharacters (realmid, acctid, numchars) "
+        "SELECT realmlist.id, account.id, 0 FROM realmlist, account "
+        "LEFT JOIN realmcharacters ON acctid = account.id "
+        "WHERE account.username = {account} AND acctid IS NULL".format(account=sql_string(account)),
+        "INSERT IGNORE INTO {character_db}.character_tutorial "
+        "(account, tut0, tut1, tut2, tut3, tut4, tut5, tut6, tut7) "
+        "SELECT id, 0, 0, 0, 0, 0, 0, 0, 0 FROM account WHERE username = {account}".format(
+            character_db=sql_identifier(character_db),
+            account=sql_string(account),
+        ),
+        "SELECT id, username, `rank`, expansion FROM account WHERE username = {}".format(sql_string(account)),
+    ]
+)
+
+sql = ";\n".join(statements) + ";\n"
+if verbose:
+    print(sql.replace(password_hash, "********"))
+
+cmd = shlex.split(mysql_command)
+completed = subprocess.run(cmd, input=sql, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+if completed.stdout:
+    print(completed.stdout.strip())
+if completed.returncode != 0:
+    if completed.stderr:
+        print(completed.stderr.strip(), file=sys.stderr)
+    raise SystemExit(completed.returncode)
+"""
+
+
 def load_env(path: pathlib.Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -197,6 +313,43 @@ def validate_account_password(password: str) -> str:
     return password
 
 
+def validate_pin(pin: str) -> str:
+    pin = pin.strip()
+    if not pin:
+        return ""
+    if not pin.isdigit() or len(pin) < 4 or len(pin) > 10:
+        raise SystemExit("PIN must be 4-10 digits.")
+    return pin
+
+
+def validate_totp_secret(secret: str) -> str:
+    secret = secret.strip().replace(" ", "").upper()
+    if not secret:
+        return ""
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    if any(ch not in allowed for ch in secret):
+        raise SystemExit("TOTP secret must be base32 characters A-Z and 2-7.")
+    return secret
+
+
+def calculate_turtle_sha_pass_hash(account_name: str, password: str) -> str:
+    normalized_account = account_name.upper()
+    normalized_password = password.upper()
+    return hashlib.sha1(f"{normalized_account}:{normalized_password}".encode("utf-8")).hexdigest().upper()
+
+
+def calculate_turtle_srp_fields(password_hash: str) -> tuple[str, str]:
+    modulus = int("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", 16)
+    generator = 7
+    salt_bytes_le = secrets.token_bytes(32)
+    password_hash_bytes = bytes.fromhex(password_hash)
+    x_digest = hashlib.sha1(salt_bytes_le + password_hash_bytes).digest()
+    x = int.from_bytes(x_digest, "little")
+    verifier = pow(generator, x, modulus)
+    salt = int.from_bytes(salt_bytes_le, "little")
+    return f"{verifier:064X}", f"{salt:064X}"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a WoW account through SSH + server-local SOAP.",
@@ -212,6 +365,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--soap-url", default="", help="Override SOAP URL on the server")
     parser.add_argument("--soap-user", default="", help="SOAP admin username. Defaults to MANGOS_SOAP_USERNAME.")
     parser.add_argument("--soap-password", default="", help="SOAP admin password. Defaults to MANGOS_SOAP_PASSWORD or prompt.")
+    parser.add_argument("--pin", default="", help="Optional 4-10 digit PIN/current token for Turtle PIN challenge.")
+    parser.add_argument("--totp-secret", default="", help="Optional Turtle staff TOTP/base32 secret stored in account.security.")
     parser.add_argument("--skip-create", action="store_true", help="Only run the expansion command for an existing account.")
     parser.add_argument("--dry-run", action="store_true", help="Print the remote commands without connecting.")
     parser.add_argument("--verbose", action="store_true", help="Print SOAP commands before executing them on the server.")
@@ -227,6 +382,96 @@ def main() -> int:
 
     account_name = validate_account_username(args.username)
     account_password = validate_account_password(args.password or getpass.getpass("New WoW account password: "))
+    pin = validate_pin(args.pin)
+    totp_secret = validate_totp_secret(args.totp_secret)
+
+    ssh_host = env_value(env, env_prefixes, "HOST")
+    if not ssh_host:
+        raise SystemExit(f"{env_prefixes[0]}_HOST must be set in .env")
+    ssh_port = env_value(env, env_prefixes, "PORT", "22") or "22"
+    ssh_user = env_value(env, env_prefixes, "USER")
+    if not ssh_user:
+        raise SystemExit(f"{env_prefixes[0]}_USER must be set in .env")
+    ssh_key = env_value(env, env_prefixes, "SSH_KEY_PATH")
+    if not ssh_key:
+        raise SystemExit(f"{env_prefixes[0]}_SSH_KEY_PATH must be set in .env")
+
+    if profile.get("backend") == "turtle_sql":
+        login_db = env_value(env, env_prefixes, "LOGIN_DB", str(profile["default_login_db"]))
+        character_db = env_value(env, env_prefixes, "CHARACTER_DB", str(profile["default_character_db"]))
+        mysql_command = env_value(env, env_prefixes, "MYSQL_COMMAND", str(profile["default_mysql_command"]))
+        password_hash = calculate_turtle_sha_pass_hash(account_name, account_password)
+        verifier, salt = calculate_turtle_srp_fields(password_hash)
+        payload: dict[str, Any] = {
+            "login_db": login_db,
+            "character_db": character_db,
+            "mysql_command": mysql_command,
+            "account": account_name,
+            "password_hash": password_hash,
+            "verifier": verifier,
+            "salt": salt,
+            "expansion": expansion,
+            "gmlevel": args.gmlevel,
+            "realm_id": args.realm_id,
+            "pin": pin,
+            "totp_secret": totp_secret,
+            "skip_create": args.skip_create,
+            "verbose": args.verbose,
+        }
+
+        if args.dry_run:
+            print(f"SSH target: {ssh_user}@{ssh_host}:{ssh_port}")
+            print(f"Server type: {profile['label']}")
+            print(f"MySQL command on server: {mysql_command}")
+            print(f"Login DB: {login_db}")
+            print(f"Character DB: {character_db}")
+            if not args.skip_create:
+                print(f"Would create account: {account_name} with password hash ********")
+            print(f"Would set expansion to {expansion}")
+            print(f"Would set rank to {args.gmlevel} (realm {args.realm_id})")
+            if pin:
+                print("Would set geolock PIN to ********")
+            if totp_secret:
+                print("Would set Turtle staff TOTP secret to ********")
+            return 0
+
+        ssh_command = [
+            "ssh",
+            "-i",
+            ssh_key,
+            "-p",
+            ssh_port,
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            f"{ssh_user}@{ssh_host}",
+            "python3 -c " + shlex.quote(REMOTE_TURTLE_SQL_SCRIPT),
+        ]
+
+        completed = subprocess.run(
+            ssh_command,
+            input=json.dumps(payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if completed.stdout:
+            print(completed.stdout.strip())
+        if completed.returncode != 0:
+            if completed.stderr:
+                print(completed.stderr.strip(), file=sys.stderr)
+            return completed.returncode
+
+        parts = [f"Created/updated {profile['label']} account {account_name} with expansion {expansion}"]
+        if args.gmlevel > 0:
+            parts.append(f"rank set to {args.gmlevel}")
+        if pin:
+            parts.append("geolock PIN set")
+        if totp_secret:
+            parts.append("TOTP secret set")
+        print(". ".join(parts) + ".")
+        return 0
 
     soap_user_prefixes = env_prefixes if args.server_type == "cmangos" else tuple(prefix for prefix in env_prefixes if prefix != "MANGOS")
     soap_user = args.soap_user or env_value(env, soap_user_prefixes, "SOAP_USERNAME") or str(profile.get("default_soap_username", ""))
@@ -244,16 +489,6 @@ def main() -> int:
     if max_soap_password_len > 0 and not args.soap_password:
         soap_password = soap_password[:max_soap_password_len]
 
-    ssh_host = env_value(env, env_prefixes, "HOST")
-    if not ssh_host:
-        raise SystemExit(f"{env_prefixes[0]}_HOST must be set in .env")
-    ssh_port = env_value(env, env_prefixes, "PORT", "22") or "22"
-    ssh_user = env_value(env, env_prefixes, "USER")
-    if not ssh_user:
-        raise SystemExit(f"{env_prefixes[0]}_USER must be set in .env")
-    ssh_key = env_value(env, env_prefixes, "SSH_KEY_PATH")
-    if not ssh_key:
-        raise SystemExit(f"{env_prefixes[0]}_SSH_KEY_PATH must be set in .env")
     soap_url_prefixes = env_prefixes if args.server_type == "cmangos" else tuple(prefix for prefix in env_prefixes if prefix != "MANGOS")
     soap_url = args.soap_url or env_value(env, soap_url_prefixes, "SOAP_URL", str(profile["default_soap_url"]))
 

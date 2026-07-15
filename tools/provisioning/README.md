@@ -1,6 +1,6 @@
 # WoWee Provisioning Tools
 
-These scripts create CMaNGOS, AzerothCore, or VMangos test accounts and characters for headless automation.
+These scripts create CMaNGOS, AzerothCore, VMangos, or Turtle WoW test accounts and characters for headless automation.
 
 ## Account Creation
 
@@ -50,6 +50,25 @@ VMANGOS_SOAP_URL=http://127.0.0.1:7880/
 If `VMANGOS_SOAP_USERNAME` is not set, the helper uses `SERVERADMIN` for VMangos and can still reuse `MANGOS_SOAP_PASSWORD`. VMangos enforces the older 16-character password limit; when the VMangos profile reads a shared env SOAP password, it uses the first 16 characters.
 
 VMangos' administrator level is `6` in this build. The SOAP admin account must be level `6` or higher for SOAP commands; normal bot roster accounts still default to moderator level `1`.
+
+For Turtle WoW, the helper uses SSH plus server-local MySQL instead of SOAP. Turtle's account table stores the old MaNGOS `sha_pass_hash`; the realmd process fills `v`/`s` on first login. The profile can reuse the same SSH host/key values as `MANGOS_*`, or you can provide Turtle-specific values:
+
+```dotenv
+TURTLE_HOST=10.0.0.10
+TURTLE_PORT=22
+TURTLE_USER=mangos
+TURTLE_SSH_KEY_PATH=C:\Users\admin\.ssh\mangos_codex
+TURTLE_LOGIN_DB=tw_logon
+TURTLE_MYSQL_COMMAND=sudo mysql
+```
+
+Turtle account rank is stored in `account.rank`, so roster `gmlevel` maps to that column. Turtle can force PIN/2FA for staff ranks, so the default Turtle roster uses `gmlevel: 0` for character provisioning. The default Turtle profile uses auth port `3730`, realm `Turtle WoW Local`, client expansion `turtle`, auth version `1.17.2` build `7199`, and world build `5875`.
+
+For staff-ranked Turtle accounts, add a local `totpSecret` to ignored `tools/provisioning/roster.json`. The headless client can generate the current PIN from that secret during provisioning. To print a PIN for logging in with the real client:
+
+```bash
+python tools/provisioning/turtle_pin.py
+```
 
 Create or update an account:
 
@@ -117,6 +136,7 @@ python tools/provisioning/create_account_ssh.py BOT001 \
 ```
 
 For TBC on CMaNGOS, `--expansion 1` is normally the useful account expansion value. For AzerothCore WotLK, use `--server-type azerothcore`; it defaults account expansion to `2`. For VMangos Vanilla, use `--server-type vmangos`; it defaults account expansion to `0`.
+For Turtle WoW, use `--server-type turtle`; it also defaults account expansion to `0`.
 
 ### GM Level for Bot Accounts
 
@@ -141,7 +161,7 @@ python tools/provisioning/create_account_direct_soap.py create \
   --expansion 1
 ```
 
-For AzerothCore direct SOAP, pass `--server-type azerothcore`. For VMangos direct SOAP, pass `--server-type vmangos` and the VMangos SOAP URL, normally `http://127.0.0.1:7880/` from the server host.
+For AzerothCore direct SOAP, pass `--server-type azerothcore`. For VMangos direct SOAP, pass `--server-type vmangos` and the VMangos SOAP URL, normally `http://127.0.0.1:7880/` from the server host. Turtle can be selected for direct SOAP only if you explicitly enable a MaNGOS-compatible SOAP endpoint; the default Turtle provisioning path is SSH plus server-local MySQL.
 
 If the CMaNGOS host should expose a tiny provisioning endpoint, run this on the Linux box:
 

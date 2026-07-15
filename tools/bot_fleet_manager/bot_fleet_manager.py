@@ -107,6 +107,30 @@ def resolve_path(raw: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def find_client_dbc_path(config: "FleetConfig", filename: str, leader: dict[str, Any] | None = None) -> Path | None:
+    client_defaults = config.defaults.get("client", {})
+    client = {**client_defaults, **(leader.get("client", {}) if leader else {})}
+    expansion = str(client.get("expansion", "")).strip()
+    candidates: list[Path] = []
+    if expansion:
+        expansion_root = ROOT / "Data" / "expansions" / expansion
+        candidates.extend([
+            expansion_root / "DBFilesClient" / filename,
+            expansion_root / "dbfilesclient" / filename,
+            expansion_root / "db" / filename,
+        ])
+    data_root = ROOT / "Data"
+    candidates.extend([
+        data_root / "DBFilesClient" / filename,
+        data_root / "dbfilesclient" / filename,
+        data_root / "db" / filename,
+    ])
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def request_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout: float = 3.0) -> dict[str, Any]:
     if not url.startswith(("http://", "https://")):
         raise ValueError(f"refusing non-http(s) URL: {url}")
@@ -427,13 +451,17 @@ class FleetConfig:
         automation_defaults = self.defaults.get("automation", {})
         startup_commands = list(automation_defaults.get("onEnterWorldCommands", []))
         startup_commands.extend(leader.get("startupCommands", []))
+        auth_settings = {
+            **self.defaults.get("auth", {}),
+            "account": leader["account"],
+            "password": leader["password"],
+        }
+        for optional_auth_key in ("pin", "totpSecret"):
+            if leader.get(optional_auth_key):
+                auth_settings[optional_auth_key] = leader[optional_auth_key]
 
         return {
-            "auth": {
-                **self.defaults.get("auth", {}),
-                "account": leader["account"],
-                "password": leader["password"],
-            },
+            "auth": auth_settings,
             "client": self.defaults.get("client", {}),
             "realm": leader.get("realm", self.defaults.get("realm", {})),
             "character": {"name": leader["character"]},
@@ -3128,14 +3156,15 @@ def cmd_tram_state(
     except ImportError:
         from bot_fleet_manager.deeprun_tram import find_best_time_offset, predict_trams, prediction_to_dict
 
-    dbc_path = ROOT / "Data" / "dbfilesclient" / "transportanimation.dbc"
-    if not dbc_path.exists():
-        print(f"Missing TransportAnimation.dbc: {dbc_path}", file=sys.stderr)
-        return 2
-
     selected = config.selected_leaders(fleet, leader_ids)
     leader_info: dict[str, Any] | None = None
     leader_label = ""
+    leader_for_data: dict[str, Any] | None = selected[0][1] if selected else None
+    dbc_path = find_client_dbc_path(config, "TransportAnimation.dbc", leader_for_data)
+    if not dbc_path:
+        print("Missing TransportAnimation.dbc in expansion-scoped or default Data paths", file=sys.stderr)
+        return 2
+
     if selected:
         index, leader = selected[0]
         leader_label = leader.get("id", f"leader-{index + 1}")

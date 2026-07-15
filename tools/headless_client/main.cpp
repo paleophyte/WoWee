@@ -1,5 +1,6 @@
 #include "auth/auth_handler.hpp"
 #include "auth/auth_packets.hpp"
+#include "auth/crypto.hpp"
 #include "game/game_handler.hpp"
 #include "game/faction_hostility.hpp"
 #include "game/game_services.hpp"
@@ -27,6 +28,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -94,8 +96,11 @@ struct Settings {
     uint16_t authPort = 3724;
     std::string account;
     std::string password;
+    std::string pin;
+    std::string totpSecret;
 
     auth::ClientInfo clientInfo;
+    uint16_t worldBuild = 0;
     std::string expansion = "wotlk";
 
     std::string realmName;
@@ -178,6 +183,66 @@ std::string detectExpansion(uint32_t build) {
     return "wotlk";
 }
 
+std::string normalizeBase32(std::string value) {
+    std::string out;
+    out.reserve(value.size());
+    for (unsigned char c : value) {
+        if (std::isspace(c) || c == '=') continue;
+        out.push_back(static_cast<char>(std::toupper(c)));
+    }
+    return out;
+}
+
+std::optional<std::vector<uint8_t>> decodeBase32(const std::string& secret) {
+    const std::string normalized = normalizeBase32(secret);
+    std::vector<uint8_t> bytes;
+    int buffer = 0;
+    int bitsLeft = 0;
+    for (char c : normalized) {
+        int value = -1;
+        if (c >= 'A' && c <= 'Z') value = c - 'A';
+        else if (c >= '2' && c <= '7') value = c - '2' + 26;
+        else return std::nullopt;
+
+        buffer = (buffer << 5) | value;
+        bitsLeft += 5;
+        if (bitsLeft >= 8) {
+            bitsLeft -= 8;
+            bytes.push_back(static_cast<uint8_t>((buffer >> bitsLeft) & 0xFF));
+        }
+    }
+    if (bytes.empty()) return std::nullopt;
+    return bytes;
+}
+
+std::optional<std::string> generateTotpCode(const std::string& secret) {
+    auto key = decodeBase32(secret);
+    if (!key) return std::nullopt;
+
+    const uint64_t counter = static_cast<uint64_t>(std::time(nullptr) / 30);
+    std::vector<uint8_t> challenge(8);
+    uint64_t value = counter;
+    for (int i = 7; i >= 0; --i) {
+        challenge[static_cast<size_t>(i)] = static_cast<uint8_t>(value & 0xFFu);
+        value >>= 8;
+    }
+
+    const auto hmac = auth::Crypto::hmacSHA1(*key, challenge);
+    if (hmac.size() < 20) return std::nullopt;
+    const uint8_t offset = hmac[19] & 0x0Fu;
+    if (offset + 3 >= hmac.size()) return std::nullopt;
+    uint32_t truncated =
+        (static_cast<uint32_t>(hmac[offset]) << 24) |
+        (static_cast<uint32_t>(hmac[offset + 1]) << 16) |
+        (static_cast<uint32_t>(hmac[offset + 2]) << 8) |
+        static_cast<uint32_t>(hmac[offset + 3]);
+    truncated &= 0x7FFFFFFFu;
+
+    std::ostringstream out;
+    out << std::setw(6) << std::setfill('0') << (truncated % 1000000u);
+    return out.str();
+}
+
 std::optional<game::Race> raceFromString(std::string value);
 std::optional<game::Class> classFromString(std::string value);
 std::optional<game::Gender> genderFromString(std::string value);
@@ -202,18 +267,21 @@ Settings loadSettings(const std::string& path) {
     s.authPort = static_cast<uint16_t>(jsonValue<int>(authObj, "port", s.authPort));
     s.account = jsonValue<std::string>(authObj, "account", s.account);
     s.password = jsonValue<std::string>(authObj, "password", s.password);
+    s.pin = jsonValue<std::string>(authObj, "pin", s.pin);
+    s.totpSecret = jsonValue<std::string>(authObj, "totpSecret", s.totpSecret);
 
     const auto clientObj = doc.value("client", json::object());
     s.clientInfo.majorVersion = static_cast<uint8_t>(jsonValue<int>(clientObj, "major", 3));
     s.clientInfo.minorVersion = static_cast<uint8_t>(jsonValue<int>(clientObj, "minor", 3));
     s.clientInfo.patchVersion = static_cast<uint8_t>(jsonValue<int>(clientObj, "patch", 5));
     s.clientInfo.build = static_cast<uint16_t>(jsonValue<int>(clientObj, "build", 12340));
+    s.worldBuild = static_cast<uint16_t>(jsonValue<int>(clientObj, "worldBuild", s.clientInfo.build));
     s.clientInfo.protocolVersion = static_cast<uint8_t>(jsonValue<int>(clientObj, "protocol", 8));
     s.clientInfo.locale = jsonValue<std::string>(clientObj, "locale", "enUS");
     s.clientInfo.platform = jsonValue<std::string>(clientObj, "platform", "x86");
     s.clientInfo.os = jsonValue<std::string>(clientObj, "os", "Win");
     s.expansion = jsonValue<std::string>(clientObj, "expansion", detectExpansion(s.clientInfo.build));
-    s.clientInfo.legacyVanillaRealmList = (s.expansion == "classic");
+    s.clientInfo.legacyVanillaRealmList = (s.expansion == "classic" || s.expansion == "turtle");
 
     const auto realmObj = doc.value("realm", json::object());
     s.realmName = jsonValue<std::string>(realmObj, "name", "");
@@ -467,7 +535,17 @@ public:
             fail("Could not connect to auth server");
             return false;
         }
-        auth_.authenticate(settings_.account, settings_.password);
+        std::string authPin = settings_.pin;
+        if (authPin.empty() && !settings_.totpSecret.empty()) {
+            auto generated = generateTotpCode(settings_.totpSecret);
+            if (generated) {
+                authPin = *generated;
+            } else {
+                fail("Invalid auth.totpSecret; cannot generate PIN");
+                return false;
+            }
+        }
+        auth_.authenticate(settings_.account, settings_.password, authPin);
         return true;
     }
 
@@ -1360,7 +1438,7 @@ private:
         const uint32_t realmId = settings_.realmId != 0 ? settings_.realmId : realm.id;
         std::cout << "Connecting to realm " << realm.name << " at " << worldHost << ":" << worldPort << "\n";
         game_.connect(worldHost, worldPort, auth_.getSessionKey(), settings_.account,
-            settings_.clientInfo.build, realmId);
+            settings_.worldBuild, realmId);
     }
 
     void selectConfiguredCharacter() {

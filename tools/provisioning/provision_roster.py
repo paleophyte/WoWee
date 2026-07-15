@@ -52,11 +52,24 @@ SERVER_DEFAULTS = {
         "clientProtocol": 8,
         "gmlevel": 1,
     },
+    "turtle": {
+        "accountExpansion": 0,
+        "authPort": 3730,
+        "realm": "Turtle WoW Local",
+        "clientExpansion": "turtle",
+        "clientMajor": 1,
+        "clientMinor": 17,
+        "clientPatch": 2,
+        "clientBuild": 7199,
+        "clientWorldBuild": 5875,
+        "clientProtocol": 8,
+        "gmlevel": 0,
+    },
 }
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         doc = json.load(f)
     if not isinstance(doc, dict):
         raise ValueError("roster root must be a JSON object")
@@ -91,7 +104,7 @@ def scrub_command(cmd: list[str]) -> str:
             hide_next = False
             continue
         scrubbed.append(item)
-        if item in {"--password", "--soap-password", "--admin-pass"}:
+        if item in {"--password", "--soap-password", "--admin-pass", "--pin", "--totp-secret"}:
             hide_next = True
     return " ".join(scrubbed)
 
@@ -111,6 +124,8 @@ def account_command(
     expansion: int,
     gmlevel: int = 0,
     realm_id: int = -1,
+    pin: str = "",
+    totp_secret: str = "",
 ) -> list[str]:
     if args.account_mode == "ssh":
         cmd = [
@@ -123,11 +138,17 @@ def account_command(
             password,
             "--expansion",
             str(expansion),
+            "--gmlevel",
+            str(gmlevel),
+            "--realm-id",
+            str(realm_id),
         ]
-        if gmlevel > 0:
-            cmd.extend(["--gmlevel", str(gmlevel), "--realm-id", str(realm_id)])
         if args.env:
             cmd.extend(["--env", str(args.env)])
+        if pin:
+            cmd.extend(["--pin", pin])
+        if totp_secret:
+            cmd.extend(["--totp-secret", totp_secret])
         return cmd
 
     cmd = [
@@ -162,6 +183,8 @@ def character_command(
     character_doc: dict[str, Any],
     account: str,
     password: str,
+    pin: str = "",
+    totp_secret: str = "",
 ) -> list[str]:
     server_defaults = SERVER_DEFAULTS[server_type]
     settings = string_value(character_doc.get("settings"), string_value(account_doc.get("settings"), string_value(defaults.get("settings"))))
@@ -191,6 +214,12 @@ def character_command(
     client_minor = int(character_doc.get("clientMinor", account_doc.get("clientMinor", defaults.get("clientMinor", server_defaults["clientMinor"]))))
     client_patch = int(character_doc.get("clientPatch", account_doc.get("clientPatch", defaults.get("clientPatch", server_defaults["clientPatch"]))))
     client_build = int(character_doc.get("clientBuild", account_doc.get("clientBuild", defaults.get("clientBuild", server_defaults["clientBuild"]))))
+    client_world_build = int(
+        character_doc.get(
+            "clientWorldBuild",
+            account_doc.get("clientWorldBuild", defaults.get("clientWorldBuild", server_defaults.get("clientWorldBuild", client_build))),
+        )
+    )
     client_protocol = int(
         character_doc.get("clientProtocol", account_doc.get("clientProtocol", defaults.get("clientProtocol", server_defaults["clientProtocol"])))
     )
@@ -225,6 +254,8 @@ def character_command(
         str(client_patch),
         "--client-build",
         str(client_build),
+        "--client-world-build",
+        str(client_world_build),
         "--client-protocol",
         str(client_protocol),
         "--name",
@@ -236,6 +267,10 @@ def character_command(
         "--gender",
         gender,
     ]
+    if pin:
+        cmd.extend(["--pin", pin])
+    if totp_secret:
+        cmd.extend(["--totp-secret", totp_secret])
     if auth_host:
         cmd.extend(["--auth-host", auth_host])
 
@@ -283,6 +318,8 @@ def provision(args: argparse.Namespace) -> int:
             continue
         account = string_value(raw_account.get("account")).strip()
         password = string_value(raw_account.get("password"), string_value(defaults.get("accountPassword"))).strip()
+        pin = string_value(raw_account.get("pin"), string_value(defaults.get("pin"))).strip()
+        totp_secret = string_value(raw_account.get("totpSecret"), string_value(defaults.get("totpSecret"))).strip()
         server_type = args.server_type or string_value(raw_account.get("serverType"), string_value(defaults.get("serverType"), "cmangos"))
         if server_type not in SERVER_DEFAULTS:
             raise ValueError(f"{account or '<account>'}: unknown serverType {server_type!r}")
@@ -298,7 +335,7 @@ def provision(args: argparse.Namespace) -> int:
         create_character = bool_value(raw_account.get("createCharacter"), bool_value(defaults.get("createCharacter"), True))
 
         if create_account and not args.skip_accounts:
-            rc = run_step(account_command(args, server_type, account, password, expansion, gmlevel, realm_id), args.dry_run)
+            rc = run_step(account_command(args, server_type, account, password, expansion, gmlevel, realm_id, pin, totp_secret), args.dry_run)
             if rc != 0:
                 failures += 1
                 print(f"Account step failed for {account} with exit code {rc}", file=sys.stderr)
@@ -308,7 +345,19 @@ def provision(args: argparse.Namespace) -> int:
         if create_character and not args.skip_characters:
             for character in iter_characters(raw_account):
                 try:
-                    cmd = character_command(args, server_type, defaults, raw_account, character, account, password)
+                    character_pin = string_value(character.get("pin"), pin).strip()
+                    character_totp_secret = string_value(character.get("totpSecret"), totp_secret).strip()
+                    cmd = character_command(
+                        args,
+                        server_type,
+                        defaults,
+                        raw_account,
+                        character,
+                        account,
+                        password,
+                        character_pin,
+                        character_totp_secret,
+                    )
                 except Exception as exc:
                     failures += 1
                     print(f"Character step setup failed for {account}: {exc}", file=sys.stderr)

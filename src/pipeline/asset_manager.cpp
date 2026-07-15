@@ -44,6 +44,55 @@ size_t parseEnvCount(const char* name, size_t defValue) {
     }
     return static_cast<size_t>(n);
 }
+
+std::vector<uint8_t> readLooseFileExactOrCaseInsensitive(
+    const std::filesystem::path& dir,
+    const std::string& filename,
+    std::string* resolvedPath = nullptr) {
+    if (!std::filesystem::is_directory(dir)) {
+        return {};
+    }
+
+    std::filesystem::path resolved = dir / filename;
+    if (!std::filesystem::exists(resolved)) {
+        std::string wantLower = filename;
+        std::transform(wantLower.begin(), wantLower.end(), wantLower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        resolved.clear();
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string gotLower = entry.path().filename().string();
+            std::transform(gotLower.begin(), gotLower.end(), gotLower.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            if (gotLower == wantLower) {
+                resolved = entry.path();
+                break;
+            }
+        }
+    }
+
+    if (resolved.empty() || !std::filesystem::exists(resolved)) {
+        return {};
+    }
+
+    std::ifstream f(resolved, std::ios::binary | std::ios::ate);
+    if (!f) {
+        return {};
+    }
+    auto size = f.tellg();
+    if (size <= 0) {
+        return {};
+    }
+
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(data.data()), size);
+    if (resolvedPath) {
+        *resolvedPath = resolved.string();
+    }
+    return data;
+}
 } // namespace
 
 AssetManager::AssetManager() = default;
@@ -194,9 +243,15 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
     // extraction produced manifest.json. Try the loose file directly at its expected
     // location before giving up, so a missing manifest entry doesn't silently mean
     // "file doesn't exist" when it plainly does.
-    std::string looseCandidate = normalizedPath;
-    std::replace(looseCandidate.begin(), looseCandidate.end(), '\\', '/');
-    looseCandidate = dataPath + "/" + looseCandidate;
+    std::string looseRelativePath = normalizedPath;
+    std::replace(looseRelativePath.begin(), looseRelativePath.end(), '\\', '/');
+    if (!expansionDataPath_.empty()) {
+        std::string expansionCandidate = expansionDataPath_ + "/" + looseRelativePath;
+        if (LooseFileReader::fileExists(expansionCandidate)) {
+            return expansionCandidate;
+        }
+    }
+    std::string looseCandidate = dataPath + "/" + looseRelativePath;
     if (LooseFileReader::fileExists(looseCandidate)) {
         return looseCandidate;
     }
@@ -356,9 +411,26 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
 
     std::vector<uint8_t> dbcData;
 
-    // Try binary DBC from extracted MPQs first (preferred source).
+    // Prefer expansion-scoped loose DBCs when present, but keep the root Data
+    // dataset as the default/fallback so existing upstream setups still work.
+    if (!expansionDataPath_.empty()) {
+        std::string resolved;
+        for (const auto& dir : {
+                 std::filesystem::path(expansionDataPath_) / "DBFilesClient",
+                 std::filesystem::path(expansionDataPath_) / "dbfilesclient",
+             }) {
+            dbcData = readLooseFileExactOrCaseInsensitive(dir, name, &resolved);
+            if (!dbcData.empty()) {
+                LOG_INFO("Loaded expansion-scoped DBC from: ", resolved,
+                         " (", dbcData.size(), " bytes)");
+                break;
+            }
+        }
+    }
+
+    // Try binary DBC from the default extracted MPQs next.
     std::string dbcPath = "DBFilesClient\\" + name;
-    {
+    if (dbcData.empty()) {
         dbcData = readFile(dbcPath);
     }
 
@@ -390,10 +462,12 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
     // Try Data/db/ directory (pre-extracted binary DBCs shared across expansions)
     if (dbcData.empty()) {
         // Expansion overlay first (e.g. Data/expansions/tbc/overlay/db/), then
-        // expansion db/, then shared Data/db/.
+        // expansion db/, then shared/default Data/db/.
         std::vector<std::string> dbDirs;
-        if (!expansionDataPath_.empty())
+        if (!expansionDataPath_.empty()) {
             dbDirs.push_back(expansionDataPath_ + "/overlay/db");
+            dbDirs.push_back(expansionDataPath_ + "/db");
+        }
         dbDirs.push_back(dataPath + "/db");
         dbDirs.push_back(dataPath + "/../../db");
         dbDirs.push_back("Data/db");
@@ -509,11 +583,46 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     auto it = dbcCache.find(name);
     if (it != dbcCache.end()) return it->second;
 
-    // Try binary DBC
+    // Try expansion-scoped loose DBCs first, then default/root Data.
     std::vector<uint8_t> dbcData;
-    {
+    if (!expansionDataPath_.empty()) {
+        std::string resolved;
+        for (const auto& dir : {
+                 std::filesystem::path(expansionDataPath_) / "DBFilesClient",
+                 std::filesystem::path(expansionDataPath_) / "dbfilesclient",
+             }) {
+            dbcData = readLooseFileExactOrCaseInsensitive(dir, name, &resolved);
+            if (!dbcData.empty()) {
+                LOG_INFO("Loaded expansion-scoped optional DBC from: ", resolved,
+                         " (", dbcData.size(), " bytes)");
+                break;
+            }
+        }
+    }
+    if (dbcData.empty()) {
         std::string dbcPath = "DBFilesClient\\" + name;
         dbcData = readFile(dbcPath);
+    }
+
+    if (dbcData.empty()) {
+        std::vector<std::string> dbDirs;
+        if (!expansionDataPath_.empty()) {
+            dbDirs.push_back(expansionDataPath_ + "/overlay/db");
+            dbDirs.push_back(expansionDataPath_ + "/db");
+        }
+        dbDirs.push_back(dataPath + "/db");
+        dbDirs.push_back(dataPath + "/../../db");
+        dbDirs.push_back("Data/db");
+
+        for (const auto& dir : dbDirs) {
+            std::string resolved;
+            dbcData = readLooseFileExactOrCaseInsensitive(dir, name, &resolved);
+            if (!dbcData.empty()) {
+                LOG_INFO("Loaded optional binary DBC from: ", resolved,
+                         " (", dbcData.size(), " bytes)");
+                break;
+            }
+        }
     }
 
     // Fall back to expansion-specific CSV
@@ -566,7 +675,16 @@ bool AssetManager::fileExists(const std::string& path) const {
         return false;
     }
     std::string normalized = normalizePath(path);
-    return manifest_.hasEntry(normalized);
+    if (manifest_.hasEntry(normalized)) {
+        return true;
+    }
+    std::string looseRelativePath = normalized;
+    std::replace(looseRelativePath.begin(), looseRelativePath.end(), '\\', '/');
+    if (!expansionDataPath_.empty() &&
+        LooseFileReader::fileExists(expansionDataPath_ + "/" + looseRelativePath)) {
+        return true;
+    }
+    return LooseFileReader::fileExists(dataPath + "/" + looseRelativePath);
 }
 
 std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {

@@ -19,6 +19,7 @@ SERVER_SOAP_NAMESPACES = {
     "cmangos": "urn:MaNGOS",
     "azerothcore": "urn:AC",
     "vmangos": "urn:MaNGOS",
+    "turtle": "urn:MaNGOS",
 }
 
 

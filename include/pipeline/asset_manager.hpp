@@ -73,9 +73,9 @@ public:
     BLPImage loadTexture(const std::string& path);
 
     /**
-     * Set expansion-specific data path for CSV DBC lookup.
-     * When set, loadDBC() checks expansionDataPath/db/Name.csv before
-     * falling back to the manifest (binary DBC from extracted MPQs).
+     * Set expansion-specific data path for DBC lookup.
+     * When set, loadDBC() checks expansionDataPath/DBFilesClient and
+     * expansionDataPath/db before falling back to the default Data dataset.
      */
     void setExpansionDataPath(const std::string& path);
 
