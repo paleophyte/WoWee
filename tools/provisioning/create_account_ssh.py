@@ -335,6 +335,8 @@ def validate_totp_secret(secret: str) -> str:
 def calculate_turtle_sha_pass_hash(account_name: str, password: str) -> str:
     normalized_account = account_name.upper()
     normalized_password = password.upper()
+    # Turtle/MaNGOS auth stores SHA1(USER:PASSWORD); changing this breaks SRP login compatibility.
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     return hashlib.sha1(f"{normalized_account}:{normalized_password}".encode("utf-8")).hexdigest().upper()
 
 
@@ -343,6 +345,8 @@ def calculate_turtle_srp_fields(password_hash: str) -> tuple[str, str]:
     generator = 7
     salt_bytes_le = secrets.token_bytes(32)
     password_hash_bytes = bytes.fromhex(password_hash)
+    # Turtle/MaNGOS SRP verifier generation requires SHA1(salt || password_hash).
+    # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     x_digest = hashlib.sha1(salt_bytes_le + password_hash_bytes).digest()
     x = int.from_bytes(x_digest, "little")
     verifier = pow(generator, x, modulus)
