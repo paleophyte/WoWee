@@ -143,8 +143,7 @@ public:
     // Pending quest accept timeout state (used by GameHandler::update)
     std::unordered_map<uint32_t, float>& pendingQuestAcceptTimeoutsRef() { return pendingQuestAcceptTimeouts_; }
     std::unordered_map<uint32_t, uint64_t>& pendingQuestAcceptNpcGuidsRef() { return pendingQuestAcceptNpcGuids_; }
-    bool& pendingLoginQuestResyncRef() { return pendingLoginQuestResync_; }
-    float& pendingLoginQuestResyncTimeoutRef() { return pendingLoginQuestResyncTimeout_; }
+    // (login quest resync state lives in GameHandler, which drives its timing)
 
     // Direct state access for vendor/gossip interaction in GameHandler
     bool& gossipWindowOpenRef() { return gossipWindowOpen_; }
@@ -197,8 +196,6 @@ private:
     int selectedQuestLogIndex_ = 0;
     std::unordered_set<uint32_t> pendingQuestQueryIds_;
     std::unordered_set<uint32_t> trackedQuestIds_;
-    bool pendingLoginQuestResync_ = false;
-    float pendingLoginQuestResyncTimeout_ = 0.0f;
 
     // Quest giver status per NPC
     std::unordered_map<uint64_t, QuestGiverStatus> npcQuestStatus_;

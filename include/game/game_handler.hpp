@@ -3644,13 +3644,9 @@ private:
     bool resurrectRequestPending_ = false;
     bool selfResAvailable_ = false;  // SMSG_PRE_RESURRECT received — Reincarnation/Twisting Nether
     // ---- Talent wipe confirm dialog ----
-    bool talentWipePending_ = false;
-    uint64_t talentWipeNpcGuid_ = 0;
-    uint32_t talentWipeCost_ = 0;
+    // (talent wipe confirm state lives in SpellHandler)
     // ---- Pet talent respec confirm dialog ----
-    bool petUnlearnPending_ = false;
-    uint64_t petUnlearnGuid_ = 0;
-    uint32_t petUnlearnCost_ = 0;
+    // (pet unlearn confirm state lives in SpellHandler)
     bool resurrectIsSpiritHealer_ = false;  // true = SMSG_SPIRIT_HEALER_CONFIRM, false = SMSG_RESURRECT_REQUEST
     uint64_t resurrectCasterGuid_ = 0;
     std::string resurrectCasterName_;

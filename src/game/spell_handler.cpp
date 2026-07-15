@@ -346,6 +346,29 @@ void SpellHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_REMOVED_SPELL] = [this](network::Packet& packet) { handleRemovedSpell(packet); };
     table[Opcode::SMSG_SEND_UNLEARN_SPELLS] = [this](network::Packet& packet) { handleUnlearnSpells(packet); };
     table[Opcode::SMSG_TALENTS_INFO] = [this](network::Packet& packet) { handleTalentsInfo(packet); };
+    // Server asks the player to confirm a talent reset (guid + gold cost).
+    // Must be handled here: this handler owns the pending-wipe state that the
+    // confirm dialog reads.
+    table[Opcode::MSG_TALENT_WIPE_CONFIRM] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
+        talentWipeNpcGuid_ = packet.readUInt64();
+        talentWipeCost_    = packet.readUInt32();
+        talentWipePending_ = true;
+        LOG_INFO("MSG_TALENT_WIPE_CONFIRM: npc=0x", std::hex, talentWipeNpcGuid_, std::dec,
+                 " cost=", talentWipeCost_);
+        owner_.fireAddonEvent("CONFIRM_TALENT_WIPE", {std::to_string(talentWipeCost_)});
+    };
+    // SMSG_PET_UNLEARN_CONFIRM: uint64 petGuid + uint32 cost (copper). Handled
+    // here for the same reason — this handler owns the pending-unlearn state.
+    // The other pet opcodes have different formats and must NOT set unlearn state.
+    table[Opcode::SMSG_PET_UNLEARN_CONFIRM] = [this](network::Packet& packet) {
+        if (packet.hasRemaining(12)) {
+            petUnlearnGuid_ = packet.readUInt64();
+            petUnlearnCost_ = packet.readUInt32();
+            petUnlearnPending_ = true;
+        }
+        packet.skipAll();
+    };
     table[Opcode::SMSG_ACHIEVEMENT_EARNED] = [this](network::Packet& packet) {
         handleAchievementEarned(packet);
     };

@@ -1435,6 +1435,48 @@ void WindowManager::renderTrainerWindow(game::GameHandler& gameHandler,
                             ImGui::PopTextWrapPos();
                             ImGui::Spacing();
                         }
+                        // Recipes: show the full item the recipe creates and the
+                        // reagents it consumes, so the purchase is an informed one.
+                        auto seIt = gameHandler.spellNameCacheRef().find(spell->spellId);
+                        if (seIt != gameHandler.spellNameCacheRef().end()) {
+                            const auto& se = seIt->second;
+                            if (se.createdItemId != 0) {
+                                gameHandler.ensureItemInfo(se.createdItemId);
+                                const auto* prodInfo = gameHandler.getItemInfo(se.createdItemId);
+                                ImGui::Separator();
+                                ImGui::TextColored(kColorYellow, "Creates:");
+                                if (prodInfo && prodInfo->valid) {
+                                    ImGui::Indent(8.0f);
+                                    inventoryScreen.renderItemTooltip(*prodInfo, &gameHandler.getInventory());
+                                    ImGui::Unindent(8.0f);
+                                } else {
+                                    ImGui::Text("Item #%u", se.createdItemId);
+                                }
+                            }
+                            bool tooltipHasReagents = false;
+                            for (const auto& reagent : se.reagents) {
+                                if (reagent.itemId != 0) { tooltipHasReagents = true; break; }
+                            }
+                            if (tooltipHasReagents) {
+                                ImGui::Separator();
+                                ImGui::TextDisabled("Reagents:");
+                                for (const auto& reagent : se.reagents) {
+                                    if (reagent.itemId == 0 || reagent.count == 0) continue;
+                                    gameHandler.ensureItemInfo(reagent.itemId);
+                                    const auto* rInfo = gameHandler.getItemInfo(reagent.itemId);
+                                    uint32_t have = countItemInInventory(gameHandler.getInventory(), reagent.itemId);
+                                    ImVec4 haveCol = have >= reagent.count
+                                        ? colors::kLightGreen : ImVec4(1.0f, 0.6f, 0.6f, 1.0f);
+                                    if (rInfo && !rInfo->name.empty())
+                                        ImGui::TextColored(haveCol, "  %s (%u/%u)",
+                                            rInfo->name.c_str(), have, reagent.count);
+                                    else
+                                        ImGui::TextColored(haveCol, "  Item #%u (%u/%u)",
+                                            reagent.itemId, have, reagent.count);
+                                }
+                            }
+                            ImGui::Spacing();
+                        }
                         ImGui::TextDisabled("Status: %s", statusLabel);
                         if (spell->reqLevel > 0) {
                             ImVec4 lvlColor = levelMet ? ui::colors::kLightGray : kColorRed;

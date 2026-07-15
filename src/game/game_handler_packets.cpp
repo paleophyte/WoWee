@@ -902,14 +902,9 @@ void GameHandler::registerOpcodeHandlers() {
         addSystemChatMessage("New flight path discovered!");
     };
 
-    // Arena
-    dispatchTable_[Opcode::MSG_TALENT_WIPE_CONFIRM] = [this](network::Packet& packet) {
-        if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
-        talentWipeNpcGuid_ = packet.readUInt64();
-        talentWipeCost_    = packet.readUInt32();
-        talentWipePending_ = true;
-                    fireAddonEvent("CONFIRM_TALENT_WIPE", {std::to_string(talentWipeCost_)});
-    };
+    // (MSG_TALENT_WIPE_CONFIRM → registered by SpellHandler, which owns the
+    // pending-wipe state the confirm dialog reads. Handling it here wrote to
+    // dead duplicate members and the dialog never appeared.)
 
     // (SMSG_CHANNEL_LIST → moved to ChatHandler)
     // (SMSG_GROUP_SET_LEADER → moved to SocialHandler)
@@ -1942,16 +1937,9 @@ void GameHandler::registerOpcodeHandlers() {
         packet.skipAll();
     };
 
-    // SMSG_PET_UNLEARN_CONFIRM: uint64 petGuid + uint32 cost (copper).
-    // The other pet opcodes have different formats and must NOT set unlearn state.
-    dispatchTable_[Opcode::SMSG_PET_UNLEARN_CONFIRM] = [this](network::Packet& packet) {
-        if (packet.hasRemaining(12)) {
-            petUnlearnGuid_ = packet.readUInt64();
-            petUnlearnCost_ = packet.readUInt32();
-            petUnlearnPending_ = true;
-        }
-        packet.skipAll();
-    };
+    // (SMSG_PET_UNLEARN_CONFIRM → registered by SpellHandler, which owns the
+    // pending-unlearn state the confirm dialog reads. Handling it here wrote
+    // to dead duplicate members and the dialog never appeared.)
     // These pet opcodes have incompatible formats — just consume the packet.
     // Previously they shared the unlearn handler, which misinterpreted sound IDs
     // or GUID lists as unlearn costs and could trigger a bogus unlearn dialog.
