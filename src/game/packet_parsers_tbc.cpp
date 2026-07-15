@@ -1500,12 +1500,17 @@ static uint8_t translateTbcCastFailure(uint8_t tbcResult) {
 //
 // TBC format: spellId(u32) + result(u8) + castCount(u8).
 // ============================================================================
-bool TbcPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) {
+bool TbcPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                                       uint32_t& miscArg) {
     if (!packet.hasRemaining(5)) return false;
     spellId = packet.readUInt32();
     uint8_t tbcResult = packet.readUInt8();
     result = translateTbcCastFailure(tbcResult);
     if (packet.hasRemaining(1)) packet.readUInt8(); // castCount
+    // Requires-spell-focus failures append the SpellFocusObject id
+    miscArg = 0;
+    if (result == kCastResultRequiresSpellFocus && packet.hasRemaining(4))
+        miscArg = packet.readUInt32();
     LOG_DEBUG("[TBC] Cast result: spell=", spellId,
               " tbcResult=", static_cast<int>(tbcResult),
               " mappedResult=", static_cast<int>(result));
@@ -1524,6 +1529,9 @@ bool TbcPacketParsers::parseCastFailed(network::Packet& packet, CastFailedData& 
     uint8_t tbcResult = packet.readUInt8();
     data.result = translateTbcCastFailure(tbcResult);
     if (packet.hasRemaining(1)) data.castCount = packet.readUInt8();
+    // Requires-spell-focus failures append the SpellFocusObject id
+    if (data.result == kCastResultRequiresSpellFocus && packet.hasRemaining(4))
+        data.miscArg = packet.readUInt32();
     LOG_DEBUG("[TBC] Cast failed: spell=", data.spellId,
               " tbcResult=", static_cast<int>(tbcResult),
               " mappedResult=", static_cast<int>(data.result));

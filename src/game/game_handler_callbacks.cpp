@@ -2756,6 +2756,11 @@ const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
     return EMPTY_STRING;
 }
 
+const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
+    if (spellHandler_) return spellHandler_->getSpellFocusName(focusId);
+    return EMPTY_STRING;
+}
+
 std::string GameHandler::getEnchantName(uint32_t enchantId) const {
     if (spellHandler_) return spellHandler_->getEnchantName(enchantId);
     return {};

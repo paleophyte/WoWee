@@ -999,6 +999,9 @@ bool ClassicPacketParsers::parseCastFailed(network::Packet& packet, CastFailedDa
     // WotLK enum starts at 0=SUCCESS, 1=AFFECTING_COMBAT.
     // Shift +1 to align with WotLK result strings.
     data.result = vanillaResult + 1;
+    // Requires-spell-focus failures append the SpellFocusObject id
+    if (data.result == kCastResultRequiresSpellFocus && packet.hasRemaining(4))
+        data.miscArg = packet.readUInt32();
     LOG_DEBUG("[Classic] Cast failed: spell=", data.spellId, " vanillaResult=", static_cast<int>(vanillaResult));
     return true;
 }
@@ -1009,12 +1012,17 @@ bool ClassicPacketParsers::parseCastFailed(network::Packet& packet, CastFailedDa
 // Apply the same +1 shift used in parseCastFailed so the result codes
 // align with WotLK's getSpellCastResultString table.
 // ============================================================================
-bool ClassicPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) {
+bool ClassicPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                                           uint32_t& miscArg) {
     if (!packet.hasRemaining(5)) return false;
     spellId = packet.readUInt32();
     uint8_t vanillaResult = packet.readUInt8();
     // Shift +1: Vanilla result 0=AFFECTING_COMBAT maps to WotLK result 1=AFFECTING_COMBAT
     result = vanillaResult + 1;
+    // Requires-spell-focus failures append the SpellFocusObject id
+    miscArg = 0;
+    if (result == kCastResultRequiresSpellFocus && packet.hasRemaining(4))
+        miscArg = packet.readUInt32();
     LOG_DEBUG("[Classic] Cast result: spell=", spellId, " vanillaResult=", static_cast<int>(vanillaResult));
     return true;
 }

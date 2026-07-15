@@ -1522,6 +1522,7 @@ void GameScreen::saveSettings() {
     out << "extended_zoom=" << (settingsPanel_.pendingExtendedZoom ? 1 : 0) << "\n";
     out << "camera_stiffness=" << settingsPanel_.pendingCameraStiffness << "\n";
     out << "camera_pivot_height=" << settingsPanel_.pendingPivotHeight << "\n";
+    out << "camera_smooth_follow=" << (settingsPanel_.pendingSmoothCameraFollow ? 1 : 0) << "\n";
     out << "fov=" << settingsPanel_.pendingFov << "\n";
 
     // Quest tracker position/size
@@ -1714,6 +1715,7 @@ void GameScreen::loadSettings() {
             else if (key == "extended_zoom") settingsPanel_.pendingExtendedZoom = (std::stoi(val) != 0);
             else if (key == "camera_stiffness") settingsPanel_.pendingCameraStiffness = std::clamp(std::stof(val), 5.0f, 100.0f);
             else if (key == "camera_pivot_height") settingsPanel_.pendingPivotHeight = std::clamp(std::stof(val), 0.0f, 3.0f);
+            else if (key == "camera_smooth_follow") settingsPanel_.pendingSmoothCameraFollow = (std::stoi(val) != 0);
             else if (key == "fov") {
                 settingsPanel_.pendingFov = std::clamp(std::stof(val), 45.0f, 110.0f);
                 if (auto* renderer = services_.renderer) {

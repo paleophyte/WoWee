@@ -2168,6 +2168,9 @@ public:
     const std::string& getSpellRank(uint32_t spellId) const;
     /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
     const std::string& getSpellDescription(uint32_t spellId) const;
+    // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
+    // requires-spell-focus cast failures; empty if unknown.
+    const std::string& getSpellFocusName(uint32_t focusId) const;
     const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
     float getSpellDuration(uint32_t spellId) const;
     std::string getEnchantName(uint32_t enchantId) const;

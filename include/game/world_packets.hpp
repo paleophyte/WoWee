@@ -1859,10 +1859,16 @@ public:
 };
 
 /** SMSG_CAST_FAILED data */
+// Normalized (WotLK-numbered) SpellCastResult whose SMSG_CAST_RESULT /
+// SMSG_CAST_FAILED payload carries a trailing uint32 SpellFocusObject id
+// (forge, anvil, cooking fire, ...) that the client can surface.
+inline constexpr uint8_t kCastResultRequiresSpellFocus = 102;
+
 struct CastFailedData {
     uint8_t castCount = 0;
     uint32_t spellId = 0;
     uint8_t result = 0;
+    uint32_t miscArg = 0;  // SpellFocusObject id when result == kCastResultRequiresSpellFocus
 
     bool isValid() const { return spellId != 0; }
 };

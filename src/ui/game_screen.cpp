@@ -158,6 +158,7 @@ void GameScreen::applyCameraControlSettings() {
         cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
         cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
         cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
+        cam->setSmoothCameraFollow(settingsPanel_.pendingSmoothCameraFollow);
     }
 }
 

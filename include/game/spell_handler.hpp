@@ -82,6 +82,10 @@ public:
     // (e.g. Cooking → 185) with at least one known recipe, else 0.
     uint32_t tradeskillOpenerSkillLine(uint32_t spellId);
 
+    // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
+    // requires-spell-focus cast failures; empty if unknown.
+    const std::string& getSpellFocusName(uint32_t focusId);
+
     // Spell queue (400ms window)
     uint32_t getQueuedSpellId() const { return queuedSpellId_; }
     void cancelQueuedSpell() { queuedSpellId_ = 0; queuedSpellTarget_ = 0; }
@@ -359,6 +363,10 @@ private:
     // Crafting window
     bool craftingWindowOpen_ = false;
     uint32_t craftingSkillLine_ = 0;
+
+    // SpellFocusObject.dbc names, loaded lazily
+    std::unordered_map<uint32_t, std::string> spellFocusNames_;
+    bool spellFocusDbcLoaded_ = false;
 
     // Spell queue (400ms window)
     uint32_t queuedSpellId_ = 0;

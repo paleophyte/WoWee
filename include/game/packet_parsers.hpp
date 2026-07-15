@@ -136,13 +136,19 @@ public:
      *  WotLK: castCount(u8) + spellId(u32) + result(u8)
      *  TBC/Classic: spellId(u32) + result(u8)  (no castCount prefix).
      *  Classic/TBC result enums have no SUCCESS entry, so parsers shift +1.
+     *  miscArg receives the trailing SpellFocusObject id for
+     *  requires-spell-focus failures (0 otherwise).
      */
-    virtual bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) {
+    virtual bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                                 uint32_t& miscArg) {
         // WotLK default: skip castCount, read spellId + result
         if (packet.getSize() - packet.getReadPos() < 6) return false;
         packet.readUInt8();  // castCount
         spellId = packet.readUInt32();
         result  = packet.readUInt8();
+        miscArg = 0;
+        if (result == kCastResultRequiresSpellFocus && packet.hasRemaining(4))
+            miscArg = packet.readUInt32();
         return true;
     }
 
@@ -352,7 +358,8 @@ public:
     // TBC 2.4.3 SMSG_GOSSIP_MESSAGE quests lack questFlags(u32)+isRepeatable(u8) (WotLK added them)
     bool parseGossipMessage(network::Packet& packet, GossipMessageData& data) override;
     // TBC 2.4.3 SMSG_CAST_RESULT: spellId(u32) + result(u8) + castCount(u8)
-    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) override;
+    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                         uint32_t& miscArg) override;
     // TBC 2.4.3 SMSG_CAST_FAILED: spellId(u32) + result(u8) + castCount(u8)
     bool parseCastFailed(network::Packet& packet, CastFailedData& data) override;
     // TBC 2.4.3 SMSG_INITIAL_SPELLS: uint16 spellId + uint16 unk per entry.
@@ -436,7 +443,8 @@ public:
                                  uint64_t itemGuid, uint32_t spellId = 0,
                                  uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0) override;
     bool parseCastFailed(network::Packet& packet, CastFailedData& data) override;
-    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result) override;
+    bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
+                         uint32_t& miscArg) override;
     bool parseMessageChat(network::Packet& packet, MessageChatData& data) override;
     bool parseGameObjectQueryResponse(network::Packet& packet, GameObjectQueryResponseData& data) override;
     // Classic 1.12 SMSG_CREATURE_QUERY_RESPONSE lacks the iconName string that TBC/WotLK include

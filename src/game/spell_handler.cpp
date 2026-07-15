@@ -63,7 +63,7 @@ bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
 }
 
 std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
-                               uint8_t result, int powerType) {
+                               uint8_t result, int powerType, uint32_t miscArg = 0) {
     // Bandages use a hidden target aura to enforce the Recently Bandaged
     // lockout. Exposing the protocol label ("Target aurastate") gives the
     // player no actionable information.
@@ -72,6 +72,17 @@ std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
             return "Cannot use another bandage while Recently Bandaged is active.";
         if (result == 40 || result == 41)
             return "Bandaging was interrupted. Remain still until it finishes.";
+    }
+
+    // "Requires spell focus" means a crafting station object must be nearby.
+    // The packet names which one via its SpellFocusObject id — surface it.
+    if (result == kCastResultRequiresSpellFocus) {
+        if (miscArg != 0) {
+            const std::string& focusName = owner.getSpellFocusName(miscArg);
+            if (!focusName.empty())
+                return "Requires " + focusName + " nearby.";
+        }
+        return "You must be near the right crafting station (forge, anvil, cooking fire, ...).";
     }
 
     const char* reason = getSpellCastResultString(result, powerType);
@@ -1170,7 +1181,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (data.result == kSpellFailedNotReady) {
         seedCooldownFromSpellInfo(data.spellId);
     }
-    std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType);
+    std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
+                                            data.miscArg);
     if (gatherCast) {
         errMsg = gatherCastFailureMessage(data.result, errMsg);
         if (shouldDespawnGatherTarget(data.result)) {
@@ -2353,6 +2365,30 @@ void SpellHandler::loadSkillLineAbilityDbc() {
     }
 }
 
+const std::string& SpellHandler::getSpellFocusName(uint32_t focusId) {
+    static const std::string kEmpty;
+    if (!spellFocusDbcLoaded_) {
+        spellFocusDbcLoaded_ = true;
+        auto* am = owner_.services().assetManager;
+        if (am && am->isInitialized()) {
+            auto dbc = am->loadDBC("SpellFocusObject.dbc");
+            // Layout is stable across expansions: ID(0) + Name locstring
+            // whose English text sits at field 1.
+            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
+                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                    uint32_t id = dbc->getUInt32(i, 0);
+                    std::string name = dbc->getString(i, 1);
+                    if (id != 0 && !name.empty())
+                        spellFocusNames_[id] = std::move(name);
+                }
+                LOG_INFO("Loaded ", spellFocusNames_.size(), " spell focus object names");
+            }
+        }
+    }
+    auto it = spellFocusNames_.find(focusId);
+    return it != spellFocusNames_.end() ? it->second : kEmpty;
+}
+
 uint32_t SpellHandler::tradeskillOpenerSkillLine(uint32_t spellId) {
     owner_.loadSpellNameCache();
     owner_.loadSkillLineDbc();
@@ -2718,7 +2754,9 @@ void SpellHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
 void SpellHandler::handleCastResult(network::Packet& packet) {
     uint32_t castResultSpellId = 0;
     uint8_t  castResult        = 0;
-    if (owner_.getPacketParsers()->parseCastResult(packet, castResultSpellId, castResult)) {
+    uint32_t castResultMiscArg = 0;
+    if (owner_.getPacketParsers()->parseCastResult(packet, castResultSpellId, castResult,
+                                                   castResultMiscArg)) {
         LOG_DEBUG("SMSG_CAST_RESULT: spellId=", castResultSpellId, " result=", static_cast<int>(castResult));
         if (castResult != 0) {
             const uint64_t gatherGoGuid = owner_.lastInteractedGoGuidRef();
@@ -2737,7 +2775,8 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                 seedCooldownFromSpellInfo(castResultSpellId);
             }
             std::string errMsg = castFailureMessage(owner_, castResultSpellId,
-                                                     castResult, playerPowerType);
+                                                     castResult, playerPowerType,
+                                                     castResultMiscArg);
             if (gatherCast) {
                 errMsg = gatherCastFailureMessage(castResult, errMsg);
                 if (shouldDespawnGatherTarget(castResult)) {

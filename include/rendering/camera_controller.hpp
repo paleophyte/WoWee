@@ -228,9 +228,15 @@ private:
     static constexpr float ZOOM_SMOOTH_SPEED = 15.0f;  // How fast zoom eases
     static constexpr float CAM_SMOOTH_SPEED_DEFAULT = 30.0f;
     float camSmoothSpeed_ = CAM_SMOOTH_SPEED_DEFAULT;  // User-configurable camera smoothing (higher = tighter)
+    // When true the camera keeps its exponential lerp even while actively
+    // dragging or keyboard-turning — the pre-snap "floaty follow" feel.
+    // When false (default), rotation input moves the camera 1:1.
+    bool smoothCameraFollow_ = false;
 public:
     void setCameraSmoothSpeed(float speed) { camSmoothSpeed_ = std::clamp(speed, 5.0f, 100.0f); }
     float getCameraSmoothSpeed() const { return camSmoothSpeed_; }
+    void setSmoothCameraFollow(bool smooth) { smoothCameraFollow_ = smooth; }
+    bool isSmoothCameraFollow() const { return smoothCameraFollow_; }
     void setPivotHeight(float h) { pivotHeight_ = std::clamp(h, 0.0f, 3.0f); }
     float getPivotHeight() const { return pivotHeight_; }
 private:

@@ -212,6 +212,17 @@ if (ImGui::SliderFloat("Camera Stiffness", &pendingCameraStiffness, 5.0f, 100.0f
     saveCallback();
 }
 ImGui::SetItemTooltip("Higher = tighter camera with less sway. Default: 30");
+if (ImGui::Checkbox("Smooth Camera Follow", &pendingSmoothCameraFollow)) {
+    if (renderer) {
+        if (auto* cameraController = renderer->getCameraController()) {
+            cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
+        }
+    }
+    saveCallback();
+}
+ImGui::SetItemTooltip("Camera keeps drifting toward its position even while turning,\n"
+                      "for a floaty, slightly detached follow. Off = turning moves the\n"
+                      "camera 1:1 with your input.");
 if (ImGui::SliderFloat("Camera Pivot Height", &pendingPivotHeight, 0.0f, 3.0f, "%.1f")) {
     if (renderer) {
         if (auto* cameraController = renderer->getCameraController()) {
@@ -345,6 +356,7 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     pendingMouseSensitivity = 0.2f;
     pendingInvertMouse = false;
     pendingExtendedZoom = false;
+    pendingSmoothCameraFollow = false;
     pendingUiOpacity = 65;
     pendingMinimapRotate = false;
     pendingMinimapSquare = false;
@@ -367,6 +379,7 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
             cameraController->setMouseSensitivity(pendingMouseSensitivity);
             cameraController->setInvertMouse(pendingInvertMouse);
             cameraController->setExtendedZoom(pendingExtendedZoom);
+            cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
         }
         if (auto* minimap = renderer->getMinimap()) {
             minimap->setRotateWithCamera(minimapRotate_);
@@ -692,6 +705,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                 cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
                 cameraController->setPivotHeight(pendingPivotHeight);
                 cameraController->setIdleOrbitEnabled(pendingIdleCameraOrbit);
+                cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
             }
         }
         pendingResIndex = 0;

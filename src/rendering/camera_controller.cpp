@@ -243,7 +243,8 @@ void CameraController::update(float deltaTime) {
             if (glm::dot(smoothedCamPos, smoothedCamPos) < 1e-4f) {
                 smoothedCamPos = actualCam;
             }
-            float camLerp = mouseButtonDown ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
+            float camLerp = (mouseButtonDown && !smoothCameraFollow_)
+                ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
             smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
             camera->setPosition(smoothedCamPos);
@@ -1658,7 +1659,8 @@ void CameraController::update(float deltaTime) {
             smoothedCamPos = actualCam;  // Initialize
         }
         bool activelyRotating = mouseButtonDown || nowTurnLeft || nowTurnRight;
-        float camLerp = activelyRotating ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
+        float camLerp = (activelyRotating && !smoothCameraFollow_)
+            ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
         smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
         // ===== Final floor clearance check =====
