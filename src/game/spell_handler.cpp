@@ -63,7 +63,8 @@ bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
 }
 
 std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
-                               uint8_t result, int powerType, uint32_t miscArg = 0) {
+                               uint8_t result, int powerType, uint32_t miscArg = 0,
+                               uint32_t miscArg2 = 0) {
     // Bandages use a hidden target aura to enforce the Recently Bandaged
     // lockout. Exposing the protocol label ("Target aurastate") gives the
     // player no actionable information.
@@ -83,6 +84,27 @@ std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
                 return "Requires " + focusName + " nearby.";
         }
         return "You must be near the right crafting station (forge, anvil, cooking fire, ...).";
+    }
+
+    // "Totems" / "Totem category" mean a required crafting tool is missing
+    // (blacksmith hammer, mining pick, ...). Name it from the packet's ids:
+    // TotemCategory.dbc entries for totem-category, item ids for totems.
+    if (result == kCastResultTotemCategory || result == kCastResultTotems) {
+        std::string tools;
+        for (uint32_t id : {miscArg, miscArg2}) {
+            if (id == 0) continue;
+            std::string name;
+            if (result == kCastResultTotemCategory) {
+                name = owner.getTotemCategoryName(id);
+            } else if (const auto* info = owner.getItemInfo(id); info && info->valid) {
+                name = info->name;
+            }
+            if (name.empty()) continue;
+            if (!tools.empty()) tools += " and ";
+            tools += name;
+        }
+        if (!tools.empty()) return "Requires " + tools + " in your inventory.";
+        return "Requires a crafting tool you don't have (blacksmith hammer, mining pick, ...).";
     }
 
     const char* reason = getSpellCastResultString(result, powerType);
@@ -1181,8 +1203,14 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     if (data.result == kSpellFailedNotReady) {
         seedCooldownFromSpellInfo(data.spellId);
     }
+    // Totem failures name tool item ids; request their info so a retry of the
+    // craft can show the tool's name even if it wasn't cached yet.
+    if (data.result == kCastResultTotems) {
+        if (data.miscArg != 0) owner_.ensureItemInfo(data.miscArg);
+        if (data.miscArg2 != 0) owner_.ensureItemInfo(data.miscArg2);
+    }
     std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
-                                            data.miscArg);
+                                            data.miscArg, data.miscArg2);
     if (gatherCast) {
         errMsg = gatherCastFailureMessage(data.result, errMsg);
         if (shouldDespawnGatherTarget(data.result)) {
@@ -2389,6 +2417,31 @@ const std::string& SpellHandler::getSpellFocusName(uint32_t focusId) {
     return it != spellFocusNames_.end() ? it->second : kEmpty;
 }
 
+const std::string& SpellHandler::getTotemCategoryName(uint32_t categoryId) {
+    static const std::string kEmpty;
+    if (!totemCategoryDbcLoaded_) {
+        totemCategoryDbcLoaded_ = true;
+        auto* am = owner_.services().assetManager;
+        if (am && am->isInitialized()) {
+            // TBC/WotLK only — absent in Vanilla, where totem failures carry
+            // item ids instead of category ids.
+            auto dbc = am->loadDBC("TotemCategory.dbc");
+            // ID(0) + Name locstring whose English text sits at field 1.
+            if (dbc && dbc->isLoaded() && dbc->getFieldCount() >= 2) {
+                for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                    uint32_t id = dbc->getUInt32(i, 0);
+                    std::string name = dbc->getString(i, 1);
+                    if (id != 0 && !name.empty())
+                        totemCategoryNames_[id] = std::move(name);
+                }
+                LOG_INFO("Loaded ", totemCategoryNames_.size(), " totem category names");
+            }
+        }
+    }
+    auto it = totemCategoryNames_.find(categoryId);
+    return it != totemCategoryNames_.end() ? it->second : kEmpty;
+}
+
 uint32_t SpellHandler::tradeskillOpenerSkillLine(uint32_t spellId) {
     owner_.loadSpellNameCache();
     owner_.loadSkillLineDbc();
@@ -2755,8 +2808,9 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
     uint32_t castResultSpellId = 0;
     uint8_t  castResult        = 0;
     uint32_t castResultMiscArg = 0;
+    uint32_t castResultMiscArg2 = 0;
     if (owner_.getPacketParsers()->parseCastResult(packet, castResultSpellId, castResult,
-                                                   castResultMiscArg)) {
+                                                   castResultMiscArg, castResultMiscArg2)) {
         LOG_DEBUG("SMSG_CAST_RESULT: spellId=", castResultSpellId, " result=", static_cast<int>(castResult));
         if (castResult != 0) {
             const uint64_t gatherGoGuid = owner_.lastInteractedGoGuidRef();
@@ -2774,9 +2828,15 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
             if (castResult == kSpellFailedNotReady) {
                 seedCooldownFromSpellInfo(castResultSpellId);
             }
+            // Totem failures name tool item ids; request their info so a retry
+            // of the craft can show the tool's name even if it wasn't cached.
+            if (castResult == kCastResultTotems) {
+                if (castResultMiscArg != 0) owner_.ensureItemInfo(castResultMiscArg);
+                if (castResultMiscArg2 != 0) owner_.ensureItemInfo(castResultMiscArg2);
+            }
             std::string errMsg = castFailureMessage(owner_, castResultSpellId,
                                                      castResult, playerPowerType,
-                                                     castResultMiscArg);
+                                                     castResultMiscArg, castResultMiscArg2);
             if (gatherCast) {
                 errMsg = gatherCastFailureMessage(castResult, errMsg);
                 if (shouldDespawnGatherTarget(castResult)) {

@@ -2171,6 +2171,9 @@ public:
     // SpellFocusObject.dbc name ("Anvil", "Cooking Fire", ...) for
     // requires-spell-focus cast failures; empty if unknown.
     const std::string& getSpellFocusName(uint32_t focusId) const;
+    // TotemCategory.dbc name ("Blacksmith Hammer", "Mining Pick", ...) for
+    // totem-category cast failures; empty if unknown.
+    const std::string& getTotemCategoryName(uint32_t categoryId) const;
     const int32_t* getSpellEffectBasePoints(uint32_t spellId) const;
     float getSpellDuration(uint32_t spellId) const;
     std::string getEnchantName(uint32_t enchantId) const;

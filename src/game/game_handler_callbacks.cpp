@@ -2761,6 +2761,11 @@ const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
     return EMPTY_STRING;
 }
 
+const std::string& GameHandler::getTotemCategoryName(uint32_t categoryId) const {
+    if (spellHandler_) return spellHandler_->getTotemCategoryName(categoryId);
+    return EMPTY_STRING;
+}
+
 std::string GameHandler::getEnchantName(uint32_t enchantId) const {
     if (spellHandler_) return spellHandler_->getEnchantName(enchantId);
     return {};

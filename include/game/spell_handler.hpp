@@ -86,6 +86,10 @@ public:
     // requires-spell-focus cast failures; empty if unknown.
     const std::string& getSpellFocusName(uint32_t focusId);
 
+    // TotemCategory.dbc name ("Blacksmith Hammer", "Mining Pick", ...) for
+    // totem-category cast failures; empty if unknown.
+    const std::string& getTotemCategoryName(uint32_t categoryId);
+
     // Spell queue (400ms window)
     uint32_t getQueuedSpellId() const { return queuedSpellId_; }
     void cancelQueuedSpell() { queuedSpellId_ = 0; queuedSpellTarget_ = 0; }
@@ -367,6 +371,10 @@ private:
     // SpellFocusObject.dbc names, loaded lazily
     std::unordered_map<uint32_t, std::string> spellFocusNames_;
     bool spellFocusDbcLoaded_ = false;
+
+    // TotemCategory.dbc names, loaded lazily
+    std::unordered_map<uint32_t, std::string> totemCategoryNames_;
+    bool totemCategoryDbcLoaded_ = false;
 
     // Spell queue (400ms window)
     uint32_t queuedSpellId_ = 0;
