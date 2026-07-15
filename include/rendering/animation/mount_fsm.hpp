@@ -112,6 +112,10 @@ private:
     MountState state_ = MountState::IDLE;
     MountAction action_ = MountAction::None;
     uint32_t actionPhase_ = 0;
+    // Animation the current action asked the renderer to play. One-shot anims
+    // are auto-switched to STAND by the renderer when they finish, so seeing a
+    // different anim than requested also means the action anim completed.
+    uint32_t actionAnimId_ = 0;
 
     MountAnimSet anims_;
     bool taxiFlight_ = false;
