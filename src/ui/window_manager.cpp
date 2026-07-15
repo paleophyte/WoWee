@@ -505,12 +505,12 @@ void WindowManager::renderQuestDetailsWindow(game::GameHandler& gameHandler,
             if (iconTex) {
                 ImGui::Image((void*)(intptr_t)iconTex, ImVec2(18, 18));
                 if (ImGui::IsItemHovered() && info && info->valid)
-                    inventoryScreen.renderItemTooltip(*info);
+                    inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
                 ImGui::SameLine();
             }
             ImGui::TextColored(nameCol, "  %s", label.c_str());
             if (ImGui::IsItemHovered() && info && info->valid)
-                inventoryScreen.renderItemTooltip(*info);
+                inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                 ImGui::GetIO().KeyShift && info && info->valid && !info->name.empty()) {
                 std::string link = buildItemChatLink(info->entry, info->quality, info->name);
@@ -719,13 +719,14 @@ void WindowManager::renderQuestOfferRewardWindow(game::GameHandler& gameHandler,
                 ImGui::EndTooltip();
                 return;
             }
-            inventoryScreen.renderItemTooltip(*info);
+            inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
         };
 
         if (!quest.choiceRewards.empty()) {
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::TextColored(ui::colors::kTooltipGold, "Choose a reward:");
+            ImGui::TextDisabled("Shift-click a reward to compare with equipped gear.");
 
             for (size_t i = 0; i < quest.choiceRewards.size(); ++i) {
                 const auto& item = quest.choiceRewards[i];
@@ -748,10 +749,10 @@ void WindowManager::renderQuestOfferRewardWindow(game::GameHandler& gameHandler,
                 }
                 ImGui::PushStyleColor(ImGuiCol_Text, qualityColor);
                 if (ImGui::Selectable(label.c_str(), selected, 0, ImVec2(0, 20))) {
-                    if (ImGui::GetIO().KeyShift && info && info->valid && !info->name.empty()) {
-                        std::string link = buildItemChatLink(info->entry, info->quality, info->name);
-                        chatPanel.insertChatLink(link);
-                    } else {
+                    // Shift is reserved for the equipped-item comparison tooltip.
+                    // Do not accidentally change the pending quest reward while
+                    // the player is comparing it.
+                    if (!ImGui::GetIO().KeyShift) {
                         selectedChoice = static_cast<int>(i);
                     }
                 }

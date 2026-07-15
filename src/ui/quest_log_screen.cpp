@@ -425,7 +425,7 @@ void QuestLogScreen::render(game::GameHandler& gameHandler, InventoryScreen& inv
                                 ImGui::Text("%s", name.c_str());
                             if (info && info->valid && ImGui::IsItemHovered()) {
                                 ImGui::BeginTooltip();
-                                invScreen.renderItemTooltip(*info);
+                                invScreen.renderItemTooltip(*info, &gameHandler.getInventory());
                                 ImGui::EndTooltip();
                             }
                         }
@@ -456,7 +456,7 @@ void QuestLogScreen::render(game::GameHandler& gameHandler, InventoryScreen& inv
                                 ImGui::Text("%s", name.c_str());
                             if (info && info->valid && ImGui::IsItemHovered()) {
                                 ImGui::BeginTooltip();
-                                invScreen.renderItemTooltip(*info);
+                                invScreen.renderItemTooltip(*info, &gameHandler.getInventory());
                                 ImGui::EndTooltip();
                             }
                         }
