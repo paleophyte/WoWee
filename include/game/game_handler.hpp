@@ -1550,11 +1550,22 @@ public:
     bool requestQuestQuery(uint32_t questId, bool force = false);
     bool isQuestTracked(uint32_t questId) const { return trackedQuestIds_.count(questId) > 0; }
     void setQuestTracked(uint32_t questId, bool tracked) {
-        if (tracked) trackedQuestIds_.insert(questId);
-        else trackedQuestIds_.erase(questId);
-        saveCharacterConfig();
+        const bool changed = tracked ? trackedQuestIds_.insert(questId).second
+                                     : trackedQuestIds_.erase(questId) > 0;
+        if (changed) saveCharacterConfig();
     }
     const std::unordered_set<uint32_t>& getTrackedQuestIds() const;
+    bool isQuestShownOnMap(uint32_t questId) const {
+        return mapVisibleQuestIds_.count(questId) > 0;
+    }
+    void setQuestShownOnMap(uint32_t questId, bool shown) {
+        const bool changed = shown ? mapVisibleQuestIds_.insert(questId).second
+                                   : mapVisibleQuestIds_.erase(questId) > 0;
+        if (changed) saveCharacterConfig();
+    }
+    const std::unordered_set<uint32_t>& getMapVisibleQuestIds() const {
+        return mapVisibleQuestIds_;
+    }
     bool isQuestQueryPending(uint32_t questId) const {
         return pendingQuestQueryIds_.count(questId) > 0;
     }
@@ -3293,6 +3304,7 @@ private:
     int selectedQuestLogIndex_ = 0;
     std::unordered_set<uint32_t> pendingQuestQueryIds_;
     std::unordered_set<uint32_t> trackedQuestIds_;
+    std::unordered_set<uint32_t> mapVisibleQuestIds_;
     bool pendingLoginQuestResync_ = false;
     float pendingLoginQuestResyncTimeout_ = 0.0f;
 
@@ -3430,8 +3442,9 @@ private:
     mutable bool areaNameCacheLoaded_ = false;
     void loadAreaNameCache() const;
 
-    // Map name cache (lazy-loaded from Map.dbc; maps mapId → localized display name)
+    // Map metadata cache (lazy-loaded from Map.dbc).
     mutable std::unordered_map<uint32_t, std::string> mapNameCache_;
+    mutable std::unordered_map<uint32_t, uint32_t> mapInstanceTypeCache_;
     mutable bool mapNameCacheLoaded_ = false;
     void loadMapNameCache() const;
 

@@ -932,20 +932,10 @@ void InventoryHandler::handleLootRemoved(network::Packet& packet) {
     uint8_t slotIndex = packet.readUInt8();
     for (auto it = currentLoot_.items.begin(); it != currentLoot_.items.end(); ++it) {
         if (it->slotIndex == slotIndex) {
-            std::string itemName = "item #" + std::to_string(it->itemId);
-            uint32_t quality = 1;
-            if (const ItemQueryResponseData* info = owner_.getItemInfo(it->itemId)) {
-                if (!info->name.empty()) itemName = info->name;
-                quality = info->quality;
-            }
-            std::string link = buildItemLink(it->itemId, quality, itemName);
-            std::string msgStr = "Looted: " + link;
-            if (it->count > 1) msgStr += " x" + std::to_string(it->count);
-            owner_.addSystemChatMessage(msgStr);
-            if (auto* ac = owner_.services().audioCoordinator) {
-                if (auto* sfx = ac->getUiSoundManager())
-                    sfx->playLootItem();
-            }
+            // SMSG_ITEM_PUSH_RESULT is the authoritative inventory receipt and
+            // emits the single "Received item" notification. Slot removal only
+            // updates the open loot window; announcing here duplicated chat and
+            // the loot sound for the same item.
             currentLoot_.items.erase(it);
             if (owner_.addonEventCallbackRef())
                 owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
@@ -2796,7 +2786,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
             if (it->itemId == data.entry) {
                 std::string itemName = data.name.empty() ? ("item #" + std::to_string(data.entry)) : data.name;
                 std::string link = buildItemLink(data.entry, data.quality, itemName);
-                std::string msg = "Received: " + link;
+                std::string msg = "Received item: " + link;
                 if (it->count > 1) msg += " x" + std::to_string(it->count);
                 owner_.addSystemChatMessage(msg);
                 if (auto* ac = owner_.services().audioCoordinator) {

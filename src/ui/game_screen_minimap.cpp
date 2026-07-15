@@ -95,11 +95,11 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
         signature ^= value;
         signature *= 1099511628211ull;
     };
-    const auto& tracked = gameHandler.getTrackedQuestIds();
-    mix(tracked.size());
+    const auto& mapVisible = gameHandler.getMapVisibleQuestIds();
+    mix(mapVisible.size());
     for (const auto& quest : gameHandler.getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
-            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+            !mapVisible.count(quest.questId)) continue;
         mix(quest.questId);
         for (const auto& objective : quest.killObjectives) {
             if (objective.required == 0) continue;
@@ -118,7 +118,7 @@ void GameScreen::refreshQuestObjectiveCache(game::GameHandler& gameHandler) {
     minimapQuestGameObjectEntries_.clear();
     for (const auto& quest : gameHandler.getQuestLog()) {
         if (quest.complete || quest.questId == 0 ||
-            (!tracked.empty() && !tracked.count(quest.questId))) continue;
+            !mapVisible.count(quest.questId)) continue;
         for (const auto& objective : quest.killObjectives) {
             if (objective.required == 0 || objective.npcOrGoId == 0) continue;
             const uint32_t entry = static_cast<uint32_t>(objective.npcOrGoId > 0
@@ -482,10 +482,10 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         // Build map of NPC entry → (quest title, current, required) for tooltips
         struct KillInfo { std::string questTitle; uint32_t current = 0; uint32_t required = 0; };
         std::unordered_map<uint32_t, KillInfo> killInfoMap;
-        const auto& trackedIds = gameHandler.getTrackedQuestIds();
+        const auto& mapVisibleIds = gameHandler.getMapVisibleQuestIds();
         for (const auto& quest : gameHandler.getQuestLog()) {
             if (quest.complete) continue;
-            if (!trackedIds.empty() && !trackedIds.count(quest.questId)) continue;
+            if (!mapVisibleIds.count(quest.questId)) continue;
             for (const auto& obj : quest.killObjectives) {
                 if (obj.npcOrGoId <= 0 || obj.required == 0) continue;
                 uint32_t npcEntry = static_cast<uint32_t>(obj.npcOrGoId);
@@ -543,6 +543,10 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
     // Gossip POI markers (quest / NPC navigation targets)
     for (const auto& poi : gameHandler.getGossipPois()) {
+        if (poi.questObjectiveIndex != -2 &&
+            !gameHandler.isQuestShownOnMap(poi.data)) {
+            continue;
+        }
         // Convert WoW canonical coords to render coords for minimap projection
         glm::vec3 poiRender = core::coords::canonicalToRender(glm::vec3(poi.x, poi.y, 0.0f));
         float sx = 0.0f, sy = 0.0f;
@@ -854,8 +858,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
     }
 
-    // Persistent coordinate display below the minimap
-    {
+    // Optional persistent coordinate display below the minimap.
+    if (settingsPanel_.showMinimapCoordinates_) {
         glm::vec3 playerCanon = core::coords::renderToCanonical(playerRender);
         char coordBuf[32];
         std::snprintf(coordBuf, sizeof(coordBuf), "%.1f, %.1f", playerCanon.x, playerCanon.y);
@@ -969,20 +973,19 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
 
         if (overMinimap) {
             ImGui::BeginTooltip();
-            // Compute the world coordinate under the mouse cursor
-            // Inverse of projectToMinimap: pixel offset → world offset in render space → canonical
-            float rxW = mdx / mapRadius * viewRadius;
-            float ryW = mdy / mapRadius * viewRadius;
-            // Invert the minimap projection used above to recover render-space
-            // world coordinates under the mouse.
-            float hoverOldRx = -rxW;
-            float hoverRotX = hoverOldRx * cosB - ryW * sinB;
-            float hoverRotY = hoverOldRx * sinB + ryW * cosB;
-            float hoverDx = -hoverRotY;
-            float hoverDy =  hoverRotX;
-            glm::vec3 hoverRender(playerRender.x + hoverDx, playerRender.y + hoverDy, playerRender.z);
-            glm::vec3 hoverCanon = core::coords::renderToCanonical(hoverRender);
-            ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.5f, 1.0f), "%.1f, %.1f", hoverCanon.x, hoverCanon.y);
+            if (settingsPanel_.showMinimapCoordinates_) {
+                // Compute the world coordinate under the mouse cursor.
+                float rxW = mdx / mapRadius * viewRadius;
+                float ryW = mdy / mapRadius * viewRadius;
+                float hoverOldRx = -rxW;
+                float hoverRotX = hoverOldRx * cosB - ryW * sinB;
+                float hoverRotY = hoverOldRx * sinB + ryW * cosB;
+                float hoverDx = -hoverRotY;
+                float hoverDy =  hoverRotX;
+                glm::vec3 hoverRender(playerRender.x + hoverDx, playerRender.y + hoverDy, playerRender.z);
+                glm::vec3 hoverCanon = core::coords::renderToCanonical(hoverRender);
+                ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.5f, 1.0f), "%.1f, %.1f", hoverCanon.x, hoverCanon.y);
+            }
             ImGui::TextColored(colors::kMediumGray, "Ctrl+click to ping");
             ImGui::EndTooltip();
 
@@ -1177,8 +1180,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     }
     ImGui::End();
 
-    // Clock display at bottom-right of minimap (local time)
-    {
+    // Optional clock display at bottom-right of minimap (local time).
+    if (settingsPanel_.showMinimapClock_) {
         auto now = std::chrono::system_clock::now();
         auto tt  = std::chrono::system_clock::to_time_t(now);
         std::tm tmBuf{};
@@ -1445,6 +1448,8 @@ void GameScreen::saveSettings() {
     out << "minimap_rotate=" << (settingsPanel_.pendingMinimapRotate ? 1 : 0) << "\n";
     out << "minimap_square=" << (settingsPanel_.pendingMinimapSquare ? 1 : 0) << "\n";
     out << "minimap_npc_dots=" << (settingsPanel_.pendingMinimapNpcDots ? 1 : 0) << "\n";
+    out << "show_minimap_clock=" << (settingsPanel_.pendingShowMinimapClock ? 1 : 0) << "\n";
+    out << "show_minimap_coordinates=" << (settingsPanel_.pendingShowMinimapCoordinates ? 1 : 0) << "\n";
     out << "show_latency_meter=" << (settingsPanel_.pendingShowLatencyMeter ? 1 : 0) << "\n";
     out << "show_dps_meter=" << (settingsPanel_.showDPSMeter_ ? 1 : 0) << "\n";
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
@@ -1580,6 +1585,12 @@ void GameScreen::loadSettings() {
                 int v = std::stoi(val);
                 settingsPanel_.minimapNpcDots_ = (v != 0);
                 settingsPanel_.pendingMinimapNpcDots = settingsPanel_.minimapNpcDots_;
+            } else if (key == "show_minimap_clock") {
+                settingsPanel_.showMinimapClock_ = (std::stoi(val) != 0);
+                settingsPanel_.pendingShowMinimapClock = settingsPanel_.showMinimapClock_;
+            } else if (key == "show_minimap_coordinates") {
+                settingsPanel_.showMinimapCoordinates_ = (std::stoi(val) != 0);
+                settingsPanel_.pendingShowMinimapCoordinates = settingsPanel_.showMinimapCoordinates_;
             } else if (key == "show_latency_meter") {
                 settingsPanel_.showLatencyMeter_ = (std::stoi(val) != 0);
                 settingsPanel_.pendingShowLatencyMeter = settingsPanel_.showLatencyMeter_;

@@ -67,6 +67,8 @@ public:
     bool pendingMinimapRotate = false;
     bool pendingMinimapSquare = false;
     bool pendingMinimapNpcDots = false;
+    bool pendingShowMinimapClock = false;
+    bool pendingShowMinimapCoordinates = false;
     bool pendingShowLatencyMeter = true;
     bool pendingSeparateBags = true;
     bool pendingShowKeyring = true;
@@ -130,6 +132,8 @@ public:
     bool minimapRotate_ = false;
     bool minimapSquare_ = false;
     bool minimapNpcDots_ = false;
+    bool showMinimapClock_ = false;
+    bool showMinimapCoordinates_ = false;
     bool showLatencyMeter_ = true;           // Show server latency indicator
     bool minimapSettingsApplied_ = false;
     bool volumeSettingsApplied_ = false;  // True once saved volume settings applied to audio managers

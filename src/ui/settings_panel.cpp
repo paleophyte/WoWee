@@ -277,6 +277,14 @@ if (ImGui::Checkbox("Show Nearby NPC Dots", &pendingMinimapNpcDots)) {
     minimapNpcDots_ = pendingMinimapNpcDots;
     saveCallback();
 }
+if (ImGui::Checkbox("Show Minimap Clock", &pendingShowMinimapClock)) {
+    showMinimapClock_ = pendingShowMinimapClock;
+    saveCallback();
+}
+if (ImGui::Checkbox("Show Minimap Coordinates", &pendingShowMinimapCoordinates)) {
+    showMinimapCoordinates_ = pendingShowMinimapCoordinates;
+    saveCallback();
+}
 // Zoom controls
 ImGui::Text("Minimap Zoom:");
 ImGui::SameLine();
@@ -341,6 +349,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     pendingMinimapRotate = false;
     pendingMinimapSquare = false;
     pendingMinimapNpcDots = false;
+    pendingShowMinimapClock = false;
+    pendingShowMinimapCoordinates = false;
     pendingSeparateBags = true;
     inventoryScreen.setSeparateBags(true);
     pendingShowKeyring = true;
@@ -350,6 +360,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     minimapRotate_ = false;
     minimapSquare_ = false;
     minimapNpcDots_ = false;
+    showMinimapClock_ = false;
+    showMinimapCoordinates_ = false;
     if (renderer) {
         if (auto* cameraController = renderer->getCameraController()) {
             cameraController->setMouseSensitivity(pendingMouseSensitivity);
@@ -703,6 +715,8 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         pendingMinimapRotate = minimapRotate_;
         pendingMinimapSquare = minimapSquare_;
         pendingMinimapNpcDots = minimapNpcDots_;
+        pendingShowMinimapClock = showMinimapClock_;
+        pendingShowMinimapCoordinates = showMinimapCoordinates_;
         pendingShowLatencyMeter = showLatencyMeter_;
         if (renderer) {
             if (auto* minimap = renderer->getMinimap()) {

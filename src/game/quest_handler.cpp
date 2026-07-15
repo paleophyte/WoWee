@@ -502,6 +502,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
                             sfx->playQuestComplete();
                     }
                     questLog_.erase(it);
+                    owner_.setQuestTracked(questId, false);
+                    owner_.setQuestShownOnMap(questId, false);
                     LOG_INFO("  Removed quest ", questId, " from quest log");
                     if (owner_.addonEventCallbackRef())
                         owner_.addonEventCallbackRef()("QUEST_TURNED_IN", {std::to_string(questId)});
@@ -769,6 +771,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             removed = true;
         }
         if (removed) {
+            owner_.setQuestTracked(questId, false);
+            owner_.setQuestShownOnMap(questId, false);
             if (!removedTitle.empty()) {
                 owner_.addSystemChatMessage("Quest removed: " + removedTitle);
             } else {

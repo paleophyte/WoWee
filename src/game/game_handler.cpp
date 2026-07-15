@@ -1174,12 +1174,28 @@ void GameHandler::saveCharacterConfig() {
         out << "tracked_quests=" << ids << "\n";
     }
 
+    // Map visibility is independent from HUD tracking. An empty set means no
+    // quest objectives are shown on either map.
+    if (!mapVisibleQuestIds_.empty()) {
+        std::string ids;
+        for (uint32_t qid : mapVisibleQuestIds_) {
+            if (!ids.empty()) ids += ',';
+            ids += std::to_string(qid);
+        }
+        out << "map_visible_quests=" << ids << "\n";
+    }
+
     LOG_INFO("Character config saved to ", path);
 }
 
 void GameHandler::loadCharacterConfig() {
     const Character* ch = getActiveCharacter();
     if (!ch || ch->name.empty()) return;
+
+    // These selections are per-character. Clear the previous character's
+    // values even when the new character has no saved config yet.
+    trackedQuestIds_.clear();
+    mapVisibleQuestIds_.clear();
 
     std::string path = getCharacterConfigDir() + "/" + ch->name + ".cfg";
     std::ifstream in(path);
@@ -1227,9 +1243,12 @@ void GameHandler::loadCharacterConfig() {
                 }
                 macros_[macroId] = std::move(unescaped);
             }
-        } else if (key == "tracked_quests" && !val.empty()) {
-            // Parse comma-separated quest IDs
-            trackedQuestIds_.clear();
+        } else if ((key == "tracked_quests" || key == "map_visible_quests") &&
+                   !val.empty()) {
+            // Parse comma-separated quest IDs into the appropriate selection.
+            auto& destination = key == "tracked_quests"
+                ? trackedQuestIds_ : mapVisibleQuestIds_;
+            destination.clear();
             size_t tqPos = 0;
             while (tqPos <= val.size()) {
                 size_t comma = val.find(',', tqPos);
@@ -1237,7 +1256,7 @@ void GameHandler::loadCharacterConfig() {
                     ? val.substr(tqPos, comma - tqPos) : val.substr(tqPos);
                 try {
                     uint32_t qid = static_cast<uint32_t>(std::stoul(idStr));
-                    if (qid != 0) trackedQuestIds_.insert(qid);
+                    if (qid != 0) destination.insert(qid);
                 } catch (...) {}
                 if (comma == std::string::npos) break;
                 tqPos = comma + 1;
@@ -2122,6 +2141,7 @@ void GameHandler::loadMapNameCache() const {
     // 4=MapName_enUS (display name), fields 5+ = other locales
     for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
         uint32_t id = dbc->getUInt32(i, 0);
+        mapInstanceTypeCache_[id] = dbc->getUInt32(i, 2);
         std::string name = dbc->getString(i, 4);
         if (name.empty()) name = dbc->getString(i, 1); // internal name fallback
         if (!name.empty() && !mapNameCache_.count(id)) {
@@ -2377,7 +2397,13 @@ bool GameHandler::isInstanceHeroic() const {
 }
 
 bool GameHandler::isInInstance() const {
-    return socialHandler_ ? socialHandler_->isInInstance() : false;
+    // Difficulty packets advertise the player's preferred dungeon setting and
+    // are also sent in the open world, so they cannot establish instance
+    // presence. Map.dbc InstanceType is authoritative: 1=party, 2=raid.
+    loadMapNameCache();
+    auto it = mapInstanceTypeCache_.find(currentMapId_);
+    return it != mapInstanceTypeCache_.end() &&
+           (it->second == 1 || it->second == 2);
 }
 
 bool GameHandler::hasPendingDuelRequest() const {
@@ -2584,9 +2610,7 @@ const std::string& GameHandler::getSharedQuestTitle() const {
     return empty;
 }
 const std::unordered_set<uint32_t>& GameHandler::getTrackedQuestIds() const {
-    if (questHandler_) return questHandler_->getTrackedQuestIds();
-    static const std::unordered_set<uint32_t> empty;
-    return empty;
+    return trackedQuestIds_;
 }
 bool GameHandler::hasPendingSharedQuest() const {
     return questHandler_ ? questHandler_->hasPendingSharedQuest() : false;

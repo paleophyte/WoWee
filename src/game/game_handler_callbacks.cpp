@@ -2462,6 +2462,8 @@ void GameHandler::declineQuest() {
 
 void GameHandler::abandonQuest(uint32_t questId) {
     if (questHandler_) questHandler_->abandonQuest(questId);
+    setQuestTracked(questId, false);
+    setQuestShownOnMap(questId, false);
 }
 
 void GameHandler::shareQuestWithParty(uint32_t questId) {

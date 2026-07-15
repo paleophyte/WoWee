@@ -499,6 +499,12 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
         constexpr float kQuestGiverPoiMergeDistanceSq =
             kQuestGiverPoiMergeDistance * kQuestGiverPoiMergeDistance;
         for (const auto& poi : gameHandler.getGossipPois()) {
+            // Keep ordinary gossip navigation POIs, but only include quest
+            // objectives/endpoints explicitly enabled from the tracker.
+            if (poi.questObjectiveIndex != -2 &&
+                !gameHandler.isQuestShownOnMap(poi.data)) {
+                continue;
+            }
             bool duplicatesQuestGiver = false;
             for (const auto& existing : qpois) {
                 if (existing.kind == rendering::WorldMap::QuestPoi::Kind::OBJECTIVE) continue;
@@ -881,8 +887,16 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
         for (int i = 0; i < static_cast<int>(toShow.size()); ++i) {
             const auto& q = *toShow[i];
 
-            // Clickable quest title — opens quest log; small [x] button untracks
+            // Per-quest map checkbox + clickable title + small [x] untrack button.
             ImGui::PushID(q.questId);
+            bool shownOnMap = gameHandler.isQuestShownOnMap(q.questId);
+            if (ImGui::Checkbox("##ShowOnMap", &shownOnMap)) {
+                gameHandler.setQuestShownOnMap(q.questId, shownOnMap);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Show this quest's objectives on the minimap and world map");
+            }
+            ImGui::SameLine();
             float untrackW = ImGui::CalcTextSize("x").x + ImGui::GetStyle().FramePadding.x * 2.0f;
             float titleW = ImGui::GetContentRegionAvail().x - untrackW -
                            ImGui::GetStyle().ItemSpacing.x;
@@ -909,6 +923,10 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
                 if (ImGui::MenuItem("Open in Quest Log")) {
                     questLogScreen.openAndSelectQuest(q.questId);
                 }
+                bool mapVisible = gameHandler.isQuestShownOnMap(q.questId);
+                if (ImGui::MenuItem("Show on Map", nullptr, mapVisible)) {
+                    gameHandler.setQuestShownOnMap(q.questId, !mapVisible);
+                }
                 bool tracked = gameHandler.isQuestTracked(q.questId);
                 if (tracked) {
                     if (ImGui::MenuItem("Stop Tracking")) {
@@ -928,7 +946,6 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
                     ImGui::Separator();
                     if (ImGui::MenuItem("Abandon Quest")) {
                         gameHandler.abandonQuest(q.questId);
-                        gameHandler.setQuestTracked(q.questId, false);
                     }
                 }
                 ImGui::EndPopup();
