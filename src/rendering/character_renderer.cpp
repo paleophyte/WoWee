@@ -3642,7 +3642,27 @@ bool CharacterRenderer::attachWeapon(uint32_t charInstanceId, uint32_t attachmen
     if (!texturePath.empty()) {
         VkTexture* texPtr = loadTexture(texturePath);
         if (texPtr != whiteTexture_.get()) {
-            setModelTexture(weaponModelId, 0, texPtr);
+            // Item models can keep an authored hilt texture in slot 0 and expose
+            // the DBC-selected skin through one or more replaceable slots:
+            // 2 = object skin, 3 = weapon blade, 4 = weapon handle.  Applying the
+            // skin to slot 0 alone leaves multi-material weapons with an untextured
+            // blade (notably Melris Malagan's sword).
+            bool appliedReplaceableSlot = false;
+            auto modelIt = models.find(weaponModelId);
+            if (modelIt != models.end()) {
+                const auto& textures = modelIt->second.data.textures;
+                for (uint32_t slot = 0; slot < textures.size(); ++slot) {
+                    const uint32_t type = textures[slot].type;
+                    if (type == 2 || type == 3 || type == 4) {
+                        setModelTexture(weaponModelId, slot, texPtr);
+                        appliedReplaceableSlot = true;
+                    }
+                }
+            }
+            // Older/simple item models commonly expose only one unnamed slot.
+            if (!appliedReplaceableSlot) {
+                setModelTexture(weaponModelId, 0, texPtr);
+            }
         }
     }
 
