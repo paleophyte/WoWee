@@ -207,7 +207,7 @@ glm::vec3 SpellVisualSystem::applyEffectHeightOffset(const glm::vec3& basePos, c
 }
 
 void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec3& worldPosition,
-                                                uint32_t castTimeMs) {
+                                                uint32_t castTimeMs, uint32_t attachInstanceId) {
     LOG_INFO("SpellVisual: playSpellVisualPrecast visualId=", visualId,
              " pos=(", worldPosition.x, ",", worldPosition.y, ",", worldPosition.z,
              ") castTimeMs=", castTimeMs);
@@ -227,7 +227,7 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
     auto pathIt = spellVisualPrecastPath_.find(visualId);
     if (pathIt == spellVisualPrecastPath_.end()) {
         // No precast kit — fall back to playing cast kit
-        playSpellVisual(visualId, worldPosition, false);
+        playSpellVisual(visualId, worldPosition, false, attachInstanceId);
         return;
     }
 
@@ -259,7 +259,7 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
             LOG_WARNING("SpellVisual: could not read precast model: ", modelPath);
             spellVisualFailedModels_.insert(modelId);
             // Fall back to cast kit
-            playSpellVisual(visualId, worldPosition, false);
+            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
             return;
         }
         LOG_INFO("SpellVisual: precast M2 data read OK, size=", m2Data.size(), " bytes");
@@ -273,7 +273,7 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
         if (model.vertices.empty() && model.particleEmitters.empty()) {
             LOG_WARNING("SpellVisual: empty precast model: ", modelPath);
             spellVisualFailedModels_.insert(modelId);
-            playSpellVisual(visualId, worldPosition, false);
+            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
             return;
         }
         if (model.version >= 264) {
@@ -287,22 +287,24 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
         if (!m2Renderer_->loadModel(model, modelId)) {
             LOG_WARNING("SpellVisual: failed to load precast model to GPU: ", modelPath);
             spellVisualFailedModels_.insert(modelId);
-            playSpellVisual(visualId, worldPosition, false);
+            playSpellVisual(visualId, worldPosition, false, attachInstanceId);
             return;
         }
         m2Renderer_->markModelAsSpellEffect(modelId);
         LOG_INFO("SpellVisual: loaded precast model id=", modelId, " path=", modelPath);
     }
 
-    // Determine attachment point for bone tracking (hand/chest/head → follow character bones)
+    // Determine attachment point for bone tracking (hand/chest/head → follow
+    // the CASTER's bones; attachInstanceId=0 means a non-tracked caster, so
+    // the effect stays static at their world position).
     uint32_t attachId = classifyAttachmentId(modelPath);
+    if (attachInstanceId == 0) attachId = 0;
     glm::vec3 spawnPos = worldPosition;
     if (attachId != 0 && renderer_) {
         auto* charRenderer = renderer_->getCharacterRenderer();
-        uint32_t charInstId = renderer_->getCharacterInstanceId();
-        if (charRenderer && charInstId != 0) {
+        if (charRenderer) {
             glm::mat4 attachMat;
-            if (charRenderer->getAttachmentTransform(charInstId, attachId, attachMat)) {
+            if (charRenderer->getAttachmentTransform(attachInstanceId, attachId, attachMat)) {
                 spawnPos = glm::vec3(attachMat[3]);
             } else {
                 spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
@@ -336,33 +338,32 @@ void SpellVisualSystem::playSpellVisualPrecast(uint32_t visualId, const glm::vec
             ? std::clamp(animDurMs / 1000.0f, 0.5f, SPELL_VISUAL_MAX_DURATION)
             : SPELL_VISUAL_DEFAULT_DURATION;
     }
-    activeSpellVisuals_.push_back({instanceId, 0.0f, duration, true, attachId});
+    activeSpellVisuals_.push_back({instanceId, 0.0f, duration, true, attachId, attachInstanceId});
     LOG_INFO("SpellVisual: spawned precast visualId=", visualId, " instanceId=", instanceId,
              " duration=", duration, "s castTimeMs=", castTimeMs, " attach=", attachId,
              " model=", modelPath,
              " active=", activeSpellVisuals_.size());
 
-    // Hand effects: spawn a mirror copy on the left hand (attachment 2)
+    // Hand effects: spawn a mirror copy on the caster's left hand (attachment 2)
     if (attachId == 1 /* RightHand */) {
         glm::vec3 leftPos = worldPosition;
         if (renderer_) {
             auto* cr = renderer_->getCharacterRenderer();
-            uint32_t ci = renderer_->getCharacterInstanceId();
-            if (cr && ci != 0) {
+            if (cr) {
                 glm::mat4 lm;
-                if (cr->getAttachmentTransform(ci, 2, lm))
+                if (cr->getAttachmentTransform(attachInstanceId, 2, lm))
                     leftPos = glm::vec3(lm[3]);
             }
         }
         uint32_t leftId = m2Renderer_->createInstance(modelId, leftPos, glm::vec3(0.0f), 1.0f);
         if (leftId != 0) {
-            activeSpellVisuals_.push_back({leftId, 0.0f, duration, true, 2 /* LeftHand */});
+            activeSpellVisuals_.push_back({leftId, 0.0f, duration, true, 2 /* LeftHand */, attachInstanceId});
         }
     }
 }
 
 void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
-                                         bool useImpactKit) {
+                                         bool useImpactKit, uint32_t attachInstanceId) {
     LOG_INFO("SpellVisual: playSpellVisual visualId=", visualId, " impact=", useImpactKit,
              " pos=(", worldPosition.x, ",", worldPosition.y, ",", worldPosition.z, ")");
     if (!m2Renderer_ || visualId == 0) return;
@@ -441,18 +442,20 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
         LOG_INFO("SpellVisual: loaded model id=", modelId, " path=", modelPath);
     }
 
-    // Determine attachment point for bone tracking on cast effects at caster
+    // Determine attachment point for bone tracking on cast effects. Only the
+    // caster identified by attachInstanceId may be tracked — never default to
+    // the local player (that glued every nearby unit's cast kit to the
+    // player's hands).
     uint32_t attachId = 0;
-    if (!useImpactKit) {
+    if (!useImpactKit && attachInstanceId != 0) {
         attachId = classifyAttachmentId(modelPath);
     }
     glm::vec3 spawnPos = worldPosition;
     if (attachId != 0 && renderer_) {
         auto* charRenderer = renderer_->getCharacterRenderer();
-        uint32_t charInstId = renderer_->getCharacterInstanceId();
-        if (charRenderer && charInstId != 0) {
+        if (charRenderer) {
             glm::mat4 attachMat;
-            if (charRenderer->getAttachmentTransform(charInstId, attachId, attachMat)) {
+            if (charRenderer->getAttachmentTransform(attachInstanceId, attachId, attachMat)) {
                 spawnPos = glm::vec3(attachMat[3]);
             } else {
                 spawnPos = applyEffectHeightOffset(worldPosition, modelPath);
@@ -479,26 +482,25 @@ void SpellVisualSystem::playSpellVisual(uint32_t visualId, const glm::vec3& worl
     float duration = (animDurMs > 100.0f)
         ? std::clamp(animDurMs / 1000.0f, 0.5f, SPELL_VISUAL_MAX_DURATION)
         : SPELL_VISUAL_DEFAULT_DURATION;
-    activeSpellVisuals_.push_back({instanceId, 0.0f, duration, false, attachId});
+    activeSpellVisuals_.push_back({instanceId, 0.0f, duration, false, attachId, attachInstanceId});
     LOG_INFO("SpellVisual: spawned ", (useImpactKit ? "impact" : "cast"), " visualId=", visualId,
              " instanceId=", instanceId, " duration=", duration, "s animDurMs=", animDurMs,
              " attach=", attachId, " model=", modelPath, " active=", activeSpellVisuals_.size());
 
-    // Hand effects: spawn a mirror copy on the left hand (attachment 2)
+    // Hand effects: spawn a mirror copy on the caster's left hand (attachment 2)
     if (attachId == 1 /* RightHand */) {
         glm::vec3 leftPos = worldPosition;
         if (renderer_) {
             auto* cr = renderer_->getCharacterRenderer();
-            uint32_t ci = renderer_->getCharacterInstanceId();
-            if (cr && ci != 0) {
+            if (cr) {
                 glm::mat4 lm;
-                if (cr->getAttachmentTransform(ci, 2, lm))
+                if (cr->getAttachmentTransform(attachInstanceId, 2, lm))
                     leftPos = glm::vec3(lm[3]);
             }
         }
         uint32_t leftId = m2Renderer_->createInstance(modelId, leftPos, glm::vec3(0.0f), 1.0f);
         if (leftId != 0) {
-            activeSpellVisuals_.push_back({leftId, 0.0f, duration, false, 2 /* LeftHand */});
+            activeSpellVisuals_.push_back({leftId, 0.0f, duration, false, 2 /* LeftHand */, attachInstanceId});
         }
     }
 }
@@ -563,7 +565,6 @@ void SpellVisualSystem::update(float deltaTime) {
 
     // Get character bone tracking context (once per frame)
     CharacterRenderer* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    uint32_t charInstId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
 
     for (auto it = activeSpellVisuals_.begin(); it != activeSpellVisuals_.end(); ) {
         it->elapsed += deltaTime;
@@ -571,10 +572,11 @@ void SpellVisualSystem::update(float deltaTime) {
             m2Renderer_->removeInstance(it->instanceId);
             it = activeSpellVisuals_.erase(it);
         } else {
-            // Update position for bone-tracked effects (follow character hands/chest/head)
-            if (it->attachmentId != 0 && charRenderer && charInstId != 0) {
+            // Update position for bone-tracked effects — follow the CASTER's
+            // hands/chest/head, not the local player's.
+            if (it->attachmentId != 0 && it->attachInstanceId != 0 && charRenderer) {
                 glm::mat4 attachMat;
-                if (charRenderer->getAttachmentTransform(charInstId, it->attachmentId, attachMat)) {
+                if (charRenderer->getAttachmentTransform(it->attachInstanceId, it->attachmentId, attachMat)) {
                     glm::vec3 bonePos = glm::vec3(attachMat[3]);
                     m2Renderer_->setInstancePosition(it->instanceId, bonePos);
                 }
