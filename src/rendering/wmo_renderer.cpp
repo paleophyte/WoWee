@@ -413,6 +413,12 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
     modelData.boundingBoxMin = model.boundingBoxMin;
     modelData.boundingBoxMax = model.boundingBoxMax;
     modelData.wmoAmbientColor = model.ambientColor;
+    std::string lowerSourcePath = model.sourcePath;
+    std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
+    std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool isStormwindCityWmo =
+        lowerSourcePath.find("\\buildings\\stormwind\\stormwind.wmo") != std::string::npos;
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
         float horiz = std::max(ext.x, ext.y);
@@ -542,7 +548,13 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 isCityShell = (lower.find("city") == 0 && lower.size() <= 8);
             }
             bool isIndoor = (wmoGroup.flags & 0x2000) != 0;
-            if ((nVerts < 100 && isLargeWmo && !isIndoor) || (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) || (isFacade && isLargeWmo && !isIndoor) || (isCityShell && !isIndoor && isLargeWmo)) {
+            const bool isStormwindCathedralShell = isStormwindCityWmo && isLargeWmo &&
+                                                   isIndoor && (wmoGroup.flags & 0x80) != 0;
+            if ((nVerts < 100 && isLargeWmo && !isIndoor) ||
+                (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
+                (isFacade && isLargeWmo && !isIndoor) ||
+                (isCityShell && !isIndoor && isLargeWmo) ||
+                isStormwindCathedralShell) {
                 resources.isLOD = true;
             }
             modelData.groups.push_back(resources);
