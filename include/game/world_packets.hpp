@@ -2847,8 +2847,10 @@ public:
 /** SMSG_AUCTION_LIST_RESULT parser (shared for browse/owner/bidder) */
 class AuctionListResultParser {
 public:
-    // numEnchantSlots: Classic 1.12 = 1, TBC/WotLK = 6 (MAX_INSPECTED_ENCHANTMENT_SLOT)
-    static bool parse(network::Packet& packet, AuctionListResult& data, int numEnchantSlots = 6);
+    // numEnchantSlots (MAX_INSPECTED_ENCHANTMENT_SLOT): Classic 1.12 = 1
+    // (single enchantId, no duration/charges, no flags field), TBC = 6,
+    // WotLK = 7. Slot count selects the whole entry layout, not just the loop.
+    static bool parse(network::Packet& packet, AuctionListResult& data, int numEnchantSlots = 7);
 };
 
 /** SMSG_AUCTION_COMMAND_RESULT parser */
