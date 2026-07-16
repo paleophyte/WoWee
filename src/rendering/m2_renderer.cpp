@@ -122,13 +122,29 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
 
     for (const auto& instance : instances) {
         const M2ModelGPU* model = instance.cachedModel;
-        if (!model || (!model->isLanternLike && !model->isTorch)) continue;
+        if (!model || (!model->isLanternLike && !model->isTorch &&
+                       !model->isBrazierOrFire)) continue;
 
         for (const auto& batch : model->batches) {
             if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
 
-            const glm::vec3 worldPos = glm::vec3(
-                instance.modelMatrix * glm::vec4(batch.center, 1.0f));
+            glm::vec3 worldPos;
+            if (model->isGroundFire &&
+                !model->particleEmitters.empty()) {
+                worldPos = glm::vec3(std::numeric_limits<float>::max());
+                for (const auto& emitter : model->particleEmitters) {
+                    glm::mat4 boneXform(1.0f);
+                    if (emitter.bone < instance.boneMatrices.size()) {
+                        boneXform = instance.boneMatrices[emitter.bone];
+                    }
+                    const glm::vec3 emitterWorld = glm::vec3(
+                        instance.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
+                    if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
+                }
+            } else {
+                worldPos = glm::vec3(
+                    instance.modelMatrix * glm::vec4(batch.center, 1.0f));
+            }
             const glm::vec3 delta = worldPos - cameraPos;
             const float distSq = glm::dot(delta, delta);
             // Keep tunnel/interior fixtures resident well before their lit
@@ -1330,6 +1346,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isKoboldFlame               = cls.isKoboldFlame;
     gpuModel.isWaterfall                 = cls.isWaterfall;
     gpuModel.isBrazierOrFire             = cls.isBrazierOrFire;
+    gpuModel.isGroundFire                = cls.isGroundFire;
     gpuModel.isTorch                     = cls.isTorch;
     gpuModel.isSkyBird                   = cls.isSkyBird;
     gpuModel.ambientEmitterType          = cls.ambientEmitterType;
@@ -1652,9 +1669,16 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             const bool modelLanternFamily = gpuModel.isLanternLike;
             const bool torchGlowCard = gpuModel.isTorch &&
                 tcls.hasGlowToken && tcls.hasGlowCardToken;
+            // Fire pits and braziers commonly pair an authored flame mesh
+            // (for example FLAMELICKSMALL) with a separate flat GLOW32 card.
+            // Replace only that glow-textured card; retaining the flame mesh
+            // preserves the intended animated fire shape.
+            const bool fireGlowCard = gpuModel.isBrazierOrFire &&
+                tcls.hasGlowToken && tcls.hasGlowCardToken;
             bgpu.lanternGlowHint =
                 tcls.exactLanternGlowTex ||
                 torchGlowCard ||
+                fireGlowCard ||
                 ((tcls.hasGlowToken || (modelLanternFamily && tcls.hasFlameToken)) &&
                  (tcls.lanternFamily || modelLanternFamily) &&
                  (!tcls.likelyFlame || modelLanternFamily));
@@ -1718,6 +1742,15 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                         }
                     }
                     bgpu.glowSize = std::max(maxDist, 0.5f);
+                    // Upright fire glow cards are deliberately tall, so their
+                    // geometric center floats above a small ground fire. Keep
+                    // the radial halo near the fuel/flame base instead.
+                    if (fireGlowCard && gpuModel.isGroundFire) {
+                        // Ground-fire sprites follow a particle emitter and its
+                        // animated bone at render time. Origin is the fallback
+                        // for unusual fire models without an emitter.
+                        bgpu.center = glm::vec3(0.0f);
+                    }
                 }
             }
 

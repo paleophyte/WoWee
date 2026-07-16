@@ -1166,7 +1166,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
                     const bool shouldUseGlowSprite =
                         !koboldFlameCard &&
-                        (model.isElvenLike || ((model.isLanternLike || model.isTorch) && batch.lanternGlowHint)) &&
+                        (model.isElvenLike ||
+                         ((model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
+                          batch.lanternGlowHint)) &&
                         !model.isSpellEffect &&
                         smallCardLikeBatch &&
                         (batch.lanternGlowHint ||
@@ -1176,7 +1178,23 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         // Generate glow sprites for each instance in the group
                         for (size_t j = lodIdx; j < lodEnd; j++) {
                             auto& inst = instances[pending[j].instanceIdx];
-                            glm::vec3 worldPos = glm::vec3(inst.modelMatrix * glm::vec4(batch.center, 1.0f));
+                            glm::vec3 worldPos;
+                            if (model.isGroundFire &&
+                                !model.particleEmitters.empty()) {
+                                worldPos = glm::vec3(std::numeric_limits<float>::max());
+                                for (const auto& emitter : model.particleEmitters) {
+                                    glm::mat4 boneXform(1.0f);
+                                    if (emitter.bone < inst.boneMatrices.size()) {
+                                        boneXform = inst.boneMatrices[emitter.bone];
+                                    }
+                                    const glm::vec3 emitterWorld = glm::vec3(
+                                        inst.modelMatrix * boneXform * glm::vec4(emitter.position, 1.0f));
+                                    if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
+                                }
+                            } else {
+                                worldPos = glm::vec3(inst.modelMatrix *
+                                                     glm::vec4(batch.center, 1.0f));
+                            }
                             GlowSprite gs;
                             gs.worldPos = worldPos;
                             if (batch.glowTint == 1 || model.isElvenLike)
@@ -1198,7 +1216,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                         const bool cardLikeSkipMesh =
                             batch.glowCardLike || (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
                         const bool lanternGlowCardSkip =
-                            (model.isLanternLike || model.isTorch) && batch.lanternGlowHint &&
+                            (model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
+                            batch.lanternGlowHint &&
                             smallCardLikeBatch && cardLikeSkipMesh;
                         if (lanternGlowCardSkip || (cardLikeSkipMesh && !model.isLanternLike))
                             continue;
@@ -1418,7 +1437,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 (batch.lanternGlowHint && batch.glowSize <= 6.0f);
             const bool shouldUseGlowSprite =
                 !koboldFlameCard &&
-                (model.isElvenLike || model.isLanternLike || model.isTorch) &&
+                (model.isElvenLike ||
+                 ((model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
+                  batch.lanternGlowHint)) &&
                 !model.isSpellEffect &&
                 smallCardLikeBatch &&
                 (batch.lanternGlowHint || (batch.blendMode >= 3) ||
@@ -1426,7 +1447,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             if (shouldUseGlowSprite) {
                 const bool cardLikeSkipMesh = batch.glowCardLike || (batch.blendMode >= 3) || batch.colorKeyBlack || batchUnlit;
                 const bool lanternGlowCardSkip =
-                    (model.isLanternLike || model.isTorch) &&
+                    (model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
                     batch.lanternGlowHint &&
                     smallCardLikeBatch &&
                     cardLikeSkipMesh;

@@ -87,6 +87,7 @@ struct M2ModelGPU {
     bool isFireflyEffect = false;   // Firefly/fireflies M2 (exempt from particle dampeners)
     bool isWaterfall = false;       // Waterfall model (ambient sound + splash particles)
     bool isBrazierOrFire = false;   // Brazier / campfire / bonfire model
+    bool isGroundFire = false;      // Ground fire whose halo follows its lowest flame emitter
     bool isTorch = false;           // Wall-mounted or standing torch
     AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
 
