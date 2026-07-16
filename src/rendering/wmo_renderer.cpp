@@ -1464,8 +1464,38 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             // from an interior group whose portals aren't in the frustum — hiding
             // the entire WMO.
             glm::vec3 localRealCam = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
-            if (findContainingGroup(model, localRealCam) < 0) {
+            int camGroup = findContainingGroup(model, localRealCam);
+            if (camGroup < 0) {
                 usePortalCulling = false;
+            } else {
+                // Entranceways and awnings: the best-fit AABB often claims an
+                // interior group while the camera is visually outside (interior
+                // boxes spill past the doorway). Only trust portal traversal
+                // when the camera group is interior-only — the same rule
+                // getVisibleGroupsViaPortals applies to the viewer position.
+                constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
+                constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
+                const uint32_t gFlags = model.groups[camGroup].groupFlags;
+                const bool isIndoor = (gFlags & WMO_GROUP_FLAG_INDOOR) != 0;
+                const bool isOutdoor = (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0;
+                if (!isIndoor || isOutdoor) {
+                    usePortalCulling = false;
+                } else {
+                    // Doorway thresholds sit inside both the interior box and
+                    // an outdoor street group's box — treat those as outdoors
+                    // too (second half of the viewer-side rule).
+                    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+                        if (static_cast<int>(gi) == camGroup) continue;
+                        const auto& g = model.groups[gi];
+                        if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
+                        if (localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
+                            localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
+                            localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z) {
+                            usePortalCulling = false;
+                            break;
+                        }
+                    }
+                }
             }
         }
         if (usePortalCulling) {
