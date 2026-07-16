@@ -3516,11 +3516,18 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
              " remaining=", instances.size() - 1,
              " override=", (void*)renderPassOverride_);
 
-    // Remove child attachments first (helmets/weapons), otherwise they leak as
-    // orphan render instances when the parent creature despawns.
+    // Remove child attachments first (helmets/weapons/enchant effects),
+    // otherwise they leak as orphan render instances when the parent creature
+    // despawns. Their models get a fresh id per attach, so unload those too
+    // once the instances are gone.
     auto attachments = it->second.weaponAttachments;
     for (const auto& wa : attachments) {
+        for (const auto& fx : wa.effects) removeInstance(fx.effectInstanceId);
         removeInstance(wa.weaponInstanceId);
+    }
+    for (const auto& wa : attachments) {
+        unloadModelIfUnused(wa.weaponModelId);
+        for (const auto& fx : wa.effects) unloadModelIfUnused(fx.effectModelId);
     }
 
     // Defer bone buffer destruction — in-flight command buffers may still
@@ -3797,14 +3804,32 @@ void CharacterRenderer::detachWeapon(uint32_t charInstanceId, uint32_t attachmen
 
     for (auto it = attachments.begin(); it != attachments.end(); ++it) {
         if (it->attachmentId == attachmentId) {
-            for (const auto& fx : it->effects) removeInstance(fx.effectInstanceId);
+            // Collect model ids before erasing the attachment, then unload the
+            // ones no instance still uses (each attach allocates a fresh id).
+            std::vector<uint32_t> modelIds;
+            modelIds.push_back(it->weaponModelId);
+            for (const auto& fx : it->effects) {
+                removeInstance(fx.effectInstanceId);
+                modelIds.push_back(fx.effectModelId);
+            }
             removeInstance(it->weaponInstanceId);
             attachments.erase(it);
+            for (uint32_t mid : modelIds) unloadModelIfUnused(mid);
             core::Logger::getInstance().info("Detached weapon from instance ", charInstanceId,
                 " attachment ", attachmentId);
             return;
         }
     }
+}
+
+void CharacterRenderer::unloadModelIfUnused(uint32_t modelId) {
+    auto modelIt = models.find(modelId);
+    if (modelIt == models.end()) return;
+    for (const auto& p : instances) {
+        if (p.second.modelId == modelId) return;
+    }
+    destroyModelGPU(modelIt->second, /*defer=*/true);
+    models.erase(modelIt);
 }
 
 bool CharacterRenderer::attachWeaponEffect(uint32_t charInstanceId, uint32_t attachmentId,

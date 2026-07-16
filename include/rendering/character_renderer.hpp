@@ -120,6 +120,20 @@ public:
     /** Detach a weapon from the given attachment point (drops its enchant effects too). */
     void detachWeapon(uint32_t charInstanceId, uint32_t attachmentId);
 
+    // Free a model's GPU buffers and map entry once no instance references it.
+    // For per-instance model ids (weapons/effects/player composites, which get
+    // a fresh id per attach or spawn) — without this every reload or despawn
+    // leaked the model. Do NOT call for displayId-keyed NPC models; those are
+    // cached across despawn/respawn on purpose. Buffers are destroyed via the
+    // frame-fence deferral path; shared textures stay in the cache.
+    void unloadModelIfUnused(uint32_t modelId);
+
+    // Model id an instance renders with (0 if the instance doesn't exist).
+    uint32_t getInstanceModelId(uint32_t instanceId) const {
+        auto it = instances.find(instanceId);
+        return it != instances.end() ? it->second.modelId : 0;
+    }
+
     /**
      * Attach an enchant visual to the weapon at the given attachment point.
      * visualSlot is the ItemVisuals.dbc slot (0-4), which selects the attachment

@@ -979,7 +979,12 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
     auto it = playerInstances_.find(guid);
     if (it == playerInstances_.end()) return;
-    renderer_->getCharacterRenderer()->removeInstance(it->second);
+    auto* charRenderer = renderer_->getCharacterRenderer();
+    // Player composites get a fresh model id per spawn (unlike displayId-keyed
+    // creature models, which stay cached), so free the model with the instance.
+    const uint32_t compositeModelId = charRenderer->getInstanceModelId(it->second);
+    charRenderer->removeInstance(it->second);
+    if (compositeModelId != 0) charRenderer->unloadModelIfUnused(compositeModelId);
     playerInstances_.erase(it);
     onlinePlayerAppearance_.erase(guid);
     pendingOnlinePlayerEquipment_.erase(guid);
