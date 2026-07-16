@@ -159,3 +159,109 @@ TEST_CASE("TBC mail list accepts overstated non-player sender size", "[mail][tbc
     CHECK(inbox[0].subject == "Auction successful");
     CHECK(packet.getRemainingSize() == 0);
 }
+
+// ============================================================
+// Auction list result parsing (SMSG_AUCTION_LIST_RESULT)
+// ============================================================
+
+namespace {
+
+// Mirrors the servers' BuildAuctionInfo: vmangos (1 slot, id only, no flags),
+// cmangos-tbc (6 id/duration/charges triplets + flags), AzerothCore
+// (7 triplets + flags).
+void writeAuctionEntry(wowee::network::Packet& p, uint32_t auctionId,
+                       int enchantSlots, bool vanillaLayout) {
+    p.writeUInt32(auctionId);
+    p.writeUInt32(2589);                     // itemEntry (Linen Cloth)
+    if (vanillaLayout) {
+        p.writeUInt32(7000 + auctionId);     // permanent enchant id only
+    } else {
+        for (int s = 0; s < enchantSlots; ++s) {
+            p.writeUInt32(s == 0 ? 7000 + auctionId : 0);  // enchant id
+            p.writeUInt32(0);                // enchant duration
+            p.writeUInt32(0);                // enchant charges
+        }
+    }
+    p.writeUInt32(0xFFFFFF85);               // randomPropertyId (negative suffix)
+    p.writeUInt32(11);                       // suffixFactor
+    p.writeUInt32(20);                       // stack count
+    p.writeUInt32(0);                        // spell charges
+    if (!vanillaLayout) p.writeUInt32(0);    // item flags
+    p.writeUInt64(0x0000000000000ABC);       // owner guid
+    p.writeUInt32(500);                      // start bid
+    p.writeUInt32(25);                       // min bid increment
+    p.writeUInt32(9000);                     // buyout
+    p.writeUInt32(172800000);                // time left ms
+    p.writeUInt64(0x0000000000000DEF);       // bidder guid
+    p.writeUInt32(525);                      // current bid
+}
+
+void checkAuctionEntry(const AuctionEntry& e, uint32_t auctionId) {
+    CHECK(e.auctionId == auctionId);
+    CHECK(e.itemEntry == 2589);
+    CHECK(e.enchantId == 7000 + auctionId);
+    CHECK(e.randomPropertyId == 0xFFFFFF85);
+    CHECK(e.suffixFactor == 11);
+    CHECK(e.stackCount == 20);
+    CHECK(e.ownerGuid == 0xABC);
+    CHECK(e.startBid == 500);
+    CHECK(e.minBidIncrement == 25);
+    CHECK(e.buyoutPrice == 9000);
+    CHECK(e.timeLeftMs == 172800000);
+    CHECK(e.bidderGuid == 0xDEF);
+    CHECK(e.currentBid == 525);
+}
+
+} // namespace
+
+TEST_CASE("WotLK auction list parses 7 enchant slots per entry", "[auction]") {
+    wowee::network::Packet packet;
+    packet.writeUInt32(2);
+    writeAuctionEntry(packet, 101, 7, false);
+    writeAuctionEntry(packet, 102, 7, false);
+    packet.writeUInt32(37);   // total count
+    packet.writeUInt32(300);  // search delay
+
+    AuctionListResult result;
+    REQUIRE(AuctionListResultParser::parse(packet, result, 7));
+    REQUIRE(result.auctions.size() == 2);
+    checkAuctionEntry(result.auctions[0], 101);
+    checkAuctionEntry(result.auctions[1], 102);
+    CHECK(result.totalCount == 37);
+    CHECK(result.searchDelay == 300);
+    CHECK(packet.getRemainingSize() == 0);
+}
+
+TEST_CASE("TBC auction list parses 6 enchant slots per entry", "[auction]") {
+    wowee::network::Packet packet;
+    packet.writeUInt32(2);
+    writeAuctionEntry(packet, 201, 6, false);
+    writeAuctionEntry(packet, 202, 6, false);
+    packet.writeUInt32(8);
+    packet.writeUInt32(300);
+
+    AuctionListResult result;
+    REQUIRE(AuctionListResultParser::parse(packet, result, 6));
+    REQUIRE(result.auctions.size() == 2);
+    checkAuctionEntry(result.auctions[0], 201);
+    checkAuctionEntry(result.auctions[1], 202);
+    CHECK(result.totalCount == 8);
+    CHECK(packet.getRemainingSize() == 0);
+}
+
+TEST_CASE("Vanilla auction list parses id-only enchant, no flags, no delay", "[auction]") {
+    wowee::network::Packet packet;
+    packet.writeUInt32(2);
+    writeAuctionEntry(packet, 301, 1, true);
+    writeAuctionEntry(packet, 302, 1, true);
+    packet.writeUInt32(5);  // total count — vanilla sends no search delay
+
+    AuctionListResult result;
+    REQUIRE(AuctionListResultParser::parse(packet, result, 1));
+    REQUIRE(result.auctions.size() == 2);
+    checkAuctionEntry(result.auctions[0], 301);
+    checkAuctionEntry(result.auctions[1], 302);
+    CHECK(result.totalCount == 5);
+    CHECK(result.searchDelay == 0);
+    CHECK(packet.getRemainingSize() == 0);
+}

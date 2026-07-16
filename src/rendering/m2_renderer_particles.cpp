@@ -597,7 +597,8 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             float alpha = std::min(interpFBlockFloat(em.particleAlpha, lifeRatio), 1.0f);
             float rawScale = interpFBlockFloat(em.particleScale, lifeRatio);
 
-            if (!gpu.isSpellEffect && !gpu.isFireflyEffect) {
+            if (!gpu.isSpellEffect && !gpu.isFireflyEffect && !gpu.isLanternLike &&
+                !gpu.isTorch && !gpu.isBrazierOrFire && !gpu.isKoboldFlame) {
                 color = glm::mix(color, glm::vec3(1.0f), 0.7f);
                 if (rawScale > 2.0f) alpha *= 0.02f;
                 if (cachedBlendType == 3 || cachedBlendType == 4) alpha *= 0.05f;

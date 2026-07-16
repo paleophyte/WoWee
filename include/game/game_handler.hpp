@@ -933,6 +933,15 @@ public:
     using NpcDeathCallback = std::function<void(uint64_t guid)>;
     void setNpcDeathCallback(NpcDeathCallback cb) { npcDeathCallback_ = std::move(cb); }
 
+    // Resolves a unit GUID to its CharacterRenderer instance id (0 = not
+    // rendered). Wired by AnimationCallbackHandler; used to bone-attach spell
+    // visuals to the actual caster instead of the local player.
+    using UnitRenderInstanceResolver = std::function<uint32_t(uint64_t guid)>;
+    void setUnitRenderInstanceResolver(UnitRenderInstanceResolver cb) { unitRenderInstanceResolver_ = std::move(cb); }
+    uint32_t resolveUnitRenderInstance(uint64_t guid) const {
+        return unitRenderInstanceResolver_ ? unitRenderInstanceResolver_(guid) : 0;
+    }
+
     using NpcAggroCallback = std::function<void(uint64_t guid, const glm::vec3& position)>;
     void setNpcAggroCallback(NpcAggroCallback cb) { npcAggroCallback_ = std::move(cb); }
 
@@ -3408,7 +3417,6 @@ private:
     AuctionListResult auctionOwnerResults_;
     AuctionListResult auctionBidderResults_;
     int auctionActiveTab_ = 0;  // 0=Browse, 1=Bids, 2=Auctions
-    float auctionSearchDelayTimer_ = 0.0f;
     // Last search params for re-query (pagination, auto-refresh after bid/buyout)
     struct AuctionSearchParams {
         std::string name;
@@ -3588,6 +3596,7 @@ private:
     void applyPackedKillCountsFromFields(QuestLogEntry& quest);
 
     NpcDeathCallback npcDeathCallback_;
+    UnitRenderInstanceResolver unitRenderInstanceResolver_;
     NpcAggroCallback npcAggroCallback_;
     NpcRespawnCallback npcRespawnCallback_;
     StandStateCallback standStateCallback_;

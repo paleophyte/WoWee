@@ -42,6 +42,7 @@ struct WeaponAttachment {
     uint16_t boneIndex;
     glm::vec3 offset;
     glm::mat4 localTransform{1.0f}; // sheath/hand orientation after attachment point
+    float sheathPush = 0.0f;   // smoothed outward push when the arm swings into the blade
     std::vector<WeaponEffectAttachment> effects;
 };
 

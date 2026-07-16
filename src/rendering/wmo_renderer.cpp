@@ -413,6 +413,12 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
     modelData.boundingBoxMin = model.boundingBoxMin;
     modelData.boundingBoxMax = model.boundingBoxMax;
     modelData.wmoAmbientColor = model.ambientColor;
+    std::string lowerSourcePath = model.sourcePath;
+    std::replace(lowerSourcePath.begin(), lowerSourcePath.end(), '/', '\\');
+    std::transform(lowerSourcePath.begin(), lowerSourcePath.end(), lowerSourcePath.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool isStormwindCityWmo =
+        lowerSourcePath.find("\\buildings\\stormwind\\stormwind.wmo") != std::string::npos;
     {
         glm::vec3 ext = model.boundingBoxMax - model.boundingBoxMin;
         float horiz = std::max(ext.x, ext.y);
@@ -542,7 +548,13 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 isCityShell = (lower.find("city") == 0 && lower.size() <= 8);
             }
             bool isIndoor = (wmoGroup.flags & 0x2000) != 0;
-            if ((nVerts < 100 && isLargeWmo && !isIndoor) || (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) || (isFacade && isLargeWmo && !isIndoor) || (isCityShell && !isIndoor && isLargeWmo)) {
+            const bool isStormwindCathedralShell = isStormwindCityWmo && isLargeWmo &&
+                                                   isIndoor && (wmoGroup.flags & 0x80) != 0;
+            if ((nVerts < 100 && isLargeWmo && !isIndoor) ||
+                (alwaysDraw && nVerts < 5000 && isLargeWmo && !isIndoor) ||
+                (isFacade && isLargeWmo && !isIndoor) ||
+                (isCityShell && !isIndoor && isLargeWmo) ||
+                isStormwindCathedralShell) {
                 resources.isLOD = true;
             }
             modelData.groups.push_back(resources);
@@ -563,11 +575,20 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             bool alphaTest;
             bool unlit;
             bool isWindow;
-            bool operator==(const BatchKey& o) const { return texPtr == o.texPtr && alphaTest == o.alphaTest && unlit == o.unlit && isWindow == o.isWindow; }
+            bool isEmissive;
+            bool operator==(const BatchKey& o) const {
+                return texPtr == o.texPtr && alphaTest == o.alphaTest &&
+                       unlit == o.unlit && isWindow == o.isWindow &&
+                       isEmissive == o.isEmissive;
+            }
         };
         struct BatchKeyHash {
             size_t operator()(const BatchKey& k) const {
-                return std::hash<uintptr_t>()(k.texPtr) ^ (std::hash<bool>()(k.alphaTest) << 1) ^ (std::hash<bool>()(k.unlit) << 2) ^ (std::hash<bool>()(k.isWindow) << 3);
+                return std::hash<uintptr_t>()(k.texPtr) ^
+                       (std::hash<bool>()(k.alphaTest) << 1) ^
+                       (std::hash<bool>()(k.unlit) << 2) ^
+                       (std::hash<bool>()(k.isWindow) << 3) ^
+                       (std::hash<bool>()(k.isEmissive) << 4);
             }
         };
         std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
@@ -613,6 +634,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             // distinguish actual glass from lamp post geometry.
             bool isWindow = false;
             bool isLava = false;
+            bool isEmissive = false;
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t ti = modelData.materialTextureIndices[batch.materialId];
                 if (ti < modelData.textureNames.size()) {
@@ -620,7 +642,9 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                     // Case-insensitive search for material types
                     std::string texNameLower = texName;
                     std::transform(texNameLower.begin(), texNameLower.end(), texNameLower.begin(), ::tolower);
-                    isWindow = (texNameLower.find("window") != std::string::npos ||
+                    isEmissive = texNameLower.find("stormwindlampglass.blp") != std::string::npos;
+                    isWindow = !isEmissive &&
+                               (texNameLower.find("window") != std::string::npos ||
                                 texNameLower.find("glass") != std::string::npos);
                     isLava = (texNameLower.find("lava") != std::string::npos ||
                               texNameLower.find("molten") != std::string::npos ||
@@ -628,7 +652,8 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 }
             }
 
-            BatchKey key{ reinterpret_cast<uintptr_t>(tex), alphaTest, unlit, isWindow };
+            BatchKey key{ reinterpret_cast<uintptr_t>(tex), alphaTest, unlit,
+                          isWindow, isEmissive };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
@@ -638,6 +663,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 mb.isTransparent = (blendMode >= 2);
                 mb.isWindow = isWindow;
                 mb.isLava = isLava;
+                mb.isEmissive = isEmissive;
                 // Look up normal/height map from texture cache
                 if (hasTexture && tex != whiteTexture_.get()) {
                     for (const auto& [cacheKey, cacheEntry] : textureCache) {
@@ -688,6 +714,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             matData.wmoAmbientR = modelData.wmoAmbientColor.r;
             matData.wmoAmbientG = modelData.wmoAmbientColor.g;
             matData.wmoAmbientB = modelData.wmoAmbientColor.b;
+            matData.emissive = mb.isEmissive ? 1 : 0;
             if (matBuf.info.pMappedData) {
                 memcpy(matBuf.info.pMappedData, &matData, sizeof(matData));
             }
@@ -1437,8 +1464,38 @@ void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const
             // from an interior group whose portals aren't in the frustum — hiding
             // the entire WMO.
             glm::vec3 localRealCam = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
-            if (findContainingGroup(model, localRealCam) < 0) {
+            int camGroup = findContainingGroup(model, localRealCam);
+            if (camGroup < 0) {
                 usePortalCulling = false;
+            } else {
+                // Entranceways and awnings: the best-fit AABB often claims an
+                // interior group while the camera is visually outside (interior
+                // boxes spill past the doorway). Only trust portal traversal
+                // when the camera group is interior-only — the same rule
+                // getVisibleGroupsViaPortals applies to the viewer position.
+                constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
+                constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
+                const uint32_t gFlags = model.groups[camGroup].groupFlags;
+                const bool isIndoor = (gFlags & WMO_GROUP_FLAG_INDOOR) != 0;
+                const bool isOutdoor = (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0;
+                if (!isIndoor || isOutdoor) {
+                    usePortalCulling = false;
+                } else {
+                    // Doorway thresholds sit inside both the interior box and
+                    // an outdoor street group's box — treat those as outdoors
+                    // too (second half of the viewer-side rule).
+                    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+                        if (static_cast<int>(gi) == camGroup) continue;
+                        const auto& g = model.groups[gi];
+                        if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
+                        if (localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
+                            localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
+                            localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z) {
+                            usePortalCulling = false;
+                            break;
+                        }
+                    }
+                }
             }
         }
         if (usePortalCulling) {
@@ -2197,13 +2254,33 @@ void WMORenderer::getVisibleGroupsViaPortals(const ModelData& model,
         }
     }
 
-    // BFS through portals from camera's group
+    // Exterior groups are never portal-culled. AABB containment misclassifies
+    // doorway/awning thresholds as indoors (interior boxes spill past the
+    // door and outdoor boxes don't always overlap them), and a wrong BFS
+    // start then hides the whole city. Portal traversal below only decides
+    // interior-only groups; streets and facades always draw (distance culling
+    // still bounds them).
+    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+        const uint32_t f = model.groups[gi].groupFlags;
+        if (!(f & WMO_GROUP_FLAG_INDOOR) || (f & WMO_GROUP_FLAG_OUTDOOR))
+            outVisibleGroups.insert(static_cast<uint32_t>(gi));
+    }
+
+    // BFS through portals from the viewer's group plus every always-visible
+    // exterior group, so interiors seen through open doors still draw even
+    // when the viewer's containing group was misclassified.
     std::vector<bool> visited(model.groups.size(), false);
     std::vector<uint32_t> queue;
     queue.reserve(model.groups.size());
     queue.push_back(static_cast<uint32_t>(cameraGroup));
     visited[cameraGroup] = true;
     outVisibleGroups.insert(static_cast<uint32_t>(cameraGroup));
+    for (uint32_t gi : outVisibleGroups) {
+        if (!visited[gi]) {
+            visited[gi] = true;
+            queue.push_back(gi);
+        }
+    }
 
     size_t queueIdx = 0;
     while (queueIdx < queue.size()) {

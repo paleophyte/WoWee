@@ -35,6 +35,10 @@ layout(set = 1, binding = 1) uniform WMOMaterial {
     float wmoAmbientR;
     float wmoAmbientG;
     float wmoAmbientB;
+    int emissive;
+    int padding0;
+    int padding1;
+    int padding2;
 };
 
 layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
@@ -203,7 +207,11 @@ void main() {
         shadow = mix(1.0, shadow, shadowParams.y);
     }
 
-    if (isLava != 0) {
+    if (emissive != 0) {
+        // Authored luminous glass must remain bright in direct sun and shadow.
+        // A small warm bias keeps low-valued texels from reading as dark glass.
+        result = texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015);
+    } else if (isLava != 0) {
         // Lava is self-luminous — bright emissive, no shadows
         result = texColor.rgb * 1.5;
     } else if (isInterior != 0) {

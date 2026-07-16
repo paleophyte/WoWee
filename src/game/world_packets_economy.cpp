@@ -555,12 +555,17 @@ network::Packet AuctionListBidderItemsPacket::build(
 }
 
 bool AuctionListResultParser::parse(network::Packet& packet, AuctionListResult& data, int numEnchantSlots) {
-    // Per-entry fixed size: auctionId(4) + itemEntry(4) + enchantSlots×3×4 +
-    //   randProp(4) + suffix(4) + stack(4) + charges(4) + flags(4) +
-    //   ownerGuid(8) + startBid(4) + outbid(4) + buyout(4) + expire(4) +
-    //   bidderGuid(8) + curBid(4)
-    // Classic: numEnchantSlots=1 → 72 bytes/entry
-    // TBC/WotLK: numEnchantSlots=6 → 132 bytes/entry
+    // Entry layout, verified against the servers' BuildAuctionInfo
+    // (vmangos / cmangos-tbc / AzerothCore):
+    //   auctionId(4) + itemEntry(4)
+    //   Vanilla (numEnchantSlots=1): enchantId(4) only — no duration/charges
+    //   TBC/WotLK: numEnchantSlots × [id(4)+duration(4)+charges(4)]
+    //     (TBC inspects 6 slots; WotLK 7 — PRISMATIC was added in 3.x)
+    //   randProp(4) + suffix(4) + stack(4) + spellCharges(4) +
+    //   flags(4, TBC/WotLK only) + ownerGuid(8) + startBid(4) + outbid(4) +
+    //   buyout(4) + expire(4) + bidderGuid(8) + curBid(4)
+    // → 64 bytes/entry vanilla, 136 TBC, 148 WotLK
+    const bool vanillaLayout = numEnchantSlots <= 1;
     if (!packet.hasRemaining(4)) return false;
 
     uint32_t count = packet.readUInt32();
@@ -574,27 +579,31 @@ bool AuctionListResultParser::parse(network::Packet& packet, AuctionListResult& 
     data.auctions.clear();
     data.auctions.reserve(count);
 
-    const size_t minPerEntry = static_cast<size_t>(8 + numEnchantSlots * 12 + 28 + 8 + 8);
+    const size_t minPerEntry = vanillaLayout
+        ? 64
+        : static_cast<size_t>(8 + numEnchantSlots * 12 + 20 + 8 + 16 + 8 + 4);
     for (uint32_t i = 0; i < count; ++i) {
         if (!packet.hasRemaining(minPerEntry)) break;
         AuctionEntry e;
         e.auctionId = packet.readUInt32();
         e.itemEntry = packet.readUInt32();
-        // First enchant slot always present
+        // Vanilla sends only the permanent enchant id; TBC/WotLK send
+        // id/duration/charges triplets for every inspected slot.
         e.enchantId = packet.readUInt32();
-        packet.readUInt32(); // enchant1 duration
-        packet.readUInt32(); // enchant1 charges
-        // Extra enchant slots for TBC/WotLK
-        for (int s = 1; s < numEnchantSlots; ++s) {
-            packet.readUInt32(); // enchant N id
-            packet.readUInt32(); // enchant N duration
-            packet.readUInt32(); // enchant N charges
+        if (!vanillaLayout) {
+            packet.readUInt32(); // enchant1 duration
+            packet.readUInt32(); // enchant1 charges
+            for (int s = 1; s < numEnchantSlots; ++s) {
+                packet.readUInt32(); // enchant N id
+                packet.readUInt32(); // enchant N duration
+                packet.readUInt32(); // enchant N charges
+            }
         }
         e.randomPropertyId = packet.readUInt32();
         e.suffixFactor     = packet.readUInt32();
         e.stackCount       = packet.readUInt32();
-        packet.readUInt32(); // item charges
-        packet.readUInt32(); // item flags (unused)
+        packet.readUInt32(); // item spell charges
+        if (!vanillaLayout) packet.readUInt32(); // item flags (server always writes 0)
         e.ownerGuid        = packet.readUInt64();
         e.startBid         = packet.readUInt32();
         e.minBidIncrement  = packet.readUInt32();
@@ -605,10 +614,10 @@ bool AuctionListResultParser::parse(network::Packet& packet, AuctionListResult& 
         data.auctions.push_back(e);
     }
 
-    if (packet.hasRemaining(8)) {
-        data.totalCount = packet.readUInt32();
-        data.searchDelay = packet.readUInt32();
-    }
+    // Trailer: totalCount everywhere; TBC/WotLK append a search-delay field
+    // (vanilla ends after totalCount, so read the two independently).
+    if (packet.hasRemaining(4)) data.totalCount = packet.readUInt32();
+    if (packet.hasRemaining(4)) data.searchDelay = packet.readUInt32();
     return true;
 }
 

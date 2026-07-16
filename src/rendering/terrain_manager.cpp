@@ -714,6 +714,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
             }
 
             if (!wmoModel.groups.empty()) {
+                wmoModel.sourcePath = wmoPath;
                 glm::vec3 pos = core::coords::adtToWorld(placement.position[0],
                                                        placement.position[1],
                                                        placement.position[2]);

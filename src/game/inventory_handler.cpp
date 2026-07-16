@@ -2346,7 +2346,9 @@ void InventoryHandler::handleAuctionHello(network::Packet& packet) {
 
 void InventoryHandler::handleAuctionListResult(network::Packet& packet) {
     AuctionListResult result;
-    const int enchantSlots = isClassicLikeExpansion() ? 1 : 6;
+    // Vanilla sends a single enchantId; TBC inspects 6 enchant slots per item,
+    // WotLK 7 (PRISMATIC_ENCHANTMENT_SLOT joined the inspected range in 3.x).
+    const int enchantSlots = isClassicLikeExpansion() ? 1 : (isPreWotlk() ? 6 : 7);
     if (!AuctionListResultParser::parse(packet, result, enchantSlots)) return;
 
     if (pendingAuctionTarget_ == AuctionResultTarget::OWNER) {

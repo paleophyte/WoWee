@@ -1225,7 +1225,7 @@ void GameHandler::setAuctionActiveTab(int tab) {
     else auctionActiveTab_ = tab;
 }
 float GameHandler::getAuctionSearchDelay() const {
-    return inventoryHandler_ ? inventoryHandler_->getAuctionSearchDelay() : auctionSearchDelayTimer_;
+    return inventoryHandler_ ? inventoryHandler_->getAuctionSearchDelay() : 0.0f;
 }
 
 // Trainer

@@ -26,13 +26,18 @@ public:
 
     // Spawn a spell visual at a world position.
     // useImpactKit=false → CastKit path; useImpactKit=true → ImpactKit path
+    // attachInstanceId: the CASTER's CharacterRenderer instance for hand/chest/
+    // head bone tracking (0 = static effect at worldPosition). Effects used to
+    // attach to the local player unconditionally, so every nearby unit's cast
+    // kit landed on the player's hands.
     void playSpellVisual(uint32_t visualId, const glm::vec3& worldPosition,
-                         bool useImpactKit = false);
+                         bool useImpactKit = false, uint32_t attachInstanceId = 0);
 
     // Spawn a precast visual effect at a world position.
     // castTimeMs: server cast time in milliseconds (0 = use anim duration).
+    // attachInstanceId: see playSpellVisual.
     void playSpellVisualPrecast(uint32_t visualId, const glm::vec3& worldPosition,
-                                uint32_t castTimeMs = 0);
+                                uint32_t castTimeMs = 0, uint32_t attachInstanceId = 0);
 
     // Launch a physical weapon projectile (arrow, bullet, or thrown item)
     // without invoking the spell visual pipeline.
@@ -61,6 +66,7 @@ private:
         float duration;  // per-instance lifetime in seconds (from M2 anim or default)
         bool isPrecast;  // true for precast effects (removed on cancel/interrupt)
         uint32_t attachmentId;  // character attachment point to track (0=none/static)
+        uint32_t attachInstanceId;  // CharacterRenderer instance the attachment belongs to
     };
 
     struct PhysicalProjectile {

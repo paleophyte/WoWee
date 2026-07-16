@@ -285,7 +285,8 @@ void SpellHandler::triggerCastVisual(uint32_t spellId, uint64_t casterGuid, uint
     glm::vec3 casterPos;
     if (!resolveUnitPosition(casterGuid, casterPos)) { LOG_DEBUG("SpellVisual: triggerCastVisual — cannot resolve caster position for guid=0x", std::hex, casterGuid, std::dec); return; }
     LOG_INFO("SpellVisual: triggerCastVisual visualId=", visualId, " pos=(", casterPos.x, ",", casterPos.y, ",", casterPos.z, ") castTimeMs=", castTimeMs);
-    svs->playSpellVisualPrecast(visualId, casterPos, castTimeMs);
+    svs->playSpellVisualPrecast(visualId, casterPos, castTimeMs,
+                                owner_.resolveUnitRenderInstance(casterGuid));
 }
 
 void SpellHandler::triggerImpactVisual(uint32_t spellId, uint64_t targetGuid) {
@@ -1612,7 +1613,8 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             if (resolveUnitPosition(data.casterUnit, casterPos)) {
                 if (auto* renderer = owner_.services().renderer) {
                     if (auto* svs = renderer->getSpellVisualSystem()) {
-                        svs->playSpellVisual(visualId, casterPos, /*useImpactKit=*/false);
+                        svs->playSpellVisual(visualId, casterPos, /*useImpactKit=*/false,
+                                             owner_.resolveUnitRenderInstance(data.casterUnit));
                     }
                 }
             }
@@ -3025,7 +3027,9 @@ void SpellHandler::handlePlaySpellVisual(network::Packet& packet) {
         glm::vec3 canonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
         spawnPos = core::coords::canonicalToRender(canonical);
     }
-    if (auto* sv = renderer->getSpellVisualSystem()) sv->playSpellVisual(visualId, spawnPos);
+    if (auto* sv = renderer->getSpellVisualSystem())
+        sv->playSpellVisual(visualId, spawnPos, /*useImpactKit=*/false,
+                            owner_.resolveUnitRenderInstance(casterGuid));
 }
 
 void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {

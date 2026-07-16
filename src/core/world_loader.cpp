@@ -45,15 +45,16 @@ namespace core {
 
 namespace {
 
-struct DeeprunPortalVisual {
+struct InstancePortalVisual {
     uint32_t mapId;
     glm::vec3 canonicalPos;
     float canonicalYaw;
+    float scale;
 };
 
-void spawnDeeprunPortalVisuals(uint32_t mapId,
-                               rendering::Renderer* renderer,
-                               pipeline::AssetManager* assetManager) {
+void spawnInstancePortalVisuals(uint32_t mapId,
+                                rendering::Renderer* renderer,
+                                pipeline::AssetManager* assetManager) {
     if (!renderer || !assetManager || !assetManager->isInitialized()) return;
     auto* m2Renderer = renderer->getM2Renderer();
     if (!m2Renderer) return;
@@ -61,14 +62,14 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
     static constexpr const char* kPortalPath =
         "World\\GENERIC\\ACTIVEDOODADS\\INSTANCEPORTAL\\InstancePortal.m2";
     static constexpr const char* kPortalModelName =
-        "World\\GENERIC\\ACTIVEDOODADS\\INSTANCEPORTAL\\InstancePortal.m2#deeprun-glow";
+        "World\\GENERIC\\ACTIVEDOODADS\\INSTANCEPORTAL\\InstancePortal.m2#world-entry-glow";
     static const uint32_t kPortalModelId =
         static_cast<uint32_t>(std::hash<std::string>{}(kPortalModelName));
 
     if (!m2Renderer->hasModel(kPortalModelId)) {
         auto m2Data = assetManager->readFile(kPortalPath);
         if (m2Data.empty()) {
-            LOG_WARNING("Deeprun portal visual unavailable: ", kPortalPath);
+            LOG_WARNING("Instance portal visual unavailable: ", kPortalPath);
             return;
         }
 
@@ -85,17 +86,17 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
         }
 
         if (!m2Renderer->loadModel(model, kPortalModelId)) {
-            LOG_WARNING("Failed to load Deeprun portal visual model: ", kPortalPath);
+            LOG_WARNING("Failed to load instance portal visual model: ", kPortalPath);
             return;
         }
         m2Renderer->markModelAsSpellEffect(kPortalModelId);
     }
 
-    static const DeeprunPortalVisual kPortals[] = {
+    static const InstancePortalVisual kPortals[] = {
         // Ironforge station -> Deeprun Tram
-        {0,   glm::vec3(-1330.46f, -4840.26f, 503.85f), 3.10f},
+        {0,   glm::vec3(-1330.46f, -4840.26f, 503.85f), 3.10f, 4.25f},
         // Deeprun Tram -> Ironforge station
-        {369, glm::vec3(10.50f, 76.03f, -2.30f),       3.12f},
+        {369, glm::vec3(10.50f, 76.03f, -2.30f),       3.12f, 4.25f},
         // Stormwind station -> Deeprun Tram. Coordinates from a live playthrough's
         // actual AreaTrigger 2173 fire: entrance trigger position on map 0, and the
         // canonical position the player actually landed at on map 369 after transfer
@@ -103,9 +104,14 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
         // to its own arrival point, since both tunnel ends have similar floor height).
         // Yaw reuses the Ironforge value as a starting point - Stormwind's entrance
         // faces a different direction, so this likely needs live tuning.
-        {0,   glm::vec3(514.03f, -8346.46f, 97.60f),   3.12f},
+        {0,   glm::vec3(514.03f, -8346.46f, 97.60f),   3.12f, 4.25f},
         // Deeprun Tram -> Stormwind station
-        {369, glm::vec3(2490.91f, 68.30f, -2.30f),     3.12f},
+        {369, glm::vec3(2490.91f, 68.30f, -2.30f),     3.12f, 4.25f},
+        // The Stockade exit. The WMO contains this InstancePortal doodad, but
+        // WMO-child matrix instances bypass the standalone portal presentation.
+        // Position and scale come from StormwindJail.wmo's authored doodad after
+        // applying the instance's 180-degree placement rotation.
+        {34,  glm::vec3(0.6882f, 45.7492f, -16.1133f), 0.0f, 1.36f},
     };
 
     for (const auto& portal : kPortals) {
@@ -113,13 +119,14 @@ void spawnDeeprunPortalVisuals(uint32_t mapId,
 
         glm::vec3 renderPos = core::coords::canonicalToRender(portal.canonicalPos);
         float renderYaw = portal.canonicalYaw + glm::radians(90.0f);
-        // Bumped from 2.75 - reported live as too small/subtle to read clearly as a
-        // portal effect ("aren't great, but they are something").
+        // Each entry keeps the scale appropriate to its authored doorway; the
+        // Deeprun entries are intentionally larger because their original effect
+        // was too subtle at station scale.
         uint32_t instanceId = m2Renderer->createInstance(
-            kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), 4.25f);
+            kPortalModelId, renderPos, glm::vec3(0.0f, 0.0f, renderYaw), portal.scale);
         if (instanceId) {
             m2Renderer->setSkipCollision(instanceId, true);
-            LOG_INFO("Spawned Deeprun portal visual map=", mapId,
+            LOG_INFO("Spawned instance portal visual map=", mapId,
                      " canonical=(", portal.canonicalPos.x, ", ",
                      portal.canonicalPos.y, ", ", portal.canonicalPos.z, ")");
         }
@@ -158,6 +165,7 @@ const char* WorldLoader::mapDisplayName(uint32_t mapId) {
         case 0: return "Eastern Kingdoms";
         case 1: return "Kalimdor";
         case 13: return "Test";
+        case 34: return "The Stockade";
         case 169: return "Emerald Dream";
         case 530: return "Outland";
         case 571: return "Northrend";
@@ -779,8 +787,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         // Snap player to WMO floor so they don't fall through on first frame
         if (wmoRenderer && renderer_) {
             glm::vec3 playerPos = renderer_->getCharacterPosition();
-            // Query floor with generous height margin above spawn point
-            auto floor = wmoRenderer->getFloorHeight(playerPos.x, playerPos.y, playerPos.z + 50.0f);
+            // getFloorHeight deliberately rejects probes far above a WMO's bounds.
+            // Keep this within its step-up window; a +50 probe made low-ceiling
+            // instances such as The Stockade fail their otherwise valid floor hit.
+            auto floor = wmoRenderer->getFloorHeight(playerPos.x, playerPos.y, playerPos.z + 5.0f);
             if (floor) {
                 playerPos.z = *floor + 0.1f;  // Small offset above floor
                 renderer_->getCharacterPosition() = playerPos;
@@ -969,7 +979,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         renderer_->getCameraController()->reset();
     }
     renderer_->setCharacterYaw(spawnYawDeg);
-    spawnDeeprunPortalVisuals(mapId, renderer_, assetManager_);
+    spawnInstancePortalVisuals(mapId, renderer_, assetManager_);
 
     // Test transport disabled — real transports come from server via UPDATEFLAG_TRANSPORT
     showProgress("Finalizing world...", 0.94f);
@@ -1109,9 +1119,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             // Check BOTH terrain AND WMO floor — require at least one to be valid.
             bool groundReady = false;
             if (renderer_) {
-                glm::vec3 renderSpawn = core::coords::canonicalToRender(
-                    glm::vec3(x, y, z));
-                float rx = renderSpawn.x, ry = renderSpawn.y, rz = renderSpawn.z;
+                // spawnRender already went server -> canonical -> render above.
+                // Applying canonicalToRender directly to the server tuple here
+                // swapped X/Y a second time, so WMO-only instances checked for a
+                // floor at the wrong location and eventually released at hard cap.
+                float rx = spawnRender.x, ry = spawnRender.y, rz = spawnRender.z;
 
                 // Check WMO floor FIRST (cities like Stormwind stand on WMO floors).
                 // Terrain exists below WMOs but at the wrong height.
