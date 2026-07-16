@@ -72,11 +72,14 @@ public:
     // Runtime-tunable 2H back-sheath placement. Live-adjusted in game via the
     // /sheathtune chat command (weapons reload on change); the defaults here
     // are what ships.
+    // Defaults tuned live in-game 2026-07-16 (clears the torso and left arm).
+    // Note the attachment frame is not axis-labeled intuitively: tz moves the
+    // weapon laterally, not vertically.
     struct SheathTuning {
-        float tx = -0.01f;      // attachment-frame X (character front/back)
-        float ty = 0.0f;        // attachment-frame Y (across the back)
-        float tz = 0.04f;       // attachment-frame Z (up/down)
-        float cantDeg = 35.0f;  // diagonal cant across the back
+        float tx = -0.03f;      // attachment-frame X
+        float ty = -0.10f;      // attachment-frame Y
+        float tz = 0.0f;        // attachment-frame Z (lateral)
+        float cantDeg = 33.0f;  // diagonal cant across the back
         float rollDeg = 90.0f;  // roll about the blade's long axis (flat to back)
     };
     static SheathTuning& sheathTuning();
