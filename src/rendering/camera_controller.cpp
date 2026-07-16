@@ -1124,6 +1124,25 @@ void CameraController::update(float deltaTime) {
                         atTunnelSeam = terrainAboveWmo > 1.2f && terrainAboveWmo < 12.0f &&
                                        wmoDropFromPlayer >= -0.4f && wmoDropFromPlayer < 1.8f;
                     }
+                    // A real tunnel mouth burrows into rising ground: the heightfield
+                    // just ahead climbs above head height (or stops in a hole cut for
+                    // the passage). WMO ramps that merely run beneath flat walkable
+                    // streets must not steal the player from the terrain above them —
+                    // that pulled players through the ground at the Stormwind gate
+                    // ramparts and down ramps into the void.
+                    if (atTunnelSeam && terrainManager) {
+                        glm::vec3 moveDir = targetPos - lastCollisionCheckPos_;
+                        moveDir.z = 0.0f;
+                        const float moveLen = glm::length(moveDir);
+                        if (moveLen < 1e-3f) {
+                            atTunnelSeam = false;  // stationary — nothing to enter
+                        } else {
+                            const glm::vec3 aheadPos = targetPos + moveDir * (2.5f / moveLen);
+                            auto terrainAhead = terrainManager->getHeightAt(aheadPos.x, aheadPos.y);
+                            atTunnelSeam = !terrainAhead ||
+                                           *terrainAhead > targetPos.z + 2.2f;
+                        }
+                    }
 
                     // Reject steep WMO slopes. Tunnel ramps use the more permissive WMO
                     // limit even at the boundary, where isInsideWMO is not reliable yet.
@@ -1257,6 +1276,19 @@ void CameraController::update(float deltaTime) {
                 if (dropFromLast > 1.0f && verticalVelocity > -6.0f) {
                     *groundH = std::max(*groundH, lastGroundZ - 0.20f);
                 }
+            }
+
+            // Void recovery: far beneath the terrain heightfield with no structure
+            // floor anywhere below means a seam heuristic already failed — snap back
+            // to the surface instead of falling forever. Legitimate deep interiors
+            // (tram tube, Stockade) always have a WMO floor under the player, so
+            // this only fires in genuine void.
+            if (!groundH && centerTerrainH && targetPos.z < *centerTerrainH - 60.0f) {
+                LOG_WARNING("Void recovery: player at z=", targetPos.z,
+                            " with terrain at ", *centerTerrainH, " and no floor below");
+                targetPos.z = *centerTerrainH + 0.5f;
+                verticalVelocity = 0.0f;
+                groundH = centerTerrainH;
             }
 
             // 1b. Multi-sample WMO floors when in/near WMO space to avoid
