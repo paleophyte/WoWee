@@ -259,6 +259,8 @@ private:
     static constexpr float CROUCH_EYE_HEIGHT = 0.6f; // Crouching eye height
     float eyeHeight = STAND_EYE_HEIGHT;
     float lastGroundZ = 0.0f;  // Last known ground height (fallback when no terrain)
+    glm::vec3 lastGroundedPos_{0.0f};  // Last position that had ground under it (void recovery)
+    bool hasLastGroundedPos_ = false;
     static constexpr float GRAVITY = -30.0f;
     static constexpr float JUMP_VELOCITY = 15.0f;
     float jumpBufferTimer = 0.0f;   // Time since space was pressed

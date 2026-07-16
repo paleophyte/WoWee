@@ -1294,6 +1294,20 @@ void CameraController::update(float deltaTime) {
                 groundH = centerTerrainH;
             }
 
+            // WMO-only maps (Deeprun Tram, instances) have no heightfield to
+            // recover to. Falling for seconds with no floor of any kind below
+            // means the player escaped the map geometry — put them back on the
+            // last spot that had ground instead of letting them fall to death.
+            if (!groundH && !centerTerrainH && hasLastGroundedPos_ &&
+                noGroundTimer_ > 2.5f && targetPos.z < lastGroundZ - 40.0f) {
+                LOG_WARNING("Void recovery (no heightfield): player at z=", targetPos.z,
+                            " returning to last grounded pos (", lastGroundedPos_.x, ", ",
+                            lastGroundedPos_.y, ", ", lastGroundedPos_.z, ")");
+                targetPos = lastGroundedPos_ + glm::vec3(0.0f, 0.0f, 0.5f);
+                verticalVelocity = 0.0f;
+                groundH = lastGroundedPos_.z;
+            }
+
             // 1b. Multi-sample WMO floors when in/near WMO space to avoid
             // falling through narrow board/plank gaps where center ray misses.
             if (wmoRenderer && nearWmoSpace) {
@@ -1459,6 +1473,8 @@ void CameraController::update(float deltaTime) {
             if (groundH) {
                 hasRealGround_ = true;
                 noGroundTimer_ = 0.0f;
+                lastGroundedPos_ = glm::vec3(targetPos.x, targetPos.y, *groundH);
+                hasLastGroundedPos_ = true;
                 float feetZ = targetPos.z;
                 float stepUp = stepUpBudget;
                 stepUp += 0.05f;
