@@ -245,6 +245,11 @@ network::Packet LogonProofPacket::buildLegacy(const std::vector<uint8_t>& A,
         for (int i = 0; i < 20; ++i) packet.writeUInt8(0); // CRC hash
     }
     packet.writeUInt8(0); // number of keys
+    // securityFlags terminates the 1.11+ vanilla proof too — mangos-family
+    // realmd reads LOGON_PROOF as a fixed-size struct that includes it, and
+    // omitting the byte stalls the server's read against stock protocol-3
+    // realms. Legacy here means "no v8 PIN/token payload", not "no flags byte".
+    packet.writeUInt8(0); // security flags
     return packet;
 }
 

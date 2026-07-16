@@ -148,13 +148,16 @@ TEST_CASE("Realm list: empty realm list is not an error", "[realm_list]") {
     CHECK(resp.realms.empty());
 }
 
-TEST_CASE("Logon proof legacy format omits v8 security flags", "[auth_packets]") {
+TEST_CASE("Logon proof legacy format matches 1.11+ vanilla struct", "[auth_packets]") {
     std::vector<uint8_t> A(32, 0xA5);
     std::vector<uint8_t> M1(20, 0x5A);
     std::array<uint8_t, 20> crc{};
 
+    // A(32) + M1(20) + crc(20) + numKeys(1) + securityFlags(1): mangos-family
+    // realmd reads this as a fixed-size struct, so the flags byte must be sent
+    // even though the legacy format carries no PIN/token payload.
     auto legacy = LogonProofPacket::buildLegacy(A, M1, &crc);
-    CHECK(legacy.getSize() == 32 + 20 + 20 + 1);
+    CHECK(legacy.getSize() == 32 + 20 + 20 + 1 + 1);
 
     auto v8 = LogonProofPacket::build(A, M1, 0, &crc, nullptr, nullptr);
     CHECK(v8.getSize() == 32 + 20 + 20 + 1 + 1);

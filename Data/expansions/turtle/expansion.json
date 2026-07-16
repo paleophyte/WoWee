@@ -6,7 +6,7 @@
   "build": 7272,
   "buildEnv": "WOWEE_TURTLE_AUTH_BUILD",
   "worldBuild": 5875,
-  "protocolVersion": 3,
+  "protocolVersion": 8,
   "os": "Win",
   "locale": "enGB",
   "maxLevel": 60,
