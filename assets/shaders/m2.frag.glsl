@@ -28,6 +28,7 @@ layout(set = 1, binding = 2) uniform M2Material {
     float fadeAlpha;
     float interiorDarken;
     float specularIntensity;
+    float emissiveBoost;
 };
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
@@ -148,7 +149,10 @@ void main() {
 
     vec3 result;
     if (unlit != 0) {
-        result = texColor.rgb;
+        result = texColor.rgb * emissiveBoost;
+        if (emissiveBoost > 1.0) {
+            result += vec3(0.32, 0.14, 0.025) * (emissiveBoost - 1.0);
+        }
     } else {
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
 

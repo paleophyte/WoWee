@@ -125,6 +125,7 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
         if (!model || (!model->isLanternLike && !model->isTorch &&
                        !model->isBrazierOrFire)) continue;
 
+        bool hasBatchLight = false;
         for (const auto& batch : model->batches) {
             if (!batch.glowCardLike || !batch.lanternGlowHint) continue;
 
@@ -158,6 +159,40 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
             else if (batch.glowTint == 2) color = glm::vec3(1.0f, 0.24f, 0.14f);
             candidates.push_back({distSq, glm::vec4(worldPos, radius),
                                   glm::vec4(color, 1.35f)});
+            hasBatchLight = true;
+        }
+
+        // Standalone candles expose their flame/glow only through particle
+        // emitters, so they have no glow-card batch for the path above. Use a
+        // single light at the emitter centroid; chandeliers with an authored
+        // glow batch remain represented by that batch rather than five lights.
+        if (!hasBatchLight && model->isLanternLike &&
+            !model->particleEmitters.empty()) {
+            glm::vec3 worldPos(0.0f);
+            uint32_t emitterCount = 0;
+            for (const auto& emitter : model->particleEmitters) {
+                glm::mat4 boneXform(1.0f);
+                if (emitter.bone < instance.boneMatrices.size()) {
+                    boneXform = instance.boneMatrices[emitter.bone];
+                }
+                worldPos += glm::vec3(instance.modelMatrix * boneXform *
+                                      glm::vec4(emitter.position, 1.0f));
+                emitterCount++;
+            }
+            if (emitterCount > 0) {
+                worldPos /= static_cast<float>(emitterCount);
+                const glm::vec3 delta = worldPos - cameraPos;
+                const float distSq = glm::dot(delta, delta);
+                if (distSq <= 300.0f * 300.0f) {
+                    const bool chandelier =
+                        model->name.find("Chandelier") != std::string::npos ||
+                        model->name.find("chandelier") != std::string::npos;
+                    candidates.push_back({distSq,
+                        glm::vec4(worldPos, chandelier ? 10.0f : 5.0f),
+                        glm::vec4(1.0f, 0.58f, 0.22f,
+                                  chandelier ? 1.25f : 0.85f)});
+                }
+            }
         }
     }
 
@@ -1676,13 +1711,16 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             const bool fireGlowCard = gpuModel.isBrazierOrFire &&
                 tcls.hasGlowToken && tcls.hasGlowCardToken;
             bgpu.lanternGlowHint =
+                tcls.softGlowSurface ||
                 tcls.exactLanternGlowTex ||
                 torchGlowCard ||
                 fireGlowCard ||
                 ((tcls.hasGlowToken || (modelLanternFamily && tcls.hasFlameToken)) &&
                  (tcls.lanternFamily || modelLanternFamily) &&
                  (!tcls.likelyFlame || modelLanternFamily));
-            bgpu.glowCardLike = bgpu.lanternGlowHint && tcls.hasGlowCardToken;
+            bgpu.glowCardLike = bgpu.lanternGlowHint &&
+                (tcls.hasGlowCardToken || tcls.softGlowSurface);
+            bgpu.preserveGlowMesh = tcls.softGlowSurface;
             bgpu.glowTint = tcls.glowTint;
             if (tex != nullptr && tex != whiteTexture_.get()) {
                 auto pit = texturePropsByPtr_.find(tex);
@@ -1827,6 +1865,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             mat.fadeAlpha = 1.0f;
             mat.interiorDarken = 0.0f;
             mat.specularIntensity = 0.5f;
+            mat.emissiveBoost = bgpu.preserveGlowMesh ? 2.4f : 1.0f;
             memcpy(matAllocInfo.pMappedData, &mat, sizeof(mat));
             bgpu.materialUBOMapped = matAllocInfo.pMappedData;
         }

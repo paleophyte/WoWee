@@ -54,6 +54,7 @@ struct M2ModelGPU {
         uint8_t texFlags = 0;     // M2Texture.flags (bit0=WrapS, bit1=WrapT)
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
+        bool preserveGlowMesh = false; // Keep emissive glass/fixture mesh below its glow sprite
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
@@ -278,6 +279,7 @@ struct M2MaterialUBO {
     float fadeAlpha;
     float interiorDarken;
     float specularIntensity;
+    float emissiveBoost;
 };
 
 // M2 params UBO — matches M2Params in m2.vert.glsl (set 1, binding 1)

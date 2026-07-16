@@ -97,6 +97,7 @@ struct M2BatchTexClassification {
     bool hasGlowCardToken    = false; ///< glow / flamelick / lensflare / t_vfx / lightbeam / glowball / genericglow
     bool likelyFlame         = false; ///< fire / flame / torch
     bool lanternFamily       = false; ///< lantern / lamp / elf / silvermoon / quel / thalas
+    bool softGlowSurface     = false; ///< Lit glass surface that keeps its mesh beneath a soft halo
     int  glowTint            = 0;     ///< 0 = neutral, 1 = cool (blue/arcane), 2 = warm (red/scarlet)
 };
 
