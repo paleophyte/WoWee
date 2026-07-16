@@ -114,3 +114,7 @@ tools/__pycache__/
 # World editor output: scaffolded/exported zones and per-user ImGui layout
 custom_zones/
 wowee_editor_layout.ini
+
+#agents
+AGENTS.md
+codex-loop.sh
