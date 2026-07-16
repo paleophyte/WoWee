@@ -2016,7 +2016,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
             ? instance.overrideModelMatrix
             : getModelMatrix(instance);
 
-        for (const auto& wa : instance.weaponAttachments) {
+        for (auto& wa : instance.weaponAttachments) {
             auto weapIt = instances.find(wa.weaponInstanceId);
             if (weapIt == instances.end()) continue;
 
@@ -2028,9 +2028,39 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 
             // Weapon model matrix = character model * bone transform * attachment
             // offset * item/sheath orientation.
-            const glm::mat4 weaponMat =
+            glm::mat4 weaponMat =
                 charModelMat * boneMat * glm::translate(glm::mat4(1.0f), wa.offset) *
                 wa.localTransform;
+
+            // Back-sheathed weapons: the swinging left arm passes through the
+            // canted blade while running. Track the elbow (M2 attachment 4)
+            // against the weapon model's own AABB and ease the blade outward,
+            // away from the spine, so the arm pushes it instead of clipping.
+            constexpr uint32_t kAttachmentBack = 12;
+            constexpr uint32_t kAttachmentElbowLeft = 4;
+            if (wa.attachmentId == kAttachmentBack && weapIt->second.cachedModel) {
+                float targetPush = 0.0f;
+                glm::mat4 elbowMat;
+                if (getAttachmentTransform(pair.first, kAttachmentElbowLeft, elbowMat)) {
+                    const glm::vec3 localElbow = glm::vec3(
+                        glm::inverse(weaponMat) * glm::vec4(glm::vec3(elbowMat[3]), 1.0f));
+                    const auto& wm = weapIt->second.cachedModel->data;
+                    const glm::vec3 closest = glm::clamp(localElbow, wm.boundMin, wm.boundMax);
+                    constexpr float kElbowRadius = 0.12f;   // approximate forearm thickness
+                    const float dist = glm::distance(localElbow, closest);
+                    if (dist < kElbowRadius) targetPush = kElbowRadius - dist;
+                }
+                wa.sheathPush += (targetPush - wa.sheathPush) * std::min(1.0f, deltaTime * 14.0f);
+                if (wa.sheathPush > 0.001f) {
+                    // Horizontal direction from the spine out through the weapon.
+                    glm::vec3 outward = glm::vec3(weaponMat[3]) - glm::vec3(charModelMat[3]);
+                    outward.z = 0.0f;
+                    const float len = glm::length(outward);
+                    if (len > 0.001f) {
+                        weaponMat = glm::translate(glm::mat4(1.0f), (outward / len) * wa.sheathPush) * weaponMat;
+                    }
+                }
+            }
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
 
