@@ -1769,8 +1769,6 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     if (!shadowPipeline_ || !shadowParamsSet_) return;
     if (instances.empty() || models.empty()) return;
 
-    const float shadowRadiusSq = shadowRadius * shadowRadius;
-
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
     const uint32_t frameIdx = vkCtx_->getCurrentFrame();
     VkDescriptorPool curShadowTexPool = shadowTexPool_[frameIdx];
@@ -1849,12 +1847,24 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             // Use cached flags to skip early without hash lookup
             if (!instance.cachedIsValid || instance.cachedIsSmoke || instance.cachedIsInvisibleTrap) continue;
 
-            // Distance cull against shadow frustum
-            glm::vec3 diff = instance.position - shadowCenter;
-            if (glm::dot(diff, diff) > shadowRadiusSq) continue;
-
             if (!instance.cachedModel) continue;
             const M2ModelGPU& model = *instance.cachedModel;
+
+            // Cull casters against the light-space ortho footprint, not a
+            // world-space sphere around the player. The shadow frustum extends
+            // ~2000 units toward the sun, so a distant tree can legitimately
+            // cast across the whole view while sitting far outside any player
+            // sphere — sphere culling made such shadows pop on/off at the cull
+            // boundary as the player moved (large-area flicker at low sun).
+            {
+                const glm::vec4 clip = lightSpaceMatrix * glm::vec4(instance.position, 1.0f);
+                // Orthographic projection: w == 1, NDC directly comparable.
+                // Inflate by the model's bounding sphere converted to NDC
+                // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
+                const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
+                if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) continue;
+                if (clip.z < -margin || clip.z > 1.0f + margin) continue;
+            }
 
             // Filter: only draw foliage models in foliage pass, non-foliage in non-foliage pass
             if (model.shadowWindFoliage != foliagePass) continue;
