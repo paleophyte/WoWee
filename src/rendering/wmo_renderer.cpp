@@ -575,11 +575,20 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             bool alphaTest;
             bool unlit;
             bool isWindow;
-            bool operator==(const BatchKey& o) const { return texPtr == o.texPtr && alphaTest == o.alphaTest && unlit == o.unlit && isWindow == o.isWindow; }
+            bool isEmissive;
+            bool operator==(const BatchKey& o) const {
+                return texPtr == o.texPtr && alphaTest == o.alphaTest &&
+                       unlit == o.unlit && isWindow == o.isWindow &&
+                       isEmissive == o.isEmissive;
+            }
         };
         struct BatchKeyHash {
             size_t operator()(const BatchKey& k) const {
-                return std::hash<uintptr_t>()(k.texPtr) ^ (std::hash<bool>()(k.alphaTest) << 1) ^ (std::hash<bool>()(k.unlit) << 2) ^ (std::hash<bool>()(k.isWindow) << 3);
+                return std::hash<uintptr_t>()(k.texPtr) ^
+                       (std::hash<bool>()(k.alphaTest) << 1) ^
+                       (std::hash<bool>()(k.unlit) << 2) ^
+                       (std::hash<bool>()(k.isWindow) << 3) ^
+                       (std::hash<bool>()(k.isEmissive) << 4);
             }
         };
         std::unordered_map<BatchKey, GroupResources::MergedBatch, BatchKeyHash> batchMap;
@@ -625,6 +634,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             // distinguish actual glass from lamp post geometry.
             bool isWindow = false;
             bool isLava = false;
+            bool isEmissive = false;
             if (batch.materialId < modelData.materialTextureIndices.size()) {
                 uint32_t ti = modelData.materialTextureIndices[batch.materialId];
                 if (ti < modelData.textureNames.size()) {
@@ -632,7 +642,9 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                     // Case-insensitive search for material types
                     std::string texNameLower = texName;
                     std::transform(texNameLower.begin(), texNameLower.end(), texNameLower.begin(), ::tolower);
-                    isWindow = (texNameLower.find("window") != std::string::npos ||
+                    isEmissive = texNameLower.find("stormwindlampglass.blp") != std::string::npos;
+                    isWindow = !isEmissive &&
+                               (texNameLower.find("window") != std::string::npos ||
                                 texNameLower.find("glass") != std::string::npos);
                     isLava = (texNameLower.find("lava") != std::string::npos ||
                               texNameLower.find("molten") != std::string::npos ||
@@ -640,7 +652,8 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 }
             }
 
-            BatchKey key{ reinterpret_cast<uintptr_t>(tex), alphaTest, unlit, isWindow };
+            BatchKey key{ reinterpret_cast<uintptr_t>(tex), alphaTest, unlit,
+                          isWindow, isEmissive };
             auto& mb = batchMap[key];
             if (mb.draws.empty()) {
                 mb.texture = tex;
@@ -650,6 +663,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 mb.isTransparent = (blendMode >= 2);
                 mb.isWindow = isWindow;
                 mb.isLava = isLava;
+                mb.isEmissive = isEmissive;
                 // Look up normal/height map from texture cache
                 if (hasTexture && tex != whiteTexture_.get()) {
                     for (const auto& [cacheKey, cacheEntry] : textureCache) {
@@ -700,6 +714,7 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
             matData.wmoAmbientR = modelData.wmoAmbientColor.r;
             matData.wmoAmbientG = modelData.wmoAmbientColor.g;
             matData.wmoAmbientB = modelData.wmoAmbientColor.b;
+            matData.emissive = mb.isEmissive ? 1 : 0;
             if (matBuf.info.pMappedData) {
                 memcpy(matBuf.info.pMappedData, &matData, sizeof(matData));
             }
