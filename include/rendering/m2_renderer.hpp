@@ -87,6 +87,7 @@ struct M2ModelGPU {
     bool isFireflyEffect = false;   // Firefly/fireflies M2 (exempt from particle dampeners)
     bool isWaterfall = false;       // Waterfall model (ambient sound + splash particles)
     bool isBrazierOrFire = false;   // Brazier / campfire / bonfire model
+    bool isGroundFire = false;      // Ground fire whose halo follows its lowest flame emitter
     bool isTorch = false;           // Wall-mounted or standing torch
     AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
 
@@ -299,6 +300,8 @@ public:
 
     [[nodiscard]] bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
                     pipeline::AssetManager* assets);
+    /** Configure this renderer for camera-centered sky M2s before initialize(). */
+    void setSkyMode(bool enabled) { skyMode_ = enabled; }
     void shutdown();
 
     bool hasModel(uint32_t modelId) const;
@@ -756,6 +759,7 @@ private:
     // M2 particle emitter system
     static constexpr size_t MAX_M2_PARTICLES = 4000;
     std::mt19937 particleRng_{123};
+    bool skyMode_ = false;
 
     // Cached camera state from update() for frustum-culling bones
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);

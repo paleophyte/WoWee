@@ -80,6 +80,10 @@ M2ClassificationResult classifyM2Model(
     const bool forgeName   = has(n, "forge") && !has(n, "forgelava");
     const bool torchName   = has(n, "torch") && !r.isKoboldFlame;
     r.isBrazierOrFire = fireName || brazierName;
+    // TaurenLampPost is the small ground-level path fire used around Camp
+    // Narache, despite its misleading model name. Its decorative halo must
+    // follow the lowest flame emitter rather than the mesh/card center.
+    r.isGroundFire    = (fireName && !brazierName) || has(n, "taurenlamppost");
     r.isTorch         = torchName;
 
     // ---------------------------------------------------------------
