@@ -3394,7 +3394,6 @@ private:
     AuctionListResult auctionOwnerResults_;
     AuctionListResult auctionBidderResults_;
     int auctionActiveTab_ = 0;  // 0=Browse, 1=Bids, 2=Auctions
-    float auctionSearchDelayTimer_ = 0.0f;
     // Last search params for re-query (pagination, auto-refresh after bid/buyout)
     struct AuctionSearchParams {
         std::string name;

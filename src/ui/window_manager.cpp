@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
 #include <string>
 #include <fstream>
 
@@ -3336,11 +3337,15 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
         auto getSearchSubClassId = [&]() -> uint32_t {
             if (auctionItemSubClass_ < 0) return 0xFFFFFFFF;
+            // Stored value is the list row minus 1 (row 0 is "All" → -1), so
+            // shift back when indexing — indexing with the stored value
+            // directly returned the previous row (2H swords queried as 1H).
+            int row = auctionItemSubClass_ + 1;
             uint32_t cid = getSearchClassId();
-            if (cid == 2 && auctionItemSubClass_ < NUM_WEAPON_SUBS)
-                return weaponSubs[auctionItemSubClass_].subId;
-            if (cid == 4 && auctionItemSubClass_ < NUM_ARMOR_SUBS)
-                return armorSubs[auctionItemSubClass_].subId;
+            if (cid == 2 && row < NUM_WEAPON_SUBS)
+                return weaponSubs[row].subId;
+            if (cid == 4 && row < NUM_ARMOR_SUBS)
+                return armorSubs[row].subId;
             return 0xFFFFFFFF;
         };
 
@@ -3462,17 +3467,85 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         }
 
         if (ImGui::BeginChild("AuctionResults", ImVec2(0, -110), true)) {
-            if (ImGui::BeginTable("AuctionTable", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY)) {
-                ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthFixed, 40);
-                ImGui::TableSetupColumn("Seller", ImGuiTableColumnFlags_WidthFixed, 95);
-                ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 60);
-                ImGui::TableSetupColumn("Bid", ImGuiTableColumnFlags_WidthFixed, 90);
-                ImGui::TableSetupColumn("Buyout", ImGuiTableColumnFlags_WidthFixed, 90);
-                ImGui::TableSetupColumn("##act", ImGuiTableColumnFlags_WidthFixed, 60);
+            // Column IDs keep sort specs stable independent of column order.
+            enum AHColumnId : ImGuiID {
+                kAHColItem = 1, kAHColLvl, kAHColRarity, kAHColQty,
+                kAHColSeller, kAHColTime, kAHColBid, kAHColBuyout, kAHColAct
+            };
+            if (ImGui::BeginTable("AuctionTable", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable)) {
+                ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch, 0.0f, kAHColItem);
+                ImGui::TableSetupColumn("Lvl", ImGuiTableColumnFlags_WidthFixed, 36, kAHColLvl);
+                ImGui::TableSetupColumn("Rarity", ImGuiTableColumnFlags_WidthFixed, 74, kAHColRarity);
+                ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthFixed, 40, kAHColQty);
+                ImGui::TableSetupColumn("Seller", ImGuiTableColumnFlags_WidthFixed, 95, kAHColSeller);
+                ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 60, kAHColTime);
+                ImGui::TableSetupColumn("Bid", ImGuiTableColumnFlags_WidthFixed, 90, kAHColBid);
+                ImGui::TableSetupColumn("Buyout", ImGuiTableColumnFlags_WidthFixed, 90, kAHColBuyout);
+                ImGui::TableSetupColumn("##act", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 60, kAHColAct);
                 ImGui::TableHeadersRow();
 
-                for (size_t i = 0; i < results.auctions.size(); i++) {
+                // Client-side sort of the current page (the server pages by
+                // 50, so sorting within the page is the best we can do).
+                std::vector<size_t> rowOrder(results.auctions.size());
+                std::iota(rowOrder.begin(), rowOrder.end(), size_t{0});
+                ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
+                if (sortSpecs && sortSpecs->SpecsCount > 0) {
+                    auto infoOf = [&](const game::AuctionEntry& a) {
+                        return gameHandler.getItemInfo(a.itemEntry);
+                    };
+                    auto cmpU32 = [](uint32_t x, uint32_t y) {
+                        return x < y ? -1 : (x > y ? 1 : 0);
+                    };
+                    auto cmpBy = [&](ImGuiID col, const game::AuctionEntry& a,
+                                     const game::AuctionEntry& b) -> int {
+                        switch (col) {
+                            case kAHColItem: {
+                                auto* ia = infoOf(a); auto* ib = infoOf(b);
+                                int c = (ia ? ia->name : std::string())
+                                            .compare(ib ? ib->name : std::string());
+                                return c < 0 ? -1 : (c > 0 ? 1 : 0);
+                            }
+                            case kAHColLvl: {
+                                auto* ia = infoOf(a); auto* ib = infoOf(b);
+                                return cmpU32(ia ? ia->requiredLevel : 0,
+                                              ib ? ib->requiredLevel : 0);
+                            }
+                            case kAHColRarity: {
+                                auto* ia = infoOf(a); auto* ib = infoOf(b);
+                                return cmpU32(ia ? ia->quality : 0,
+                                              ib ? ib->quality : 0);
+                            }
+                            case kAHColQty: return cmpU32(a.stackCount, b.stackCount);
+                            case kAHColSeller: {
+                                int c = gameHandler.getCachedPlayerName(a.ownerGuid)
+                                            .compare(gameHandler.getCachedPlayerName(b.ownerGuid));
+                                return c < 0 ? -1 : (c > 0 ? 1 : 0);
+                            }
+                            case kAHColTime: return cmpU32(a.timeLeftMs, b.timeLeftMs);
+                            case kAHColBid:
+                                return cmpU32(a.currentBid > 0 ? a.currentBid : a.startBid,
+                                              b.currentBid > 0 ? b.currentBid : b.startBid);
+                            case kAHColBuyout: return cmpU32(a.buyoutPrice, b.buyoutPrice);
+                            default: return 0;
+                        }
+                    };
+                    std::stable_sort(rowOrder.begin(), rowOrder.end(),
+                        [&](size_t ia, size_t ib) {
+                            const auto& a = results.auctions[ia];
+                            const auto& b = results.auctions[ib];
+                            for (int k = 0; k < sortSpecs->SpecsCount; ++k) {
+                                const auto& s = sortSpecs->Specs[k];
+                                int c = cmpBy(s.ColumnUserID, a, b);
+                                if (c != 0)
+                                    return s.SortDirection == ImGuiSortDirection_Ascending
+                                        ? c < 0 : c > 0;
+                            }
+                            return false;
+                        });
+                }
+
+                for (size_t row = 0; row < rowOrder.size(); row++) {
+                    const size_t i = rowOrder[row];
                     const auto& auction = results.auctions[i];
                     auto* info = gameHandler.getItemInfo(auction.itemEntry);
                     std::string name = info ? info->name : ("Item #" + std::to_string(auction.itemEntry));
@@ -3507,9 +3580,25 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                     }
 
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%u", auction.stackCount);
+                    if (info && info->requiredLevel > 0)
+                        ImGui::Text("%u", info->requiredLevel);
+                    else
+                        ImGui::TextDisabled("--");
 
                     ImGui::TableSetColumnIndex(2);
+                    {
+                        static const char* qualityNames[] = {
+                            "Poor", "Common", "Uncommon", "Rare",
+                            "Epic", "Legendary", "Artifact"};
+                        uint32_t qi = info ? info->quality : 1;
+                        if (qi > 6) qi = 6;
+                        ImGui::TextColored(qc, "%s", qualityNames[qi]);
+                    }
+
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%u", auction.stackCount);
+
+                    ImGui::TableSetColumnIndex(4);
                     if (auction.ownerGuid == gameHandler.getPlayerGuid()) {
                         ImGui::TextUnformatted("You");
                     } else {
@@ -3520,27 +3609,27 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                             ImGui::TextDisabled("Loading...");
                     }
 
-                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TableSetColumnIndex(5);
                     // Time left display
                     uint32_t mins = auction.timeLeftMs / 60000;
                     if (mins > 720) ImGui::Text("Long");
                     else if (mins > 120) ImGui::Text("Medium");
                     else ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Short");
 
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(6);
                     {
                         uint32_t bid = auction.currentBid > 0 ? auction.currentBid : auction.startBid;
                         renderCoinsFromCopper(bid);
                     }
 
-                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TableSetColumnIndex(7);
                     if (auction.buyoutPrice > 0) {
                         renderCoinsFromCopper(auction.buyoutPrice);
                     } else {
                         ImGui::TextDisabled("--");
                     }
 
-                    ImGui::TableSetColumnIndex(6);
+                    ImGui::TableSetColumnIndex(8);
                     ImGui::PushID(static_cast<int>(i) + 7000);
                     if (auction.buyoutPrice > 0 && ImGui::SmallButton("Buy")) {
                         gameHandler.auctionBuyout(auction.auctionId, auction.buyoutPrice);

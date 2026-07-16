@@ -564,10 +564,9 @@ void GameHandler::updateTimers(float deltaTime) {
         }
     }
 
-    if (auctionSearchDelayTimer_ > 0.0f) {
-        auctionSearchDelayTimer_ -= deltaTime;
-        if (auctionSearchDelayTimer_ < 0.0f) auctionSearchDelayTimer_ = 0.0f;
-    }
+    // Tick InventoryHandler's auction search cooldown (the authoritative
+    // timer — GameHandler previously ticked its own never-set duplicate).
+    if (inventoryHandler_) inventoryHandler_->tickAuctionSearchDelay(deltaTime);
 
     // Tick QuestHandler's pending-accept timeouts (the authoritative maps —
     // GameHandler previously ticked its own never-populated copies, so lost

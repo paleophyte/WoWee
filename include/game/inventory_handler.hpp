@@ -229,6 +229,15 @@ public:
     int getAuctionActiveTab() const { return auctionActiveTab_; }
     void setAuctionActiveTab(int tab) { auctionActiveTab_ = tab; }
     float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
+    // Ticked from GameHandler::update — this member is the authoritative
+    // timer (GameHandler used to decrement its own never-set copy, leaving
+    // the search button disabled forever after the first search).
+    void tickAuctionSearchDelay(float deltaTime) {
+        if (auctionSearchDelayTimer_ > 0.0f) {
+            auctionSearchDelayTimer_ -= deltaTime;
+            if (auctionSearchDelayTimer_ < 0.0f) auctionSearchDelayTimer_ = 0.0f;
+        }
+    }
 
     // ---- Trainer ----
     struct TrainerTab {
