@@ -1,4 +1,5 @@
 #include "ui/character_create_screen.hpp"
+#include "ui/selection_screen_layout.hpp"
 #include "ui/ui_colors.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
@@ -370,34 +371,47 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         preview_->requestComposite();
     }
 
-    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     bool hasPreview = (preview_ && preview_->getTextureId() != 0);
-    float previewWidth = hasPreview ? 320.0f : 0.0f;
-    float controlsWidth = 540.0f;
-    float totalWidth = hasPreview ? (previewWidth + controlsWidth + 16.0f) : 600.0f;
-    float totalHeight = 580.0f;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const SelectionScreenLayout layout = makeSelectionScreenLayout(*vp);
 
-    ImGui::SetNextWindowSize(ImVec2(totalWidth, totalHeight), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(ImVec2((displaySize.x - totalWidth) * 0.5f,
-                                    (displaySize.y - totalHeight) * 0.5f),
-                            ImGuiCond_Always);
+    ImGui::SetNextWindowPos(layout.windowPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(layout.windowSize, ImGuiCond_Always);
 
     ImGui::Begin("Create Character", nullptr,
-        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::SetWindowFontScale(layout.scale);
+
+    ImGui::TextColored(ui::colors::kWarmGold, "Create a Character");
+    ImGui::TextDisabled("Choose your hero's identity and appearance.");
+    ImGui::Separator();
+
+    const float bodyHeight = std::max(
+        320.0f,
+        ImGui::GetContentRegionAvail().y - layout.footerHeight() -
+            ImGui::GetStyle().ItemSpacing.y);
+    const float availableWidth = ImGui::GetContentRegionAvail().x;
+    const float previewWidth = hasPreview
+        ? std::min(680.0f * layout.scale,
+                   std::max(360.0f * layout.scale, availableWidth * 0.44f))
+        : 0.0f;
 
     if (hasPreview) {
         // Left panel: 3D preview
-        ImGui::BeginChild("##preview_panel", ImVec2(previewWidth, -40.0f), false);
+        ImGui::BeginChild("##preview_panel", ImVec2(previewWidth, bodyHeight), true);
         {
-            // Display the FBO texture (flip Y for OpenGL)
-            float imgW = previewWidth - 8.0f;
+            float imgW = ImGui::GetContentRegionAvail().x;
             float imgH = imgW * (static_cast<float>(preview_->getHeight()) /
                                   static_cast<float>(preview_->getWidth()));
-            if (imgH > totalHeight - 80.0f) {
-                imgH = totalHeight - 80.0f;
+            const float maxImageH = std::max(200.0f, bodyHeight - 42.0f * layout.scale);
+            if (imgH > maxImageH) {
+                imgH = maxImageH;
                 imgW = imgH * (static_cast<float>(preview_->getWidth()) /
                                static_cast<float>(preview_->getHeight()));
             }
+
+            const float indent = (ImGui::GetContentRegionAvail().x - imgW) * 0.5f;
+            if (indent > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
 
             if (preview_->getTextureId()) {
                 ImGui::Image(
@@ -416,20 +430,20 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
                 preview_->zoom(ImGui::GetIO().MouseWheel);
             }
 
-            ImGui::TextColored(ui::colors::kDarkGray, "Drag to rotate - Scroll to zoom");
+            ImGui::TextDisabled("Drag to rotate  -  Scroll to zoom");
         }
         ImGui::EndChild();
 
-        ImGui::SameLine();
-
-        // Right panel: controls
-        ImGui::BeginChild("##controls_panel", ImVec2(0, -40.0f), false);
+        ImGui::SameLine(0.0f, layout.gap());
     }
+
+    // Right panel: controls remain independently scrollable on short windows.
+    ImGui::BeginChild("##controls_panel", ImVec2(0.0f, bodyHeight), true);
 
     // Name input
     ImGui::Text("Name:");
-    ImGui::SameLine(80);
-    ImGui::SetNextItemWidth(200);
+    ImGui::SameLine(100.0f * layout.scale);
+    ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputText("##name", nameBuffer, sizeof(nameBuffer));
 
     ImGui::Spacing();
@@ -438,15 +452,25 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     int raceCount = static_cast<int>(availableRaces_.size());
     ImGui::Text("Race:");
     ImGui::Spacing();
-    ImGui::Indent(10.0f);
+    ImGui::Indent(10.0f * layout.scale);
+    auto continueButtonRow = [&](const char* label, bool first) {
+        if (first) return;
+        const float buttonWidth = ImGui::CalcTextSize(label).x +
+                                  ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float nextRight = ImGui::GetItemRectMax().x +
+                                ImGui::GetStyle().ItemSpacing.x + buttonWidth;
+        const float contentRight = ImGui::GetWindowPos().x +
+                                   ImGui::GetContentRegionMax().x;
+        if (nextRight <= contentRight) ImGui::SameLine();
+    };
     if (allianceRaceCount_ > 0) {
         ImGui::TextColored(ImVec4(0.3f, 0.5f, 1.0f, 1.0f), "Alliance:");
-        ImGui::SameLine();
         for (int i = 0; i < allianceRaceCount_; ++i) {
-            if (i > 0) ImGui::SameLine();
+            const char* raceName = game::getRaceName(availableRaces_[i]);
+            continueButtonRow(raceName, i == 0);
             bool selected = (raceIndex == i);
             if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 1.0f, 0.8f));
-            if (ImGui::SmallButton(game::getRaceName(availableRaces_[i]))) {
+            if (ImGui::SmallButton(raceName)) {
                 if (raceIndex != i) {
                     raceIndex = i;
                     classIndex = 0;
@@ -459,12 +483,12 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     }
     if (allianceRaceCount_ < raceCount) {
         ImGui::TextColored(ui::colors::kRed, "Horde:");
-        ImGui::SameLine();
         for (int i = allianceRaceCount_; i < raceCount; ++i) {
-            if (i > allianceRaceCount_) ImGui::SameLine();
+            const char* raceName = game::getRaceName(availableRaces_[i]);
+            continueButtonRow(raceName, i == allianceRaceCount_);
             bool selected = (raceIndex == i);
             if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.3f, 0.3f, 0.8f));
-            if (ImGui::SmallButton(game::getRaceName(availableRaces_[i]))) {
+            if (ImGui::SmallButton(raceName)) {
                 if (raceIndex != i) {
                     raceIndex = i;
                     classIndex = 0;
@@ -475,20 +499,20 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
             if (selected) ImGui::PopStyleColor();
         }
     }
-    ImGui::Unindent(10.0f);
+    ImGui::Unindent(10.0f * layout.scale);
 
     ImGui::Spacing();
 
     // Class selection
     ImGui::Text("Class:");
-    ImGui::SameLine(80);
     if (!availableClasses.empty()) {
         ImGui::BeginGroup();
         for (int i = 0; i < static_cast<int>(availableClasses.size()); ++i) {
-            if (i > 0) ImGui::SameLine();
+            const char* className = game::getClassName(availableClasses[i]);
+            continueButtonRow(className, i == 0);
             bool selected = (classIndex == i);
             if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 0.8f));
-            if (ImGui::SmallButton(game::getClassName(availableClasses[i]))) {
+            if (ImGui::SmallButton(className)) {
                 classIndex = i;
             }
             if (selected) ImGui::PopStyleColor();
@@ -500,7 +524,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
 
     // Gender
     ImGui::Text("Gender:");
-    ImGui::SameLine(80);
+    ImGui::SameLine(100.0f * layout.scale);
     ImGui::RadioButton("Male", &genderIndex, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Female", &genderIndex, 1);
@@ -531,13 +555,12 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
     ImGui::Text("Appearance");
     ImGui::Spacing();
 
-    float sliderWidth = hasPreview ? 180.0f : 200.0f;
-    float labelCol = hasPreview ? 100.0f : 120.0f;
+    const float labelCol = 120.0f * layout.scale;
 
     auto slider = [&](const char* label, int* val, int maxVal) {
         ImGui::Text("%s", label);
         ImGui::SameLine(labelCol);
-        ImGui::SetNextItemWidth(sliderWidth);
+        ImGui::SetNextItemWidth(-1.0f);
         char id[32];
         snprintf(id, sizeof(id), "##%s", label);
         ImGui::SliderInt(id, val, 0, maxVal);
@@ -555,23 +578,25 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
 
     ImGui::Spacing();
 
-    // Status message
+    ImGui::EndChild(); // controls_panel
+
+    // Shared footer: Back remains left, primary Create action remains right.
+    ImGui::BeginChild("CharacterCreateFooter", ImVec2(0.0f, layout.footerHeight()), true);
     if (!statusMessage.empty()) {
-        ImGui::Separator();
-        ImGui::Spacing();
         ImVec4 color = statusIsError ? ui::colors::kRed : ui::colors::kBrightGreen;
         ImGui::TextColored(color, "%s", statusMessage.c_str());
+    } else {
+        ImGui::TextDisabled("Names may contain up to 12 characters.");
     }
-
-    if (hasPreview) {
-        ImGui::EndChild(); // controls_panel
-    }
-
-    // Bottom buttons (outside children)
-    ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Button("Create", ImVec2(150, 35))) {
+    if (ImGui::Button("Back", layout.button())) {
+        if (onCancel) onCancel();
+    }
+
+    const ImVec2 createSize = layout.primaryButton(180.0f);
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - createSize.x);
+    if (ImGui::Button("Create Character", createSize)) {
         std::string name(nameBuffer);
         // Trim whitespace
         size_t start = name.find_first_not_of(" \t\r\n");
@@ -605,13 +630,7 @@ void CharacterCreateScreen::render(game::GameHandler& /*gameHandler*/) {
         }
     }
 
-    ImGui::SameLine();
-
-    if (ImGui::Button("Back", ImVec2(150, 35))) {
-        if (onCancel) {
-            onCancel();
-        }
-    }
+    ImGui::EndChild();
 
     ImGui::End();
 }

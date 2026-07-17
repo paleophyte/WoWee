@@ -1234,8 +1234,11 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         case game::Race::NIGHT_ELF: sceneName = "UI_NightElf"; break;
         case game::Race::UNDEAD:    sceneName = "UI_Scourge";  break;
         case game::Race::TAUREN:    sceneName = "UI_Tauren";   break;
-        case game::Race::GNOME:     sceneName = "UI_Gnome";    break;
-        case game::Race::TROLL:     sceneName = "UI_Troll";    break;
+        // Blizzard does not ship separate Gnome or Troll glue scenes in the
+        // Classic/TBC/WotLK asset sets. These races intentionally share their
+        // faction partner's authored selection backdrop.
+        case game::Race::GNOME:     sceneName = "UI_Dwarf";    break;
+        case game::Race::TROLL:     sceneName = "UI_Orc";      break;
         case game::Race::BLOOD_ELF: sceneName = "UI_BloodElf"; break;
         case game::Race::DRAENEI:   sceneName = "UI_Draenei";  break;
         default: break;
