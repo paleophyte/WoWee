@@ -730,7 +730,6 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
 }
 
 void SpellHandler::cancelCast() {
-    if (!casting_) return;
     if (restorationActive_) {
         const uint32_t auraSpell = restorationSpellId_;
         cancelAura(auraSpell);
@@ -741,6 +740,7 @@ void SpellHandler::cancelCast() {
         LOG_INFO("Cancelled restoration aura: spellId=", auraSpell);
         return;
     }
+    if (!casting_) return;
     // GameObject interaction cast is client-side timing only.
     if (owner_.pendingGameObjectInteractGuidRef() == 0 &&
         owner_.getState() == WorldState::IN_WORLD && owner_.getSocket() &&
@@ -1185,6 +1185,9 @@ void SpellHandler::updateTimers(float dt) {
     // Eating/drinking munch-gulp repeats for the whole restoration aura,
     // matching the real client's looping consume sound.
     if (restorationActive_) {
+        if (restorationTimeRemaining_ > 0.0f) {
+            restorationTimeRemaining_ = std::max(0.0f, restorationTimeRemaining_ - dt);
+        }
         restorationSoundTimer_ -= dt;
         if (restorationSoundTimer_ <= 0.0f) {
             restorationSoundTimer_ = 1.0f;
@@ -1229,11 +1232,8 @@ void SpellHandler::stopRestorationPresentation() {
     }
     restorationActive_ = false;
     restorationSpellId_ = 0;
-    casting_ = false;
-    castIsChannel_ = false;
-    currentCastSpellId_ = 0;
-    castTimeRemaining_ = 0.0f;
-    castTimeTotal_ = 0.0f;
+    restorationTimeRemaining_ = 0.0f;
+    restorationTimeTotal_ = 0.0f;
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_CHANNEL_STOP",
                                        {"player", std::to_string(stoppedSpell)});
@@ -1280,19 +1280,16 @@ void SpellHandler::refreshRestorationFromPlayerAuras() {
     }
     int32_t remainingMs = restorationAura->getRemainingMs(nowMs);
     if (remainingMs < 0) {
-        remainingMs = (!newlyActive && castTimeRemaining_ > 0.0f)
-            ? static_cast<int32_t>(castTimeRemaining_ * 1000.0f)
+        remainingMs = (!newlyActive && restorationTimeRemaining_ > 0.0f)
+            ? static_cast<int32_t>(restorationTimeRemaining_ * 1000.0f)
             : totalMs;
     }
 
     restorationActive_ = true;
     restorationSpellId_ = spellId;
     restorationIsFood_ = restorationIsFood;
-    casting_ = true;
-    castIsChannel_ = true;
-    currentCastSpellId_ = spellId;
-    castTimeTotal_ = static_cast<float>(totalMs) / 1000.0f;
-    castTimeRemaining_ = static_cast<float>(remainingMs) / 1000.0f;
+    restorationTimeTotal_ = static_cast<float>(totalMs) / 1000.0f;
+    restorationTimeRemaining_ = static_cast<float>(remainingMs) / 1000.0f;
 
     if (newlyActive) {
         restorationSoundTimer_ = 0.0f;
@@ -1652,13 +1649,11 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
                     " lastGoGuid=0x", std::hex, owner_.lastInteractedGoGuidRef(),
                     " pendingGoGuid=0x", owner_.pendingGameObjectInteractGuidRef(), std::dec);
 
-        if (!restorationActive_) {
-            casting_ = false;
-            castIsChannel_ = false;
-            currentCastSpellId_ = 0;
-            castTimeRemaining_ = 0.0f;
-            castTimeTotal_ = 0.0f;
-        }
+        casting_ = false;
+        castIsChannel_ = false;
+        currentCastSpellId_ = 0;
+        castTimeRemaining_ = 0.0f;
+        castTimeTotal_ = 0.0f;
 
         // Gather node looting: re-send CMSG_LOOT now that the cast completed.
         if (wasInTimedCast && owner_.lastInteractedGoGuidRef() != 0) {
@@ -2384,6 +2379,8 @@ void SpellHandler::stopCasting() {
 void SpellHandler::resetCastState() {
     restorationActive_ = false;
     restorationSpellId_ = 0;
+    restorationTimeRemaining_ = 0.0f;
+    restorationTimeTotal_ = 0.0f;
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;

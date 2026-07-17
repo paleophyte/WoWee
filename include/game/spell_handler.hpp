@@ -58,14 +58,24 @@ public:
     float getSpellCooldown(uint32_t spellId) const;
 
     // Cast state
-    bool isCasting() const { return casting_; }
-    bool isChanneling() const { return casting_ && castIsChannel_; }
+    bool isCasting() const { return casting_ || restorationActive_; }
+    bool isChanneling() const { return casting_ ? castIsChannel_ : restorationActive_; }
     bool isRestoring() const { return restorationActive_; }
     bool isGameObjectInteractionCasting() const;
-    uint32_t getCurrentCastSpellId() const { return currentCastSpellId_; }
-    float getCastProgress() const { return castTimeTotal_ > 0 ? (castTimeTotal_ - castTimeRemaining_) / castTimeTotal_ : 0.0f; }
-    float getCastTimeRemaining() const { return castTimeRemaining_; }
-    float getCastTimeTotal() const { return castTimeTotal_; }
+    uint32_t getCurrentCastSpellId() const {
+        return casting_ ? currentCastSpellId_ : restorationSpellId_;
+    }
+    float getCastProgress() const {
+        const float total = casting_ ? castTimeTotal_ : restorationTimeTotal_;
+        const float remaining = casting_ ? castTimeRemaining_ : restorationTimeRemaining_;
+        return total > 0.0f ? (total - remaining) / total : 0.0f;
+    }
+    float getCastTimeRemaining() const {
+        return casting_ ? castTimeRemaining_ : restorationTimeRemaining_;
+    }
+    float getCastTimeTotal() const {
+        return casting_ ? castTimeTotal_ : restorationTimeTotal_;
+    }
 
     // Repeat-craft queue
     void startCraftQueue(uint32_t spellId, int count);
@@ -367,6 +377,8 @@ private:
     bool restorationActive_ = false;
     uint32_t restorationSpellId_ = 0;
     bool restorationIsFood_ = false;
+    float restorationTimeRemaining_ = 0.0f;
+    float restorationTimeTotal_ = 0.0f;
     float restorationSoundTimer_ = 0.0f; // repeats the consume sound while active
 
     // Repeat-craft queue
