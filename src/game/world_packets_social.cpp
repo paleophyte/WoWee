@@ -198,13 +198,6 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
             }
 
             data.receiverGuid = packet.readUInt64();
-
-            // Optional trailing whisper target/source name on some formats.
-            if (data.type == ChatType::WHISPER && data.receiverName.empty()) {
-                tryReadSizedCString(data.receiverName, 128, 4 + 1);
-            } else if (data.type == ChatType::WHISPER_INFORM && data.senderName.empty()) {
-                tryReadSizedCString(data.senderName, 128, 4 + 1);
-            }
             break;
         }
 

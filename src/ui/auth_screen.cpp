@@ -25,8 +25,6 @@
 #include <cstdio>
 #include <algorithm>
 #include <iomanip>
-#include <array>
-#include <random>
 #include <unordered_map>
 
 namespace wowee { namespace ui {
@@ -260,66 +258,35 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
             }
             music->update(ImGui::GetIO().DeltaTime);
             if (!music->isPlaying() && !music->isLoading()) {
-                static std::mt19937 rng(std::random_device{}());
                 if (!introTracksScanned_) {
                     introTracksScanned_ = true;
-
-                    // Tracks in assets/ root
-                    static const std::array<const char*, 1> kRootTracks = {
-                        "Raise the Mug, Sound the Warcry.mp3",
-                    };
-                    // Tracks in assets/Original Music/
-                    static const std::array<const char*, 11> kOriginalTracks = {
-                        "Gold on the Tide in Booty Bay.mp3",
-                        "Lanterns Over Lordaeron.mp3",
-                        "Loot the Dogs.mp3",
-                        "One More Pull.mp3",
-                        "Roll Need Greed.mp3",
-                        "RunBackPolka.mp3",
-                        "The Barrens Has No End.mp3",
-                        "The Bone Collector.mp3",
-                        "Wanderwewill.mp3",
-                        "WHO PULLED_.mp3",
-                        "You No Take Candle!.mp3",
-                    };
-
-                    auto tryAddTrack = [&](const std::filesystem::path& base, const char* track) {
-                        std::filesystem::path p = base / track;
-                        if (std::filesystem::exists(p)) {
-                            introTracks_.push_back(p.string());
-                        }
-                    };
-                    for (const char* track : kRootTracks) {
-                        tryAddTrack("assets", track);
-                        if (introTracks_.empty()) {
-                            tryAddTrack(std::filesystem::current_path() / "assets", track);
+                    const std::filesystem::path relative =
+                        std::filesystem::path("assets") / "Original Music" /
+                        "TavernAllianceREMIX.mp3";
+                    if (std::filesystem::exists(relative)) {
+                        loginTrackPath_ = relative.string();
+                    } else {
+                        const auto absolute = std::filesystem::current_path() / relative;
+                        if (std::filesystem::exists(absolute)) {
+                            loginTrackPath_ = absolute.string();
                         }
                     }
-                    for (const char* track : kOriginalTracks) {
-                        tryAddTrack(std::filesystem::path("assets") / "Original Music", track);
-                        tryAddTrack(std::filesystem::current_path() / "assets" / "Original Music", track);
-                    }
-
-                    std::sort(introTracks_.begin(), introTracks_.end());
-                    introTracks_.erase(std::unique(introTracks_.begin(), introTracks_.end()), introTracks_.end());
                 }
 
-                if (!introTracks_.empty()) {
-                    std::uniform_int_distribution<size_t> pick(0, introTracks_.size() - 1);
-                    const size_t idx = pick(rng);
-                    const std::string path = introTracks_[idx];
-                    music->playFilePath(path, true, 1800.0f);
+                if (!loginTrackPath_.empty()) {
+                    music->playFilePath(loginTrackPath_, true, 1800.0f);
                     // The read runs on a worker, so the track is not playing yet.
                     // Treat a load in flight as success or the track gets dropped below.
                     musicPlaying = music->isPlaying() || music->isLoading();
                     if (musicPlaying) {
-                        LOG_INFO("AuthScreen: Playing login intro track: ", path);
+                        LOG_INFO("AuthScreen: Playing login intro track: ", loginTrackPath_);
                     } else {
-                        // Drop bad paths to avoid retrying the same failed file every frame.
-                        introTracks_.erase(introTracks_.begin() + idx);
+                        // Avoid retrying a bad file every frame. There is deliberately
+                        // no fallback: the login screen is constrained to this track.
+                        loginTrackPath_.clear();
                     }
                 } else if (!missingIntroTracksLogged_) {
-                    LOG_WARNING("AuthScreen: No login intro tracks found in assets/");
+                    LOG_WARNING("AuthScreen: Login track not found: assets/Original Music/TavernAllianceREMIX.mp3");
                     missingIntroTracksLogged_ = true;
                 }
             }

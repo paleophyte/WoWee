@@ -147,7 +147,7 @@ private:
     bool musicPlaying = false;
     bool missingIntroTracksLogged_ = false;
     bool introTracksScanned_ = false;
-    std::vector<std::string> introTracks_;
+    std::string loginTrackPath_;
     bool loginMusicVolumeAdjusted_ = false;
     int savedMusicVolume_ = 30;
 

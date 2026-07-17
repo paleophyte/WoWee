@@ -479,12 +479,18 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.localLightPosRadius[i] = glm::vec4(0.0f);
         currentFrameData.localLightColorIntensity[i] = glm::vec4(0.0f);
     }
-    const uint32_t localLightCount = m2Renderer
-        ? m2Renderer->gatherLocalLights(camera->getPosition(),
+    uint32_t localLightCount = wmoRenderer
+        ? wmoRenderer->gatherLavaLights(camera->getPosition(),
               currentFrameData.localLightPosRadius,
               currentFrameData.localLightColorIntensity,
               MAX_LOCAL_LIGHTS)
         : 0;
+    if (m2Renderer && localLightCount < MAX_LOCAL_LIGHTS) {
+        localLightCount += m2Renderer->gatherLocalLights(camera->getPosition(),
+            currentFrameData.localLightPosRadius + localLightCount,
+            currentFrameData.localLightColorIntensity + localLightCount,
+            MAX_LOCAL_LIGHTS - localLightCount);
+    }
     currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount), 0, 0, 0);
 
     // Player water ripple data: pack player XY into shadowParams.zw, ripple strength into fogParams.w
@@ -1305,6 +1311,16 @@ void Renderer::update(float deltaTime) {
         }
     }
 
+    // Resolve WMO containment before weather and ambience consume it. Server
+    // weather remains authoritative outdoors, but particles must not follow the
+    // camera through a roof into Ironforge or other enclosed WMOs.
+    const bool canQueryWmo = (camera && wmoRenderer);
+    const glm::vec3 camPos = camera ? camera->getPosition() : glm::vec3(0.0f);
+    uint32_t insideWmoId = 0;
+    const bool insideWmo = canQueryWmo &&
+        wmoRenderer->isInsideWMO(camPos.x, camPos.y, camPos.z, &insideWmoId);
+    playerIndoors_ = insideWmo;
+
     // Update lighting system
     if (lightingManager) {
         const auto* gh = core::Application::getInstance().getGameHandler();
@@ -1338,7 +1354,7 @@ void Renderer::update(float deltaTime) {
                 // No server weather — use zone-based weather configuration
                 weather->updateZoneWeather(getCurrentZoneId(), deltaTime);
             }
-            weather->setEnabled(true);
+            weather->setEnabled(!insideWmo);
 
             // Lightning flash disabled
             if (lightning) {
@@ -1347,7 +1363,7 @@ void Renderer::update(float deltaTime) {
         } else if (weather) {
             // No game handler (single-player without network) — zone weather only
             weather->updateZoneWeather(getCurrentZoneId(), deltaTime);
-            weather->setEnabled(true);
+            weather->setEnabled(!insideWmo);
         }
     }
 
@@ -1497,13 +1513,6 @@ void Renderer::update(float deltaTime) {
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
     if (animationController_) animationController_->updateSfxState(deltaTime);
-
-    const bool canQueryWmo = (camera && wmoRenderer);
-    const glm::vec3 camPos = camera ? camera->getPosition() : glm::vec3(0.0f);
-    uint32_t insideWmoId = 0;
-    const bool insideWmo = canQueryWmo &&
-        wmoRenderer->isInsideWMO(camPos.x, camPos.y, camPos.z, &insideWmoId);
-    playerIndoors_ = insideWmo;
 
     // Ambient environmental sounds + zone/music transitions (delegated to AudioCoordinator)
     if (audioCoordinator_) {
