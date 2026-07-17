@@ -39,6 +39,28 @@ constexpr const char* kResistNames[6] = {
     "Frost Resistance", "Shadow Resistance", "Arcane Resistance"
 };
 
+// Keep the complete bag window reachable after monitor/resolution changes or
+// a stale imgui.ini position. Merely checking for total off-screen placement
+// leaves a narrow sliver visible and makes the title bar almost impossible to
+// grab, which is worse than restoring it to the viewport edge.
+bool clampCurrentWindowToMainViewport() {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    if (!viewport) return false;
+
+    ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    const ImVec2 minPos = viewport->WorkPos;
+    const ImVec2 maxPos(
+        minPos.x + std::max(0.0f, viewport->WorkSize.x - size.x),
+        minPos.y + std::max(0.0f, viewport->WorkSize.y - size.y));
+    const ImVec2 clamped(std::clamp(pos.x, minPos.x, maxPos.x),
+                         std::clamp(pos.y, minPos.y, maxPos.y));
+    if (clamped.x == pos.x && clamped.y == pos.y) return false;
+
+    ImGui::SetWindowPos(clamped);
+    return true;
+}
+
 // Render "Classes: Warrior, Paladin" or "Races: Human, Orc" restriction text.
 // Shared between quest info and item info tooltips — both use the same WoW
 // allowableClass/allowableRace bitmask format with identical display logic.
@@ -1148,13 +1170,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
         return;
     }
 
-    // Reset to bottom-right if the window ended up outside the screen (resolution change)
-    ImVec2 winPos = ImGui::GetWindowPos();
-    ImVec2 winSize = ImGui::GetWindowSize();
-    if (winPos.x > screenW || winPos.y > screenH ||
-        winPos.x + winSize.x < 0 || winPos.y + winSize.y < 0) {
-        ImGui::SetWindowPos(ImVec2(posX, posY));
-    }
+    clampCurrentWindowToMainViewport();
 
     // Draw one uninterrupted grid while retaining each slot's real container
     // and index for pickup, use, split, destroy, and server swap operations.
@@ -1353,17 +1369,15 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
         return;
     }
 
-    // Reset position if the window ended up outside the screen (resolution change)
+    // Recover stale or partially off-screen saved positions. The entire title
+    // bar remains selectable instead of accepting a one-pixel visible sliver.
     ImVec2 winPos = ImGui::GetWindowPos();
     ImVec2 winSize = ImGui::GetWindowSize();
-    float scrW = ImGui::GetIO().DisplaySize.x;
-    float scrH = ImGui::GetIO().DisplaySize.y;
-    if (winPos.x > scrW || winPos.y > scrH ||
-        winPos.x + winSize.x < 0 || winPos.y + winSize.y < 0) {
-        ImGui::SetWindowPos(ImVec2(defaultX, defaultY));
+    if (clampCurrentWindowToMainViewport()) {
         winPos = ImGui::GetWindowPos();
         winSize = ImGui::GetWindowSize();
     }
+    float scrH = ImGui::GetIO().DisplaySize.y;
 
     if (bagIndex < 0) {
         constexpr float bagBarSlotSize = 42.0f;
