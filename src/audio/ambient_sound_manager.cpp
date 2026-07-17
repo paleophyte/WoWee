@@ -903,7 +903,7 @@ void AmbientSoundManager::updateBellTolls(float deltaTime) {
     const float bellInterval = randomFloat(120.0f, 180.0f);
     if (bellLibrary && !bellLibrary->empty() && (*bellLibrary)[0].loaded) {
         if (bellTollTime_ >= bellInterval) {
-            float volume = 0.5f * volumeScale_;
+            float volume = 0.5f * bellVolumeScale_ * volumeScale_;
             AudioEngine::instance().playSound2D((*bellLibrary)[0].data, volume, 1.0f);
             LOG_INFO("Bell toll ringing in city: type ", static_cast<int>(currentCity_));
             bellTollTime_ = 0.0f;

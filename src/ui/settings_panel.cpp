@@ -532,6 +532,12 @@ if (ImGui::SliderInt("##AmbientVolume", &pendingAmbientVolume, 0, 100, "%d%%")) 
 ImGui::TextWrapped("Weather, zones, cities, emitters");
 
 ImGui::Spacing();
+ImGui::Text("Capital City Bells");
+if (ImGui::SliderInt("##BellVolume", &pendingBellVolume, 0, 100, "%d%%")) {
+    applyAudioSettings();
+}
+
+ImGui::Spacing();
 ImGui::Text("UI Sounds");
 if (ImGui::SliderInt("##UiVolume", &pendingUiVolume, 0, 100, "%d%%")) {
     applyAudioSettings();
@@ -597,13 +603,14 @@ if (ImGui::Button("Restore Audio Defaults", ImVec2(-1, 0))) {
     pendingMasterVolume = 100;
     pendingMusicVolume = 30; // default music volume
     pendingAmbientVolume = 100;
+    pendingBellVolume = 50;
     pendingUiVolume = 100;
     pendingCombatVolume = 100;
     pendingSpellVolume = 100;
     pendingMovementVolume = 100;
     pendingFootstepVolume = 100;
     pendingNpcVoiceVolume = 100;
-    pendingMountVolume = 100;
+    pendingMountVolume = 70;
     pendingActivityVolume = 100;
     pendingCharacterSpeech = true;
     applyAudioSettings();
@@ -1353,7 +1360,10 @@ void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
     if (auto* music = ac->getMusicManager())
         music->setVolume(pendingMusicVolume);
     if (auto* ambient = ac->getAmbientSoundManager())
+    {
         ambient->setVolumeScale(pendingAmbientVolume / 100.0f);
+        ambient->setBellVolumeScale(pendingBellVolume / 100.0f);
+    }
     if (auto* ui = ac->getUiSoundManager())
         ui->setVolumeScale(pendingUiVolume / 100.0f);
     if (auto* combat = ac->getCombatSoundManager())

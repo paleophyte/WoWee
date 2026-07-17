@@ -45,13 +45,14 @@ public:
     int pendingMasterVolume = 100;
     int pendingMusicVolume = 30;
     int pendingAmbientVolume = 100;
+    int pendingBellVolume = 50;
     int pendingUiVolume = 100;
     int pendingCombatVolume = 100;
     int pendingSpellVolume = 100;
     int pendingMovementVolume = 100;
     int pendingFootstepVolume = 100;
     int pendingNpcVoiceVolume = 100;
-    int pendingMountVolume = 100;
+    int pendingMountVolume = 70;
     int pendingActivityVolume = 100;
     bool pendingCharacterSpeech = true;
 

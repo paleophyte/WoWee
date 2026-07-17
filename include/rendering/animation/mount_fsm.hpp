@@ -122,7 +122,7 @@ private:
 
     // Fidget system — per-instance, not static
     float fidgetTimer_ = 0.0f;
-    float nextFidgetTime_ = 8.0f;
+    float nextFidgetTime_ = 30.0f;
     uint32_t activeFidget_ = 0;
     std::mt19937 rng_;
 

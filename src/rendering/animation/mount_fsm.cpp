@@ -26,7 +26,9 @@ void MountFSM::configure(const MountAnimSet& anims, bool taxiFlight) {
     // Seed per-instance RNG
     std::random_device rd;
     rng_.seed(rd());
-    nextFidgetTime_ = std::uniform_real_distribution<float>(6.0f, 12.0f)(rng_);
+    // Mount fidgets are noticeable full-body animations. Keep them occasional;
+    // the old 6-12 second cadence made horses look continuously restless.
+    nextFidgetTime_ = std::uniform_real_distribution<float>(20.0f, 45.0f)(rng_);
     nextIdleSoundTime_ = std::uniform_real_distribution<float>(45.0f, 90.0f)(rng_);
 }
 
@@ -308,7 +310,7 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             uint32_t fidgetAnim = anims_.fidgets[dist(rng_)];
             activeFidget_ = fidgetAnim;
             fidgetTimer_ = 0.0f;
-            nextFidgetTime_ = std::uniform_real_distribution<float>(6.0f, 12.0f)(rng_);
+            nextFidgetTime_ = std::uniform_real_distribution<float>(20.0f, 45.0f)(rng_);
 
             out.mountAnimId = fidgetAnim;
             out.mountAnimLoop = false;

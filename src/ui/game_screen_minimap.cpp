@@ -1037,6 +1037,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
         if (auto* ambient = ac->getAmbientSoundManager()) {
             ambient->setVolumeScale(settingsPanel_.pendingAmbientVolume / 100.0f);
+            ambient->setBellVolumeScale(settingsPanel_.pendingBellVolume / 100.0f);
         }
         if (auto* ui = ac->getUiSoundManager()) {
             ui->setVolumeScale(settingsPanel_.pendingUiVolume / 100.0f);
@@ -1476,6 +1477,7 @@ void GameScreen::saveSettings() {
     out << "master_volume=" << settingsPanel_.pendingMasterVolume << "\n";
     out << "music_volume=" << settingsPanel_.pendingMusicVolume << "\n";
     out << "ambient_volume=" << settingsPanel_.pendingAmbientVolume << "\n";
+    out << "bell_volume=" << settingsPanel_.pendingBellVolume << "\n";
     out << "ui_volume=" << settingsPanel_.pendingUiVolume << "\n";
     out << "combat_volume=" << settingsPanel_.pendingCombatVolume << "\n";
     out << "spell_volume=" << settingsPanel_.pendingSpellVolume << "\n";
@@ -1648,6 +1650,7 @@ void GameScreen::loadSettings() {
             else if (key == "master_volume") settingsPanel_.pendingMasterVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "music_volume") settingsPanel_.pendingMusicVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "ambient_volume") settingsPanel_.pendingAmbientVolume = std::clamp(std::stoi(val), 0, 100);
+            else if (key == "bell_volume") settingsPanel_.pendingBellVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "ui_volume") settingsPanel_.pendingUiVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "combat_volume") settingsPanel_.pendingCombatVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "spell_volume") settingsPanel_.pendingSpellVolume = std::clamp(std::stoi(val), 0, 100);
