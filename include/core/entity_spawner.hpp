@@ -145,6 +145,7 @@ public:
     std::unordered_map<uint64_t, uint32_t>& getCreatureInstances() { return creatureInstances_; }
     const std::unordered_map<uint64_t, uint32_t>& getCreatureInstances() const { return creatureInstances_; }
     std::unordered_map<uint64_t, uint32_t>& getCreatureModelIds() { return creatureModelIds_; }
+    const std::unordered_map<uint64_t, uint32_t>& getCreatureDisplayIds() const { return creatureDisplayIds_; }
     std::unordered_map<uint64_t, glm::vec3>& getCreatureRenderPosCache() { return creatureRenderPosCache_; }
     std::unordered_map<uint64_t, bool>& getCreatureWasMoving() { return creatureWasMoving_; }
     std::unordered_map<uint64_t, bool>& getCreatureWasSwimming() { return creatureWasSwimming_; }
@@ -153,6 +154,7 @@ public:
     std::unordered_map<uint64_t, bool>& getCreatureSwimmingState() { return creatureSwimmingState_; }
     std::unordered_map<uint64_t, bool>& getCreatureWalkingState() { return creatureWalkingState_; }
     std::unordered_map<uint64_t, bool>& getCreatureFlyingState() { return creatureFlyingState_; }
+    std::unordered_map<uint64_t, uint32_t>& getCreatureActiveEmotes() { return creatureActiveEmotes_; }
     std::unordered_set<uint64_t>& getCreatureWeaponsAttached() { return creatureWeaponsAttached_; }
     std::unordered_map<uint64_t, uint8_t>& getCreatureWeaponAttachAttempts() { return creatureWeaponAttachAttempts_; }
     std::unordered_map<uint32_t, bool>& getModelIdIsWolfLike() { return modelIdIsWolfLike_; }
@@ -233,8 +235,15 @@ private:
     void buildGameObjectDisplayLookups();
 
     // --- Creature instances and tracking ---
+    // Drop the pending-spawn marker for guid unless a queue entry still references it.
+    void erasePendingGuidIfUnqueued(uint64_t guid);
+
     std::unordered_map<uint64_t, uint32_t> creatureInstances_;  // guid → render instanceId
     std::unordered_map<uint64_t, uint32_t> creatureModelIds_;   // guid → loaded modelId
+    std::unordered_map<uint64_t, uint32_t> creatureDisplayIds_; // guid → active displayId
+    // Latest server-requested display, including creatures whose async model load
+    // has not completed yet. This prevents an older queued display from winning.
+    std::unordered_map<uint64_t, uint32_t> requestedCreatureDisplayIds_;
     std::unordered_map<uint64_t, glm::vec3> creatureRenderPosCache_; // guid → last synced render position
     std::unordered_map<uint64_t, bool> creatureWasMoving_;
     std::unordered_map<uint64_t, bool> creatureWasSwimming_;
@@ -243,6 +252,9 @@ private:
     std::unordered_map<uint64_t, bool> creatureSwimmingState_;
     std::unordered_map<uint64_t, bool> creatureWalkingState_;
     std::unordered_map<uint64_t, bool> creatureFlyingState_;
+    // Server waypoint scripts hold work/chop emotes for many seconds. Locomotion
+    // temporarily overrides them, then the idle transition restores this loop.
+    std::unordered_map<uint64_t, uint32_t> creatureActiveEmotes_;
     std::unordered_map<uint64_t, bool> creatureWasStealthed_;
     uint32_t stealthSyncFrameCounter_ = 0;  // throttles syncCreatureStealthVisuals()
     std::unordered_set<uint64_t> creatureWeaponsAttached_;

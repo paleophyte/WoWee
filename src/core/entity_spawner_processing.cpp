@@ -57,6 +57,18 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         it = asyncCreatureLoads_.erase(it);
         asyncCreatureDisplayLoads_.erase(result.displayId);
 
+        auto requested = requestedCreatureDisplayIds_.find(result.guid);
+        if (requested == requestedCreatureDisplayIds_.end() ||
+            requested->second != result.displayId) {
+            // A VALUES update changed the display while this model was loading.
+            // The replacement request is already queued; never instantiate stale
+            // geometry (notably the lumberjack's log-carrying model while chopping).
+            // Release the pending marker unless a replacement queue entry still
+            // holds it — a stranded marker blocks the resync sweep forever.
+            erasePendingGuidIfUnqueued(result.guid);
+            continue;
+        }
+
         // Failures and cache hits need no GPU work — process them even when the
         // upload budget is exhausted. Previously the budget check was above this
         // point, blocking ALL ready futures (including zero-cost ones) after a
@@ -289,6 +301,14 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
         PendingCreatureSpawn s = pendingCreatureSpawns_.front();
         pendingCreatureSpawns_.pop_front();
+
+        auto requested = requestedCreatureDisplayIds_.find(s.guid);
+        if (requested == requestedCreatureDisplayIds_.end() ||
+            requested->second != s.displayId) {
+            // Stale entry superseded by a newer display request for this guid.
+            erasePendingGuidIfUnqueued(s.guid);
+            continue;
+        }
 
         if (nonRenderableCreatureDisplayIds_.count(s.displayId)) {
             pendingCreatureSpawnGuids_.erase(s.guid);
@@ -1556,6 +1576,13 @@ void EntitySpawner::processPendingMount() {
     LOG_INFO("processPendingMount: DONE displayId=", mountDisplayId, " model=", m2Path, " heightOffset=", heightOffset);
 }
 
+void EntitySpawner::erasePendingGuidIfUnqueued(uint64_t guid) {
+    for (const auto& pending : pendingCreatureSpawns_) {
+        if (pending.guid == guid) return;
+    }
+    pendingCreatureSpawnGuids_.erase(guid);
+}
+
 void EntitySpawner::despawnCreature(uint64_t guid) {
     // If this guid is a PLAYER, it will be tracked in playerInstances_.
     // Route to the correct despawn path so we don't leak instances.
@@ -1565,6 +1592,8 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     }
 
     pendingCreatureSpawnGuids_.erase(guid);
+    requestedCreatureDisplayIds_.erase(guid);
+    creatureActiveEmotes_.erase(guid);
     creatureSpawnRetryCounts_.erase(guid);
     creaturePermanentFailureGuids_.erase(guid);
     deadCreatureGuids_.erase(guid);
@@ -1578,6 +1607,7 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
 
     creatureInstances_.erase(it);
     creatureModelIds_.erase(guid);
+    creatureDisplayIds_.erase(guid);
     creatureRenderPosCache_.erase(guid);
     creatureWeaponsAttached_.erase(guid);
     creatureWeaponAttachAttempts_.erase(guid);

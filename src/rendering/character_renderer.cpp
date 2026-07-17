@@ -186,6 +186,43 @@ static bool sceneDiagEnabled() {
     return enabled;
 }
 
+// Evaluate a batch's M2 color-alpha track at the given animation sequence/time.
+// Returns 1.0 when the batch has no color slot or the track has no usable data.
+// Global-sequence-timed tracks are not culled (they run on a different clock and
+// typically drive pulsing glows, not visibility gating).
+static float evalBatchColorAlpha(const pipeline::M2Model& model,
+                                 const pipeline::M2Batch& batch,
+                                 int sequenceIndex, float timeMs) {
+    if (batch.colorIndex == 0xFFFF ||
+        batch.colorIndex >= model.colorAlphaTracks.size()) {
+        return 1.0f;
+    }
+    const auto& track = model.colorAlphaTracks[batch.colorIndex];
+    if (track.globalSequence >= 0 || track.sequences.empty()) return 1.0f;
+    if (sequenceIndex < 0 ||
+        static_cast<size_t>(sequenceIndex) >= track.sequences.size()) {
+        return 1.0f;
+    }
+    const auto& seq = track.sequences[sequenceIndex];
+    const size_t n = std::min(seq.timestamps.size(), seq.floatValues.size());
+    if (n == 0) return 1.0f;
+    if (n == 1 || timeMs <= static_cast<float>(seq.timestamps[0])) {
+        return seq.floatValues[0];
+    }
+    for (size_t k = 1; k < n; k++) {
+        float t1 = static_cast<float>(seq.timestamps[k]);
+        if (timeMs <= t1) {
+            // Interpolation type 0 is stepwise — hold the earlier key.
+            if (track.interpolationType == 0) return seq.floatValues[k - 1];
+            float t0 = static_cast<float>(seq.timestamps[k - 1]);
+            float f = (t1 > t0) ? (timeMs - t0) / (t1 - t0) : 1.0f;
+            return seq.floatValues[k - 1] +
+                   (seq.floatValues[k] - seq.floatValues[k - 1]) * f;
+        }
+    }
+    return seq.floatValues[n - 1];
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
@@ -1802,7 +1839,8 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     return id;
 }
 
-void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId, bool loop) {
+void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId, bool loop,
+                                      uint32_t oneShotReturnAnim) {
     auto it = instances.find(instanceId);
     if (it == instances.end()) {
         core::Logger::getInstance().warning("Cannot play animation: instance ", instanceId, " not found");
@@ -1811,6 +1849,7 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
 
     auto& instance = it->second;
     auto& model = models[instance.modelId].data;
+    instance.oneShotReturnAnim = loop ? 0 : oneShotReturnAnim;
 
     // Track death state for preventing movement while dead
     if (animationId == 1) {
@@ -1925,9 +1964,12 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
                         inst.animationTime -= static_cast<float>(seq.duration);
                     }
                 } else {
-                    // One-shot animation finished: return to Stand unless dead
+                    // One-shot animation finished: return to the caller-specified
+                    // resume anim (NPC state emote) or Stand, unless dead
                     if (inst.currentAnimationId != anim::DEATH) {
-                        playAnimation(pair.first, anim::STAND, true);
+                        const uint32_t resumeAnim =
+                            inst.oneShotReturnAnim != 0 ? inst.oneShotReturnAnim : anim::STAND;
+                        playAnimation(pair.first, resumeAnim, true);
                     } else {
                         // Stay on last frame of death
                         inst.animationTime = static_cast<float>(seq.duration);
@@ -2696,6 +2738,16 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     // only for DK/NE eye glow and should be off by default.
                     uint16_t grp = batch.submeshId / 100;
                     if (grp == 17 || grp == 18) continue;
+                }
+                // M2 color-alpha animation gates prop submeshes per animation —
+                // e.g. the peasant lumberjack carry model has two wood-bundle
+                // submeshes and only one is alpha-1 in any given animation.
+                // Opaque batches can't express alpha in the shader, so cull
+                // batches whose track evaluates to ~0 for the current sequence.
+                if (evalBatchColorAlpha(gpuModel.data, batch,
+                                        instance.currentSequenceIndex,
+                                        instance.animationTime) <= 0.01f) {
+                    continue;
                 }
                 // Resolve texture for this batch (prefer hair textures for hair geosets).
                 VkTexture* texPtr = resolveBatchTexture(instance, gpuModel, batch);

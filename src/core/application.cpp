@@ -1940,6 +1940,7 @@ void Application::update(float deltaTime) {
                 auto& _creatureSwimmingState = entitySpawner_->getCreatureSwimmingState();
                 auto& _creatureWalkingState = entitySpawner_->getCreatureWalkingState();
                 auto& _creatureFlyingState = entitySpawner_->getCreatureFlyingState();
+                auto& _creatureActiveEmotes = entitySpawner_->getCreatureActiveEmotes();
                 auto& _creatureWasMoving = entitySpawner_->getCreatureWasMoving();
                 auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
                 auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
@@ -1995,7 +1996,13 @@ void Application::update(float deltaTime) {
                     // above a tunnel cannot move the model into/onto the WMO shell.
                     const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                                 !_creatureSwimmingState.count(guid);
-                    if (entity->isActivelyMoving() && groundCreature) {
+                    // These scripted Westfall workers have authored waypoint Z
+                    // on lumber piles/roof surfaces. Broad client floor probes can
+                    // snap them to a nearby WMO shell above the intended surface.
+                    const uint32_t creatureEntry =
+                        std::static_pointer_cast<game::Unit>(entity)->getEntry();
+                    const bool authoredWorkerHeight = creatureEntry == 6670 || creatureEntry == 842;
+                    if (entity->isActivelyMoving() && groundCreature && !authoredWorkerHeight) {
                         if (auto floorZ = movingEntityFloor(renderer.get(), renderPos)) {
                             renderPos.z = *floorZ;
                         }
@@ -2143,7 +2150,18 @@ void Application::update(float deltaTime) {
                                 } else {
                                     if (isFlyingNow)        targetAnim = rendering::anim::FLY_IDLE;
                                     else if (isSwimmingNow) targetAnim = rendering::anim::SWIM_IDLE;
-                                    else                    targetAnim = rendering::anim::STAND;
+                                    else {
+                                        // Resume a retained state emote (work/chop loop),
+                                        // but only if this model ships the animation —
+                                        // display swaps can land on models without it
+                                        // (the log-carrying peasant has no chop anim).
+                                        targetAnim = rendering::anim::STAND;
+                                        auto emoteIt = _creatureActiveEmotes.find(guid);
+                                        if (emoteIt != _creatureActiveEmotes.end() &&
+                                            charRenderer->hasAnimation(instanceId, emoteIt->second)) {
+                                            targetAnim = emoteIt->second;
+                                        }
+                                    }
                                 }
                                 charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
                             }

@@ -199,6 +199,7 @@ void CameraController::update(float deltaTime) {
     }
     // Keep physics integration stable during render hitches to avoid floor tunneling.
     const float physicsDeltaTime = std::min(deltaTime, kMaxPhysicsDelta);
+    intoxicationTime_ += deltaTime;
 
     // During taxi flights, skip movement logic but keep camera orbit/zoom controls.
     if (externalFollow_) {
@@ -477,6 +478,11 @@ void CameraController::update(float deltaTime) {
         facingYaw = yaw;
     }
     float moveYaw = cameraDrivesFacing ? yaw : facingYaw;
+    if (intoxication_ > 0.34f) {
+        // Drunk and smashed characters weave while trying to walk. Keep facing
+        // authoritative; only the travel direction stumbles side to side.
+        moveYaw += std::sin(intoxicationTime_ * 2.1f) * 11.0f * intoxication_;
+    }
     float moveYawRad = glm::radians(moveYaw);
     glm::vec3 forward(std::cos(moveYawRad), std::sin(moveYawRad), 0.0f);
     glm::vec3 right(-std::sin(moveYawRad), std::cos(moveYawRad), 0.0f);
@@ -2116,6 +2122,13 @@ void CameraController::update(float deltaTime) {
         if (camera) {
             camera->setPosition(camera->getPosition() + offset);
         }
+    }
+
+    if (intoxication_ > 0.0f && camera) {
+        const float swayYaw = std::sin(intoxicationTime_ * 1.35f) * 2.5f * intoxication_;
+        const float swayPitch = std::sin(intoxicationTime_ * 1.8f + 0.7f) * 1.6f * intoxication_;
+        camera->setRotation(yaw + swayYaw,
+                            glm::clamp(pitch + swayPitch, MIN_PITCH, MAX_PITCH));
     }
 }
 

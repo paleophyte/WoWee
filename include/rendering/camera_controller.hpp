@@ -151,6 +151,7 @@ public:
     bool isDescending() const { return wasDescending_; }
     void setHoverActive(bool active) { hoverActive_ = active; }
     void setMounted(bool m) { mounted_ = m; }
+    void setIntoxication(float amount) { intoxication_ = std::clamp(amount, 0.0f, 1.0f); }
     void setMountHeightOffset(float offset) { mountHeightOffset_ = offset; }
     void setExternalFollow(bool enabled) { externalFollow_ = enabled; }
     void setExternalMoving(bool moving) { externalMoving_ = moving; }
@@ -462,6 +463,10 @@ private:
     float shakeDuration_  = 0.0f;
     float shakeMagnitude_ = 0.0f;
     float shakeFrequency_ = 0.0f;
+
+    // Server-authored drunkenness (0 sober, 1 smashed).
+    float intoxication_ = 0.0f;
+    float intoxicationTime_ = 0.0f;
 };
 
 } // namespace rendering
