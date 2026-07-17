@@ -1174,7 +1174,7 @@ void CameraController::update(float deltaTime) {
                     // Guard against extremely bad WMO void ramps, but keep normal tunnel
                     // transitions valid. Only reject when the WMO sample is implausibly far
                     // below terrain and player is not already descending.
-                    if (terrainH && wmoH) {
+                    if (terrainH && wmoH && !cachedInsideWMO) {
                         float terrainMinusWmo = *terrainH - *wmoH;
                         if (terrainMinusWmo > 12.0f && verticalVelocity > -8.0f) {
                             wmoH = std::nullopt;

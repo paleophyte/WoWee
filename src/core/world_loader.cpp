@@ -367,6 +367,17 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         // Clear pending queues first (these don't touch GPU resources)
         entitySpawner_->clearAllQueues();
 
+        // Transport GUIDs are reused across maps (for example, Undercity elevator
+        // GUIDs become Deeprun tram GUIDs). The renderer instances are map-local,
+        // so the logical transport/path state must be map-local too; otherwise a
+        // newly spawned SubwayCar is rebound to the old elevator path.
+        if (gameHandler_) {
+            gameHandler_->clearPlayerTransport();
+            if (auto* tm = gameHandler_->getTransportManager()) {
+                tm->clearTransports();
+            }
+        }
+
         if (renderer_) {
             // Clear all world geometry from old map (including textures/models).
             // WMO clearAll and M2 clear both call vkDeviceWaitIdle internally,

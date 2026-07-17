@@ -120,6 +120,10 @@ public:
                            uint32_t displayId = 0,
                            bool isM2 = false);
     void unregisterTransport(uint64_t guid);
+    // Logical transport GUIDs are only unique within the current map. Clear all
+    // active instances on map transitions so a reused GUID cannot retain the
+    // previous map's entry/path while merely rebinding to a new render model.
+    void clearTransports();
 
     ActiveTransport* getTransport(uint64_t guid);
     // MAIN-THREAD-ONLY: this reference is not lock-protected, matching EntityManager's

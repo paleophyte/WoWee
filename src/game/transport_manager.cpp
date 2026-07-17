@@ -258,6 +258,14 @@ void TransportManager::unregisterTransport(uint64_t guid) {
     LOG_INFO("TransportManager: Unregistered transport ", guid);
 }
 
+void TransportManager::clearTransports() {
+    const size_t count = transports_.size();
+    transports_.clear();
+    if (count != 0) {
+        LOG_INFO("TransportManager: Cleared ", count, " transports for map transition");
+    }
+}
+
 void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
                                                uint32_t entry,
                                                uint32_t displayId,
