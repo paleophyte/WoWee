@@ -1962,8 +1962,12 @@ void GameHandler::confirmTalentWipe() {
     if (spellHandler_) spellHandler_->confirmTalentWipe();
 }
 
-void GameHandler::sendAlterAppearance(uint32_t hairStyle, uint32_t hairColor, uint32_t facialHair) {
-    if (socialHandler_) socialHandler_->sendAlterAppearance(hairStyle, hairColor, facialHair);
+void GameHandler::sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
+                                      uint32_t facialHairEntry, uint32_t skinColorEntry) {
+    if (socialHandler_) {
+        socialHandler_->sendAlterAppearance(hairStyleEntry, hairColor,
+                                            facialHairEntry, skinColorEntry);
+    }
 }
 
 // ============================================================

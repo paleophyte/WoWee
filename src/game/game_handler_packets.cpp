@@ -1223,7 +1223,7 @@ void GameHandler::registerOpcodeHandlers() {
 
     // ---- SMSG_BARBER_SHOP_RESULT ----
     dispatchTable_[Opcode::SMSG_BARBER_SHOP_RESULT] = [this](network::Packet& packet) {
-        // uint32 result (0 = success, 1 = no money, 2 = not barber, 3 = sitting)
+        // uint32 result: 0=success, 1/3=not enough money, 2=not seated at barber
         if (packet.hasRemaining(4)) {
             uint32_t result = packet.readUInt32();
             if (result == 0) {
@@ -1231,9 +1231,8 @@ void GameHandler::registerOpcodeHandlers() {
                 barberShopOpen_ = false;
                 fireAddonEvent("BARBER_SHOP_CLOSE", {});
             } else {
-                const char* msg = (result == 1) ? "Not enough money for new hairstyle."
+                const char* msg = (result == 1 || result == 3) ? "Not enough money for new hairstyle."
                                 : (result == 2) ? "You are not at a barber shop."
-                                : (result == 3) ? "You must stand up to use the barber shop."
                                 : "Barber shop unavailable.";
                 addUIError(msg);
                 addSystemChatMessage(msg);

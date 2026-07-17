@@ -791,12 +791,19 @@ void MovementHandler::forceClearTaxiAndMovementState() {
     taxiStartGrace_ = 0.0f;
     onTaxiFlight_ = false;
 
-    if (taxiMountActive_ && owner_.mountCallbackRef()) {
+    const bool clearingTaxiMount = taxiMountActive_;
+    if (clearingTaxiMount && owner_.mountCallbackRef()) {
         owner_.mountCallbackRef()(0);
     }
     taxiMountActive_ = false;
     taxiMountDisplayId_ = 0;
-    owner_.currentMountDisplayIdRef() = 0;
+    // A normal mount is owned by its aura/update-field path. Do not silently
+    // zero it here without firing the mount callback: that leaves the rendered
+    // mount behind and reconciliation spawns a duplicate. Unstuck explicitly
+    // dismounts normal mounts before calling this movement reset.
+    if (clearingTaxiMount) {
+        owner_.currentMountDisplayIdRef() = 0;
+    }
     owner_.vehicleIdRef() = 0;
     // Death/resurrect state is intentionally NOT cleared here.
     // Previously this method reset 10 death-related fields despite being named

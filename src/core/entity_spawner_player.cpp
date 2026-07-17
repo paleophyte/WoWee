@@ -1278,7 +1278,10 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             }
 
             pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
-            if (model.name.empty()) model.name = modelPath;
+            // Collision classification needs the asset path. Embedded M2 names
+            // are often generic and caused herb/grass gameobjects to be treated
+            // as solid props.
+            model.name = modelPath;
             if (model.vertices.empty()) {
                 LOG_WARNING("Failed to parse gameobject M2: ", modelPath);
                 gameObjectDisplayIdFailedCache_.insert(displayId);

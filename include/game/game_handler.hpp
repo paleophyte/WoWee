@@ -1287,7 +1287,8 @@ public:
     // Barber shop
     bool isBarberShopOpen() const { return barberShopOpen_; }
     void closeBarberShop() { barberShopOpen_ = false; fireAddonEvent("BARBER_SHOP_CLOSE", {}); }
-    void sendAlterAppearance(uint32_t hairStyle, uint32_t hairColor, uint32_t facialHair);
+    void sendAlterAppearance(uint32_t hairStyleEntry, uint32_t hairColor,
+                             uint32_t facialHairEntry, uint32_t skinColorEntry);
 
     // Instance difficulty (0=5N, 1=5H, 2=25N, 3=25H for WotLK)
     uint32_t getInstanceDifficulty() const;

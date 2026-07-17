@@ -204,9 +204,9 @@ add_test(NAME dbc_loader COMMAND test_dbc_loader)
 register_test_target(test_dbc_loader)
 
 # ── test_m2_structs ──────────────────────────────────────────
-# Header-only struct layout tests — no source files needed
 add_executable(test_m2_structs
     test_m2_structs.cpp
+    ../src/rendering/m2_model_classifier.cpp
 )
 target_include_directories(test_m2_structs PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_structs SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
