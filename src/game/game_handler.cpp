@@ -29,6 +29,7 @@
 #include "auth/crypto.hpp"
 #include "core/coordinates.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
@@ -1104,15 +1105,7 @@ void GameHandler::extractExploredZoneFields(const FlatFieldMap& fields) {
 }
 
 std::string GameHandler::getCharacterConfigDir() {
-    std::string dir;
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    dir = appdata ? std::string(appdata) + "\\wowee\\characters" : "characters";
-#else
-    const char* home = std::getenv("HOME");
-    dir = home ? std::string(home) + "/.wowee/characters" : "characters";
-#endif
-    return dir;
+    return core::getConfigRoot() + "/characters";
 }
 
 static const std::string EMPTY_MACRO_TEXT;

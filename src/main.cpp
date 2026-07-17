@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include <exception>
 #include <csignal>
@@ -155,6 +156,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         wowee::core::Logger::getInstance().setLogLevel(readLogLevelFromEnv());
         LOG_INFO("=== Wowee Native Client ===");
         LOG_INFO("Starting application...");
+
+        // Seed portable config from the per-user location on first portable launch.
+        wowee::core::migratePortableConfigIfNeeded();
 
         wowee::core::Application app;
 

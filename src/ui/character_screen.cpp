@@ -4,6 +4,7 @@
 #include "rendering/renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -554,13 +555,7 @@ ImVec4 CharacterScreen::getFactionColor(game::Race race) const {
 }
 
 std::string CharacterScreen::getConfigDir() {
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    return appdata ? std::string(appdata) + "\\wowee" : ".";
-#else
-    const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/.wowee" : ".";
-#endif
+    return core::getConfigRoot();
 }
 
 void CharacterScreen::saveLastCharacter(uint64_t guid) {

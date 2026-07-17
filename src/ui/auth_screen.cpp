@@ -3,6 +3,7 @@
 #include "ui/settings_panel.hpp"
 #include "auth/crypto.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include "core/version.hpp"
 #include "core/window.hpp"
@@ -781,15 +782,7 @@ void AuthScreen::setStatus(const std::string& message, bool isError) {
 }
 
 std::string AuthScreen::getConfigPath() {
-    std::string dir;
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    dir = appdata ? std::string(appdata) + "\\wowee" : ".";
-#else
-    const char* home = std::getenv("HOME");
-    dir = home ? std::string(home) + "/.wowee" : ".";
-#endif
-    return dir + "/login.cfg";
+    return core::getConfigRoot() + "/login.cfg";
 }
 
 void AuthScreen::saveLoginInfo(bool includePasswordHash) {
