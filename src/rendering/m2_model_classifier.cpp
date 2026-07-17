@@ -34,10 +34,18 @@ M2ClassificationResult classifyM2Model(
     std::size_t        vertexCount,
     std::size_t        emitterCount)
 {
-    // Single lowercased copy — all token checks share it.
-    std::string n = name;
-    std::transform(n.begin(), n.end(), n.begin(),
+    // Lowercased full name for explicitly path-based checks (ground detail).
+    std::string fullPath = name;
+    std::transform(fullPath.begin(), fullPath.end(), fullPath.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    // Token checks run on the basename only: model names are often full asset
+    // paths, and directory tokens poison them (e.g. every model under
+    // PASSIVEDOODADS\LIGHTS\ matched the "light" lantern token, turning wall
+    // torches into floating glow sprites). Filenames carry the real semantics.
+    std::string n = fullPath;
+    const size_t lastSep = n.find_last_of("\\/");
+    if (lastSep != std::string::npos) n = n.substr(lastSep + 1);
 
     M2ClassificationResult r;
 
@@ -54,7 +62,7 @@ M2ClassificationResult classifyM2Model(
     // Simple single-token flags
     // ---------------------------------------------------------------
     r.isInvisibleTrap = has(n, "invisibletrap");
-    r.isGroundDetail  = has(n, "\\nodxt\\detail\\") || has(n, "\\detail\\");
+    r.isGroundDetail  = has(fullPath, "\\nodxt\\detail\\") || has(fullPath, "\\detail\\");
     r.isSmoke         = has(n, "smoke");
     r.isLavaModel     = has(n, "forgelava") || has(n, "lavapot") || has(n, "lavaflow")
                     || has(n, "lavapool");
