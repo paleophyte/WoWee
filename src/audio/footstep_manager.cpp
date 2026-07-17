@@ -28,6 +28,16 @@ std::vector<std::string> buildAltFootstepSet(const std::string& folder, const st
     return out;
 }
 
+std::vector<std::string> buildHorseFootstepSet(const std::string& material) {
+    std::vector<std::string> out;
+    for (int i = 1; i <= 5; ++i) {
+        char index[3];
+        std::snprintf(index, sizeof(index), "%02d", i);
+        out.push_back("Sound\\Creature\\Horse\\mFootstepsHorse" + material + index + ".wav");
+    }
+    return out;
+}
+
 } // namespace
 
 FootstepManager::FootstepManager() : rng(std::random_device{}()) {}
@@ -40,6 +50,9 @@ bool FootstepManager::initialize(pipeline::AssetManager* assets) {
     assetManager = assets;
     sampleCount = 0;
     for (auto& surface : surfaces) {
+        surface.clips.clear();
+    }
+    for (auto& surface : horseSurfaces) {
         surface.clips.clear();
     }
 
@@ -60,12 +73,21 @@ bool FootstepManager::initialize(pipeline::AssetManager* assets) {
         preloadSurface(FootstepSurface::METAL, buildClassicFootstepSet("Metal"));
     }
 
+    preloadHorseSurface(FootstepSurface::STONE, buildHorseFootstepSet("Stone"));
+    preloadHorseSurface(FootstepSurface::DIRT, buildHorseFootstepSet("Dirt"));
+    preloadHorseSurface(FootstepSurface::GRASS, buildHorseFootstepSet("Grass"));
+    preloadHorseSurface(FootstepSurface::WOOD, buildHorseFootstepSet("Wood"));
+    preloadHorseSurface(FootstepSurface::SNOW, buildHorseFootstepSet("Snow"));
+
     LOG_INFO("Footstep manager initialized (", sampleCount, " clips)");
     return sampleCount > 0;
 }
 
 void FootstepManager::shutdown() {
     for (auto& surface : surfaces) {
+        surface.clips.clear();
+    }
+    for (auto& surface : horseSurfaces) {
         surface.clips.clear();
     }
     sampleCount = 0;
@@ -86,7 +108,14 @@ void FootstepManager::playFootstep(FootstepSurface surface, bool sprinting) {
         return;
     }
 
-    playRandomStep(surface, sprinting);
+    playRandomStep(surface, sprinting, false);
+}
+
+void FootstepManager::playHorseFootstep(FootstepSurface surface, bool sprinting) {
+    if (!assetManager || sampleCount == 0 || !AudioEngine::instance().isInitialized()) {
+        return;
+    }
+    playRandomStep(surface, sprinting, true);
 }
 
 void FootstepManager::preloadSurface(FootstepSurface surface, const std::vector<std::string>& candidates) {
@@ -112,7 +141,20 @@ void FootstepManager::preloadSurface(FootstepSurface surface, const std::vector<
     }
 }
 
-bool FootstepManager::playRandomStep(FootstepSurface surface, bool sprinting) {
+void FootstepManager::preloadHorseSurface(FootstepSurface surface,
+                                          const std::vector<std::string>& candidates) {
+    if (!assetManager) return;
+    auto& list = horseSurfaces[static_cast<size_t>(surface)].clips;
+    for (const std::string& path : candidates) {
+        if (!assetManager->fileExists(path)) continue;
+        auto data = assetManager->readFile(path);
+        if (data.empty()) continue;
+        list.push_back({path, std::move(data)});
+        sampleCount++;
+    }
+}
+
+bool FootstepManager::playRandomStep(FootstepSurface surface, bool sprinting, bool horse) {
     auto now = std::chrono::steady_clock::now();
     if (lastPlayTime.time_since_epoch().count() != 0) {
         float elapsed = std::chrono::duration<float>(now - lastPlayTime).count();
@@ -122,17 +164,24 @@ bool FootstepManager::playRandomStep(FootstepSurface surface, bool sprinting) {
         }
     }
 
-    auto& list = surfaces[static_cast<size_t>(surface)].clips;
-    if (list.empty()) {
-        list = surfaces[static_cast<size_t>(FootstepSurface::STONE)].clips;
-        if (list.empty()) {
-            return false;
-        }
+    const auto surfaceIndex = static_cast<size_t>(surface);
+    const std::vector<Sample>* list = horse ? &horseSurfaces[surfaceIndex].clips
+                                            : &surfaces[surfaceIndex].clips;
+    if (list->empty() && horse) {
+        // Horse archives do not author metal or water variants. Hooves on metal
+        // are closest to the stone bank; water keeps the normal splash bank.
+        list = (surface == FootstepSurface::WATER)
+            ? &surfaces[surfaceIndex].clips
+            : &horseSurfaces[static_cast<size_t>(FootstepSurface::STONE)].clips;
+    }
+    if (list->empty()) {
+        list = &surfaces[static_cast<size_t>(FootstepSurface::STONE)].clips;
+        if (list->empty()) return false;
     }
 
     // Pick a random clip
-    std::uniform_int_distribution<size_t> clipDist(0, list.size() - 1);
-    const Sample& sample = list[clipDist(rng)];
+    std::uniform_int_distribution<size_t> clipDist(0, list->size() - 1);
+    const Sample& sample = (*list)[clipDist(rng)];
 
     // Subtle variation for less repetitive cadence
     std::uniform_real_distribution<float> pitchDist(0.97f, 1.05f);

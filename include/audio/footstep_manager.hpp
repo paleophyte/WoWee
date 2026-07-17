@@ -31,6 +31,7 @@ public:
 
     void update(float deltaTime);
     void playFootstep(FootstepSurface surface, bool sprinting);
+    void playHorseFootstep(FootstepSurface surface, bool sprinting);
     void setVolumeScale(float scale) { volumeScale = scale; }
     float getVolumeScale() const { return volumeScale; }
 
@@ -48,11 +49,13 @@ private:
     };
 
     void preloadSurface(FootstepSurface surface, const std::vector<std::string>& candidates);
-    bool playRandomStep(FootstepSurface surface, bool sprinting);
+    void preloadHorseSurface(FootstepSurface surface, const std::vector<std::string>& candidates);
+    bool playRandomStep(FootstepSurface surface, bool sprinting, bool horse);
     static const char* surfaceName(FootstepSurface surface);
 
     pipeline::AssetManager* assetManager = nullptr;
     SurfaceSamples surfaces[7];
+    SurfaceSamples horseSurfaces[7];
     size_t sampleCount = 0;
 
     std::chrono::steady_clock::time_point lastPlayTime = std::chrono::steady_clock::time_point{};

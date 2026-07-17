@@ -8,6 +8,7 @@
 #include "rendering/swim_effects.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/footstep_manager.hpp"
+#include "audio/mount_sound_manager.hpp"
 #include "audio/movement_sound_manager.hpp"
 
 #include <algorithm>
@@ -106,7 +107,9 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
     if (wmoRenderer) {
         auto wmoFloor = wmoRenderer->getFloorHeight(p.x, p.y, p.z + 1.5f);
         auto terrainFloor = terrainManager ? terrainManager->getHeightAt(p.x, p.y) : std::nullopt;
-        if (wmoFloor && (!terrainFloor || *wmoFloor >= *terrainFloor - 0.1f)) {
+        const bool standingOnWmo = wmoFloor && std::abs(*wmoFloor - p.z) <= 2.5f;
+        if (standingOnWmo && (cameraController->isInsideWMO() ||
+                             !terrainFloor || *wmoFloor >= *terrainFloor - 0.1f)) {
             cachedFootstepSurface_ = audio::FootstepSurface::STONE;
             return audio::FootstepSurface::STONE;
         }
@@ -179,7 +182,17 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                     return mountFootstepLastNormTime_ < eventNorm || eventNorm <= norm;
                 };
                 if (crossed(0.25f) || crossed(0.75f)) {
-                    footstepManager->playFootstep(resolveFootstepSurface(renderer), true);
+                    const auto surface = resolveFootstepSurface(renderer);
+                    auto* mountSounds = renderer->getAudioCoordinator()->getMountSoundManager();
+                    const auto family = mountSounds
+                        ? mountSounds->getCurrentMountFamily()
+                        : audio::MountFamily::UNKNOWN;
+                    if (family == audio::MountFamily::HORSE ||
+                        family == audio::MountFamily::UNDEAD_HORSE) {
+                        footstepManager->playHorseFootstep(surface, true);
+                    } else {
+                        footstepManager->playFootstep(surface, true);
+                    }
                 }
                 mountFootstepLastNormTime_ = norm;
             }

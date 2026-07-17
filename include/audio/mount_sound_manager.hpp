@@ -66,6 +66,7 @@ public:
     void playIdleSound();     // Ambient idle (snort/stomp/breath)
 
     bool isMounted() const { return mounted_; }
+    MountFamily getCurrentMountFamily() const { return currentMountFamily_; }
     void setVolumeScale(float scale) { volumeScale_ = scale; }
     float getVolumeScale() const { return volumeScale_; }
 
