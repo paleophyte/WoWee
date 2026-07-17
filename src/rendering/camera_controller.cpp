@@ -1288,11 +1288,13 @@ void CameraController::update(float deltaTime) {
             }
 
             // Void recovery: far beneath the terrain heightfield with no structure
-            // floor anywhere below means a seam heuristic already failed — snap back
-            // to the surface instead of falling forever. Legitimate deep interiors
-            // (tram tube, Stockade) always have a WMO floor under the player, so
-            // this only fires in genuine void.
-            if (!groundH && centerTerrainH && targetPos.z < *centerTerrainH - 60.0f) {
+            // floor anywhere below usually means a seam heuristic already failed.
+            // Never use the heightfield as a rescue target while WMO containment says
+            // the player is inside, though: Ironforge's valid interior floor is over
+            // 200 units below the mountain terrain, and a transient floor-query miss
+            // must not teleport the player onto the mountain above the city.
+            if (!groundH && centerTerrainH && !cachedInsideWMO &&
+                targetPos.z < *centerTerrainH - 60.0f) {
                 LOG_WARNING("Void recovery: player at z=", targetPos.z,
                             " with terrain at ", *centerTerrainH, " and no floor below");
                 targetPos.z = *centerTerrainH + 0.5f;
@@ -1300,13 +1302,12 @@ void CameraController::update(float deltaTime) {
                 groundH = centerTerrainH;
             }
 
-            // WMO-only maps (Deeprun Tram, instances) have no heightfield to
-            // recover to. Falling for seconds with no floor of any kind below
-            // means the player escaped the map geometry — put them back on the
-            // last spot that had ground instead of letting them fall to death.
-            if (!groundH && !centerTerrainH && hasLastGroundedPos_ &&
+            // WMO-only maps (Deeprun Tram, instances), and deep WMO interiors on
+            // terrain maps (Ironforge), must recover to the last structural floor
+            // rather than the unrelated outdoor heightfield above them.
+            if (!groundH && (!centerTerrainH || cachedInsideWMO) && hasLastGroundedPos_ &&
                 noGroundTimer_ > 2.5f && targetPos.z < lastGroundZ - 40.0f) {
-                LOG_WARNING("Void recovery (no heightfield): player at z=", targetPos.z,
+                LOG_WARNING("Void recovery (WMO/ no heightfield): player at z=", targetPos.z,
                             " returning to last grounded pos (", lastGroundedPos_.x, ", ",
                             lastGroundedPos_.y, ", ", lastGroundedPos_.z, ")");
                 targetPos = lastGroundedPos_ + glm::vec3(0.0f, 0.0f, 0.5f);
