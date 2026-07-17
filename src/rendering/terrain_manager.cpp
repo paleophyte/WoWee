@@ -199,6 +199,19 @@ void TerrainManager::update(const Camera& camera, float deltaTime) {
         return;
     }
 
+    // Reconcile the "already uploaded" cache against models the renderer reaped
+    // for being instanceless. Without this, a model freed after leaving an area
+    // stays marked uploaded, so the next tile prep skips its load and pushes an
+    // empty placeholder — doodads (e.g. Stormwind tunnel torches) then fail to
+    // spawn on revisit with "M2 model has no renderable content".
+    if (m2Renderer) {
+        std::vector<uint32_t> reaped = m2Renderer->drainReapedModelIds();
+        if (!reaped.empty()) {
+            std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
+            for (uint32_t id : reaped) uploadedM2Ids_.erase(id);
+        }
+    }
+
     // Always process ready tiles each frame (GPU uploads from background thread)
     // Time-budgeted internally to prevent frame spikes.
     processReadyTiles();
@@ -797,7 +810,12 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                             std::lock_guard<std::mutex> lock(uploadedM2IdsMutex_);
                             modelAlreadyUploaded = uploadedM2Ids_.count(doodadModelId) > 0;
                         }
-                        bool modelAlreadyPreparedInWmo = !wmoPreparedModelIds.insert(doodadModelId).second;
+                        // Membership check only — the id is claimed below, after a
+                        // successful prep. Claiming up front meant a model whose first
+                        // occurrence failed (missing/invalid file) poisoned every later
+                        // occurrence into an empty placeholder push, which finalize then
+                        // rejected with "no renderable content".
+                        bool modelAlreadyPreparedInWmo = wmoPreparedModelIds.count(doodadModelId) > 0;
 
                         pipeline::M2Model m2Model;
                         if (!modelAlreadyUploaded && !modelAlreadyPreparedInWmo) {
@@ -812,6 +830,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y) {
                                 pipeline::M2Loader::loadSkin(skinData, m2Model);
                             }
                             if (!m2Model.isValid()) continue;
+                            wmoPreparedModelIds.insert(doodadModelId);
 
                             // Pre-decode doodad M2 textures on background thread
                             for (const auto& tex : m2Model.textures) {

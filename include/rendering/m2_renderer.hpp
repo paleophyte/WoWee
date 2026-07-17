@@ -389,6 +389,9 @@ public:
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */
     void clearInstances();
     void cleanupUnusedModels();
+    /** Return and clear the model IDs evicted by cleanupUnusedModels() since the
+     *  last call. Lets callers that track uploaded models drop stale entries. */
+    std::vector<uint32_t> drainReapedModelIds();
 
     bool checkCollision(const glm::vec3& from, const glm::vec3& to,
                         glm::vec3& adjustedPos, float playerRadius = 0.5f) const;
@@ -592,6 +595,10 @@ private:
     // Grace period for model cleanup: track when a model first became instanceless.
     // Models are only evicted after 60 seconds with no instances.
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> modelUnusedSince_;
+    // Model IDs evicted by cleanupUnusedModels() since the last drain. Owners that
+    // cache "already uploaded" model IDs (e.g. TerrainManager) reconcile against
+    // this so a reaped model is re-loaded instead of skipped as a stale hit.
+    std::vector<uint32_t> reapedModelIds_;
     std::vector<M2Instance> instances;
 
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId

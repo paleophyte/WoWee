@@ -568,12 +568,22 @@ void M2Renderer::cleanupUnusedModels() {
         if (it != models.end()) {
             destroyModelGPU(it->second);
             models.erase(it);
+            // Record the eviction so owners caching "uploaded" model IDs can
+            // drop it; otherwise their next spawn skips the load as a stale hit
+            // and pushes an empty placeholder (missing doodads on revisit).
+            reapedModelIds_.push_back(id);
         }
     }
 
     if (!toRemove.empty()) {
         LOG_INFO("M2 cleanup: removed ", toRemove.size(), " unused models, ", models.size(), " remaining");
     }
+}
+
+std::vector<uint32_t> M2Renderer::drainReapedModelIds() {
+    std::vector<uint32_t> out;
+    out.swap(reapedModelIds_);
+    return out;
 }
 
 void M2Renderer::unloadModel(uint32_t modelId) {
@@ -583,6 +593,7 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     destroyModelGPU(it->second);
     models.erase(it);
     modelUnusedSince_.erase(modelId);
+    reapedModelIds_.push_back(modelId);
 }
 
 VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
