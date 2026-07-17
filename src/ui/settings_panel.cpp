@@ -50,6 +50,22 @@ void SettingsPanel::renderSettingsInterfaceTab(std::function<void()> saveCallbac
 ImGui::Spacing();
 ImGui::BeginChild("InterfaceSettings", ImVec2(0, 360), true);
 
+ImGui::SeparatorText("Window UI");
+ImGui::Spacing();
+ImGui::SetNextItemWidth(200.0f);
+ImGui::SliderFloat("Window UI Scale", &pendingWindowUiScale, 0.75f, 1.5f, "%.2fx");
+if (ImGui::IsItemActive()) {
+    // Keep the window and slider stationary while the pointer is dragging.
+    windowUiScaleEditing_ = true;
+}
+if (ImGui::IsItemDeactivatedAfterEdit()) {
+    windowUiScaleEditing_ = false;
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(fonts, controls, and spacing)");
+ImGui::Spacing();
+
 ImGui::SeparatorText("Buff Bar");
 ImGui::Spacing();
 ImGui::SetNextItemWidth(200.0f);
@@ -340,6 +356,13 @@ if (ImGui::IsItemHovered())
 ImGui::Spacing();
 ImGui::Text("Bags");
 ImGui::Separator();
+ImGui::SetNextItemWidth(200.0f);
+if (ImGui::SliderFloat("Bag & Window Scale", &pendingBagScale, 0.75f, 1.5f, "%.2fx")) {
+    inventoryScreen.setBagScale(pendingBagScale);
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(high-resolution default is larger)");
 if (ImGui::Checkbox("Separate Bag Windows", &pendingSeparateBags)) {
     inventoryScreen.setSeparateBags(pendingSeparateBags);
     saveCallback();
@@ -368,6 +391,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     inventoryScreen.setSeparateBags(true);
     pendingShowKeyring = true;
     inventoryScreen.setShowKeyring(true);
+    pendingBagScale = InventoryScreen::recommendedBagScale(ImGui::GetIO().DisplaySize.y);
+    inventoryScreen.setBagScale(pendingBagScale);
     pendingShowMicroMenu = false;
     uiOpacity_ = 0.65f;
     minimapRotate_ = false;
@@ -755,7 +780,8 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
     ImGuiIO& io = ImGui::GetIO();
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
-    ImVec2 size(520.0f, std::min(screenH * 0.9f, 720.0f));
+    ImVec2 size(520.0f * appliedWindowUiScale_,
+                std::min(screenH * 0.9f, 720.0f * appliedWindowUiScale_));
     ImVec2 pos((screenW - size.x) * 0.5f, (screenH - size.y) * 0.5f);
 
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
@@ -1164,6 +1190,24 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         ImGui::PopStyleVar();
     }
     ImGui::End();
+}
+
+void SettingsPanel::applyWindowUiScale() {
+    if (!ImGui::GetCurrentContext()) return;
+
+    pendingWindowUiScale = std::clamp(pendingWindowUiScale, 0.75f, 1.5f);
+    if (windowUiScaleEditing_) return;
+    if (std::abs(appliedWindowUiScale_ - pendingWindowUiScale) < 0.0001f) {
+        ImGui::GetIO().FontGlobalScale = pendingWindowUiScale;
+        return;
+    }
+
+    // Scale from the currently applied value, not from the already-scaled
+    // style, so dragging the slider back and forth never compounds rounding.
+    const float ratio = pendingWindowUiScale / appliedWindowUiScale_;
+    ImGui::GetStyle().ScaleAllSizes(ratio);
+    ImGui::GetIO().FontGlobalScale = pendingWindowUiScale;
+    appliedWindowUiScale_ = pendingWindowUiScale;
 }
 
 void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {

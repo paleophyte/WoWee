@@ -1119,7 +1119,8 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
 
-    constexpr float slotSize = 40.0f;
+    const float scale = bagScale_;
+    const float slotSize = 40.0f * scale;
     constexpr int columns = 6;
     int totalSlots = inventory.getBackpackSize();
     int usedSlots = 0;
@@ -1134,7 +1135,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     }
 
     int rows = (totalSlots + columns - 1) / columns;
-    float bagContentH = rows * (slotSize + 4.0f) + 54.0f; // grid + footer (separator + sort button + money)
+    float bagContentH = rows * (slotSize + 4.0f * scale) + 54.0f * scale;
     int visibleKeySlots = 0;
     if (showKeyring_) {
         constexpr int keyColumns = 8;
@@ -1144,14 +1145,14 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
         }
         visibleKeySlots = lastOccupied < 0 ? 0 : ((lastOccupied / keyColumns) + 1) * keyColumns;
         if (visibleKeySlots > 0) {
-            constexpr float keySlotSize = 24.0f;
+            const float keySlotSize = 24.0f * scale;
             const int keyRows = (visibleKeySlots + keyColumns - 1) / keyColumns;
-            bagContentH += 30.0f + keyRows * (keySlotSize + 4.0f);
+            bagContentH += 30.0f * scale + keyRows * (keySlotSize + 4.0f * scale);
         }
     }
 
-    float windowW = columns * (slotSize + 4.0f) + 30.0f;
-    float windowH = bagContentH + 50.0f;
+    float windowW = columns * (slotSize + 4.0f * scale) + 30.0f * scale;
+    float windowH = bagContentH + 50.0f * scale;
 
     float posX = screenW - windowW - 10.0f;
     float posY = screenH - windowH - 60.0f;
@@ -1215,7 +1216,7 @@ void InventoryScreen::renderAggregateBags(game::Inventory& inventory, uint64_t m
     }
 
     if (visibleKeySlots > 0) {
-        constexpr float keySlotSize = 24.0f;
+        const float keySlotSize = 24.0f * scale;
         constexpr int keyColumns = 8;
         ImGui::Spacing();
         ImGui::Separator();
@@ -1242,9 +1243,10 @@ void InventoryScreen::renderSeparateBags(game::Inventory& inventory, uint64_t mo
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
 
-    constexpr float slotSize = 40.0f;
+    const float scale = bagScale_;
+    const float slotSize = 40.0f * scale;
     constexpr int columns = 6;
-    constexpr float baseWindowW = columns * (slotSize + 4.0f) + 30.0f;
+    const float baseWindowW = columns * (slotSize + 4.0f * scale) + 30.0f * scale;
 
     // Each bag window is independently closable — no forced backpack constraint.
 
@@ -1262,9 +1264,9 @@ void InventoryScreen::renderSeparateBags(game::Inventory& inventory, uint64_t mo
         char bpTitle[64];
         snprintf(bpTitle, sizeof(bpTitle), "Backpack (%d/%d)###backpack", bpUsed, bpTotal);
         int bpRows = (bpTotal + columns - 1) / columns;
-        float bpH = bpRows * (slotSize + 4.0f) + 80.0f; // header + money + padding
+        float bpH = bpRows * (slotSize + 4.0f * scale) + 80.0f * scale;
         if (showKeyring_) {
-            constexpr float keySlotSize = 24.0f;
+            const float keySlotSize = 24.0f * scale;
             constexpr int keyCols = 8;
             int lastOccupied = -1;
             for (int i = inventory.getKeyringSize() - 1; i >= 0; --i) {
@@ -1273,7 +1275,7 @@ void InventoryScreen::renderSeparateBags(game::Inventory& inventory, uint64_t mo
             if (lastOccupied >= 0) {
                 int visibleKeySlots = ((lastOccupied / keyCols) + 1) * keyCols;
                 int keyRows = (visibleKeySlots + keyCols - 1) / keyCols;
-                bpH += 30.0f + keyRows * (keySlotSize + 4.0f);
+                bpH += 30.0f * scale + keyRows * (keySlotSize + 4.0f * scale);
             }
         }
         float defaultY = stackBottom - bpH;
@@ -1295,7 +1297,7 @@ void InventoryScreen::renderSeparateBags(game::Inventory& inventory, uint64_t mo
         // to open empty bags to move items into them.
 
         int bagRows = (bagSize + columns - 1) / columns;
-        float bagH = bagRows * (slotSize + 4.0f) + 60.0f;
+        float bagH = bagRows * (slotSize + 4.0f * scale) + 60.0f * scale;
         float defaultY = stackBottom - bagH;
         stackBottom = defaultY - stackGap;
 
@@ -1321,19 +1323,20 @@ void InventoryScreen::renderSeparateBags(game::Inventory& inventory, uint64_t mo
 void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
                                        game::Inventory& inventory, int bagIndex,
                                        float defaultX, float defaultY, uint64_t moneyCopper) {
-    constexpr float slotSize = 40.0f;
+    const float scale = bagScale_;
+    const float slotSize = 40.0f * scale;
     constexpr int columns = 6;
 
     int numSlots = (bagIndex < 0) ? inventory.getBackpackSize() : inventory.getBagSize(bagIndex);
     if (numSlots <= 0) return;
 
     int rows = (numSlots + columns - 1) / columns;
-    float contentH = rows * (slotSize + 4.0f) + 10.0f;
+    float contentH = rows * (slotSize + 4.0f * scale) + 10.0f * scale;
     if (bagIndex < 0) {
         // Keyring renders at 24px in 8 columns and ONLY shows rows that have
         // occupied slots (rounded up to a full row of 8) — must match the
         // render logic below or we reserve huge empty space.
-        constexpr float keySlotSize = 24.0f;
+        const float keySlotSize = 24.0f * scale;
         constexpr int   keyCols     = 8;
         int lastOccupied = -1;
         if (showKeyring_) {
@@ -1344,18 +1347,18 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
         int visibleKeySlots = (lastOccupied < 0) ? 0
                             : ((lastOccupied / keyCols) + 1) * keyCols;
         int keyringRows = (visibleKeySlots + keyCols - 1) / keyCols;
-        contentH += 36.0f; // separator + sort button + money display
+        contentH += 36.0f * scale;
         if (visibleKeySlots > 0) {
-            contentH += 30.0f + keyringRows * (keySlotSize + 4.0f); // header + slots
+            contentH += 30.0f * scale + keyringRows * (keySlotSize + 4.0f * scale);
         }
     }
-    float gridW = columns * (slotSize + 4.0f) + 30.0f;
+    float gridW = columns * (slotSize + 4.0f * scale) + 30.0f * scale;
     // Ensure window is wide enough for the title + close button
     const char* displayTitle = title;
     const char* hashPos = strstr(title, "##");
     float titleW = ImGui::CalcTextSize(displayTitle, hashPos).x + 50.0f; // close button + padding
     float windowW = std::max(gridW, titleW);
-    float windowH = contentH + 40.0f; // title bar + padding
+    float windowH = contentH + 40.0f * scale;
 
     ImGui::SetNextWindowPos(ImVec2(defaultX, defaultY), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(windowW, windowH), ImGuiCond_Always);
@@ -1439,7 +1442,7 @@ void InventoryScreen::renderBagWindow(const char* title, bool& isOpen,
     }
 
     if (bagIndex < 0 && showKeyring_) {
-        constexpr float keySlotSize = 24.0f;
+        const float keySlotSize = 24.0f * scale;
         constexpr int keyCols = 8;
         // Only show rows that contain items (round up to full row)
         int lastOccupied = -1;

@@ -163,6 +163,10 @@ void GameScreen::applyCameraControlSettings() {
 }
 
 void GameScreen::render(game::GameHandler& gameHandler) {
+    // Apply before any Begin() calls so a scale change cannot alter style
+    // metrics halfway through an ImGui frame.
+    settingsPanel_.applyWindowUiScale();
+
     // Set up chat bubble callback (once) and cache game handler in ChatPanel
     chatPanel_.setupCallbacks(gameHandler);
     toastManager_.setupCallbacks(gameHandler);
