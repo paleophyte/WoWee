@@ -30,6 +30,30 @@ TEST_CASE("Entity position set/get", "[entity]") {
     REQUIRE(e.getOrientation() == Catch::Approx(1.57f));
 }
 
+TEST_CASE("Entity ignores positive-duration movement without displacement",
+          "[entity][movement]") {
+    Entity e;
+    e.setPosition(10.0f, 20.0f, 30.0f, 0.0f);
+
+    e.startMoveTo(10.0f, 20.0f, 30.0f, 1.25f, 0.5f);
+
+    REQUIRE_FALSE(e.isEntityMoving());
+    REQUIRE_FALSE(e.isActivelyMoving());
+    REQUIRE(e.getOrientation() == Catch::Approx(1.25f));
+}
+
+TEST_CASE("Entity still interpolates meaningful movement", "[entity][movement]") {
+    Entity e;
+    e.setPosition(0.0f, 0.0f, 0.0f, 0.0f);
+
+    e.startMoveTo(5.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+    REQUIRE(e.isActivelyMoving());
+
+    e.updateMovement(0.5f);
+    REQUIRE(e.getX() == Catch::Approx(2.5f));
+    REQUIRE(e.isActivelyMoving());
+}
+
 TEST_CASE("Entity field set/get/has", "[entity]") {
     Entity e;
     REQUIRE_FALSE(e.hasField(10));

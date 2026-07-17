@@ -525,29 +525,18 @@ void GameHandler::updateAutoAttack(float deltaTime) {
 }
 
 void GameHandler::updateEntityInterpolation(float deltaTime) {
-// Update entity movement interpolation (keeps targeting in sync with visuals)
-// Only update entities within reasonable distance for performance
-auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
-glm::vec3 playerPos = playerEntity ? glm::vec3(playerEntity->getX(), playerEntity->getY(), playerEntity->getZ()) : glm::vec3(0.0f);
-const uint64_t attackTargetGuid = combatHandler_ ? combatHandler_->getAutoAttackTargetGuid() : 0;
-if (playerEntity) playerEntity->updateMovement(deltaTime);
-if (targetGuid != 0 && targetGuid != playerGuid) {
-    if (auto selected = entityController_->getEntityManager().getEntity(targetGuid))
-        selected->updateMovement(deltaTime);
-}
-if (attackTargetGuid != 0 && attackTargetGuid != playerGuid && attackTargetGuid != targetGuid) {
-    if (auto engaged = entityController_->getEntityManager().getEntity(attackTargetGuid))
-        engaged->updateMovement(deltaTime);
-}
-
-static thread_local std::vector<std::shared_ptr<Entity>> nearbyEntities;
-entityController_->getEntityManager().getEntitiesNear(
-    playerPos.x, playerPos.y, game::ENTITY_UPDATE_RADIUS, nearbyEntities);
-for (const auto& entity : nearbyEntities) {
-    if (!entity) continue;
-    const uint64_t guid = entity->getGuid();
-    if (guid == playerGuid || guid == targetGuid || guid == attackTargetGuid) continue;
-    entity->updateMovement(deltaTime);
+// Advance every server-tracked unit once per frame. This is intentionally not
+// selected-target or distance gated: the spatial query is indexed by each
+// mover's latest destination, so a creature visibly beside the player could be
+// excluded while its destination was outside the query radius. Selecting that
+// creature then put it on the unconditional path and made it snap forward.
+// Entity interpolation is inexpensive; rendering retains its own distance
+// culling and remains the correct place to skip costly visual work.
+for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
+    (void)guid;
+    if (entity && entity->isUnit()) {
+        entity->updateMovement(deltaTime);
+    }
 }
 }
 

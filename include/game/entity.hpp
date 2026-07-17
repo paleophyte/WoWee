@@ -169,6 +169,20 @@ public:
             setPosition(destX, destY, destZ, destO);
             return;
         }
+        // Movement heartbeats and repeated spline destinations can carry a
+        // positive duration without any actual displacement. Treat these as
+        // authoritative stops; otherwise isActivelyMoving() drives Run/Walk
+        // while the model has nowhere to move. This applies equally to nearby
+        // players and creatures.
+        const float remainingX = destX - x;
+        const float remainingY = destY - y;
+        const float remainingZ = destZ - z;
+        constexpr float kNoOpMoveDistanceSq = 0.02f * 0.02f;
+        if (remainingX * remainingX + remainingY * remainingY +
+                remainingZ * remainingZ <= kNoOpMoveDistanceSq) {
+            setPosition(destX, destY, destZ, destO);
+            return;
+        }
         // If we're in the dead-reckoning overrun phase, snap x/y/z back to the
         // destination before using them as the new start.  The renderer was showing
         // the entity at moveEnd (via getLatest) during overrun, so the new
