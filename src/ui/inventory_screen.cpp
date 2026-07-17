@@ -370,13 +370,19 @@ void InventoryScreen::updatePreview(float deltaTime) {
     }
 }
 
-void InventoryScreen::updatePreviewEquipment(game::Inventory& inventory) {
+void InventoryScreen::updatePreviewEquipment(game::Inventory& inventory,
+                                              bool showHelm, bool showCloak) {
     if (!charPreview_ || !charPreview_->isModelLoaded()) return;
 
     std::vector<game::EquipmentItem> equipped;
     equipped.reserve(game::Inventory::NUM_EQUIP_SLOTS);
     for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
-        const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
+        const auto equipSlot = static_cast<game::EquipSlot>(s);
+        if ((!showHelm && equipSlot == game::EquipSlot::HEAD) ||
+            (!showCloak && equipSlot == game::EquipSlot::BACK)) {
+            continue;
+        }
+        const auto& slot = inventory.getEquipSlot(equipSlot);
         if (slot.empty() || slot.item.displayInfoId == 0) continue;
         game::EquipmentItem ei;
         ei.displayModel = slot.item.displayInfoId;
@@ -1529,7 +1535,8 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
 
     // Update preview equipment if dirty
     if (previewDirty_ && charPreview_ && previewInitialized_) {
-        updatePreviewEquipment(inventory);
+        updatePreviewEquipment(inventory, gameHandler.isHelmVisible(),
+                                gameHandler.isCloakVisible());
     }
 
     // Update and render the preview FBO
@@ -1547,6 +1554,15 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
         ImGui::End();
         return;
     }
+
+    // Scale character-window contents from the usable resized area. Width and
+    // height both constrain the result so controls grow into a large window
+    // without overflowing a short one.
+    const ImVec2 characterAvail = ImGui::GetContentRegionAvail();
+    const float widthScale = characterAvail.x / 350.0f;
+    const float heightScale = characterAvail.y / 450.0f;
+    characterUiScale_ = std::clamp(std::min(widthScale, heightScale), 0.75f, 2.0f);
+    ImGui::SetWindowFontScale(characterUiScale_);
 
     // Clamp window position within screen after resize
     {
@@ -1571,10 +1587,12 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
             bool cloakVis = gameHandler.isCloakVisible();
             if (ImGui::Checkbox("Show Helm", &helmVis)) {
                 gameHandler.toggleHelm();
+                previewDirty_ = true;
             }
             ImGui::SameLine();
             if (ImGui::Checkbox("Show Cloak", &cloakVis)) {
                 gameHandler.toggleCloak();
+                previewDirty_ = true;
             }
             ImGui::EndTabItem();
         }
@@ -1604,7 +1622,7 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
                 };
                 ImGui::TextDisabled("Time Played");
                 ImGui::Columns(2, "##playtime", false);
-                ImGui::SetColumnWidth(0, 130);
+                ImGui::SetColumnWidth(0, 130.0f * characterUiScale_);
                 ImGui::Text("Total:");    ImGui::NextColumn();
                 ImGui::Text("%s", fmtTime(totalSec).c_str()); ImGui::NextColumn();
                 ImGui::Text("This level:"); ImGui::NextColumn();
@@ -1619,7 +1637,7 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
                 ImGui::Separator();
                 ImGui::TextDisabled("PvP Currency");
                 ImGui::Columns(2, "##pvpcurrency", false);
-                ImGui::SetColumnWidth(0, 130);
+                ImGui::SetColumnWidth(0, 130.0f * characterUiScale_);
                 ImGui::Text("Honor Points:"); ImGui::NextColumn();
                 ImGui::TextColored(ImVec4(0.9f, 0.75f, 0.2f, 1.0f), "%u", honor); ImGui::NextColumn();
                 ImGui::Text("Arena Points:"); ImGui::NextColumn();
@@ -1705,12 +1723,12 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
                                              : isBuffed ? ImVec4(0.4f, 0.9f,  1.0f, 1.0f)
                                              :            ui::colors::kVeryLightGray;
                             ImGui::TextColored(nameColor, "%s", label);
-                            ImGui::SameLine(180.0f);
+                            ImGui::SameLine(180.0f * characterUiScale_);
                             ImGui::SetNextItemWidth(-1.0f);
                             // Bar color: gold when maxed, green otherwise
                             ImVec4 barColor = isMaxed ? ui::colors::kTooltipGold : ui::colors::kFriendlyGreen;
                             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
-                            ImGui::ProgressBar(ratio, ImVec2(0, 14.0f), overlay);
+                            ImGui::ProgressBar(ratio, ImVec2(0, 14.0f * characterUiScale_), overlay);
                             ImGui::PopStyleColor();
                         }
                     }
@@ -1806,7 +1824,7 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
 
             // Save current gear as new set
             static char newSetName[64] = {};
-            ImGui::SetNextItemWidth(160.0f);
+            ImGui::SetNextItemWidth(160.0f * characterUiScale_);
             ImGui::InputTextWithHint("##newsetname", "New set name...", newSetName, sizeof(newSetName));
             ImGui::SameLine();
             bool canSave = (newSetName[0] != '\0');
@@ -1828,7 +1846,7 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
                     ImGui::PushID(static_cast<int>(es.setId));
                     const char* displayName = es.name.empty() ? "(Unnamed)" : es.name.c_str();
                     ImGui::Text("%s", displayName);
-                    float btnAreaW = 150.0f;
+                    float btnAreaW = 150.0f * characterUiScale_;
                     ImGui::SameLine(ImGui::GetContentRegionAvail().x - btnAreaW + ImGui::GetCursorPosX());
                     if (ImGui::SmallButton("Equip")) {
                         gameHandler.useEquipmentSet(es.setId);
@@ -1927,7 +1945,7 @@ void InventoryScreen::renderReputationPanel(game::GameHandler& gameHandler) {
 
         // Faction name + tier label on same line; mark at-war and watched factions
         ImGui::TextColored(tier.color, "[%s]", tier.name);
-        ImGui::SameLine(90.0f);
+        ImGui::SameLine(90.0f * characterUiScale_);
         if (atWar) {
             ImGui::TextColored(ui::colors::kRed, "%s", displayName);
             ImGui::SameLine();
@@ -1958,7 +1976,7 @@ void InventoryScreen::renderReputationPanel(game::GameHandler& gameHandler) {
 
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, tier.color);
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::ProgressBar(ratio, ImVec2(0, 12.0f), overlay);
+        ImGui::ProgressBar(ratio, ImVec2(0, 12.0f * characterUiScale_), overlay);
         ImGui::PopStyleColor();
 
         // Right-click context menu on the progress bar
@@ -1999,12 +2017,16 @@ void InventoryScreen::renderEquipmentPanel(game::Inventory& inventory) {
         game::EquipSlot::TRINKET1, game::EquipSlot::TRINKET2,
     };
 
-    constexpr float slotSize = 36.0f;
-    constexpr float previewW = 140.0f;
+    const float slotSize = 36.0f * characterUiScale_;
+    const float gap = 8.0f * characterUiScale_;
+    const float availableW = ImGui::GetContentRegionAvail().x;
+    const float minimumPreviewW = 140.0f * characterUiScale_;
+    const float minimumLayoutW = slotSize * 2.0f + gap * 2.0f + minimumPreviewW;
+    const float previewW = minimumPreviewW + std::max(0.0f, availableW - minimumLayoutW);
 
     // Calculate column positions for the 3-column layout
     float contentStartX = ImGui::GetCursorPosX();
-    float rightColX = contentStartX + slotSize + 8.0f + previewW + 8.0f;
+    float rightColX = contentStartX + slotSize + gap + previewW + gap;
 
     int rows = 8;
     float previewStartY = ImGui::GetCursorScreenPos().y;
@@ -2040,7 +2062,7 @@ void InventoryScreen::renderEquipmentPanel(game::Inventory& inventory) {
 
     // Draw the 3D character preview in the center column
     if (charPreview_ && previewInitialized_ && charPreview_->getTextureId()) {
-        float previewX = ImGui::GetWindowPos().x + contentStartX + slotSize + 8.0f;
+        float previewX = ImGui::GetWindowPos().x + contentStartX + slotSize + gap;
         float previewH = previewEndY - previewStartY;
         // Maintain aspect ratio
         float texAspect = static_cast<float>(charPreview_->getWidth()) / static_cast<float>(charPreview_->getHeight());
@@ -2084,7 +2106,7 @@ void InventoryScreen::renderEquipmentPanel(game::Inventory& inventory) {
     };
 
     // Position weapons in center column area (after left column, 3D preview renders on top)
-    ImGui::SetCursorPosX(contentStartX + slotSize + 8.0f);
+    ImGui::SetCursorPosX(contentStartX + slotSize + gap);
     for (int i = 0; i < 3; i++) {
         if (i > 0) ImGui::SameLine();
         const auto& slot = inventory.getEquipSlot(weaponSlots[i]);

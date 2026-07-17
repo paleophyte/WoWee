@@ -93,6 +93,7 @@ public:
 private:
     bool open = false;
     bool characterOpen = false;
+    float characterUiScale_ = 1.0f;
     bool bKeyWasDown = false;
     bool separateBags_ = true;
     bool compactBags_ = false;
@@ -133,7 +134,8 @@ private:
     uint8_t playerFacialHair_ = 0;
 
     void initPreview();
-    void updatePreviewEquipment(game::Inventory& inventory);
+    void updatePreviewEquipment(game::Inventory& inventory,
+                                bool showHelm, bool showCloak);
 
     // Drag-and-drop held item state
     bool holdingItem = false;

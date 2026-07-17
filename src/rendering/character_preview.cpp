@@ -1291,7 +1291,14 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
 
 void CharacterPreview::update(float deltaTime) {
     if (charRenderer_ && modelLoaded_) {
-        charRenderer_->update(deltaTime);
+        // Racial glue scenes place the character far from world origin (the
+        // human scene is roughly 230 units away). Use this preview's camera for
+        // animation distance checks; testing against the renderer's default
+        // origin culled bone and weapon-attachment updates, leaving the paper
+        // doll rigid and its equipped weapons invisible.
+        const glm::vec3 cameraPos = camera_ ? camera_->getPosition()
+                                            : previewStandPosition_;
+        charRenderer_->update(deltaTime, cameraPos);
     }
 }
 
