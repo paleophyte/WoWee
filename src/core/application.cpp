@@ -102,7 +102,8 @@ bool envFlagEnabled(const char* key, bool defaultValue = false) {
 }
 
 std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
-                                        const glm::vec3& renderPos) {
+                                        const glm::vec3& renderPos,
+                                        const std::optional<glm::vec3>& previousRenderPos) {
     if (!renderer) return std::nullopt;
 
     // Server movement Z is the reference surface.  In WMO overlap regions the
@@ -135,6 +136,19 @@ std::optional<float> movingEntityFloor(rendering::Renderer* renderer,
     }
     if (auto* m2 = renderer->getM2Renderer()) {
         consider(m2->getFloorHeight(renderPos.x, renderPos.y, probeZ));
+    }
+
+    // A broader floor candidate is useful on stairs and uneven terrain, but it is
+    // ambiguous near overlapping shells or non-collidable authored props. Require
+    // continuity with the last rendered ground position before accepting it. This
+    // preserves server-authored waypoint height without creature-entry exceptions.
+    if (best && std::abs(*best - renderPos.z) > 0.35f) {
+        if (!previousRenderPos) return std::nullopt;
+        const glm::vec2 planarDelta = glm::vec2(renderPos) - glm::vec2(*previousRenderPos);
+        const float maxContinuousStep = 0.35f + glm::length(planarDelta) * 1.5f;
+        if (std::abs(*best - previousRenderPos->z) > maxContinuousStep) {
+            return std::nullopt;
+        }
     }
     return best;
 }
@@ -1990,20 +2004,20 @@ void Application::update(float deltaTime) {
                         inOverrun ? entity->getLatestY() : entity->getY(),
                         inOverrun ? entity->getLatestZ() : entity->getZ());
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
+                    auto posIt = _creatureRenderPosCache.find(guid);
+                    const std::optional<glm::vec3> previousRenderPos =
+                        posIt != _creatureRenderPosCache.end()
+                            ? std::optional<glm::vec3>(posIt->second)
+                            : std::nullopt;
 
                     // Ground-moving entities need client floor projection between server
                     // spline points. Use the floor nearest server Z so outdoor terrain
                     // above a tunnel cannot move the model into/onto the WMO shell.
                     const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                                 !_creatureSwimmingState.count(guid);
-                    // These scripted Westfall workers have authored waypoint Z
-                    // on lumber piles/roof surfaces. Broad client floor probes can
-                    // snap them to a nearby WMO shell above the intended surface.
-                    const uint32_t creatureEntry =
-                        std::static_pointer_cast<game::Unit>(entity)->getEntry();
-                    const bool authoredWorkerHeight = creatureEntry == 6670 || creatureEntry == 842;
-                    if (entity->isActivelyMoving() && groundCreature && !authoredWorkerHeight) {
-                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos)) {
+                    if (entity->isActivelyMoving() && groundCreature) {
+                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
+                                                            previousRenderPos)) {
                             renderPos.z = *floorZ;
                         }
                     }
@@ -2073,7 +2087,6 @@ void Application::update(float deltaTime) {
                         }
                     }
 
-                    auto posIt = _creatureRenderPosCache.find(guid);
                     if (posIt == _creatureRenderPosCache.end()) {
                         charRenderer->setInstancePosition(instanceId, renderPos);
                         _creatureRenderPosCache[guid] = renderPos;
@@ -2223,18 +2236,23 @@ void Application::update(float deltaTime) {
                         inOverrun ? entity->getLatestY() : entity->getY(),
                         inOverrun ? entity->getLatestZ() : entity->getZ());
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
+                    auto posIt = _pCreatureRenderPosCache.find(guid);
+                    const std::optional<glm::vec3> previousRenderPos =
+                        posIt != _pCreatureRenderPosCache.end()
+                            ? std::optional<glm::vec3>(posIt->second)
+                            : std::nullopt;
 
                     // Match creature projection: terrain alone is not a valid floor in
                     // WMO overlap regions (tunnels, buildings, bridges).
                     const bool groundPlayer = !_pCreatureFlyingState.count(guid) &&
                                               !_pCreatureSwimmingState.count(guid);
                     if (entity->isActivelyMoving() && groundPlayer) {
-                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos)) {
+                        if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
+                                                            previousRenderPos)) {
                             renderPos.z = *floorZ;
                         }
                     }
 
-                    auto posIt = _pCreatureRenderPosCache.find(guid);
                     if (posIt == _pCreatureRenderPosCache.end()) {
                         charRenderer->setInstancePosition(instanceId, renderPos);
                         _pCreatureRenderPosCache[guid] = renderPos;
