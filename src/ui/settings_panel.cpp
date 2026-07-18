@@ -48,7 +48,7 @@ namespace wowee { namespace ui {
 
 void SettingsPanel::renderSettingsInterfaceTab(std::function<void()> saveCallback) {
 ImGui::Spacing();
-ImGui::BeginChild("InterfaceSettings", ImVec2(0, 360), true);
+ImGui::BeginChild("InterfaceSettings", ImVec2(0, -1), true);
 
 ImGui::SeparatorText("Window UI");
 ImGui::Spacing();
@@ -193,6 +193,7 @@ void SettingsPanel::renderSettingsGameplayTab(InventoryScreen& inventoryScreen,
                                                   std::function<void()> saveCallback) {
     auto* renderer = services_.renderer;
 ImGui::Spacing();
+ImGui::BeginChild("GameplaySettings", ImVec2(0, -1), true);
 
 ImGui::Text("Controls");
 ImGui::Separator();
@@ -415,6 +416,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     saveCallback();
 }
 
+ImGui::EndChild();
+
 }
 
 void SettingsPanel::renderSettingsControlsTab(std::function<void()> saveCallback) {
@@ -518,7 +521,7 @@ if (ImGui::Button("Reset to Defaults", ImVec2(-1, 0))) {
 void SettingsPanel::renderSettingsAudioTab(std::function<void()> saveCallback) {
     auto* renderer = services_.renderer;
 ImGui::Spacing();
-ImGui::BeginChild("AudioSettings", ImVec2(0, 360), true);
+ImGui::BeginChild("AudioSettings", ImVec2(0, -1), true);
 
 // Helper lambda to apply audio settings
 auto applyAudioSettings = [&]() {
@@ -780,13 +783,15 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
     ImGuiIO& io = ImGui::GetIO();
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
-    ImVec2 size(520.0f * appliedWindowUiScale_,
-                std::min(screenH * 0.9f, 720.0f * appliedWindowUiScale_));
+    // Give the settings surface enough room on high-resolution displays while
+    // retaining a sensible minimum for 1080p and laptop screens.
+    ImVec2 size(std::clamp(650.0f * appliedWindowUiScale_, 520.0f, screenW * 0.90f),
+                std::clamp(std::min(screenH * 0.90f, 900.0f * appliedWindowUiScale_), 560.0f, screenH * 0.90f));
     ImVec2 pos((screenW - size.x) * 0.5f, (screenH - size.y) * 0.5f);
 
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
     if (ImGui::Begin("##SettingsWindow", nullptr, flags)) {
@@ -801,6 +806,10 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         }
         ImGui::Separator();
 
+        // Keep the action row outside the scrolling tab region so it remains
+        // visible regardless of which tab or section is active.
+        const float footerHeight = ImGui::GetFrameHeightWithSpacing() + 18.0f;
+        ImGui::BeginChild("SettingsTabRegion", ImVec2(0, -footerHeight), false);
         if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_None)) {
             // ============================================================
             // VIDEO TAB
@@ -1176,6 +1185,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
 
             ImGui::EndTabBar();
         }
+        ImGui::EndChild();
 
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 10.0f));
