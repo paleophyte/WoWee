@@ -21,23 +21,10 @@ AzerothCore/ChromieCraft, TrinityCore, MaNGOS, and Turtle WoW 1.18.
 [Download the latest release](https://github.com/Kelsidavis/WoWee/releases/latest) ·
 [Read the project status](docs/status.md)
 
-> [!WARNING]
-> **macOS releases are not currently signed with an Apple Developer ID or
-> notarized.** CI applies only an ad-hoc signature, so Gatekeeper may block the
-> app. Developer ID signing and notarization require a paid Apple Developer
-> Program membership (currently US$99 per year). If you want to help fund it,
-> use the [GitHub Sponsors page](https://github.com/sponsors/Kelsidavis).
->
-> To open a release downloaded from the official WoWee GitHub page:
->
-> 1. Try to open **Wowee.app** once, then dismiss the macOS warning.
-> 2. Open **Apple menu → System Settings → Privacy & Security**.
-> 3. Scroll to **Security** and click **Open Anyway** beside the WoWee message.
->    The button is normally available for about an hour after the failed launch.
-> 4. Authenticate, confirm **Open**, and launch WoWee again.
->
-> This creates an exception for WoWee without globally disabling Gatekeeper.
-> Only override the warning for a release you obtained from this repository.
+> [!NOTE]
+> macOS release DMGs are Developer ID signed, notarized by Apple, and stapled
+> before publication. Gatekeeper should identify them as notarized Developer ID
+> software without requiring an **Open Anyway** exception.
 
 > [!IMPORTANT]
 > WoWee is an educational and research project. It contains no Blizzard

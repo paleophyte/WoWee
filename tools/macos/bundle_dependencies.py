@@ -7,6 +7,7 @@ import argparse
 import collections
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -125,6 +126,7 @@ class Bundler:
         if not destination.exists():
             shutil.copy2(canonical_source, destination)
             print(f"Bundled {canonical_source} -> {destination.name}")
+        destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
         return destination
 
     def bundle(self, roots: list[pathlib.Path]) -> None:
