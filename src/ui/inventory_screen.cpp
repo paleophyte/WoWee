@@ -630,6 +630,14 @@ void InventoryScreen::placeInBag(game::Inventory& inv, int bagIndex, int slotInd
 void InventoryScreen::placeInEquipment(game::Inventory& inv, game::EquipSlot slot) {
     if (!holdingItem) return;
 
+    if (heldItem.bindType == 2 && !equipConfirmOpen_) {
+        equipConfirmOpen_ = true;
+        equipConfirmAuto_ = false;
+        equipConfirmSlot_ = slot;
+        equipConfirmItemName_ = heldItem.name;
+        return;
+    }
+
     // Validate: check if the held item can go in this slot
     if (heldItem.inventoryType > 0) {
         bool valid = false;
@@ -1112,8 +1120,42 @@ void InventoryScreen::render(game::Inventory& inventory, uint64_t moneyCopper) {
         ImGui::EndPopup();
     }
 
+    renderEquipConfirmationPopup(inventory);
     // Draw held item at cursor
     renderHeldItem();
+}
+
+void InventoryScreen::renderEquipConfirmationPopup(game::Inventory& inventory) {
+    if (equipConfirmOpen_) {
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        ImGui::SetNextWindowPos(ImVec2(mousePos.x - 120.0f, mousePos.y - 30.0f), ImGuiCond_Always);
+        ImGui::OpenPopup("##BindOnEquipConfirm");
+        equipConfirmOpen_ = false;
+    }
+    if (ImGui::BeginPopup("##BindOnEquipConfirm", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextWrapped("Equip \"%s\"?", equipConfirmItemName_.c_str());
+        ImGui::TextColored(ui::colors::kSoftRed, "This item will bind to you.");
+        ImGui::Spacing();
+        if (ImGui::Button("Equip", ImVec2(85, 0))) {
+            if (equipConfirmAuto_ && gameHandler_) {
+                if (equipConfirmBag_ == 0xFF)
+                    gameHandler_->autoEquipItemBySlot(static_cast<int>(equipConfirmSourceSlot_ - game::Inventory::NUM_EQUIP_SLOTS));
+                else
+                    gameHandler_->autoEquipItemInBag(equipConfirmBag_, equipConfirmSourceSlot_);
+            } else if (holdingItem) {
+                equipConfirmOpen_ = true;
+                placeInEquipment(inventory, equipConfirmSlot_);
+            }
+            equipConfirmItemName_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(85, 0))) {
+            equipConfirmItemName_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 // ============================================================
@@ -1870,6 +1912,8 @@ void InventoryScreen::renderCharacterScreen(game::GameHandler& gameHandler) {
 
         ImGui::EndTabBar();
     }
+
+    renderEquipConfirmationPopup(inventory);
 
     ImGui::End();
 
@@ -2836,7 +2880,15 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
                     uint64_t iGuid = gameHandler_->getBackpackItemGuid(backpackIndex);
                     gameHandler_->offerQuestFromItem(iGuid, item.startQuestId);
                 } else if (item.inventoryType > 0) {
-                    gameHandler_->autoEquipItemBySlot(backpackIndex);
+                    if (item.bindType == 2) {
+                        equipConfirmOpen_ = true;
+                        equipConfirmAuto_ = true;
+                        equipConfirmBag_ = 0xFF;
+                        equipConfirmSourceSlot_ = static_cast<uint8_t>(game::Inventory::NUM_EQUIP_SLOTS + backpackIndex);
+                        equipConfirmItemName_ = item.name;
+                    } else {
+                        gameHandler_->autoEquipItemBySlot(backpackIndex);
+                    }
                 } else {
                     // itemClass==1 (Container) with inventoryType==0 means a lockbox;
                     // use CMSG_OPEN_ITEM so the server checks keyring automatically.
@@ -2858,7 +2910,15 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
                     uint64_t iGuid = gameHandler_->getBagItemGuid(bagIndex, bagSlotIndex);
                     gameHandler_->offerQuestFromItem(iGuid, item.startQuestId);
                 } else if (item.inventoryType > 0) {
-                    gameHandler_->autoEquipItemInBag(bagIndex, bagSlotIndex);
+                    if (item.bindType == 2) {
+                        equipConfirmOpen_ = true;
+                        equipConfirmAuto_ = true;
+                        equipConfirmBag_ = static_cast<uint8_t>(bagIndex);
+                        equipConfirmSourceSlot_ = static_cast<uint8_t>(bagSlotIndex);
+                        equipConfirmItemName_ = item.name;
+                    } else {
+                        gameHandler_->autoEquipItemInBag(bagIndex, bagSlotIndex);
+                    }
                 } else {
                     auto* info = gameHandler_->getItemInfo(item.itemId);
                     if (info && info->valid && info->pageTextId != 0) {

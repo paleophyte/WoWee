@@ -198,6 +198,7 @@ private:
     void cancelPickup(game::Inventory& inv);
     game::EquipSlot getEquipSlotForType(uint8_t inventoryType, game::Inventory& inv);
     void renderHeldItem();
+    void renderEquipConfirmationPopup(game::Inventory& inventory);
     bool bagHasAnyItems(const game::Inventory& inventory, int bagIndex) const;
 
     // Drop confirmation (drag-outside-window destroy)
@@ -219,6 +220,15 @@ private:
     int splitMax_ = 1;
     int splitCount_ = 1;
     std::string splitItemName_;
+
+    // Binding-on-equip confirmation. The item remains on the cursor until the
+    // player explicitly accepts, including when the destination is a bag slot.
+    bool equipConfirmOpen_ = false;
+    bool equipConfirmAuto_ = false;
+    uint8_t equipConfirmBag_ = 0xFF;
+    uint8_t equipConfirmSourceSlot_ = 0;
+    game::EquipSlot equipConfirmSlot_ = game::EquipSlot::NUM_SLOTS;
+    std::string equipConfirmItemName_;
 
     // ImGui starts window movement before item widgets run for the frame, so
     // keep bag windows title-bar-draggable while bags are open.
