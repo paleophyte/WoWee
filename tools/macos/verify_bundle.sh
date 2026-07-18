@@ -30,6 +30,10 @@ if [ ! -f "${FRAMEWORKS_DIR}/libMoltenVK.dylib" ]; then
     echo "ERROR: app bundle is missing Contents/Frameworks/libMoltenVK.dylib" >&2
     exit 1
 fi
+if [ ! -f "${FRAMEWORKS_DIR}/libSDL3.dylib" ]; then
+    echo "ERROR: app bundle is missing runtime-loaded Contents/Frameworks/libSDL3.dylib" >&2
+    exit 1
+fi
 if [ ! -f "${ICD_MANIFEST}" ]; then
     echo "ERROR: app bundle is missing the MoltenVK ICD manifest" >&2
     exit 1

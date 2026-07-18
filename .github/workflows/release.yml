@@ -200,6 +200,14 @@ jobs:
         MOLTENVK_PREFIX="$(brew --prefix molten-vk)"
         cp -L "${MOLTENVK_PREFIX}/lib/libMoltenVK.dylib" \
           Wowee.app/Contents/Frameworks/libMoltenVK.dylib
+
+        # Homebrew's sdl2 formula is sdl2-compat, which loads SDL3 with dlopen
+        # instead of an LC_LOAD_DYLIB command. The recursive Mach-O walker
+        # cannot discover that runtime-only dependency, so bundle it explicitly
+        # at the @loader_path location sdl2-compat probes on macOS.
+        SDL3_PREFIX="$(brew --prefix sdl3)"
+        cp -L "${SDL3_PREFIX}/lib/libSDL3.dylib" \
+          Wowee.app/Contents/Frameworks/libSDL3.dylib
         mkdir -p Wowee.app/Contents/Resources/vulkan/icd.d
         python3 - \
           "${MOLTENVK_PREFIX}/etc/vulkan/icd.d/MoltenVK_icd.json" \
@@ -222,9 +230,11 @@ jobs:
           BUNDLE_ROOTS+=(Wowee.app/Contents/MacOS/asset_extract)
         fi
         BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libMoltenVK.dylib)
+        BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libSDL3.dylib)
         python3 tools/macos/bundle_dependencies.py \
           --app Wowee.app \
           --search-dir "$(brew --prefix sdl2)/lib" \
+          --search-dir "$(brew --prefix sdl3)/lib" \
           --search-dir "$(brew --prefix vulkan-loader)/lib" \
           --search-dir "$(brew --prefix openssl@3)/lib" \
           --search-dir "$(brew --prefix ffmpeg)/lib" \
