@@ -622,10 +622,9 @@ void ADTLoader::parseMH2O(const uint8_t* data, size_t size, ADTTerrain& terrain)
             if (layer.x + layer.width > 8) layer.width = 8 - layer.x;
             if (layer.y + layer.height > 8) layer.height = 8 - layer.y;
 
-            // Read exists bitmap (which tiles have water).
-            // In WotLK MH2O this is chunk-wide 8x8 tile flags (64 bits = 8 bytes),
-            // even when the layer covers a sub-rect.
-            constexpr size_t bitmapBytes = 8;
+            // Read the layer-local exists bitmap. MH2O stores one bit per tile
+            // in the layer rectangle, not a chunk-wide 8x8 bitmap.
+            const size_t bitmapBytes = (static_cast<size_t>(layer.width) * layer.height + 7) / 8;
 
             // Note: offsets in SMLiquidInstance are relative to MH2O chunk start
             if (offsetExistsBitmap > 0) {
