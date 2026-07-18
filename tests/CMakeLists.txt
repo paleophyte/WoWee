@@ -39,6 +39,16 @@ set(TEST_SYSTEM_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/extern
 )
 
+# Stock-style hill climbing regression test. Run directly with:
+#   cmake --build build --target test_hill_climbing && ctest --test-dir build -R hill_climbing
+add_executable(test_hill_climbing
+    test_movement_limits.cpp
+)
+target_include_directories(test_hill_climbing PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_hill_climbing PRIVATE catch2_main)
+add_test(NAME hill_climbing COMMAND test_hill_climbing)
+register_test_target(test_hill_climbing)
+
 # ── test_packet ──────────────────────────────────────────────
 add_executable(test_packet
     test_packet.cpp

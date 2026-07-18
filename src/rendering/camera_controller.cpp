@@ -1,4 +1,5 @@
 #include "rendering/camera_controller.hpp"
+#include "rendering/movement_limits.hpp"
 #include <algorithm>
 #include <future>
 #include "core/thread_pool.hpp"
@@ -1032,15 +1033,15 @@ void CameraController::update(float deltaTime) {
         // Ground the character to terrain or WMO floor
         // Skip entirely while swimming — the swim floor clamp handles vertical bounds.
         if (!swimming) {
-            float stepUpBudget = grounded ? 1.6f : 1.2f;
+            float stepUpBudget = grounded ? movement::kMaxStepUp : 1.2f;
             // 1. Center-only sample for terrain/WMO floor selection.
             //    Using only the center prevents tunnel entrances from snapping
             //    to terrain when offset samples miss the WMO floor geometry.
             // Slope limit: reject surfaces too steep to walk (prevent clipping).
             // WMO tunnel/bridge ramps are often steeper than outdoor terrain ramps.
-            constexpr float MIN_WALKABLE_NORMAL_TERRAIN = 0.7f; // ~45°
-            constexpr float MIN_WALKABLE_NORMAL_WMO = 0.45f;    // allow tunnel ramps
-            constexpr float MIN_WALKABLE_NORMAL_M2 = 0.45f;     // allow bridge/deck ramps
+            constexpr float MIN_WALKABLE_NORMAL_TERRAIN = movement::kMinWalkableNormalZ;
+            constexpr float MIN_WALKABLE_NORMAL_WMO = movement::kMinWalkableNormalZ;
+            constexpr float MIN_WALKABLE_NORMAL_M2 = movement::kMinWalkableNormalZ;
 
             std::optional<float> groundH;
             std::optional<float> centerTerrainH;
