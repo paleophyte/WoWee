@@ -87,6 +87,9 @@ config.ini
 config.json
 .env
 
+# Local signing and notarization handoff material
+.secrets/
+
 # Runtime cache (floor heights, etc.)
 cache/
 

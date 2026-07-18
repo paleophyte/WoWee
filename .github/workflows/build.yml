@@ -1,6 +1,7 @@
 name: Build
 
 on:
+  workflow_dispatch:
   push:
     branches: [ master ]
   pull_request:
@@ -156,7 +157,8 @@ jobs:
     - name: Configure
       run: |
         BREW=$(brew --prefix)
-        export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
+        PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
+        export PKG_CONFIG_PATH
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
@@ -166,18 +168,18 @@ jobs:
           -DWOWEE_BUILD_TESTS=ON
 
     - name: Assert AMD FSR2 target
-      run: cmake --build build --target wowee_fsr2_amd_vk --parallel $(sysctl -n hw.logicalcpu)
+      run: cmake --build build --target wowee_fsr2_amd_vk --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Assert AMD FSR3 framegen probe target (if present)
       run: |
         if cmake --build build --target help | grep -q 'wowee_fsr3_framegen_amd_vk_probe'; then
-          cmake --build build --target wowee_fsr3_framegen_amd_vk_probe --parallel $(sysctl -n hw.logicalcpu)
+          cmake --build build --target wowee_fsr3_framegen_amd_vk_probe --parallel "$(sysctl -n hw.logicalcpu)"
         else
           echo "FSR3 framegen probe target not generated for this SDK layout; continuing."
         fi
 
     - name: Build
-      run: cmake --build build --parallel $(sysctl -n hw.logicalcpu)
+      run: cmake --build build --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Run tests
       run: cd build && ctest --output-on-failure
@@ -190,8 +192,12 @@ jobs:
       run: |
         if [ -z "${APPLE_CERT_P12}" ] || [ -z "${APPLE_CERT_PASSWORD}" ] || \
            [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "::error::Apple Developer ID secrets are required for trusted macOS builds."
+            exit 1
+          fi
           echo "MACOS_SIGNING_ENABLED=false" >> "${GITHUB_ENV}"
-          echo "::warning::Apple Developer ID secrets are absent; using ad-hoc signing."
+          echo "::warning::Apple secrets are unavailable to this pull request; using ad-hoc signing."
           exit 0
         fi
 
@@ -224,17 +230,17 @@ jobs:
         cp build/bin/asset_extract Wowee.app/Contents/MacOS/
 
         # Extraction scripts and GUI remain available for advanced users.
-        cp extract_assets.sh Wowee.app/Contents/MacOS/
-        cp tools/asset_pipeline_gui.py Wowee.app/Contents/MacOS/
+        cp extract_assets.sh Wowee.app/Contents/Resources/
+        cp tools/asset_pipeline_gui.py Wowee.app/Contents/Resources/
 
         # Assets (exclude proprietary music)
         rsync -a --exclude='Original Music' build/bin/assets/ \
-          Wowee.app/Contents/MacOS/assets/
+          Wowee.app/Contents/Resources/assets/
 
         # Data directory (git-tracked redistributable files only)
         git ls-files Data/ | while read -r f; do
-          mkdir -p "Wowee.app/Contents/MacOS/$(dirname "$f")"
-          cp "$f" "Wowee.app/Contents/MacOS/$f"
+          mkdir -p "Wowee.app/Contents/Resources/$(dirname "$f")"
+          cp "$f" "Wowee.app/Contents/Resources/$f"
         done
 
         # The Vulkan loader is not a graphics driver. Bundle MoltenVK and its
@@ -301,6 +307,9 @@ jobs:
         fi
         bash tools/macos/sign_app.sh Wowee.app "${IDENTITY}"
         bash tools/macos/sign_app.sh "Wowee Asset Extractor.app" "${IDENTITY}"
+        bash tools/macos/verify_signature.sh Wowee.app "${IDENTITY}"
+        bash tools/macos/verify_signature.sh \
+          "Wowee Asset Extractor.app" "${IDENTITY}"
 
     - name: Verify bundled dylibs
       run: |
@@ -342,6 +351,12 @@ jobs:
           exit 1
         fi
 
+        if [ "${MACOS_SIGNING_ENABLED}" = "true" ]; then
+          codesign --force --sign "${APPLE_SIGNING_IDENTITY}" \
+            --timestamp Wowee.dmg
+          codesign --verify --strict --verbose=2 Wowee.dmg
+        fi
+
     - name: Notarize and staple DMG
       env:
         APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
@@ -351,7 +366,11 @@ jobs:
         if [ "${MACOS_SIGNING_ENABLED}" != "true" ] || \
            [ -z "${APPLE_NOTARY_KEY}" ] || [ -z "${APPLE_NOTARY_KEY_ID}" ] || \
            [ -z "${APPLE_NOTARY_ISSUER_ID}" ]; then
-          echo "::warning::Notarization credentials are absent; DMG cannot be stapled."
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "::error::Notarization credentials are required for trusted macOS builds."
+            exit 1
+          fi
+          echo "::warning::Notarization credentials are unavailable to this pull request."
           exit 0
         fi
 
@@ -364,6 +383,8 @@ jobs:
           --wait --timeout 30m
         xcrun stapler staple Wowee.dmg
         xcrun stapler validate Wowee.dmg
+        spctl --assess --type open --context context:primary-signature \
+          --verbose=2 Wowee.dmg
 
     - name: Upload DMG
       uses: actions/upload-artifact@v4

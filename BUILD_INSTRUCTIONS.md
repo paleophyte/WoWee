@@ -136,14 +136,12 @@ Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 ### Running a downloaded macOS release
 
-Current GitHub releases are ad-hoc signed, not Apple Developer ID signed or
-notarized. After trying to open `Wowee.app` once and dismissing the warning, go
-to **Apple menu → System Settings → Privacy & Security**, scroll to
-**Security**, click **Open Anyway**, authenticate, and confirm **Open**. The
-button is normally available for about an hour after the failed launch.
+GitHub release DMGs are Developer ID signed, notarized by Apple, and stapled.
+Gatekeeper should accept a release downloaded from the official WoWee GitHub
+repository without an **Open Anyway** exception.
 
-This creates an exception for WoWee without disabling Gatekeeper globally. Only
-use it for a release downloaded from the official WoWee GitHub repository.
+Maintainers can find the CI credential contract and verification commands in
+[`docs/macos-distribution.md`](docs/macos-distribution.md).
 
 ---
 
