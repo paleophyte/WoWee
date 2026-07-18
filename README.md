@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/sponsors/Kelsidavis"><img src="https://img.shields.io/github/sponsors/Kelsidavis?label=Sponsor&logo=GitHub" alt="Sponsor" /></a>
-  <a href="https://discord.gg/PSdMPS8uje"><img src="https://img.shields.io/discord/1?label=Discord&logo=discord" alt="Discord" /></a>
+  <a href="https://discord.gg/PSdMPS8uje"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Join the WoWee Discord" /></a>
 </p>
 
 WoWee supports **Vanilla 1.12**, **TBC 2.4.3**, and **WotLK 3.3.5a** through
