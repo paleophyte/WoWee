@@ -495,9 +495,10 @@ void ADTLoader::parseMCLQ(const uint8_t* data, size_t size, int chunkIndex,
     bool anyVisible = false;
     for (int i = 0; i < 64; i++) {
         uint8_t tileFlag = tileData[i];
-        // Bit 0x0F = liquid type, bit 0x40 = fatigue, bit 0x80 = hidden
-        // A tile is visible if NOT hidden (0x80 not set) and type is non-zero or has base flag
-        bool hidden = (tileFlag & 0x80) != 0;
+        // The low nibble stores the liquid type; 0x0F is the MCLQ sentinel
+        // for a tile with no liquid.  Some files also mark dry tiles with
+        // the legacy 0x80 hidden bit.
+        bool hidden = (tileFlag & 0x0F) == 0x0F || (tileFlag & 0x80) != 0;
         tileMask[i] = hidden ? 0 : 1;
         if (!hidden) anyVisible = true;
     }
