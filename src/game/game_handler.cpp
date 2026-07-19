@@ -1006,6 +1006,15 @@ uint32_t GameHandler::getTaxiCostTo(uint32_t destNodeId) const {
     return 0;
 }
 
+bool GameHandler::hasTaxiRouteTo(uint32_t destNodeId) const {
+    return movementHandler_ && movementHandler_->hasTaxiRouteTo(destNodeId);
+}
+
+std::vector<uint32_t> GameHandler::getTaxiRouteTo(uint32_t destNodeId) const {
+    if (movementHandler_) return movementHandler_->getTaxiRouteTo(destNodeId);
+    return {};
+}
+
 void GameHandler::activateTaxi(uint32_t destNodeId) {
     if (movementHandler_) movementHandler_->activateTaxi(destNodeId);
 }

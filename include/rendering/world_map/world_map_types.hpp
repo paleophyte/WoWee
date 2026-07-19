@@ -105,6 +105,11 @@ struct TaxiNode {
     float     wowX = 0, wowY = 0, wowZ = 0;  ///< Canonical WoW coordinates
     std::string name;      ///< Node name (shown as tooltip)
     bool      known = false; ///< Player has discovered this node
+    // Flight-map (taxi selection mode) data — only meaningful while a flight
+    // master window is open and the cost map is built from the current node.
+    uint32_t  costCopper = 0;   ///< Total flight cost from the current node
+    bool      current = false;  ///< This is the node the player is standing at
+    bool      reachable = false;///< A route exists from the current node
 };
 
 // ── Area Point of Interest from AreaPOI.dbc ──────────────────

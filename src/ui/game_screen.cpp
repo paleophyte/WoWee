@@ -474,7 +474,15 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         inventoryScreen);
     windowManager_.renderBarberShopWindow(gameHandler);
     windowManager_.renderStableWindow(gameHandler);
-    windowManager_.renderTaxiWindow(gameHandler);
+    // Flight selection is handled by the world map's flight-map mode (see
+    // renderWorldMap); the legacy list window remains as a fallback when the
+    // world map system is unavailable.
+    {
+        auto* mapRenderer = core::Application::getInstance().getRenderer();
+        if (!mapRenderer || !mapRenderer->getWorldMap()) {
+            windowManager_.renderTaxiWindow(gameHandler);
+        }
+    }
     windowManager_.renderMailWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderMailComposeWindow(gameHandler, inventoryScreen);
     windowManager_.renderBankWindow(gameHandler, inventoryScreen, chatPanel_);

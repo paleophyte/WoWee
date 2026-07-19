@@ -162,10 +162,13 @@ void DataRepository::loadZones(const std::string& mapName,
                 cont.bounds.locTop = z.bounds.locTop; cont.bounds.locBottom = z.bounds.locBottom;
                 first = false;
             } else {
-                cont.bounds.locLeft = std::min(cont.bounds.locLeft, z.bounds.locLeft);
-                cont.bounds.locRight = std::max(cont.bounds.locRight, z.bounds.locRight);
-                cont.bounds.locTop = std::min(cont.bounds.locTop, z.bounds.locTop);
-                cont.bounds.locBottom = std::max(cont.bounds.locBottom, z.bounds.locBottom);
+                // WorldMapArea loc coords descend left→right and top→bottom
+                // (locLeft/locTop hold the larger world coordinate), so the
+                // union keeps the max on the left/top edges.
+                cont.bounds.locLeft = std::max(cont.bounds.locLeft, z.bounds.locLeft);
+                cont.bounds.locRight = std::min(cont.bounds.locRight, z.bounds.locRight);
+                cont.bounds.locTop = std::max(cont.bounds.locTop, z.bounds.locTop);
+                cont.bounds.locBottom = std::min(cont.bounds.locBottom, z.bounds.locBottom);
             }
         }
     }

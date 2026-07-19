@@ -398,14 +398,29 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 // ============================================================
 
 void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
-    if (!showWorldMap_) return;
-
     auto& app = core::Application::getInstance();
     auto* renderer = app.getRenderer();
     if (!renderer) return;
 
     auto* wm = renderer->getWorldMap();
     if (!wm) return;
+
+    // Flight master window drives the world map's flight-map (taxi selection)
+    // mode: opening SMSG_SHOWTAXINODES opens the map, activating a flight or
+    // closing the gossip closes it. A user-dismissed map (Escape / X) closes
+    // the flight master window through the onClose handler.
+    const bool taxiWanted = gameHandler.isTaxiWindowOpen();
+    if (taxiWanted && !wm->isTaxiMapOpen()) {
+        auto* gh = &gameHandler;
+        wm->openTaxiMap(
+            [gh](uint32_t dest) { return gh->getTaxiRouteTo(dest); },
+            [gh](uint32_t dest) { gh->activateTaxi(dest); },
+            [gh]() { gh->closeTaxi(); });
+    } else if (!taxiWanted && wm->isTaxiMapOpen()) {
+        wm->closeTaxiMap();
+    }
+
+    if (!showWorldMap_ && !wm->isTaxiMapOpen()) return;
 
     // Keep map name in sync with minimap's map name
     auto* minimap = renderer->getMinimap();
@@ -445,16 +460,25 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
     {
         std::vector<rendering::WorldMapTaxiNode> taxiNodes;
         const auto& nodes = gameHandler.getTaxiNodes();
+        uint32_t currentTaxiNode = gameHandler.getTaxiCurrentNode();
         taxiNodes.reserve(nodes.size());
         for (const auto& [id, node] : nodes) {
             rendering::WorldMapTaxiNode wtn;
             wtn.id    = node.id;
             wtn.mapId = node.mapId;
-            wtn.wowX  = node.x;
-            wtn.wowY  = node.y;
-            wtn.wowZ  = node.z;
+            // TaxiNodes.dbc stores server/wire-order coordinates — convert to
+            // canonical (X=north, Y=west) like the taxi flight path code does,
+            // or the markers land transposed on the map.
+            glm::vec3 canonical = core::coords::serverToCanonical(
+                glm::vec3(node.x, node.y, node.z));
+            wtn.wowX  = canonical.x;
+            wtn.wowY  = canonical.y;
+            wtn.wowZ  = canonical.z;
             wtn.name  = node.name;
             wtn.known = gameHandler.isKnownTaxiNode(id);
+            wtn.costCopper = gameHandler.getTaxiCostTo(id);
+            wtn.current    = (id == currentTaxiNode);
+            wtn.reachable  = gameHandler.hasTaxiRouteTo(id);
             taxiNodes.push_back(std::move(wtn));
         }
         wm->setTaxiNodes(std::move(taxiNodes));

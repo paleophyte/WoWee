@@ -5,6 +5,8 @@
 
 #include "rendering/world_map/world_map_types.hpp"
 #include <glm/glm.hpp>
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -46,6 +48,19 @@ public:
 
     bool isOpen() const;
     void close();
+
+    /// Flight-map (taxi selection) mode — opens the map locked to the player's
+    /// continent with interactive flight nodes (see TaxiNodeLayer flight-map
+    /// rendering). routeProvider maps a destination node id to the hop chain
+    /// used to draw the route; onSelect fires with the chosen destination;
+    /// onClose fires when the player dismisses the map (Escape / X).
+    void openTaxiMap(std::function<std::vector<uint32_t>(uint32_t)> routeProvider,
+                     std::function<void(uint32_t)> onSelect,
+                     std::function<void()> onClose);
+    /// Silent close (no onClose callback) — used when the game state already
+    /// closed the flight master window.
+    void closeTaxiMap();
+    bool isTaxiMapOpen() const;
 
 private:
     struct Impl;

@@ -129,6 +129,11 @@ struct WorldMapFacade::Impl {
     std::vector<TaxiNode> taxiNodes;
     std::vector<QuestPOI> questPois;
 
+    // Flight-map (taxi selection) mode — locks the view to the continent and
+    // renders only the map, player marker, and interactive flight nodes.
+    bool taxiMode = false;
+    std::function<void()> taxiCloseHandler;
+
     float lastFrameTime = 0.0f;
 
     void initOverlayLayers();
@@ -148,6 +153,13 @@ void WorldMapFacade::Impl::closeMap() {
     if (!pendingMapName.empty()) {
         mapName = pendingMapName;
         pendingMapName.clear();
+    }
+    // A user-dismissed flight map also closes the flight master window.
+    if (taxiMode) {
+        taxiMode = false;
+        if (taxiNodeLayer) taxiNodeLayer->setTaxiMode(false);
+        if (taxiCloseHandler) taxiCloseHandler();
+        taxiCloseHandler = nullptr;
     }
 }
 
@@ -373,7 +385,9 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
         }
 
         int playerZone = findZoneForPlayer(d.data.zones(), playerRenderPos);
-        if (playerZone >= 0 && d.viewState.continentIdx() >= 0 &&
+        // Flight map is always the continent overview — never open at zone level.
+        if (!d.taxiMode &&
+            playerZone >= 0 && d.viewState.continentIdx() >= 0 &&
             zoneBelongsToContinent(d.data.zones(), playerZone, d.viewState.continentIdx())) {
             d.compositor.loadZoneTextures(playerZone, d.data.zones(), d.mapName);
             d.compositor.loadOverlayTextures(playerZone, d.data.zones());
@@ -395,6 +409,12 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     InputResult inputResult = d.input.process(d.viewState.currentLevel(),
                                                hoveredZone,
                                                d.viewState.cosmicEnabled());
+
+    // Flight map is locked to the continent view: node clicks are handled by
+    // the taxi layer, so only closing the map is a valid input action here.
+    if (d.taxiMode && inputResult.action != InputAction::CLOSE) {
+        inputResult.action = InputAction::NONE;
+    }
 
     switch (inputResult.action) {
         case InputAction::CLOSE:
@@ -549,6 +569,35 @@ void WorldMapFacade::close() {
     impl_->closeMap();
 }
 
+void WorldMapFacade::openTaxiMap(std::function<std::vector<uint32_t>(uint32_t)> routeProvider,
+                                 std::function<void(uint32_t)> onSelect,
+                                 std::function<void()> onClose) {
+    auto& d = *impl_;
+    if (d.taxiNodeLayer) {
+        d.taxiNodeLayer->setTaxiMode(true);
+        d.taxiNodeLayer->setTaxiHandlers(std::move(routeProvider), std::move(onSelect));
+    }
+    d.taxiCloseHandler = std::move(onClose);
+    d.taxiMode = true;
+    d.userMapOverride = false;
+    // Force the first-open flow on the next render so the view snaps to the
+    // player's continent regardless of where the map was last left.
+    d.open = false;
+}
+
+void WorldMapFacade::closeTaxiMap() {
+    auto& d = *impl_;
+    if (!d.taxiMode) return;
+    d.taxiMode = false;
+    d.taxiCloseHandler = nullptr;
+    if (d.taxiNodeLayer) d.taxiNodeLayer->setTaxiMode(false);
+    d.open = false;
+}
+
+bool WorldMapFacade::isTaxiMapOpen() const {
+    return impl_->taxiMode;
+}
+
 // ── ImGui Overlay ────────────────────────────────────────────
 
 void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
@@ -598,8 +647,11 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
 
     // Keep ImGui's close state separate so clicking the title-bar X can use
     // the same cleanup path as Escape instead of mutating open directly.
+    // The ### suffix keeps one window identity across both titles.
     bool windowOpen = open;
-    if (ImGui::Begin("World Map", &windowOpen, flags)) {
+    const char* windowTitle = taxiMode ? "Flight Map###WorldMapWindow"
+                                       : "World Map###WorldMapWindow";
+    if (ImGui::Begin(windowTitle, &windowOpen, flags)) {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
 
         // imgMin/imgMax = the content area (after title bar)
@@ -710,6 +762,41 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             };
             layerCtx.zmpRepoPtr = &data;
             layerCtx.zmpZoneBounds = &data.zmpZoneBounds();
+        }
+
+        // Flight-map mode: just the map, the player marker, and the
+        // interactive flight nodes — no zone navigation chrome.
+        if (taxiMode) {
+            if (playerMarkerLayer) playerMarkerLayer->render(layerCtx);
+            if (taxiNodeLayer) taxiNodeLayer->render(layerCtx);
+
+            // Continent name title
+            int curIdx = viewState.currentZoneIdx();
+            if (curIdx >= 0 && curIdx < static_cast<int>(data.zones().size())) {
+                std::string title = data.zones()[curIdx].areaName;
+                if (title == "Azeroth") title = mapDisplayName(0);
+                if (!title.empty()) {
+                    ImVec2 titleSz = ImGui::CalcTextSize(title.c_str());
+                    float tx = imgMin.x + (displayW - titleSz.x) * 0.5f;
+                    float ty = imgMin.y + 8.0f;
+                    drawList->AddText(ImVec2(tx + 1.0f, ty + 1.0f),
+                                      IM_COL32(0, 0, 0, 220), title.c_str());
+                    drawList->AddText(ImVec2(tx, ty),
+                                      IM_COL32(255, 215, 0, 255), title.c_str());
+                }
+            }
+
+            const char* taxiHelp = "Click a destination to fly there | Escape to close";
+            ImVec2 helpSz = ImGui::CalcTextSize(taxiHelp);
+            float hx = imgMin.x + (displayW - helpSz.x) / 2.0f;
+            float hy = imgMax.y - helpSz.y - 4.0f;
+            ImGui::SetCursorScreenPos(ImVec2(hx, hy));
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "%s", taxiHelp);
+
+            ImGui::End();
+            if (!windowOpen) closeMap();
+            ImGui::PopStyleVar(3);
+            return;
         }
 
         // World-level: Azeroth map with clickable continent regions

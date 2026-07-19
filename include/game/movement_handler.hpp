@@ -139,6 +139,10 @@ public:
         return (knownTaxiMask_[idx / 32] & (1u << (idx % 32))) != 0;
     }
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
+    /// True when the taxi cost map has a route from the current node to dest.
+    bool hasTaxiRouteTo(uint32_t destNodeId) const;
+    /// Node-id hop chain current → dest (inclusive); empty if unreachable.
+    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;
@@ -349,6 +353,8 @@ private:
     uint32_t knownTaxiMask_[12] = {};
     bool taxiMaskInitialized_ = false;
     std::unordered_map<uint32_t, uint32_t> taxiCostMap_;
+    // BFS predecessor per node from buildTaxiCostMap; getTaxiRouteTo walks it.
+    std::unordered_map<uint32_t, uint32_t> taxiPrevMap_;
 
     bool followMoveMoving_ = false;  // whether MSG_MOVE_START_FORWARD has been sent for the current follow
 };

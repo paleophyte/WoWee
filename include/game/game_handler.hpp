@@ -2040,6 +2040,8 @@ public:
     const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const;
     bool isKnownTaxiNode(uint32_t nodeId) const;
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
+    bool hasTaxiRouteTo(uint32_t destNodeId) const;
+    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;

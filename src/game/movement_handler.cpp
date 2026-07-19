@@ -2792,6 +2792,7 @@ void MovementHandler::closeTaxi() {
 
 void MovementHandler::buildTaxiCostMap() {
     taxiCostMap_.clear();
+    taxiPrevMap_.clear();
     uint32_t startNode = currentTaxiData_.nearestNode;
     if (startNode == 0) return;
 
@@ -2809,8 +2810,13 @@ void MovementHandler::buildTaxiCostMap() {
         uint32_t cur = queue.front();
         queue.pop_front();
         for (const auto& next : adj[cur]) {
+            // Flights only route through nodes the player has discovered —
+            // the server rejects paths crossing unknown nodes, so a cost map
+            // built over them would show routes/prices the server won't honor.
+            if (!currentTaxiData_.isNodeKnown(next.node)) continue;
             if (taxiCostMap_.find(next.node) == taxiCostMap_.end()) {
                 taxiCostMap_[next.node] = taxiCostMap_[cur] + next.cost;
+                taxiPrevMap_[next.node] = cur;
                 queue.push_back(next.node);
             }
         }
@@ -2820,6 +2826,30 @@ void MovementHandler::buildTaxiCostMap() {
 uint32_t MovementHandler::getTaxiCostTo(uint32_t destNodeId) const {
     auto it = taxiCostMap_.find(destNodeId);
     return (it != taxiCostMap_.end()) ? it->second : 0;
+}
+
+bool MovementHandler::hasTaxiRouteTo(uint32_t destNodeId) const {
+    return destNodeId != currentTaxiData_.nearestNode &&
+           taxiCostMap_.find(destNodeId) != taxiCostMap_.end();
+}
+
+std::vector<uint32_t> MovementHandler::getTaxiRouteTo(uint32_t destNodeId) const {
+    std::vector<uint32_t> route;
+    if (!hasTaxiRouteTo(destNodeId)) return route;
+
+    uint32_t startNode = currentTaxiData_.nearestNode;
+    uint32_t cur = destNodeId;
+    while (cur != startNode) {
+        route.push_back(cur);
+        auto it = taxiPrevMap_.find(cur);
+        if (it == taxiPrevMap_.end() || route.size() > taxiPrevMap_.size()) {
+            return {};  // broken chain — should not happen with a consistent BFS
+        }
+        cur = it->second;
+    }
+    route.push_back(startNode);
+    std::reverse(route.begin(), route.end());
+    return route;
 }
 
 void MovementHandler::activateTaxi(uint32_t destNodeId) {
