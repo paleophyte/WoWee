@@ -789,6 +789,7 @@ set(WOWEE_SOURCES
     src/rendering/render_graph.cpp
     src/rendering/hiz_system.cpp
     src/rendering/quest_marker_renderer.cpp
+    src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
     src/rendering/world_map/coordinate_projection.cpp
     src/rendering/world_map/map_resolver.cpp

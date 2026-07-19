@@ -40,6 +40,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/quest_marker_renderer.hpp"
+#include "rendering/footprint_renderer.hpp"
 #include "rendering/loading_screen.hpp"
 #include "audio/music_manager.hpp"
 #include "audio/footstep_manager.hpp"
@@ -1264,6 +1265,9 @@ void Application::performLogoutToLogin() {
         }
         if (auto* questMarkers = renderer->getQuestMarkerRenderer()) {
             questMarkers->clear();
+        }
+        if (auto* footprints = renderer->getFootprintRenderer()) {
+            footprints->clear();
         }
         if (auto* ac = renderer->getAnimationController()) ac->clearMount();
         renderer->setCharacterFollow(0);

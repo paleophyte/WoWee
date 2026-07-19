@@ -22,6 +22,8 @@ Makefile
 *.slo
 *.lo
 *.spv
+!assets/shaders/footprint.vert.spv
+!assets/shaders/footprint.frag.spv
 
 # Compiled Dynamic libraries
 *.so

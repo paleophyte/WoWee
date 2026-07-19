@@ -20,6 +20,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/quest_marker_renderer.hpp"
+#include "rendering/footprint_renderer.hpp"
 #include "rendering/loading_screen.hpp"
 #include "addons/addon_manager.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -410,6 +411,9 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             }
             if (auto* questMarkers = renderer_->getQuestMarkerRenderer()) {
                 questMarkers->clear();
+            }
+            if (auto* footprints = renderer_->getFootprintRenderer()) {
+                footprints->clear();
             }
             if (auto* ac = renderer_->getAnimationController()) ac->clearMount();
         }
