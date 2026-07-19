@@ -674,10 +674,7 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
     // Merge threshold: groups with more than this many chunks get merged into
     // one tile-wide surface.  Small groups (shore, lakes) stay per-chunk so
     // their original mask / height data is preserved exactly.
-    // Keep terrain liquids as per-layer surfaces. MH2O masks are chunk-wide
-    // bitmaps with layer-local offsets; merging them into a tile-wide grid can
-    // collapse small multi-chunk ponds into one corner of the merged surface.
-    constexpr size_t MERGE_THRESHOLD = std::numeric_limits<size_t>::max();
+    constexpr size_t MERGE_THRESHOLD = 4;
 
     // ── Pass 2: create surfaces ──
     for (auto& [key, chunkLayers] : mergeGroups) {
@@ -875,20 +872,6 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
     if (totalSurfaces > 0) {
         LOG_INFO("Water: Loaded ", totalSurfaces, " surfaces from tile [", tileX, ",", tileY,
                  "] (", mergeGroups.size(), " groups), total surfaces: ", surfaces.size());
-        if (tileX == 40 && tileY == 33) {
-            for (const auto& surface : surfaces) {
-                if (surface.tileX != tileX || surface.tileY != tileY) continue;
-                size_t activeBits = 0;
-                for (size_t i = 0; i < static_cast<size_t>(surface.width) * surface.height; ++i) {
-                    if (i / 8 < surface.mask.size() && (surface.mask[i / 8] & (1u << (i % 8)))) ++activeBits;
-                }
-                LOG_WARNING("Durotar water tile [40,33]: origin=", surface.origin.x, ",", surface.origin.y,
-                            " size=", static_cast<int>(surface.width), "x", static_cast<int>(surface.height),
-                            " offset=", static_cast<int>(surface.xOffset), ",", static_cast<int>(surface.yOffset),
-                            " maskBytes=", surface.mask.size(), " active=", activeBits,
-                            " indices=", surface.indexCount);
-            }
-        }
     }
 }
 
@@ -1292,8 +1275,10 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
             if (!surface.mask.empty()) {
                 int tileIndex;
                 bool isMergedTerrain = (surface.wmoId == 0 && surface.width > 8);
-                if (surface.wmoId == 0 && surface.width <= 8) {
-                    tileIndex = y * surface.width + x;
+                if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
+                    int cx = static_cast<int>(surface.xOffset) + x;
+                    int cy = static_cast<int>(surface.yOffset) + y;
+                    tileIndex = cy * 8 + cx;
                 } else {
                     tileIndex = y * surface.width + x;
                 }
@@ -1325,8 +1310,9 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
                                     int nx = x + dx, ny = y + dy;
                                     if (nx < 0 || ny < 0 || nx >= gridWidth-1 || ny >= gridHeight-1) continue;
                                     int neighborIdx;
-                                    if (surface.wmoId == 0 && surface.width <= 8) {
-                                        neighborIdx = ny * surface.width + nx;
+                                    if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
+                                        neighborIdx = (static_cast<int>(surface.yOffset) + ny) * 8 +
+                                                      (static_cast<int>(surface.xOffset) + nx);
                                     } else {
                                         neighborIdx = ny * surface.width + nx;
                                     }
