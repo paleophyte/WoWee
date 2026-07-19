@@ -20,10 +20,11 @@ constexpr float    M2_MAX_RENDER_DISTANCE_LOW_DENSITY  = 2800.0f;
 constexpr float M2_LOD3_DISTANCE        = 150.0f;  // Beyond this: no bone updates
 constexpr float M2_BONE_SKIP_DIST_FAR   = 100.0f;  // Beyond this: every 4th frame
 constexpr float M2_BONE_SKIP_DIST_MID   = 50.0f;   // Beyond this: every 2nd frame
-// Flying ambient models have obvious, rapid wing motion.  Keep them animated at
-// full rate while visible and finish their distance fade before the generic
-// no-bone LOD, so a bird can never remain on screen in a frozen pose.
-constexpr float M2_SKY_BIRD_MAX_RENDER_DISTANCE = 140.0f;
+// Flying ambient models have obvious, rapid wing motion.  They are exempt from
+// bone frame-skipping and the LOD3 bone freeze (their flight path is baked into
+// bone animation), so they stay fully animated out to this range instead of
+// despawning at the generic no-bone LOD boundary.
+constexpr float M2_SKY_BIRD_MAX_RENDER_DISTANCE = 320.0f;
 
 // ---------------------------------------------------------------------------
 // M2 culling geometry

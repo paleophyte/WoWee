@@ -1395,7 +1395,38 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isBrazierOrFire             = cls.isBrazierOrFire;
     gpuModel.isGroundFire                = cls.isGroundFire;
     gpuModel.isTorch                     = cls.isTorch;
-    gpuModel.isSkyBird                   = cls.isSkyBird;
+    // Data-driven flight-path detection: name tokens miss many flying doodads
+    // (buzzards, swallows, bird swarms, ...). A small mesh whose bone animation
+    // translates it tens of units is a flight-path doodad — it visibly freezes
+    // mid-air whenever distance culling stops its bone updates, so give it the
+    // same treatment as named sky birds.
+    bool flightPathDoodad = cls.isSkyBird;
+    if (!flightPathDoodad && !cls.disableAnimation) {
+        glm::vec3 meshExtent = tightMax - tightMin;
+        const bool smallMesh = meshExtent.x < 6.0f && meshExtent.y < 6.0f &&
+                               meshExtent.z < 6.0f;
+        if (smallMesh) {
+            constexpr float kFlightPathRange = 15.0f;
+            for (const auto& bone : model.bones) {
+                for (const auto& seq : bone.translation.sequences) {
+                    for (const auto& v : seq.vec3Values) {
+                        if (std::abs(v.x) > kFlightPathRange ||
+                            std::abs(v.y) > kFlightPathRange ||
+                            std::abs(v.z) > kFlightPathRange) {
+                            flightPathDoodad = true;
+                            break;
+                        }
+                    }
+                    if (flightPathDoodad) break;
+                }
+                if (flightPathDoodad) break;
+            }
+            if (flightPathDoodad) {
+                LOG_DEBUG("Flight-path doodad detected (unnamed sky bird): ", model.name);
+            }
+        }
+    }
+    gpuModel.isSkyBird                   = flightPathDoodad;
     gpuModel.ambientEmitterType          = cls.ambientEmitterType;
     gpuModel.boundMin = tightMin;
     gpuModel.boundMax = tightMax;

@@ -476,8 +476,10 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
         // (always valid — seeded on spawn) and avoid the expensive per-bone work.
+        // Sky birds are exempt: their flight path is baked into bone animation,
+        // so freezing bones freezes the whole bird mid-air.
         constexpr float kLOD3DistSq = rendering::M2_LOD3_DISTANCE * rendering::M2_LOD3_DISTANCE;
-        if (distSq > kLOD3DistSq) continue;
+        if (distSq > kLOD3DistSq && !instance.cachedIsSkyBird) continue;
 
         // Distance-based frame skipping: update distant bones less frequently
         uint32_t boneInterval = 1;
