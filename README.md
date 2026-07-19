@@ -21,6 +21,10 @@ AzerothCore/ChromieCraft, TrinityCore, MaNGOS, and Turtle WoW 1.18.
 [Download the latest release](https://github.com/Kelsidavis/WoWee/releases/latest) ·
 [Read the project status](docs/status.md)
 
+<p align="center">
+  <img src="assets/orgrimmar-entrance.png" alt="WoWee rendering Orgrimmar" width="100%" />
+</p>
+
 > [!NOTE]
 > macOS release DMGs are Developer ID signed, notarized by Apple, and stapled
 > before publication. Gatekeeper should identify them as notarized Developer ID
