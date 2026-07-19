@@ -225,7 +225,7 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                         bank = audio::FootstepBank::HORSE;
                         break;
                     case audio::MountFamily::KODO:
-                        bank = audio::FootstepBank::HUGE;
+                        bank = audio::FootstepBank::HEAVY;
                         break;
                     default:
                         break;

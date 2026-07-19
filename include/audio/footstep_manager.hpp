@@ -22,10 +22,12 @@ enum class FootstepSurface : uint8_t {
 };
 
 // Which sample bank a step draws from.
+// Note: the heavy bank is named HEAVY (not HUGE) because Windows math headers
+// define HUGE as a macro.
 enum class FootstepBank : uint8_t {
     CHARACTER = 0,  // medium/large biped footsteps (also padded mounts: wolf/tiger/raptor)
     HORSE,          // hoofed mounts (horse/skeletal horse/ram)
-    HUGE            // heavy mounts (kodo)
+    HEAVY           // heavy mounts (kodo) — mFootHuge* sample set
 };
 
 class FootstepManager {

@@ -186,7 +186,7 @@ bool FootstepManager::playRandomStep(FootstepSurface surface, FootstepBank bank,
     const std::vector<Sample>* list = nullptr;
     switch (bank) {
         case FootstepBank::HORSE: list = &horseSurfaces[surfaceIndex].clips; break;
-        case FootstepBank::HUGE:  list = &hugeSurfaces[surfaceIndex].clips; break;
+        case FootstepBank::HEAVY: list = &hugeSurfaces[surfaceIndex].clips; break;
         default:                  list = &surfaces[surfaceIndex].clips; break;
     }
 
