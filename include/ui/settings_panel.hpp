@@ -45,13 +45,14 @@ public:
     int pendingMasterVolume = 100;
     int pendingMusicVolume = 30;
     int pendingAmbientVolume = 100;
+    int pendingBellVolume = 50;
     int pendingUiVolume = 100;
     int pendingCombatVolume = 100;
     int pendingSpellVolume = 100;
     int pendingMovementVolume = 100;
     int pendingFootstepVolume = 100;
     int pendingNpcVoiceVolume = 100;
-    int pendingMountVolume = 100;
+    int pendingMountVolume = 70;
     int pendingActivityVolume = 100;
     bool pendingCharacterSpeech = true;
 
@@ -66,6 +67,7 @@ public:
 
     // ---- Pending UI / interface ----
     int pendingUiOpacity = 65;
+    float pendingWindowUiScale = 1.0f;
     bool pendingMinimapRotate = false;
     bool pendingMinimapSquare = false;
     bool pendingMinimapNpcDots = false;
@@ -74,6 +76,7 @@ public:
     bool pendingShowLatencyMeter = true;
     bool pendingSeparateBags = true;
     bool pendingShowKeyring = true;
+    float pendingBagScale = 1.0f;
     bool pendingShowMicroMenu = false;
 
     // ---- Pending gameplay ----
@@ -166,6 +169,9 @@ public:
     /// Apply audio volume levels to all audio coordinator sound managers
     void applyAudioVolumes(audio::AudioCoordinator* ac);
 
+    /// Apply the persisted global ImGui window scale without compounding ratios.
+    void applyWindowUiScale();
+
     /// Return the platform-specific settings file path
     static std::string getSettingsPath();
 
@@ -174,6 +180,8 @@ public:
 
 private:
     UIServices services_;  // Injected service references
+    float appliedWindowUiScale_ = 1.0f;
+    bool windowUiScaleEditing_ = false;
 
     // Keybinding customization (private — only used in Controls tab)
     int pendingRebindAction_ = -1;  // -1 = not rebinding, otherwise action index

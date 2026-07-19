@@ -96,3 +96,78 @@ TEST_CASE("CMSG_USE_ITEM keeps unit/self targeting when no item target", "[use_i
         REQUIRE(mask == 0x00);
     }
 }
+
+TEST_CASE("CMSG_ALTER_APPEARANCE uses the WotLK four-field payload", "[barber]") {
+    auto packet = AlterAppearancePacket::build(101, 7, 205, 309);
+    REQUIRE(packet.getData().size() == 16);
+    REQUIRE(packet.readUInt32() == 101);
+    REQUIRE(packet.readUInt32() == 7);
+    REQUIRE(packet.readUInt32() == 205);
+    REQUIRE(packet.readUInt32() == 309);
+    REQUIRE_FALSE(packet.hasData());
+}
+
+TEST_CASE("SMSG_MESSAGECHAT whispers use the exact layout for every expansion", "[chat]") {
+    constexpr uint64_t kSenderGuid = 0x42ull;
+    constexpr uint64_t kReceiverGuid = 0x99ull;
+    const std::string message = "meet me at the tram";
+
+    auto buildTbcOrWotlk = [&] {
+        wowee::network::Packet packet(0);
+        packet.writeUInt8(static_cast<uint8_t>(ChatType::WHISPER));
+        packet.writeUInt32(static_cast<uint32_t>(ChatLanguage::UNIVERSAL));
+        packet.writeUInt64(kSenderGuid);
+        packet.writeUInt32(0);
+        packet.writeUInt64(kReceiverGuid);
+        packet.writeUInt32(static_cast<uint32_t>(message.size() + 1));
+        packet.writeString(message);
+        packet.writeUInt8(0x01);
+        return packet;
+    };
+
+    auto verifySharedResult = [&](const MessageChatData& parsed) {
+        REQUIRE(parsed.type == ChatType::WHISPER);
+        REQUIRE(parsed.senderGuid == kSenderGuid);
+        REQUIRE(parsed.receiverGuid == kReceiverGuid);
+        REQUIRE(parsed.message == message);
+        REQUIRE(parsed.senderName.empty());
+        REQUIRE(parsed.receiverName.empty());
+        REQUIRE(parsed.chatTag == 0x01);
+    };
+
+    SECTION("WotLK") {
+        auto packet = buildTbcOrWotlk();
+        MessageChatData parsed;
+        REQUIRE(MessageChatParser::parse(packet, parsed));
+        verifySharedResult(parsed);
+        REQUIRE_FALSE(packet.hasData());
+    }
+
+    SECTION("TBC") {
+        auto packet = buildTbcOrWotlk();
+        MessageChatData parsed;
+        TbcPacketParsers parsers;
+        REQUIRE(parsers.parseMessageChat(packet, parsed));
+        verifySharedResult(parsed);
+        REQUIRE_FALSE(packet.hasData());
+    }
+
+    SECTION("Classic") {
+        wowee::network::Packet packet(0);
+        packet.writeUInt8(static_cast<uint8_t>(ChatType::WHISPER));
+        packet.writeUInt32(static_cast<uint32_t>(ChatLanguage::UNIVERSAL));
+        packet.writeUInt64(kSenderGuid);
+        packet.writeUInt32(static_cast<uint32_t>(message.size() + 1));
+        packet.writeString(message);
+        packet.writeUInt8(0x01);
+
+        MessageChatData parsed;
+        ClassicPacketParsers parsers;
+        REQUIRE(parsers.parseMessageChat(packet, parsed));
+        REQUIRE(parsed.type == ChatType::WHISPER);
+        REQUIRE(parsed.senderGuid == kSenderGuid);
+        REQUIRE(parsed.message == message);
+        REQUIRE(parsed.chatTag == 0x01);
+        REQUIRE_FALSE(packet.hasData());
+    }
+}

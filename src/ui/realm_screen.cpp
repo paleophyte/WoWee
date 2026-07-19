@@ -1,4 +1,5 @@
 #include "ui/realm_screen.hpp"
+#include "ui/selection_screen_layout.hpp"
 #include "ui/ui_colors.hpp"
 #include <imgui.h>
 
@@ -9,27 +10,17 @@ RealmScreen::RealmScreen() {
 
 void RealmScreen::render(auth::AuthHandler& authHandler) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec2 pad(24.0f, 24.0f);
-    ImVec2 winSize(vp->Size.x - pad.x * 2.0f, vp->Size.y - pad.y * 2.0f);
-    if (winSize.x < 720.0f) winSize.x = 720.0f;
-    if (winSize.y < 540.0f) winSize.y = 540.0f;
+    const SelectionScreenLayout layout = makeSelectionScreenLayout(*vp);
 
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + (vp->Size.x - winSize.x) * 0.5f,
-                                   vp->Pos.y + (vp->Size.y - winSize.y) * 0.5f),
-                            ImGuiCond_Always);
-    ImGui::SetNextWindowSize(winSize, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(layout.windowPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(layout.windowSize, ImGuiCond_Always);
     ImGui::Begin("Realm Selection", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::SetWindowFontScale(layout.scale);
 
-    // Header with title and back button
-    if (ImGui::Button("Back", ImVec2(100, 36))) {
-        if (onBack) onBack();
-    }
-    ImGui::SameLine();
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
-    ImGui::Text("Select a Realm");
+    ImGui::TextColored(ui::colors::kWarmGold, "Select a Realm");
+    ImGui::TextDisabled("Choose where your characters live.");
     ImGui::Separator();
-    ImGui::Spacing();
 
     // Status message
     if (!statusMessage.empty()) {
@@ -41,10 +32,16 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
 
     // Get realm list
     const auto& realms = authHandler.getRealms();
+    const float bodyHeight = std::max(
+        200.0f,
+        ImGui::GetContentRegionAvail().y - layout.footerHeight() -
+            ImGui::GetStyle().ItemSpacing.y);
 
     if (realms.empty()) {
+        ImGui::BeginChild("RealmListEmpty", ImVec2(0.0f, bodyHeight), true);
         ImGui::Text("No realms available. Requesting realm list...");
         authHandler.requestRealmList();
+        ImGui::EndChild();
     } else {
         // Auto-select: prefer realm with characters, then single realm, then first available
         if (!autoSelectAttempted && !realmSelected) {
@@ -75,20 +72,18 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
             }
         }
 
-        // Calculate row height for table - use more vertical space
-        float rowHeight = std::max(28.0f, ImGui::GetTextLineHeight() + 16.0f);
+        float rowHeight = std::max(28.0f * layout.scale,
+                                   ImGui::GetTextLineHeight() + 12.0f * layout.scale);
 
-        // Reserve space for bottom panel (selected realm info + buttons)
-        float bottomPanelHeight = 120.0f;
-        float tableHeight = ImGui::GetContentRegionAvail().y - bottomPanelHeight;
-        if (tableHeight < 200.0f) tableHeight = 200.0f;
-
+        // The body consumes all flexible space; the shared footer remains at a
+        // stable screen-relative position regardless of realm count or status.
         // Realm table - fills available width and height
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(12.0f, 8.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,
+                            ImVec2(12.0f * layout.scale, 6.0f * layout.scale));
         if (ImGui::BeginTable("RealmsTable", 5,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-                ImVec2(0, tableHeight))) {
+                ImVec2(0, bodyHeight))) {
 
             // Proportional columns
             float totalW = ImGui::GetContentRegionAvail().x;
@@ -163,65 +158,64 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
             ImGui::EndTable();
         }
         ImGui::PopStyleVar(); // CellPadding
+    }
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+    ImGui::BeginChild("RealmFooter", ImVec2(0.0f, layout.footerHeight()), true);
 
-        // Bottom panel: selected realm info + action buttons
-        if (selectedRealmIndex >= 0 && selectedRealmIndex < static_cast<int>(realms.size())) {
-            const auto& realm = realms[selectedRealmIndex];
+    // Stable footer: navigation left, primary action right.
+    if (selectedRealmIndex >= 0 && selectedRealmIndex < static_cast<int>(realms.size())) {
+        const auto& realm = realms[selectedRealmIndex];
 
-            ImGui::Text("Selected: %s", realm.name.c_str());
+        ImGui::Text("Selected: %s", realm.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", realm.address.c_str());
+        if (realm.characters > 0) {
             ImGui::SameLine();
-            ImGui::TextDisabled("(%s)", realm.address.c_str());
-            if (realm.characters > 0) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f),
-                    " - %d character%s", realm.characters, realm.characters > 1 ? "s" : "");
-            }
-            if (realm.hasVersionInfo() && (realm.majorVersion || realm.build)) {
-                ImGui::SameLine();
-                ImGui::TextDisabled(" v%d.%d.%d (build %d)",
-                    realm.majorVersion, realm.minorVersion, realm.patchVersion, realm.build);
-            }
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f),
+                " - %d character%s", realm.characters, realm.characters > 1 ? "s" : "");
+        }
+        if (realm.hasVersionInfo() && (realm.majorVersion || realm.build)) {
+            ImGui::SameLine();
+            ImGui::TextDisabled(" v%d.%d.%d (build %d)",
+                realm.majorVersion, realm.minorVersion, realm.patchVersion, realm.build);
+        }
 
-            ImGui::Spacing();
+    } else {
+        ImGui::TextDisabled("Click a realm to select it, or double-click to enter.");
+    }
 
-            // Enter Realm button (large)
-            if (!realm.lock) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                if (ImGui::Button("Enter Realm", ImVec2(200, 40))) {
-                    realmSelected = true;
-                    selectedRealmName = realm.name;
-                    selectedRealmAddress = realm.address;
-                    setStatus("Connecting to realm: " + realm.name);
-                    if (onRealmSelected) {
-                        onRealmSelected(selectedRealmName, selectedRealmAddress);
-                    }
-                }
-                ImGui::PopStyleColor(2);
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ui::colors::kDarkGray);
-                ImGui::Button("Realm Locked", ImVec2(200, 40));
-                ImGui::PopStyleColor();
-            }
+    ImGui::Spacing();
+    if (ImGui::Button("Back", layout.button())) {
+        if (onBack) onBack();
+    }
+    ImGui::SameLine(0.0f, layout.gap());
+    if (ImGui::Button("Refresh", layout.button())) {
+        authHandler.requestRealmList();
+        setStatus("Refreshing realm list...");
+    }
 
-            ImGui::SameLine(0, 16.0f);
-            if (ImGui::Button("Refresh", ImVec2(120, 40))) {
-                authHandler.requestRealmList();
-                setStatus("Refreshing realm list...");
+    if (selectedRealmIndex >= 0 && selectedRealmIndex < static_cast<int>(realms.size())) {
+        const auto& realm = realms[selectedRealmIndex];
+        const ImVec2 primarySize = layout.primaryButton(200.0f);
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - primarySize.x);
+        if (!realm.lock) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+            if (ImGui::Button("Enter Realm", primarySize)) {
+                realmSelected = true;
+                selectedRealmName = realm.name;
+                selectedRealmAddress = realm.address;
+                setStatus("Connecting to realm: " + realm.name);
+                if (onRealmSelected) onRealmSelected(selectedRealmName, selectedRealmAddress);
             }
+            ImGui::PopStyleColor(2);
         } else {
-            ImGui::TextDisabled("Click a realm to select it, or double-click to enter.");
-            ImGui::Spacing();
-            if (ImGui::Button("Refresh", ImVec2(120, 40))) {
-                authHandler.requestRealmList();
-                setStatus("Refreshing realm list...");
-            }
+            ImGui::BeginDisabled();
+            ImGui::Button("Realm Locked", primarySize);
+            ImGui::EndDisabled();
         }
     }
+    ImGui::EndChild();
 
     ImGui::End();
 }

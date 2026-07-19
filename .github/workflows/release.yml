@@ -66,7 +66,7 @@ jobs:
         cmake -LA -N build | grep -E '^CMAKE_BUILD_TYPE:STRING=Release$'
 
     - name: Build
-      run: cmake --build build --parallel $(nproc)
+      run: cmake --build build --parallel "$(nproc)"
 
     - name: Package
       run: |
@@ -122,7 +122,8 @@ jobs:
     - name: Configure
       run: |
         BREW=$(brew --prefix)
-        export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
+        PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
+        export PKG_CONFIG_PATH
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
@@ -134,7 +135,7 @@ jobs:
         cmake -LA -N build | grep -E '^CMAKE_BUILD_TYPE:STRING=Release$'
 
     - name: Build
-      run: cmake --build build --parallel $(sysctl -n hw.logicalcpu)
+      run: cmake --build build --parallel "$(sysctl -n hw.logicalcpu)"
 
     - name: Configure Developer ID signing
       env:
@@ -144,9 +145,8 @@ jobs:
       run: |
         if [ -z "${APPLE_CERT_P12}" ] || [ -z "${APPLE_CERT_PASSWORD}" ] || \
            [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
-          echo "MACOS_SIGNING_ENABLED=false" >> "${GITHUB_ENV}"
-          echo "::warning::Apple Developer ID secrets are absent; using ad-hoc signing."
-          exit 0
+          echo "::error::Apple Developer ID secrets are required for macOS releases."
+          exit 1
         fi
 
         KEYCHAIN_PATH="${RUNNER_TEMP}/wowee-signing.keychain-db"
@@ -181,17 +181,17 @@ jobs:
         cp build/bin/asset_extract Wowee.app/Contents/MacOS/
 
         # Extraction scripts and GUI
-        cp extract_assets.sh Wowee.app/Contents/MacOS/
-        cp tools/asset_pipeline_gui.py Wowee.app/Contents/MacOS/
+        cp extract_assets.sh Wowee.app/Contents/Resources/
+        cp tools/asset_pipeline_gui.py Wowee.app/Contents/Resources/
 
         # Assets (exclude proprietary music)
         rsync -a --exclude='Original Music' build/bin/assets/ \
-          Wowee.app/Contents/MacOS/assets/
+          Wowee.app/Contents/Resources/assets/
 
         # Data directory (git-tracked files only)
         git ls-files Data/ | while read -r f; do
-          mkdir -p "Wowee.app/Contents/MacOS/$(dirname "$f")"
-          cp "$f" "Wowee.app/Contents/MacOS/$f"
+          mkdir -p "Wowee.app/Contents/Resources/$(dirname "$f")"
+          cp "$f" "Wowee.app/Contents/Resources/$f"
         done
 
         # The Vulkan loader is not a graphics driver. Bundle MoltenVK and its
@@ -200,6 +200,14 @@ jobs:
         MOLTENVK_PREFIX="$(brew --prefix molten-vk)"
         cp -L "${MOLTENVK_PREFIX}/lib/libMoltenVK.dylib" \
           Wowee.app/Contents/Frameworks/libMoltenVK.dylib
+
+        # Homebrew's sdl2 formula is sdl2-compat, which loads SDL3 with dlopen
+        # instead of an LC_LOAD_DYLIB command. The recursive Mach-O walker
+        # cannot discover that runtime-only dependency, so bundle it explicitly
+        # at the @loader_path location sdl2-compat probes on macOS.
+        SDL3_PREFIX="$(brew --prefix sdl3)"
+        cp -L "${SDL3_PREFIX}/lib/libSDL3.dylib" \
+          Wowee.app/Contents/Frameworks/libSDL3.dylib
         mkdir -p Wowee.app/Contents/Resources/vulkan/icd.d
         python3 - \
           "${MOLTENVK_PREFIX}/etc/vulkan/icd.d/MoltenVK_icd.json" \
@@ -222,9 +230,11 @@ jobs:
           BUNDLE_ROOTS+=(Wowee.app/Contents/MacOS/asset_extract)
         fi
         BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libMoltenVK.dylib)
+        BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libSDL3.dylib)
         python3 tools/macos/bundle_dependencies.py \
           --app Wowee.app \
           --search-dir "$(brew --prefix sdl2)/lib" \
+          --search-dir "$(brew --prefix sdl3)/lib" \
           --search-dir "$(brew --prefix vulkan-loader)/lib" \
           --search-dir "$(brew --prefix openssl@3)/lib" \
           --search-dir "$(brew --prefix ffmpeg)/lib" \
@@ -261,6 +271,9 @@ jobs:
         fi
         bash tools/macos/sign_app.sh Wowee.app "${IDENTITY}"
         bash tools/macos/sign_app.sh "Wowee Asset Extractor.app" "${IDENTITY}"
+        bash tools/macos/verify_signature.sh Wowee.app "${IDENTITY}"
+        bash tools/macos/verify_signature.sh \
+          "Wowee Asset Extractor.app" "${IDENTITY}"
 
     - name: Verify bundled dylibs
       run: |
@@ -279,6 +292,10 @@ jobs:
         ln -s /Applications dmg-root/Applications
         hdiutil create -volname Wowee -srcfolder dmg-root -ov -format UDZO \
           "wowee-${TAG}-macos-arm64.dmg"
+        codesign --force --sign "${APPLE_SIGNING_IDENTITY}" \
+          --timestamp "wowee-${TAG}-macos-arm64.dmg"
+        codesign --verify --strict --verbose=2 \
+          "wowee-${TAG}-macos-arm64.dmg"
 
     - name: Notarize and staple DMG
       env:
@@ -289,8 +306,8 @@ jobs:
         if [ "${MACOS_SIGNING_ENABLED}" != "true" ] || \
            [ -z "${APPLE_NOTARY_KEY}" ] || [ -z "${APPLE_NOTARY_KEY_ID}" ] || \
            [ -z "${APPLE_NOTARY_ISSUER_ID}" ]; then
-          echo "::warning::Notarization credentials are absent; DMG cannot be stapled."
-          exit 0
+          echo "::error::Notarization credentials are required for macOS releases."
+          exit 1
         fi
 
         DMG="wowee-${GITHUB_REF_NAME}-macos-arm64.dmg"
@@ -303,6 +320,8 @@ jobs:
           --wait --timeout 30m
         xcrun stapler staple "${DMG}"
         xcrun stapler validate "${DMG}"
+        spctl --assess --type open --context context:primary-signature \
+          --verbose=2 "${DMG}"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -476,7 +495,11 @@ jobs:
           FILES+=("$f")
         done
 
-        gh release create "${TAG}" \
-          --title "Wowee ${TAG}" \
-          --generate-notes \
-          "${FILES[@]}"
+        if gh release view "${TAG}" >/dev/null 2>&1; then
+          gh release upload "${TAG}" --clobber "${FILES[@]}"
+        else
+          gh release create "${TAG}" \
+            --title "Wowee ${TAG}" \
+            --generate-notes \
+            "${FILES[@]}"
+        fi

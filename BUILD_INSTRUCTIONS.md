@@ -16,7 +16,14 @@ sudo apt install -y \
   libssl-dev zlib1g-dev \
   libvulkan-dev vulkan-tools glslc \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  libunicorn-dev libstorm-dev libx11-dev
+  libx11-dev
+```
+
+Optional features:
+
+```bash
+sudo apt install -y libunicorn-dev  # Warden execution
+sudo apt install -y libstorm-dev    # asset_extract
 ```
 
 ---
@@ -28,14 +35,17 @@ sudo apt install -y \
 ```bash
 sudo pacman -S --needed \
   base-devel cmake pkgconf git \
-  sdl2 glm openssl zlib \
+  sdl2-compat glm openssl zlib libx11 \
   vulkan-headers vulkan-icd-loader vulkan-tools shaderc \
-  ffmpeg unicorn stormlib
+  ffmpeg
 ```
 
 > **Note:** `vulkan-headers` provides the `vulkan/vulkan.h` development headers required
 > at build time. `vulkan-devel` is a group that includes these on some distros but is not
 > available by name on Arch — install `vulkan-headers` and `vulkan-icd-loader` explicitly.
+
+Install `unicorn` for optional Warden execution. StormLib is available from the
+AUR as `stormlib-git` if you need `asset_extract`.
 
 ---
 
@@ -79,12 +89,18 @@ Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
 ### Install Dependencies
 
-Vulkan on macOS is provided via MoltenVK (a Vulkan-to-Metal translation layer),
-which is included in the `vulkan-loader` Homebrew package.
+Vulkan on macOS uses the Vulkan loader plus MoltenVK's Vulkan-to-Metal driver.
 
 ```bash
-brew install cmake pkg-config sdl2 glm openssl@3 zlib ffmpeg unicorn \
-  stormlib vulkan-loader vulkan-headers shaderc
+brew install cmake pkg-config sdl2 glm openssl@3 zlib ffmpeg \
+  vulkan-loader vulkan-headers molten-vk shaderc
+```
+
+Optional features:
+
+```bash
+brew install unicorn  # Warden execution
+brew install stormlib # asset_extract
 ```
 
 Optional (for creating redistributable `.app` bundles):
@@ -118,11 +134,21 @@ It automatically detects Homebrew and passes the correct paths to CMake.
 
 Supports `classic`, `turtle`, `tbc`, `wotlk` targets (auto-detected if omitted).
 
+### Running a downloaded macOS release
+
+GitHub release DMGs are Developer ID signed, notarized by Apple, and stapled.
+Gatekeeper should accept a release downloaded from the official WoWee GitHub
+repository without an **Open Anyway** exception.
+
+Maintainers can find the CI credential contract and verification commands in
+[`docs/macos-distribution.md`](docs/macos-distribution.md).
+
 ---
 
 ## 🪟 Windows (MSYS2 — Recommended)
 
-MSYS2 provides all dependencies as pre-built packages.
+MSYS2 provides the normal client dependencies as pre-built packages. StormLib
+is built separately only when the optional asset extractor is needed.
 
 ### Install MSYS2
 
@@ -145,8 +171,25 @@ pacman -S --needed \
   mingw-w64-x86_64-vulkan-loader \
   mingw-w64-x86_64-vulkan-headers \
   mingw-w64-x86_64-shaderc \
-  mingw-w64-x86_64-stormlib \
   git
+```
+
+The normal client does not require StormLib. To build `asset_extract`, install
+the static-link dependencies and build StormLib using the same configuration as
+CI:
+
+```bash
+pacman -S --needed \
+  mingw-w64-x86_64-libtommath \
+  mingw-w64-x86_64-libtomcrypt
+
+git clone --depth 1 https://github.com/ladislav-zezula/StormLib.git /tmp/StormLib
+cmake -S /tmp/StormLib -B /tmp/StormLib/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$MINGW_PREFIX" \
+  -DBUILD_SHARED_LIBS=OFF
+cmake --build /tmp/StormLib/build --parallel
+cmake --install /tmp/StormLib/build
 ```
 
 ### Clone & Build

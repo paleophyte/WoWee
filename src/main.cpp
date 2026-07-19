@@ -1,4 +1,5 @@
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include <exception>
 #include <csignal>
@@ -132,15 +133,24 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     std::signal(SIGTERM, crashHandler);
     std::signal(SIGINT,  crashHandler);
 #endif
-    // Change working directory to the executable's directory so relative asset
-    // paths (assets/shaders/, Data/, etc.) resolve correctly from any launch location.
+    // Change working directory so relative asset paths resolve from any launch
+    // location. A signed macOS bundle keeps data in Contents/Resources because
+    // Contents/MacOS may contain code only.
 #ifdef __APPLE__
     {
         uint32_t bufSize = 0;
         _NSGetExecutablePath(nullptr, &bufSize);
         std::string exePath(bufSize, '\0');
         _NSGetExecutablePath(exePath.data(), &bufSize);
-        if (chdir(dirname(exePath.data())) != 0) {}
+        const std::filesystem::path executableDir =
+            std::filesystem::path(exePath.c_str()).parent_path();
+        const std::filesystem::path resourceDir =
+            executableDir.parent_path() / "Resources";
+        const std::filesystem::path runtimeDir =
+            std::filesystem::is_directory(resourceDir / "assets")
+                ? resourceDir
+                : executableDir;
+        if (chdir(runtimeDir.c_str()) != 0) {}
     }
     selectMacUserDataPath();
 #elif defined(__linux__)
@@ -155,6 +165,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         wowee::core::Logger::getInstance().setLogLevel(readLogLevelFromEnv());
         LOG_INFO("=== Wowee Native Client ===");
         LOG_INFO("Starting application...");
+
+        // Seed portable config from the per-user location on first portable launch.
+        wowee::core::migratePortableConfigIfNeeded();
 
         wowee::core::Application app;
 

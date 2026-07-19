@@ -400,7 +400,8 @@ public:
     bool parseGuildQueryResponse(network::Packet& packet, GuildQueryResponseData& data) override;
     // TBC 2.4.3 SMSG_QUESTGIVER_STATUS: uint32 status (WotLK uses uint8)
     uint8_t readQuestGiverStatus(network::Packet& packet) override;
-    // TBC 2.4.3 SMSG_MESSAGECHAT: no senderGuid/unknown prefix before type-specific data
+    // TBC 2.4.3 SMSG_MESSAGECHAT shares the senderGuid + unknown + receiverGuid
+    // whisper layout used by WotLK.
     bool parseMessageChat(network::Packet& packet, MessageChatData& data) override;
     // TBC 2.4.3 SMSG_GAMEOBJECT_QUERY_RESPONSE: 2 extra strings after names
     // (iconName + castBarCaption); WotLK has 3 (adds unk1)

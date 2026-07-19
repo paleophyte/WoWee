@@ -69,21 +69,6 @@ public:
     // Equipment weapon loading (reads inventory, attaches weapon M2 models)
     void loadEquippedWeapons();
 
-    // Runtime-tunable 2H back-sheath placement. Live-adjusted in game via the
-    // /sheathtune chat command (weapons reload on change); the defaults here
-    // are what ships.
-    // Defaults tuned live in-game 2026-07-16 (clears the torso and left arm).
-    // Note the attachment frame is not axis-labeled intuitively: tz moves the
-    // weapon laterally, not vertically.
-    struct SheathTuning {
-        float tx = -0.03f;      // attachment-frame X
-        float ty = -0.10f;      // attachment-frame Y
-        float tz = 0.0f;        // attachment-frame Z (lateral)
-        float cantDeg = 33.0f;  // diagonal cant across the back
-        float rollDeg = 90.0f;  // roll about the blade's long axis (flat to back)
-    };
-    static SheathTuning& sheathTuning();
-
     // Weapon sheathe state
     void setWeaponsSheathed(bool sheathed) { weaponsSheathed_ = sheathed; }
     bool isWeaponsSheathed() const { return weaponsSheathed_; }
@@ -95,6 +80,10 @@ public:
 
     // Mining casts temporarily replace the held main-hand model with a pickaxe.
     void showMiningPick(bool show);
+
+    // Fishing casts temporarily replace the held main-hand model with a pole
+    // found in the player's equipped slots or bags.
+    void showFishingPole(bool show);
 
     // Saved skin state accessors (used by game_screen.cpp for equipment re-compositing)
     const std::string& getBodySkinPath() const { return bodySkinPath_; }
@@ -125,6 +114,7 @@ private:
     bool showingRanged_ = false;
     bool showingMiningPick_ = false;
     uint32_t miningPickInstanceId_ = 0;
+    bool showingFishingPole_ = false;
 };
 
 } // namespace core

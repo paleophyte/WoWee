@@ -39,6 +39,16 @@ set(TEST_SYSTEM_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/extern
 )
 
+# Stock-style hill climbing regression test. Run directly with:
+#   cmake --build build --target test_hill_climbing && ctest --test-dir build -R hill_climbing
+add_executable(test_hill_climbing
+    test_movement_limits.cpp
+)
+target_include_directories(test_hill_climbing PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_hill_climbing PRIVATE catch2_main)
+add_test(NAME hill_climbing COMMAND test_hill_climbing)
+register_test_target(test_hill_climbing)
+
 # ── test_packet ──────────────────────────────────────────────
 add_executable(test_packet
     test_packet.cpp
@@ -204,9 +214,9 @@ add_test(NAME dbc_loader COMMAND test_dbc_loader)
 register_test_target(test_dbc_loader)
 
 # ── test_m2_structs ──────────────────────────────────────────
-# Header-only struct layout tests — no source files needed
 add_executable(test_m2_structs
     test_m2_structs.cpp
+    ../src/rendering/m2_model_classifier.cpp
 )
 target_include_directories(test_m2_structs PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_m2_structs SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -216,6 +226,44 @@ if(TARGET glm::glm)
 endif()
 add_test(NAME m2_structs COMMAND test_m2_structs)
 register_test_target(test_m2_structs)
+
+# ── test_m2_color_alpha ──────────────────────────────────────
+# Loads the peasant lumberjack carry models (WotLK v264 + vanilla v256) and
+# pins the M2 color-alpha track parsing that hides the duplicate wood bundle.
+add_executable(test_m2_color_alpha
+    test_m2_color_alpha.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+)
+target_include_directories(test_m2_color_alpha PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_color_alpha SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_m2_color_alpha PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_m2_color_alpha PRIVATE catch2_main)
+if(TARGET glm::glm)
+    target_link_libraries(test_m2_color_alpha PRIVATE glm::glm)
+endif()
+add_test(NAME m2_color_alpha COMMAND test_m2_color_alpha)
+register_test_target(test_m2_color_alpha)
+
+# ── test_m2_footstep_events ──────────────────────────────────
+# Loads real WotLK v264 + vanilla v256 models and pins the $FSD footfall
+# event parsing that syncs footstep audio to foot-strike keyframes.
+add_executable(test_m2_footstep_events
+    test_m2_footstep_events.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+)
+target_include_directories(test_m2_footstep_events PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_footstep_events SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_m2_footstep_events PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_m2_footstep_events PRIVATE catch2_main)
+if(TARGET glm::glm)
+    target_link_libraries(test_m2_footstep_events PRIVATE glm::glm)
+endif()
+add_test(NAME m2_footstep_events COMMAND test_m2_footstep_events)
+register_test_target(test_m2_footstep_events)
 
 # ── test_blp_loader ──────────────────────────────────────────
 add_executable(test_blp_loader

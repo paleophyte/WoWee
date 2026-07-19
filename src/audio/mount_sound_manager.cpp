@@ -107,7 +107,6 @@ void MountSoundManager::loadMountSounds() {
         }, s.land);
         loadSoundList(assetManager_, {
             "Sound\\Creature\\Horse\\mHorseStand3A.wav",
-            "Sound\\Creature\\Horse\\mHorseAggroA.wav",
         }, s.idle);
     }
 
@@ -638,6 +637,14 @@ void MountSoundManager::updateMountSounds() {
     }
     // Ground mounts — use per-family sounds
     else if (currentMountType_ == MountType::GROUND && !flying_) {
+        // Horse vocals are already driven semantically by MountFSM: rear-up uses
+        // the aggro/whinny clip and the sparse idle timer uses the stand/snort clip.
+        // Do not also run the generic 4.5/8-second ambient loop, which made a horse
+        // whinny repeatedly while merely standing or travelling.
+        if (currentMountFamily_ == MountFamily::HORSE ||
+            currentMountFamily_ == MountFamily::UNDEAD_HORSE) {
+            return;
+        }
         const auto& sounds = getCurrentFamilySounds();
         if (moving_ && !sounds.move.empty()) {
             if (soundLoopTimer_ >= 8.0f) {

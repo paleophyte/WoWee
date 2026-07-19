@@ -5,6 +5,7 @@
 #include "game/world_packets.hpp"
 #include <vulkan/vulkan.h>
 #include <imgui.h>
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <functional>
@@ -48,6 +49,13 @@ public:
     bool isCompactBags() const { return compactBags_; }
     void setShowKeyring(bool show) { showKeyring_ = show; }
     bool isShowKeyring() const { return showKeyring_; }
+    void setBagScale(float scale) { bagScale_ = std::clamp(scale, 0.75f, 1.5f); }
+    float getBagScale() const { return bagScale_; }
+    static float recommendedBagScale(float displayHeight) {
+        if (displayHeight >= 2000.0f) return 1.20f;
+        if (displayHeight >= 1300.0f) return 1.10f;
+        return 1.00f;
+    }
     bool isBackpackOpen() const { return backpackOpen_; }
     bool isBagOpen(int idx) const { return idx >= 0 && idx < 4 ? bagOpen_[idx] : false; }
 
@@ -85,10 +93,12 @@ public:
 private:
     bool open = false;
     bool characterOpen = false;
+    float characterUiScale_ = 1.0f;
     bool bKeyWasDown = false;
     bool separateBags_ = true;
     bool compactBags_ = false;
     bool showKeyring_ = true;
+    float bagScale_ = 1.0f;
     bool backpackOpen_ = false;
     std::array<bool, 4> bagOpen_{};
     bool cKeyWasDown = false;
@@ -124,7 +134,8 @@ private:
     uint8_t playerFacialHair_ = 0;
 
     void initPreview();
-    void updatePreviewEquipment(game::Inventory& inventory);
+    void updatePreviewEquipment(game::Inventory& inventory,
+                                bool showHelm, bool showCloak);
 
     // Drag-and-drop held item state
     bool holdingItem = false;
@@ -187,6 +198,7 @@ private:
     void cancelPickup(game::Inventory& inv);
     game::EquipSlot getEquipSlotForType(uint8_t inventoryType, game::Inventory& inv);
     void renderHeldItem();
+    void renderEquipConfirmationPopup(game::Inventory& inventory);
     bool bagHasAnyItems(const game::Inventory& inventory, int bagIndex) const;
 
     // Drop confirmation (drag-outside-window destroy)
@@ -208,6 +220,15 @@ private:
     int splitMax_ = 1;
     int splitCount_ = 1;
     std::string splitItemName_;
+
+    // Binding-on-equip confirmation. The item remains on the cursor until the
+    // player explicitly accepts, including when the destination is a bag slot.
+    bool equipConfirmOpen_ = false;
+    bool equipConfirmAuto_ = false;
+    uint8_t equipConfirmBag_ = 0xFF;
+    uint8_t equipConfirmSourceSlot_ = 0;
+    game::EquipSlot equipConfirmSlot_ = game::EquipSlot::NUM_SLOTS;
+    std::string equipConfirmItemName_;
 
     // ImGui starts window movement before item widgets run for the frame, so
     // keep bag windows title-bar-draggable while bags are open.

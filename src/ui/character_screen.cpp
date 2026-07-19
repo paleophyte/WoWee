@@ -1,9 +1,11 @@
 #include "ui/character_screen.hpp"
+#include "ui/selection_screen_layout.hpp"
 #include "ui/ui_colors.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -43,18 +45,18 @@ static ImVec4 classColor(uint8_t classId) { return ui::getClassColor(classId); }
 
 void CharacterScreen::render(game::GameHandler& gameHandler) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec2 pad(24.0f, 24.0f);
-    ImVec2 winSize(vp->Size.x - pad.x * 2.0f, vp->Size.y - pad.y * 2.0f);
-    if (winSize.x < 860.0f) winSize.x = 860.0f;
-    if (winSize.y < 620.0f) winSize.y = 620.0f;
+    const SelectionScreenLayout layout = makeSelectionScreenLayout(*vp);
 
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + (vp->Size.x - winSize.x) * 0.5f,
-                                   vp->Pos.y + (vp->Size.y - winSize.y) * 0.5f),
-                            ImGuiCond_Always);
-    ImGui::SetNextWindowSize(winSize, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(layout.windowPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(layout.windowSize, ImGuiCond_Always);
 
     ImGui::Begin("Character Selection", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::SetWindowFontScale(layout.scale);
+
+    ImGui::TextColored(ui::colors::kWarmGold, "Select a Character");
+    ImGui::TextDisabled("Choose a hero or create a new one.");
+    ImGui::Separator();
 
     // Ensure we can render a preview even if the state transition hook didn't inject the AssetManager.
     if (!assetManager_) {
@@ -172,11 +174,13 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     float availW = ImGui::GetContentRegionAvail().x;
     // The preview is the centrepiece of this screen — give it a wide panel, but
     // never at the cost of the character list becoming unusable.
-    float detailPanelW = std::min(520.0f, std::max(360.0f, availW * 0.38f));
+    float detailPanelW = std::min(520.0f * layout.scale,
+                                  std::max(360.0f * layout.scale, availW * 0.38f));
     float listW = availW - detailPanelW - ImGui::GetStyle().ItemSpacing.x;
     if (listW < 300.0f) { listW = availW; detailPanelW = 0.0f; }
 
-    float listH = ImGui::GetContentRegionAvail().y - 50.0f; // reserve bottom row for buttons
+    float listH = ImGui::GetContentRegionAvail().y - layout.footerHeight() -
+                  ImGui::GetStyle().ItemSpacing.y;
 
     // ── Left: Character list ──
     ImGui::BeginChild("CharList", ImVec2(listW, listH), true);
@@ -349,7 +353,8 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             float imgH = imgW * (static_cast<float>(preview_->getHeight()) /
                                  static_cast<float>(preview_->getWidth()));
             // Take as much of the panel as the character's details will spare.
-            float maxH = std::max(320.0f, listH - 230.0f);
+            float maxH = std::max(260.0f * layout.scale,
+                                  listH - 230.0f * layout.scale);
             if (imgH > maxH) {
                 imgH = maxH;
                 imgW = imgH * (static_cast<float>(preview_->getWidth()) /
@@ -403,62 +408,61 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
             ImGui::Text("Pet Lv%d (Family %d)", character.pet.level, character.pet.family);
         }
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        // Enter World button — full width
-        float btnW = ImGui::GetContentRegionAvail().x;
-        bool disconnected = (gameHandler.getState() == game::WorldState::DISCONNECTED ||
-                             gameHandler.getState() == game::WorldState::FAILED);
-        if (disconnected) {
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Connection lost — click Back to reconnect");
-        }
-        if (disconnected) ImGui::BeginDisabled();
-        if (ImGui::Button("Enter World", ImVec2(btnW, 44))) {
-            characterSelected = true;
-            saveLastCharacter(character.guid);
-            std::stringstream ss;
-            ss << "Entering world with " << character.name << "...";
-            setStatus(ss.str());
-            gameHandler.selectCharacter(character.guid);
-            if (onCharacterSelected) onCharacterSelected(character.guid);
-        }
-        if (disconnected) ImGui::EndDisabled();
-
         ImGui::EndChild();
     }
 
-    // ── Bottom button row ──
+    // ── Shared fixed footer: navigation left, destructive/primary actions right ──
+    ImGui::BeginChild("CharacterFooter", ImVec2(0.0f, layout.footerHeight()), true);
+    ImGui::TextDisabled("Double-click a character or press Enter to enter the world.");
     ImGui::Spacing();
-    if (ImGui::Button("Back", ImVec2(120, 36))) { if (onBack) onBack(); }
-    ImGui::SameLine();
-    if (ImGui::Button("Refresh", ImVec2(120, 36))) {
+    if (ImGui::Button("Back", layout.button())) { if (onBack) onBack(); }
+    ImGui::SameLine(0.0f, layout.gap());
+    if (ImGui::Button("Refresh", layout.button())) {
         if (gameHandler.getState() == game::WorldState::READY ||
             gameHandler.getState() == game::WorldState::CHAR_LIST_RECEIVED) {
             gameHandler.requestCharacterList();
             setStatus("Refreshing character list...");
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Create Character", ImVec2(160, 36))) {
+    ImGui::SameLine(0.0f, layout.gap());
+    if (ImGui::Button("Create Character", layout.button(160.0f))) {
         if (onCreateCharacter) onCreateCharacter();
     }
 
-    // Delete button — small, red, far right, only when a character is selected
+    const ImVec2 primarySize = layout.primaryButton(180.0f);
+    const ImVec2 deleteSize = layout.button(90.0f);
     if (selectedCharacterIndex >= 0 &&
         selectedCharacterIndex < static_cast<int>(characters.size())) {
-        float deleteW = 80.0f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - deleteW);
+        const float primaryX = ImGui::GetContentRegionMax().x - primarySize.x;
+        ImGui::SameLine(primaryX - deleteSize.x - layout.gap());
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.08f, 0.08f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.5f, 0.5f, 1.0f));
-        if (ImGui::Button("Delete", ImVec2(deleteW, 28))) {
+        if (ImGui::Button("Delete", deleteSize)) {
             deleteConfirmStage = 1;
             ImGui::OpenPopup("DeleteConfirm1");
         }
         ImGui::PopStyleColor(3);
+
+        const auto& character = characters[selectedCharacterIndex];
+        const bool disconnected =
+            gameHandler.getState() == game::WorldState::DISCONNECTED ||
+            gameHandler.getState() == game::WorldState::FAILED;
+        ImGui::SameLine(primaryX);
+        if (disconnected) ImGui::BeginDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.62f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.48f, 0.8f, 1.0f));
+        if (ImGui::Button("Enter World", primarySize)) {
+            characterSelected = true;
+            saveLastCharacter(character.guid);
+            setStatus("Entering world with " + character.name + "...");
+            gameHandler.selectCharacter(character.guid);
+            if (onCharacterSelected) onCharacterSelected(character.guid);
+        }
+        ImGui::PopStyleColor(2);
+        if (disconnected) ImGui::EndDisabled();
     }
+    ImGui::EndChild();
 
     // First confirmation popup
     if (ImGui::BeginPopupModal("DeleteConfirm1", nullptr,
@@ -554,13 +558,7 @@ ImVec4 CharacterScreen::getFactionColor(game::Race race) const {
 }
 
 std::string CharacterScreen::getConfigDir() {
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    return appdata ? std::string(appdata) + "\\wowee" : ".";
-#else
-    const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/.wowee" : ".";
-#endif
+    return core::getConfigRoot();
 }
 
 void CharacterScreen::saveLastCharacter(uint64_t guid) {

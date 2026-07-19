@@ -136,8 +136,14 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // --- Celestial bodies (sun + White Lady + Blue Child) ---
     if (celestial_) {
+        // Gate moon visibility on how dark the DBC sky actually is. The
+        // hardcoded 19:00 night window can precede sky darkening by hours,
+        // and full-brightness moons on a daylight sky read as extra suns.
+        float skyLum = glm::dot(params.skyTopColor, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+        float nightFactor = 1.0f - glm::smoothstep(0.08f, 0.25f, skyLum);
         celestial_->render(cmd, perFrameSet, params.timeOfDay,
-                           &params.directionalDir, &params.sunColor, params.gameTime);
+                           &params.directionalDir, &params.sunColor, params.gameTime,
+                           nightFactor);
     }
 
     // --- Clouds (DBC-driven colors + sun lighting) ---

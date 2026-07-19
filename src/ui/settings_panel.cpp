@@ -8,6 +8,7 @@
 #include "ui/chat_panel.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include "core/version.hpp"
 #include "rendering/renderer.hpp"
@@ -47,7 +48,23 @@ namespace wowee { namespace ui {
 
 void SettingsPanel::renderSettingsInterfaceTab(std::function<void()> saveCallback) {
 ImGui::Spacing();
-ImGui::BeginChild("InterfaceSettings", ImVec2(0, 360), true);
+ImGui::BeginChild("InterfaceSettings", ImVec2(0, -1), true);
+
+ImGui::SeparatorText("Window UI");
+ImGui::Spacing();
+ImGui::SetNextItemWidth(200.0f);
+ImGui::SliderFloat("Window UI Scale", &pendingWindowUiScale, 0.75f, 1.5f, "%.2fx");
+if (ImGui::IsItemActive()) {
+    // Keep the window and slider stationary while the pointer is dragging.
+    windowUiScaleEditing_ = true;
+}
+if (ImGui::IsItemDeactivatedAfterEdit()) {
+    windowUiScaleEditing_ = false;
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(fonts, controls, and spacing)");
+ImGui::Spacing();
 
 ImGui::SeparatorText("Buff Bar");
 ImGui::Spacing();
@@ -176,6 +193,7 @@ void SettingsPanel::renderSettingsGameplayTab(InventoryScreen& inventoryScreen,
                                                   std::function<void()> saveCallback) {
     auto* renderer = services_.renderer;
 ImGui::Spacing();
+ImGui::BeginChild("GameplaySettings", ImVec2(0, -1), true);
 
 ImGui::Text("Controls");
 ImGui::Separator();
@@ -339,6 +357,13 @@ if (ImGui::IsItemHovered())
 ImGui::Spacing();
 ImGui::Text("Bags");
 ImGui::Separator();
+ImGui::SetNextItemWidth(200.0f);
+if (ImGui::SliderFloat("Bag & Window Scale", &pendingBagScale, 0.75f, 1.5f, "%.2fx")) {
+    inventoryScreen.setBagScale(pendingBagScale);
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(high-resolution default is larger)");
 if (ImGui::Checkbox("Separate Bag Windows", &pendingSeparateBags)) {
     inventoryScreen.setSeparateBags(pendingSeparateBags);
     saveCallback();
@@ -367,6 +392,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     inventoryScreen.setSeparateBags(true);
     pendingShowKeyring = true;
     inventoryScreen.setShowKeyring(true);
+    pendingBagScale = InventoryScreen::recommendedBagScale(ImGui::GetIO().DisplaySize.y);
+    inventoryScreen.setBagScale(pendingBagScale);
     pendingShowMicroMenu = false;
     uiOpacity_ = 0.65f;
     minimapRotate_ = false;
@@ -388,6 +415,8 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     }
     saveCallback();
 }
+
+ImGui::EndChild();
 
 }
 
@@ -492,7 +521,7 @@ if (ImGui::Button("Reset to Defaults", ImVec2(-1, 0))) {
 void SettingsPanel::renderSettingsAudioTab(std::function<void()> saveCallback) {
     auto* renderer = services_.renderer;
 ImGui::Spacing();
-ImGui::BeginChild("AudioSettings", ImVec2(0, 360), true);
+ImGui::BeginChild("AudioSettings", ImVec2(0, -1), true);
 
 // Helper lambda to apply audio settings
 auto applyAudioSettings = [&]() {
@@ -529,6 +558,12 @@ if (ImGui::SliderInt("##AmbientVolume", &pendingAmbientVolume, 0, 100, "%d%%")) 
     applyAudioSettings();
 }
 ImGui::TextWrapped("Weather, zones, cities, emitters");
+
+ImGui::Spacing();
+ImGui::Text("Capital City Bells");
+if (ImGui::SliderInt("##BellVolume", &pendingBellVolume, 0, 100, "%d%%")) {
+    applyAudioSettings();
+}
 
 ImGui::Spacing();
 ImGui::Text("UI Sounds");
@@ -596,13 +631,14 @@ if (ImGui::Button("Restore Audio Defaults", ImVec2(-1, 0))) {
     pendingMasterVolume = 100;
     pendingMusicVolume = 30; // default music volume
     pendingAmbientVolume = 100;
+    pendingBellVolume = 50;
     pendingUiVolume = 100;
     pendingCombatVolume = 100;
     pendingSpellVolume = 100;
     pendingMovementVolume = 100;
     pendingFootstepVolume = 100;
     pendingNpcVoiceVolume = 100;
-    pendingMountVolume = 100;
+    pendingMountVolume = 70;
     pendingActivityVolume = 100;
     pendingCharacterSpeech = true;
     applyAudioSettings();
@@ -747,12 +783,15 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
     ImGuiIO& io = ImGui::GetIO();
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
-    ImVec2 size(520.0f, std::min(screenH * 0.9f, 720.0f));
+    // Give the settings surface enough room on high-resolution displays while
+    // retaining a sensible minimum for 1080p and laptop screens.
+    ImVec2 size(std::clamp(650.0f * appliedWindowUiScale_, 520.0f, screenW * 0.90f),
+                std::clamp(std::min(screenH * 0.90f, 900.0f * appliedWindowUiScale_), 560.0f, screenH * 0.90f));
     ImVec2 pos((screenW - size.x) * 0.5f, (screenH - size.y) * 0.5f);
 
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
     if (ImGui::Begin("##SettingsWindow", nullptr, flags)) {
@@ -767,6 +806,10 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         }
         ImGui::Separator();
 
+        // Keep the action row outside the scrolling tab region so it remains
+        // visible regardless of which tab or section is active.
+        const float footerHeight = ImGui::GetFrameHeightWithSpacing() + 18.0f;
+        ImGui::BeginChild("SettingsTabRegion", ImVec2(0, -footerHeight), false);
         if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_None)) {
             // ============================================================
             // VIDEO TAB
@@ -1142,6 +1185,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
 
             ImGui::EndTabBar();
         }
+        ImGui::EndChild();
 
         ImGui::Spacing();
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 10.0f));
@@ -1156,6 +1200,24 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         ImGui::PopStyleVar();
     }
     ImGui::End();
+}
+
+void SettingsPanel::applyWindowUiScale() {
+    if (!ImGui::GetCurrentContext()) return;
+
+    pendingWindowUiScale = std::clamp(pendingWindowUiScale, 0.75f, 1.5f);
+    if (windowUiScaleEditing_) return;
+    if (std::abs(appliedWindowUiScale_ - pendingWindowUiScale) < 0.0001f) {
+        ImGui::GetIO().FontGlobalScale = pendingWindowUiScale;
+        return;
+    }
+
+    // Scale from the currently applied value, not from the already-scaled
+    // style, so dragging the slider back and forth never compounds rounding.
+    const float ratio = pendingWindowUiScale / appliedWindowUiScale_;
+    ImGui::GetStyle().ScaleAllSizes(ratio);
+    ImGui::GetIO().FontGlobalScale = pendingWindowUiScale;
+    appliedWindowUiScale_ = pendingWindowUiScale;
 }
 
 void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
@@ -1342,15 +1404,7 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
 }
 
 std::string SettingsPanel::getSettingsPath() {
-    std::string dir;
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    dir = appdata ? std::string(appdata) + "\\wowee" : ".";
-#else
-    const char* home = std::getenv("HOME");
-    dir = home ? std::string(home) + "/.wowee" : ".";
-#endif
-    return dir + "/settings.cfg";
+    return core::getConfigRoot() + "/settings.cfg";
 }
 
 void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
@@ -1360,7 +1414,10 @@ void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
     if (auto* music = ac->getMusicManager())
         music->setVolume(pendingMusicVolume);
     if (auto* ambient = ac->getAmbientSoundManager())
+    {
         ambient->setVolumeScale(pendingAmbientVolume / 100.0f);
+        ambient->setBellVolumeScale(pendingBellVolume / 100.0f);
+    }
     if (auto* ui = ac->getUiSoundManager())
         ui->setVolumeScale(pendingUiVolume / 100.0f);
     if (auto* combat = ac->getCombatSoundManager())

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace wowee {
@@ -27,13 +28,21 @@ public:
                 bool isFootstepState);
 
     /// Detect if a footstep event should trigger based on animation phase crossing.
+    /// When the model has authored $FSD footfall keyframes, pass them as
+    /// eventTimesMs (ms from sequence start) for exact foot-strike timing;
+    /// nullptr falls back to the generic biped step pattern.
     bool shouldTriggerFootstepEvent(uint32_t animationId, float animationTimeMs,
-                                    float animationDurationMs);
+                                    float animationDurationMs,
+                                    const std::vector<uint32_t>* eventTimesMs = nullptr);
 
     /// Resolve the surface type under the character for footstep sound selection.
     audio::FootstepSurface resolveFootstepSurface(Renderer* renderer) const;
 
 private:
+    /// Water-step side effects shared by on-foot and mounted steps
+    /// (splash sound layer + visual foot splash).
+    void playWaterStepExtras(Renderer* renderer) const;
+
     // Player footstep event tracking (animation-driven)
     uint32_t footstepLastAnimationId_ = 0;
     float footstepLastNormTime_ = 0.0f;

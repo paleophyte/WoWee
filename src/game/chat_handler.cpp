@@ -240,8 +240,13 @@ void ChatHandler::registerOpcodes(DispatchTable& table) {
         uint32_t emoteId    = packet.readUInt32();
         uint64_t sourceGuid = packet.readUInt64();
         uint32_t animId = rendering::AnimationController::getEmoteAnimByEmotesId(emoteId);
-        if (owner_.emoteAnimCallbackRef() && sourceGuid != 0 && animId != 0) {
-            owner_.emoteAnimCallbackRef()(sourceGuid, animId);
+        // Emotes.dbc EmoteSpecProc distinguishes persistent STATE_ emotes from
+        // one-shots. Emote 0 (ONESHOT_NONE) cancels a one-shot but must not
+        // clear a UNIT_NPC_EMOTESTATE work loop, so it is forwarded as non-state.
+        const bool isState = emoteId != 0 &&
+            rendering::AnimationController::isStateEmoteById(emoteId);
+        if (owner_.emoteAnimCallbackRef() && sourceGuid != 0 && (animId != 0 || emoteId == 0)) {
+            owner_.emoteAnimCallbackRef()(sourceGuid, animId, isState);
         } else if (emoteId != 0 && animId == 0) {
             LOG_DEBUG("SMSG_EMOTE emoteId=", emoteId, " had no Emotes.dbc animation mapping");
         }
@@ -707,7 +712,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
     if (!headlessModeEnabled() && animId != 0 && owner_.emoteAnimCallbackRef()) {
         wowee::core::setCrashNote("SMSG_TEXT_EMOTE: animation callback");
-        owner_.emoteAnimCallbackRef()(data.senderGuid, animId);
+        owner_.emoteAnimCallbackRef()(data.senderGuid, animId, /*isState=*/false);
     }
 
     if (senderName.empty()) {

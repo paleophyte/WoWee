@@ -23,7 +23,7 @@ if [ ! -d "${APP_PATH}" ] && [ -d "/Applications/Wowee.app" ]; then
 fi
 
 EXTRACTOR="${APP_PATH}/Contents/MacOS/asset_extract"
-BUNDLED_DATA="${APP_PATH}/Contents/MacOS/Data"
+BUNDLED_DATA="${APP_PATH}/Contents/Resources/Data"
 OUTPUT_ROOT="${HOME}/Library/Application Support/Wowee/Data"
 
 if [ ! -x "${EXTRACTOR}" ]; then

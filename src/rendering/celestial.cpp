@@ -197,7 +197,7 @@ void Celestial::shutdown() {
 void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                        float timeOfDay,
                        const glm::vec3* sunDir, const glm::vec3* sunColor,
-                       float gameTime) {
+                       float gameTime, float nightFactor) {
     if (!renderingEnabled_ || pipeline_ == VK_NULL_HANDLE) {
         return;
     }
@@ -219,9 +219,9 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // Draw sun, then moon(s) — each call pushes different constants
     renderSun(cmd, perFrameSet, timeOfDay, sunDir, sunColor);
-    renderMoon(cmd, perFrameSet, timeOfDay);
+    renderMoon(cmd, perFrameSet, timeOfDay, nightFactor);
     if (dualMoonMode_) {
-        renderBlueChild(cmd, perFrameSet, timeOfDay);
+        renderBlueChild(cmd, perFrameSet, timeOfDay, nightFactor);
     }
 }
 
@@ -271,9 +271,15 @@ void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
 }
 
 void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
-                            float timeOfDay) {
+                            float timeOfDay, float nightFactor) {
     // Moon (White Lady) visible 19:00–5:00
     if (timeOfDay >= 5.0f && timeOfDay < 19.0f) {
+        return;
+    }
+    // Scale by actual sky darkness — the DBC sky can stay daylight-bright
+    // well past 19:00, and a full-brightness moon on a blue sky reads as a
+    // second sun.
+    if (nightFactor < 0.01f) {
         return;
     }
 
@@ -285,16 +291,16 @@ void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
 
     glm::vec3 color = glm::vec3(0.8f, 0.85f, 1.0f);
 
-    float intensity = 1.0f;
+    float intensity = nightFactor;
     if (timeOfDay >= 19.0f && timeOfDay < 21.0f) {
-        intensity = (timeOfDay - 19.0f) / 2.0f; // Fade in
+        intensity *= (timeOfDay - 19.0f) / 2.0f; // Fade in
     } else if (timeOfDay >= 3.0f && timeOfDay < 5.0f) {
-        intensity = 1.0f - (timeOfDay - 3.0f) / 2.0f; // Fade out
+        intensity *= 1.0f - (timeOfDay - 3.0f) / 2.0f; // Fade out
     }
 
     CelestialPush push{};
     push.model          = model;
-    push.celestialColor = glm::vec4(color, 1.0f);
+    push.celestialColor = glm::vec4(color, 0.0f);  // w=0 marks moon for the shader
     push.intensity      = intensity;
     push.moonPhase      = whiteLadyPhase_;
     push.animTime       = sunHazeTimer_;
@@ -307,9 +313,12 @@ void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
 }
 
 void Celestial::renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
-                                 float timeOfDay) {
+                                 float timeOfDay, float nightFactor) {
     // Blue Child visible 19:00–5:00
     if (timeOfDay >= 5.0f && timeOfDay < 19.0f) {
+        return;
+    }
+    if (nightFactor < 0.01f) {
         return;
     }
 
@@ -324,17 +333,17 @@ void Celestial::renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet /*perFrameS
 
     glm::vec3 color = glm::vec3(0.7f, 0.8f, 1.0f);
 
-    float intensity = 1.0f;
+    float intensity = nightFactor;
     if (timeOfDay >= 19.0f && timeOfDay < 21.0f) {
-        intensity = (timeOfDay - 19.0f) / 2.0f;
+        intensity *= (timeOfDay - 19.0f) / 2.0f;
     } else if (timeOfDay >= 3.0f && timeOfDay < 5.0f) {
-        intensity = 1.0f - (timeOfDay - 3.0f) / 2.0f;
+        intensity *= 1.0f - (timeOfDay - 3.0f) / 2.0f;
     }
     intensity *= 0.7f; // Blue Child is dimmer
 
     CelestialPush push{};
     push.model          = model;
-    push.celestialColor = glm::vec4(color, 1.0f);
+    push.celestialColor = glm::vec4(color, 0.0f);  // w=0 marks moon for the shader
     push.intensity      = intensity;
     push.moonPhase      = blueChildPhase_;
     push.animTime       = sunHazeTimer_;

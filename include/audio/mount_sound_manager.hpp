@@ -66,6 +66,7 @@ public:
     void playIdleSound();     // Ambient idle (snort/stomp/breath)
 
     bool isMounted() const { return mounted_; }
+    MountFamily getCurrentMountFamily() const { return currentMountFamily_; }
     void setVolumeScale(float scale) { volumeScale_ = scale; }
     float getVolumeScale() const { return volumeScale_; }
 
@@ -85,7 +86,7 @@ private:
     MountType currentMountType_ = MountType::NONE;
     MountFamily currentMountFamily_ = MountFamily::UNKNOWN;
     uint32_t currentDisplayId_ = 0;
-    float volumeScale_ = 1.0f;
+    float volumeScale_ = 0.7f;
 
     // Mount sound samples (loaded from MPQ)
     std::vector<MountSample> wingFlapSounds_;

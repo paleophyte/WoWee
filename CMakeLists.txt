@@ -510,6 +510,7 @@ set(WOWEE_SOURCES
     src/core/logger.cpp
     src/core/crash_diagnostics.cpp
     src/core/memory_monitor.cpp
+    src/core/config_paths.cpp
 
     # Math
     src/math/spline.cpp

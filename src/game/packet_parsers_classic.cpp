@@ -1173,6 +1173,13 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
         case ChatType::SAY:
         case ChatType::PARTY:
         case ChatType::YELL:
+        {
+            // senderGuid(u64) + senderGuid(u64) — written twice by server
+            data.senderGuid = packet.readUInt64();
+            /*duplicateGuid*/ packet.readUInt64();
+            break;
+        }
+
         case ChatType::WHISPER:
         case ChatType::WHISPER_INFORM:
         case ChatType::GUILD:
@@ -1182,9 +1189,8 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
         case ChatType::RAID_WARNING:
         case ChatType::EMOTE:
         case ChatType::TEXT_EMOTE: {
-            // senderGuid(u64) + senderGuid(u64) — written twice by server
+            // Classic's default chat body carries one sender GUID.
             data.senderGuid = packet.readUInt64();
-            /*duplicateGuid*/ packet.readUInt64();
             break;
         }
 

@@ -16,7 +16,11 @@ void main() {
     float dist = length(center);
     float alpha = smoothstep(0.5, 0.0, dist);
     float glow = exp(-dist * dist * 8.0) * 0.5;
-    alpha = max(alpha, glow) * push.color.w;
-    if (alpha < 0.01) discard;
+    // Fade to zero before the quad boundary — the glow term alone stays
+    // visibly nonzero at dist 0.5, which draws the billboard as a bright
+    // square behind the sun.
+    float edgeFade = 1.0 - smoothstep(0.30, 0.48, dist);
+    alpha = max(alpha, glow) * edgeFade * push.color.w;
+    if (alpha < 0.004) discard;
     outColor = vec4(push.color.rgb, alpha);
 }

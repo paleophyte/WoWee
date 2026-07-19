@@ -47,7 +47,8 @@ public:
                 float timeOfDay,
                 const glm::vec3* sunDir   = nullptr,
                 const glm::vec3* sunColor = nullptr,
-                float gameTime = -1.0f);
+                float gameTime = -1.0f,
+                float nightFactor = 1.0f);
 
     /**
      * Update celestial bodies (moon phase cycling, haze timer).
@@ -98,8 +99,10 @@ private:
     void renderSun(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                    float timeOfDay,
                    const glm::vec3* sunDir, const glm::vec3* sunColor);
-    void renderMoon(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay);
-    void renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay);
+    void renderMoon(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,
+                    float nightFactor);
+    void renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,
+                         float nightFactor);
 
     float calculateCelestialAngle(float timeOfDay, float riseTime, float setTime) const;
     float computePhaseFromGameTime(float gameTime, float cycleDays) const;

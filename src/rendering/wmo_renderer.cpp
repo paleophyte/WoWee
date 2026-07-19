@@ -758,6 +758,31 @@ bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
                 vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
             }
 
+            if (mb.isLava) {
+                for (const auto& draw : mb.draws) {
+                    glm::vec3 lavaMin(std::numeric_limits<float>::max());
+                    glm::vec3 lavaMax(std::numeric_limits<float>::lowest());
+                    bool foundVertex = false;
+                    const uint32_t indexEnd = std::min<uint32_t>(
+                        draw.firstIndex + draw.indexCount,
+                        static_cast<uint32_t>(groupRes.collisionIndices.size()));
+                    for (uint32_t ii = draw.firstIndex; ii < indexEnd; ++ii) {
+                        const uint16_t vertexIndex = groupRes.collisionIndices[ii];
+                        if (vertexIndex >= groupRes.collisionVertices.size()) continue;
+                        const glm::vec3& vertex = groupRes.collisionVertices[vertexIndex];
+                        lavaMin = glm::min(lavaMin, vertex);
+                        lavaMax = glm::max(lavaMax, vertex);
+                        foundVertex = true;
+                    }
+                    if (foundVertex) {
+                        const glm::vec3 center = (lavaMin + lavaMax) * 0.5f;
+                        const float radius = std::clamp(
+                            glm::length(lavaMax - lavaMin) * 0.35f, 8.0f, 28.0f);
+                        groupRes.lavaLights.emplace_back(center, radius);
+                    }
+                }
+            }
+
             groupRes.mergedBatches.push_back(std::move(mb));
         }
         groupRes.allUntextured = !anyTextured && !groupRes.mergedBatches.empty();
@@ -3380,14 +3405,21 @@ bool WMORenderer::checkWallCollision(const glm::vec3& from, const glm::vec3& to,
                 float triHeight = tb.maxZ - tb.minZ;
                 if (triHeight < 1.0f && tb.maxZ <= localFeetZ + 1.2f) continue;
 
-                // Use MOPY flags to filter wall collision.
-                // Collide with triangles that have the collision flag (0x08) or no flags at all.
-                // Skip detail/decorative (0x04) and render-only (0x20 without 0x08) surfaces.
+                // Use MOPY flags to filter wall collision. Blocking set is the
+                // union of both flag conventions seen in the assets:
+                //  - explicit collision hulls (0x08), rendered or not — tunnel
+                //    walls rely on invisible hulls;
+                //  - rendered geometry (0x20) that is not detail (0x04) — the
+                //    Deeprun Tram gates carry render flags without 0x08 and
+                //    were walk-through when only 0x08 blocked.
+                // Detail/decorative (0x04: gears, railings, webs) never blocks.
                 uint32_t triIdx = triStart / 3;
                 if (!group.triMopyFlags.empty() && triIdx < group.triMopyFlags.size()) {
                     uint8_t mopy = group.triMopyFlags[triIdx];
                     if (mopy != 0) {
-                        if ((mopy & 0x04) || !(mopy & 0x08)) continue;
+                        const bool collisionHull = (mopy & 0x08) != 0;
+                        const bool renderedSolid = (mopy & 0x20) != 0 && !(mopy & 0x04);
+                        if (!collisionHull && !renderedSolid) continue;
                     }
                 }
 
@@ -3627,6 +3659,46 @@ bool WMORenderer::isInsideWMO(float glX, float glY, float glZ, uint32_t* outMode
         }
     }
     return false;
+}
+
+uint32_t WMORenderer::gatherLavaLights(const glm::vec3& cameraPos,
+                                       glm::vec4* outPosRadius,
+                                       glm::vec4* outColorIntensity,
+                                       uint32_t maxLights) const {
+    if (!outPosRadius || !outColorIntensity || maxLights == 0) return 0;
+
+    struct Candidate {
+        float distSq;
+        glm::vec4 posRadius;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& instance : instances) {
+        auto modelIt = loadedModels.find(instance.modelId);
+        if (modelIt == loadedModels.end()) continue;
+        for (const auto& group : modelIt->second.groups) {
+            for (const glm::vec4& localLight : group.lavaLights) {
+                const glm::vec3 worldPos = glm::vec3(
+                    instance.modelMatrix * glm::vec4(glm::vec3(localLight), 1.0f));
+                const glm::vec3 delta = worldPos - cameraPos;
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > 300.0f * 300.0f) continue;
+                const float worldRadius = std::clamp(localLight.w * instance.scale,
+                                                     8.0f, 35.0f);
+                candidates.push_back({distSq, glm::vec4(worldPos, worldRadius)});
+            }
+        }
+    }
+
+    const uint32_t count = std::min<uint32_t>(maxLights,
+        static_cast<uint32_t>(candidates.size()));
+    if (count == 0) return 0;
+    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+        [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
+    for (uint32_t i = 0; i < count; ++i) {
+        outPosRadius[i] = candidates[i].posRadius;
+        outColorIntensity[i] = glm::vec4(1.0f, 0.28f, 0.035f, 1.75f);
+    }
+    return count;
 }
 
 bool WMORenderer::isInsideInteriorWMO(float glX, float glY, float glZ) const {

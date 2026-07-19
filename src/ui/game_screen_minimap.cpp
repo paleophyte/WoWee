@@ -1037,6 +1037,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
         if (auto* ambient = ac->getAmbientSoundManager()) {
             ambient->setVolumeScale(settingsPanel_.pendingAmbientVolume / 100.0f);
+            ambient->setBellVolumeScale(settingsPanel_.pendingBellVolume / 100.0f);
         }
         if (auto* ui = ac->getUiSoundManager()) {
             ui->setVolumeScale(settingsPanel_.pendingUiVolume / 100.0f);
@@ -1444,6 +1445,7 @@ void GameScreen::saveSettings() {
 
     // Interface
     out << "ui_opacity=" << settingsPanel_.pendingUiOpacity << "\n";
+    out << "window_ui_scale=" << settingsPanel_.pendingWindowUiScale << "\n";
     out << "minimap_rotate=" << (settingsPanel_.pendingMinimapRotate ? 1 : 0) << "\n";
     out << "minimap_square=" << (settingsPanel_.pendingMinimapSquare ? 1 : 0) << "\n";
     out << "minimap_npc_dots=" << (settingsPanel_.pendingMinimapNpcDots ? 1 : 0) << "\n";
@@ -1454,6 +1456,7 @@ void GameScreen::saveSettings() {
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
     out << "separate_bags=" << (settingsPanel_.pendingSeparateBags ? 1 : 0) << "\n";
     out << "show_keyring=" << (settingsPanel_.pendingShowKeyring ? 1 : 0) << "\n";
+    out << "bag_scale=" << settingsPanel_.pendingBagScale << "\n";
     out << "show_micro_menu=" << (settingsPanel_.pendingShowMicroMenu ? 1 : 0) << "\n";
     out << "idle_camera_orbit=" << (settingsPanel_.pendingIdleCameraOrbit ? 1 : 0) << "\n";
     out << "buff_bar_scale=" << settingsPanel_.pendingBuffBarScale << "\n";
@@ -1476,6 +1479,7 @@ void GameScreen::saveSettings() {
     out << "master_volume=" << settingsPanel_.pendingMasterVolume << "\n";
     out << "music_volume=" << settingsPanel_.pendingMusicVolume << "\n";
     out << "ambient_volume=" << settingsPanel_.pendingAmbientVolume << "\n";
+    out << "bell_volume=" << settingsPanel_.pendingBellVolume << "\n";
     out << "ui_volume=" << settingsPanel_.pendingUiVolume << "\n";
     out << "combat_volume=" << settingsPanel_.pendingCombatVolume << "\n";
     out << "spell_volume=" << settingsPanel_.pendingSpellVolume << "\n";
@@ -1557,8 +1561,16 @@ void GameScreen::saveSettings() {
 void GameScreen::loadSettings() {
     std::string path = SettingsPanel::getSettingsPath();
     std::ifstream in(path);
+    float currentDisplayHeight = settingsPanel_.pendingResolutionHeight;
+    if (ImGui::GetCurrentContext() && ImGui::GetIO().DisplaySize.y > 0.0f) {
+        currentDisplayHeight = ImGui::GetIO().DisplaySize.y;
+    }
+    settingsPanel_.pendingBagScale =
+        InventoryScreen::recommendedBagScale(currentDisplayHeight);
+    inventoryScreen.setBagScale(settingsPanel_.pendingBagScale);
     if (!in.is_open()) return;
 
+    bool bagScaleLoaded = false;
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
@@ -1574,6 +1586,8 @@ void GameScreen::loadSettings() {
                     settingsPanel_.pendingUiOpacity = v;
                     settingsPanel_.uiOpacity_ = static_cast<float>(v) / 100.0f;
                 }
+            } else if (key == "window_ui_scale") {
+                settingsPanel_.pendingWindowUiScale = std::clamp(std::stof(val), 0.75f, 1.5f);
             } else if (key == "minimap_rotate") {
                 // Ignore persisted rotate state; keep north-up.
                 settingsPanel_.minimapRotate_ = false;
@@ -1605,6 +1619,10 @@ void GameScreen::loadSettings() {
             } else if (key == "show_keyring") {
                 settingsPanel_.pendingShowKeyring = (std::stoi(val) != 0);
                 inventoryScreen.setShowKeyring(settingsPanel_.pendingShowKeyring);
+            } else if (key == "bag_scale") {
+                settingsPanel_.pendingBagScale = std::clamp(std::stof(val), 0.75f, 1.5f);
+                inventoryScreen.setBagScale(settingsPanel_.pendingBagScale);
+                bagScaleLoaded = true;
             } else if (key == "show_micro_menu") {
                 settingsPanel_.pendingShowMicroMenu = (std::stoi(val) != 0);
             } else if (key == "idle_camera_orbit") {
@@ -1648,6 +1666,7 @@ void GameScreen::loadSettings() {
             else if (key == "master_volume") settingsPanel_.pendingMasterVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "music_volume") settingsPanel_.pendingMusicVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "ambient_volume") settingsPanel_.pendingAmbientVolume = std::clamp(std::stoi(val), 0, 100);
+            else if (key == "bell_volume") settingsPanel_.pendingBellVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "ui_volume") settingsPanel_.pendingUiVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "combat_volume") settingsPanel_.pendingCombatVolume = std::clamp(std::stoi(val), 0, 100);
             else if (key == "spell_volume") settingsPanel_.pendingSpellVolume = std::clamp(std::stoi(val), 0, 100);
@@ -1760,6 +1779,14 @@ void GameScreen::loadSettings() {
             else if (key == "chat_autojoin_lfg") chatPanel_.chatAutoJoinLFG = (std::stoi(val) != 0);
             else if (key == "chat_autojoin_local") chatPanel_.chatAutoJoinLocal = (std::stoi(val) != 0);
         } catch (...) {}
+    }
+
+    if (!bagScaleLoaded) {
+        const float defaultHeight = settingsPanel_.displaySettingsLoaded_
+            ? static_cast<float>(settingsPanel_.pendingResolutionHeight)
+            : currentDisplayHeight;
+        settingsPanel_.pendingBagScale = InventoryScreen::recommendedBagScale(defaultHeight);
+        inventoryScreen.setBagScale(settingsPanel_.pendingBagScale);
     }
 
     // Load keybindings from the same config file

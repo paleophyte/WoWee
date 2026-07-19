@@ -8,6 +8,8 @@ CONTENTS="${APP_PATH}/Contents"
 MACOS_DIR="${CONTENTS}/MacOS"
 FRAMEWORKS_DIR="${CONTENTS}/Frameworks"
 ICD_MANIFEST="${CONTENTS}/Resources/vulkan/icd.d/MoltenVK_icd.json"
+ASSETS_DIR="${CONTENTS}/Resources/assets"
+DATA_DIR="${CONTENTS}/Resources/Data"
 
 for tool in file lipo otool codesign python3; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -28,8 +30,20 @@ if [ ! -f "${FRAMEWORKS_DIR}/libMoltenVK.dylib" ]; then
     echo "ERROR: app bundle is missing Contents/Frameworks/libMoltenVK.dylib" >&2
     exit 1
 fi
+if [ ! -f "${FRAMEWORKS_DIR}/libSDL3.dylib" ]; then
+    echo "ERROR: app bundle is missing runtime-loaded Contents/Frameworks/libSDL3.dylib" >&2
+    exit 1
+fi
 if [ ! -f "${ICD_MANIFEST}" ]; then
     echo "ERROR: app bundle is missing the MoltenVK ICD manifest" >&2
+    exit 1
+fi
+if [ ! -d "${ASSETS_DIR}" ]; then
+    echo "ERROR: app bundle is missing Contents/Resources/assets" >&2
+    exit 1
+fi
+if [ ! -d "${DATA_DIR}" ]; then
+    echo "ERROR: app bundle is missing Contents/Resources/Data" >&2
     exit 1
 fi
 

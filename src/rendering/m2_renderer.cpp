@@ -123,7 +123,19 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
     for (const auto& instance : instances) {
         const M2ModelGPU* model = instance.cachedModel;
         if (!model || (!model->isLanternLike && !model->isTorch &&
-                       !model->isBrazierOrFire)) continue;
+                       !model->isBrazierOrFire && !model->isLavaModel)) continue;
+
+        if (model->isLavaModel) {
+            const glm::vec3 worldPos = instance.cachedCullCenter;
+            const glm::vec3 delta = worldPos - cameraPos;
+            const float distSq = glm::dot(delta, delta);
+            if (distSq <= 300.0f * 300.0f) {
+                const float radius = std::clamp(instance.cachedVisualRadius * 0.8f,
+                                                10.0f, 35.0f);
+                candidates.push_back({distSq, glm::vec4(worldPos, radius),
+                                      glm::vec4(1.0f, 0.28f, 0.035f, 1.75f)});
+            }
+        }
 
         bool hasBatchLight = false;
         for (const auto& batch : model->batches) {
@@ -719,8 +731,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
     // Pipeline derivatives — opaque is the base, others derive from it for shared state optimization
     auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState, bool depthWrite,
-                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE) -> VkPipeline {
-        return PipelineBuilder()
+                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE,
+                               bool alphaToCoverage = false) -> VkPipeline {
+        auto builder = PipelineBuilder()
             .setShaders(m2Vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
@@ -729,7 +742,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             .setDepthTest(!skyMode_, skyMode_ ? false : depthWrite,
                           skyMode_ ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL)
             .setColorBlendAttachment(blendState)
-            .setMultisample(vkCtx_->getMsaaSamples())
+            .setMultisample(vkCtx_->getMsaaSamples());
+        // MSAA alpha-to-coverage dithers the shader's sharpened cutout alpha
+        // across samples for smooth foliage/leaf silhouettes.
+        if (alphaToCoverage) builder.setAlphaToCoverage(true);
+        return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
             .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
@@ -741,7 +758,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     opaquePipeline_ = buildM2Pipeline(PipelineBuilder::blendDisabled(), true,
                                       VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT);
     alphaTestPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), true,
-                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_,
+                                         /*alphaToCoverage=*/true);
     alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
@@ -1383,7 +1401,38 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     gpuModel.isBrazierOrFire             = cls.isBrazierOrFire;
     gpuModel.isGroundFire                = cls.isGroundFire;
     gpuModel.isTorch                     = cls.isTorch;
-    gpuModel.isSkyBird                   = cls.isSkyBird;
+    // Data-driven flight-path detection: name tokens miss many flying doodads
+    // (buzzards, swallows, bird swarms, ...). A small mesh whose bone animation
+    // translates it tens of units is a flight-path doodad — it visibly freezes
+    // mid-air whenever distance culling stops its bone updates, so give it the
+    // same treatment as named sky birds.
+    bool flightPathDoodad = cls.isSkyBird;
+    if (!flightPathDoodad && !cls.disableAnimation) {
+        glm::vec3 meshExtent = tightMax - tightMin;
+        const bool smallMesh = meshExtent.x < 6.0f && meshExtent.y < 6.0f &&
+                               meshExtent.z < 6.0f;
+        if (smallMesh) {
+            constexpr float kFlightPathRange = 15.0f;
+            for (const auto& bone : model.bones) {
+                for (const auto& seq : bone.translation.sequences) {
+                    for (const auto& v : seq.vec3Values) {
+                        if (std::abs(v.x) > kFlightPathRange ||
+                            std::abs(v.y) > kFlightPathRange ||
+                            std::abs(v.z) > kFlightPathRange) {
+                            flightPathDoodad = true;
+                            break;
+                        }
+                    }
+                    if (flightPathDoodad) break;
+                }
+                if (flightPathDoodad) break;
+            }
+            if (flightPathDoodad) {
+                LOG_DEBUG("Flight-path doodad detected (unnamed sky bird): ", model.name);
+            }
+        }
+    }
+    gpuModel.isSkyBird                   = flightPathDoodad;
     gpuModel.ambientEmitterType          = cls.ambientEmitterType;
     gpuModel.boundMin = tightMin;
     gpuModel.boundMax = tightMax;

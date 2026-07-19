@@ -190,8 +190,11 @@ void Clouds::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     glm::vec3 cloudBaseColor = params.skyBand1Color * 1.1f;
     cloudBaseColor = glm::clamp(cloudBaseColor, glm::vec3(0.0f), glm::vec3(1.0f));
 
-    // Sun direction (opposite of light direction)
+    // Sun direction (opposite of light direction). Guard the hemisphere like
+    // Celestial/SkySystem do — directionalDir's sign convention is not stable,
+    // and a flipped vector puts the cloud scatter glow opposite the real sun.
     glm::vec3 sunDir = -glm::normalize(params.directionalDir);
+    if (sunDir.z < 0.0f) sunDir = -sunDir;
     float sunAboveHorizon = glm::clamp(sunDir.z, 0.0f, 1.0f);
 
     // Sun intensity based on elevation

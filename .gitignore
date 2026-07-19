@@ -94,6 +94,9 @@ tools/bot_fleet_manager/runtime/
 tools/provisioning/*.local.json
 tools/provisioning/roster.json
 
+# Local signing and notarization handoff material
+.secrets/
+
 # Runtime cache (floor heights, etc.)
 cache/
 

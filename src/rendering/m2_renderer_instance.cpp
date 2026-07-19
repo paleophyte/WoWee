@@ -568,12 +568,22 @@ void M2Renderer::cleanupUnusedModels() {
         if (it != models.end()) {
             destroyModelGPU(it->second);
             models.erase(it);
+            // Record the eviction so owners caching "uploaded" model IDs can
+            // drop it; otherwise their next spawn skips the load as a stale hit
+            // and pushes an empty placeholder (missing doodads on revisit).
+            reapedModelIds_.push_back(id);
         }
     }
 
     if (!toRemove.empty()) {
         LOG_INFO("M2 cleanup: removed ", toRemove.size(), " unused models, ", models.size(), " remaining");
     }
+}
+
+std::vector<uint32_t> M2Renderer::drainReapedModelIds() {
+    std::vector<uint32_t> out;
+    out.swap(reapedModelIds_);
+    return out;
 }
 
 void M2Renderer::unloadModel(uint32_t modelId) {
@@ -583,6 +593,7 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     destroyModelGPU(it->second);
     models.erase(it);
     modelUnusedSince_.erase(modelId);
+    reapedModelIds_.push_back(modelId);
 }
 
 VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
@@ -1215,8 +1226,9 @@ void M2Renderer::recreatePipelines() {
 
     // Pipeline derivatives — opaque is the base, others derive from it for shared state optimization
     auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState, bool depthWrite,
-                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE) -> VkPipeline {
-        return PipelineBuilder()
+                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE,
+                               bool alphaToCoverage = false) -> VkPipeline {
+        auto builder = PipelineBuilder()
             .setShaders(m2Vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
@@ -1225,7 +1237,11 @@ void M2Renderer::recreatePipelines() {
             .setDepthTest(!skyMode_, skyMode_ ? false : depthWrite,
                           skyMode_ ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL)
             .setColorBlendAttachment(blendState)
-            .setMultisample(vkCtx_->getMsaaSamples())
+            .setMultisample(vkCtx_->getMsaaSamples());
+        // MSAA alpha-to-coverage dithers the shader's sharpened cutout alpha
+        // across samples for smooth foliage/leaf silhouettes.
+        if (alphaToCoverage) builder.setAlphaToCoverage(true);
+        return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
             .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
@@ -1237,7 +1253,8 @@ void M2Renderer::recreatePipelines() {
     opaquePipeline_ = buildM2Pipeline(PipelineBuilder::blendDisabled(), true,
                                       VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT);
     alphaTestPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), true,
-                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_,
+                                         /*alphaToCoverage=*/true);
     alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,

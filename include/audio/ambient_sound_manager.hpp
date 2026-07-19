@@ -86,6 +86,8 @@ public:
     // Volume control
     void setVolumeScale(float scale);
     float getVolumeScale() const { return volumeScale_; }
+    void setBellVolumeScale(float scale) { bellVolumeScale_ = scale; }
+    float getBellVolumeScale() const { return bellVolumeScale_; }
 
 private:
     struct AmbientEmitter {
@@ -172,6 +174,7 @@ private:
     // State tracking
     float gameTimeHours_ = 12.0f;  // Default noon
     float volumeScale_ = 1.0f;
+    float bellVolumeScale_ = 0.5f;
     float birdTimer_ = 0.0f;
     float cricketTimer_ = 0.0f;
     float windLoopTime_ = 0.0f;
