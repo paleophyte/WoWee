@@ -692,8 +692,10 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                     layer.minHeight
                 );
                 surface.origin = glm::vec3(
-                    surface.position.x - (static_cast<float>(layer.x) * TILE_SIZE),
-                    surface.position.y - (static_cast<float>(layer.y) * TILE_SIZE),
+                    // MCNK terrain maps offsetY onto world X and offsetX
+                    // onto world Y; MH2O uses the same chunk-local axes.
+                    surface.position.x - (static_cast<float>(layer.y) * TILE_SIZE),
+                    surface.position.y - (static_cast<float>(layer.x) * TILE_SIZE),
                     layer.minHeight
                 );
                 surface.stepX = glm::vec3(-TILE_SIZE, 0.0f, 0.0f);
@@ -702,8 +704,8 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                 surface.minHeight = layer.minHeight;
                 surface.maxHeight = layer.maxHeight;
                 surface.liquidType = layer.liquidType;
-                surface.xOffset = layer.x;
-                surface.yOffset = layer.y;
+                surface.xOffset = layer.y;
+                surface.yOffset = layer.x;
                 surface.width = layer.width;
                 surface.height = layer.height;
 
