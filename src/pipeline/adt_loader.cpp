@@ -624,20 +624,34 @@ void ADTLoader::parseMH2O(const uint8_t* data, size_t size, ADTTerrain& terrain)
             if (layer.y + layer.height > 8) layer.height = 8 - layer.y;
 
             // Read exists bitmap (which tiles have water).
-            // In WotLK MH2O this is chunk-wide 8x8 tile flags (64 bits = 8 bytes),
-            // even when the layer covers a sub-rect.
-            constexpr size_t bitmapBytes = 8;
-
+            // The bitmap holds one bit per tile of the layer's width×height
+            // sub-rectangle — row-major, LSB-first, packed into
+            // (width*height+7)/8 bytes. It is NOT a chunk-wide 8-byte block.
+            // Normalize into a canonical chunk-wide 8x8 mask
+            // (bit = (y+row)*8 + (x+col), LSB-first) so MCLQ and MH2O
+            // masks share one format downstream.
             // Note: offsets in SMLiquidInstance are relative to MH2O chunk start
-            if (offsetExistsBitmap > 0) {
-                size_t bitmapOffset = offsetExistsBitmap;
-                if (bitmapOffset + bitmapBytes <= size) {
-                    layer.mask.resize(bitmapBytes);
-                    std::memcpy(layer.mask.data(), data + bitmapOffset, bitmapBytes);
+            layer.mask.assign(8, 0x00);
+            bool anyTile = false;
+            size_t packedBytes = (static_cast<size_t>(layer.width) * layer.height + 7) / 8;
+            bool haveBitmap = offsetExistsBitmap > 0 &&
+                              offsetExistsBitmap + packedBytes <= size;
+            const uint8_t* bits = haveBitmap ? data + offsetExistsBitmap : nullptr;
+            int bitPos = 0;
+            for (int row = 0; row < layer.height; row++) {
+                for (int col = 0; col < layer.width; col++, bitPos++) {
+                    // No bitmap (or out-of-range offset) means every tile in
+                    // the sub-rect exists.
+                    bool exists = !bits || (bits[bitPos / 8] & (1 << (bitPos % 8))) != 0;
+                    if (exists) {
+                        int tileIdx = (layer.y + row) * 8 + (layer.x + col);
+                        layer.mask[tileIdx / 8] |= static_cast<uint8_t>(1 << (tileIdx % 8));
+                        anyTile = true;
+                    }
                 }
-            } else {
-                // No bitmap means all tiles in chunk are valid for this layer.
-                layer.mask.resize(bitmapBytes, 0xFF);
+            }
+            if (!anyTile) {
+                continue;  // Bitmap masks out every tile — nothing to render
             }
 
             // Read vertex heights
