@@ -141,6 +141,9 @@ TEST_CASE("Unit flags", "[entity]") {
     u.setVisibilityFlags(UNIT_VIS_FLAG_CREEP);
     REQUIRE(u.getVisibilityFlags() == UNIT_VIS_FLAG_CREEP);
     REQUIRE(u.hasCreepVisibility());
+    u.clearCreepVisibility();
+    REQUIRE_FALSE(u.hasCreepVisibility());
+    REQUIRE((u.getVisibilityFlags() & UNIT_VIS_FLAG_CREEP) == 0);
 
     u.setDynamicFlags(0x02);
     REQUIRE(u.getDynamicFlags() == 0x02);

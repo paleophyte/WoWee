@@ -389,6 +389,25 @@ void CombatHandler::handleAttackStart(network::Packet& packet) {
     AttackStartData data;
     if (!AttackStartParser::parse(packet, data)) return;
 
+    // CREEP is a client presentation flag, not an instruction to keep a unit
+    // translucent after it has openly engaged. Some legacy realms do not send
+    // a matching UNIT_FIELD_BYTES_1 update when an NPC breaks stealth, but the
+    // stock client reveals both combatants at ATTACKSTART. Clear the cached
+    // presentation state here so the normal creature visual sync restores full
+    // opacity instead of leaving an invisible monster in melee.
+    auto revealCombatant = [this](uint64_t guid) {
+        auto entity = owner_.getEntityManager().getEntity(guid);
+        if (!entity || !entity->isUnit()) return;
+        auto unit = std::static_pointer_cast<Unit>(entity);
+        if (!unit->hasCreepVisibility()) return;
+        unit->clearCreepVisibility();
+        if (guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
+            owner_.stealthStateCallbackRef()(false);
+        }
+    };
+    revealCombatant(data.attackerGuid);
+    revealCombatant(data.victimGuid);
+
     if (data.attackerGuid == owner_.getPlayerGuid()) {
         autoAttackRequested_ = true;
         autoAttacking_ = true;

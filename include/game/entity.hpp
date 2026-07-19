@@ -382,6 +382,9 @@ public:
     uint8_t getVisibilityFlags() const { return visibilityFlags; }
     void setVisibilityFlags(uint8_t f) { visibilityFlags = f; }
     bool hasCreepVisibility() const { return (visibilityFlags & UNIT_VIS_FLAG_CREEP) != 0; }
+    void clearCreepVisibility() {
+        visibilityFlags &= static_cast<uint8_t>(~UNIT_VIS_FLAG_CREEP);
+    }
 
     // Dynamic flags (UNIT_DYNAMIC_FLAGS, index 147)
     uint32_t getDynamicFlags() const { return dynamicFlags; }
