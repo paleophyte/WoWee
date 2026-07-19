@@ -704,8 +704,10 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                 surface.minHeight = layer.minHeight;
                 surface.maxHeight = layer.maxHeight;
                 surface.liquidType = layer.liquidType;
-                surface.xOffset = layer.y;
-                surface.yOffset = layer.x;
+                // Keep mask coordinates in the MH2O chunk's native x/y order;
+                // only the world-space origin needs the terrain axis conversion.
+                surface.xOffset = layer.x;
+                surface.yOffset = layer.y;
                 surface.width = layer.width;
                 surface.height = layer.height;
 
