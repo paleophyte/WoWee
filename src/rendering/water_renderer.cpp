@@ -1289,11 +1289,6 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
                     if (isMergedTerrain) {
                         // Merged surfaces use LSB-only bit order
                         renderTile = (maskByte & (1 << bitIndex)) != 0;
-                    } else if (surface.wmoId == 0) {
-                        // ADT/MH2O terrain masks are LSB-first. Do not mirror
-                        // the bits here or small ponds render with the wrong
-                        // half of their footprint.
-                        renderTile = (maskByte & (1 << bitIndex)) != 0;
                     } else {
                         bool lsbOrder = (maskByte & (1 << bitIndex)) != 0;
                         bool msbOrder = (maskByte & (1 << (7 - bitIndex))) != 0;
@@ -1321,8 +1316,6 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
                                     if (nByteIdx < static_cast<int>(surface.mask.size())) {
                                         uint8_t nMask = surface.mask[nByteIdx];
                                         if (isMergedTerrain) {
-                                            if (nMask & (1 << nBitIdx)) return true;
-                                        } else if (surface.wmoId == 0) {
                                             if (nMask & (1 << nBitIdx)) return true;
                                         } else {
                                             if ((nMask & (1 << nBitIdx)) || (nMask & (1 << (7 - nBitIdx)))) return true;
@@ -1478,8 +1471,6 @@ std::optional<float> WaterRenderer::getWaterHeightAt(float glX, float glY) const
                 bool renderTile;
                 if (surface.wmoId == 0 && surface.width > 8) {
                     renderTile = (maskByte & (1 << bitIndex)) != 0;
-                } else if (surface.wmoId == 0) {
-                    renderTile = (maskByte & (1 << bitIndex)) != 0;
                 } else {
                     renderTile = (maskByte & (1 << bitIndex)) || (maskByte & (1 << (7 - bitIndex)));
                 }
@@ -1546,8 +1537,6 @@ std::optional<float> WaterRenderer::getNearestWaterHeightAt(float glX, float glY
                 uint8_t maskByte = surface.mask[byteIndex];
                 bool renderTile;
                 if (surface.wmoId == 0 && surface.width > 8) {
-                    renderTile = (maskByte & (1 << bitIndex)) != 0;
-                } else if (surface.wmoId == 0) {
                     renderTile = (maskByte & (1 << bitIndex)) != 0;
                 } else {
                     renderTile = (maskByte & (1 << bitIndex)) || (maskByte & (1 << (7 - bitIndex)));
@@ -1619,8 +1608,6 @@ std::optional<uint16_t> WaterRenderer::getWaterTypeAt(float glX, float glY) cons
                 uint8_t maskByte = surface.mask[byteIndex];
                 bool renderTile;
                 if (surface.wmoId == 0 && surface.width > 8) {
-                    renderTile = (maskByte & (1 << bitIndex)) != 0;
-                } else if (surface.wmoId == 0) {
                     renderTile = (maskByte & (1 << bitIndex)) != 0;
                 } else {
                     renderTile = (maskByte & (1 << bitIndex)) || (maskByte & (1 << (7 - bitIndex)));
