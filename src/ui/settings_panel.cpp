@@ -539,6 +539,11 @@ if (ImGui::Checkbox("Enable WoWee Music", &pendingUseOriginalSoundtrack)) {
     if (renderer) {
         if (auto* zm = renderer->getZoneManager()) {
             zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
+            if (!pendingUseOriginalSoundtrack) {
+                if (auto* ac = renderer->getAudioCoordinator()) {
+                    ac->onOriginalSoundtrackDisabled(zm);
+                }
+            }
         }
     }
     saveCallback();

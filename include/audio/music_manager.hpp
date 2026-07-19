@@ -38,6 +38,9 @@ public:
     bool isLoading() const { return pendingFileLoad_.has_value(); }
     bool isInitialized() const { return assetManager != nullptr; }
     const std::string& getCurrentTrack() const { return currentTrack; }
+    /// True when the current track came from the filesystem (WoWee original
+    /// music) rather than a game archive.
+    bool isCurrentTrackFile() const { return currentTrackIsFile; }
 
 private:
     float effectiveMusicVolume() const;
