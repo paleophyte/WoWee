@@ -107,8 +107,21 @@ void main() {
     } else if (alphaTest != 0) {
         alphaCutoff = 0.4;
     }
-    if (alphaTest != 0 && texColor.a < alphaCutoff) {
-        discard;
+    // Mip-alpha preservation: alpha mips average downward, thinning distant
+    // canopies to skeletons. Boost alpha with mip level so perceived leaf
+    // density stays constant with distance.
+    if (isFoliage && hasTexture != 0) {
+        float mip = textureQueryLod(uTexture, TexCoord).x;
+        texColor.a *= 1.0 + clamp(mip, 0.0, 4.0) * 0.18;
+    }
+    if (alphaTest != 0) {
+        // Screen-space sharpened alpha: rescale so the cutoff maps to the
+        // texel boundary. With MSAA + alpha-to-coverage on the cutout
+        // pipeline this dithers the edge band across samples, smoothing
+        // leaf silhouettes instead of the old hard binary discard.
+        float aGrad = fwidth(texColor.a);
+        texColor.a = clamp((texColor.a - alphaCutoff) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
+        if (texColor.a < 1.0 / 255.0) discard;
     }
     if (colorKeyBlack != 0) {
         float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
@@ -187,7 +200,14 @@ void main() {
             sss = sssAmount * vec3(1.0, 0.9, 0.5) * lightColor.rgb;
         }
 
-        result = ambientColor.rgb * texColor.rgb
+        // Sky-bounce ambient for foliage: upward-facing leaves catch more
+        // ambient than the canopy underside, giving the crown depth instead
+        // of a uniformly-lit blob.
+        vec3 ambientTerm = ambientColor.rgb;
+        if (isFoliage) {
+            ambientTerm *= 0.82 + 0.30 * clamp(norm.z, 0.0, 1.0);
+        }
+        result = ambientTerm * texColor.rgb
                + shadow * (diff * lightColor.rgb * texColor.rgb + spec * lightColor.rgb)
                + sss;
 
@@ -210,15 +230,12 @@ void main() {
     result = mix(fogColor.rgb, result, fogFactor);
 
     float outAlpha = texColor.a * vFadeAlpha;
-    // Cutout materials should not remain partially transparent after discard,
-    // otherwise foliage cards look view-dependent.
-    if (alphaTest != 0 || colorKeyBlack != 0) {
+    // Cutout materials output the sharpened coverage alpha computed above —
+    // alpha-to-coverage turns it into per-sample coverage for smooth edges.
+    // Color-key-only materials have no meaningful texture alpha; keep them
+    // opaque after the discard.
+    if (colorKeyBlack != 0 && alphaTest == 0) {
         outAlpha = vFadeAlpha;
-    }
-    // Foliage cutout should stay opaque after alpha discard to avoid
-    // view-angle translucency artifacts.
-    if (alphaTest == 2 || alphaTest == 3) {
-        outAlpha = 1.0 * vFadeAlpha;
     }
     outColor = vec4(result, outAlpha);
 }

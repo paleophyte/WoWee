@@ -731,8 +731,9 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
     // Pipeline derivatives — opaque is the base, others derive from it for shared state optimization
     auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState, bool depthWrite,
-                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE) -> VkPipeline {
-        return PipelineBuilder()
+                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE,
+                               bool alphaToCoverage = false) -> VkPipeline {
+        auto builder = PipelineBuilder()
             .setShaders(m2Vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
@@ -741,7 +742,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
             .setDepthTest(!skyMode_, skyMode_ ? false : depthWrite,
                           skyMode_ ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL)
             .setColorBlendAttachment(blendState)
-            .setMultisample(vkCtx_->getMsaaSamples())
+            .setMultisample(vkCtx_->getMsaaSamples());
+        // MSAA alpha-to-coverage dithers the shader's sharpened cutout alpha
+        // across samples for smooth foliage/leaf silhouettes.
+        if (alphaToCoverage) builder.setAlphaToCoverage(true);
+        return builder
             .setLayout(pipelineLayout_)
             .setRenderPass(mainPass)
             .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
@@ -753,7 +758,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     opaquePipeline_ = buildM2Pipeline(PipelineBuilder::blendDisabled(), true,
                                       VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT);
     alphaTestPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), true,
-                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
+                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_,
+                                         /*alphaToCoverage=*/true);
     alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
                                      VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
     additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
