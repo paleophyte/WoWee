@@ -21,6 +21,13 @@ enum class FootstepSurface : uint8_t {
     SNOW
 };
 
+// Which sample bank a step draws from.
+enum class FootstepBank : uint8_t {
+    CHARACTER = 0,  // medium/large biped footsteps (also padded mounts: wolf/tiger/raptor)
+    HORSE,          // hoofed mounts (horse/skeletal horse/ram)
+    HUGE            // heavy mounts (kodo)
+};
+
 class FootstepManager {
 public:
     FootstepManager();
@@ -31,7 +38,7 @@ public:
 
     void update(float deltaTime);
     void playFootstep(FootstepSurface surface, bool sprinting);
-    void playHorseFootstep(FootstepSurface surface, bool sprinting);
+    void playMountFootstep(FootstepSurface surface, FootstepBank bank);
     void setVolumeScale(float scale) { volumeScale = scale; }
     float getVolumeScale() const { return volumeScale; }
 
@@ -48,14 +55,16 @@ private:
         std::vector<Sample> clips;
     };
 
-    void preloadSurface(FootstepSurface surface, const std::vector<std::string>& candidates);
-    void preloadHorseSurface(FootstepSurface surface, const std::vector<std::string>& candidates);
-    bool playRandomStep(FootstepSurface surface, bool sprinting, bool horse);
+    void preloadSurface(SurfaceSamples* bank, FootstepSurface surface,
+                        const std::vector<std::string>& candidates, const char* bankName);
+    bool playRandomStep(FootstepSurface surface, FootstepBank bank,
+                        float minInterval, float volumeMul);
     static const char* surfaceName(FootstepSurface surface);
 
     pipeline::AssetManager* assetManager = nullptr;
     SurfaceSamples surfaces[7];
     SurfaceSamples horseSurfaces[7];
+    SurfaceSamples hugeSurfaces[7];
     size_t sampleCount = 0;
 
     std::chrono::steady_clock::time_point lastPlayTime = std::chrono::steady_clock::time_point{};

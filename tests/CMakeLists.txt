@@ -246,6 +246,25 @@ endif()
 add_test(NAME m2_color_alpha COMMAND test_m2_color_alpha)
 register_test_target(test_m2_color_alpha)
 
+# ── test_m2_footstep_events ──────────────────────────────────
+# Loads real WotLK v264 + vanilla v256 models and pins the $FSD footfall
+# event parsing that syncs footstep audio to foot-strike keyframes.
+add_executable(test_m2_footstep_events
+    test_m2_footstep_events.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+)
+target_include_directories(test_m2_footstep_events PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_m2_footstep_events SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_compile_definitions(test_m2_footstep_events PRIVATE
+    WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_m2_footstep_events PRIVATE catch2_main)
+if(TARGET glm::glm)
+    target_link_libraries(test_m2_footstep_events PRIVATE glm::glm)
+endif()
+add_test(NAME m2_footstep_events COMMAND test_m2_footstep_events)
+register_test_target(test_m2_footstep_events)
+
 # ── test_blp_loader ──────────────────────────────────────────
 add_executable(test_blp_loader
     test_blp_loader.cpp

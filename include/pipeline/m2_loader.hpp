@@ -217,6 +217,12 @@ struct M2Model {
     std::vector<M2Sequence> sequences;
     std::vector<uint32_t> globalSequenceDurations;  // Per-global-sequence loop durations (ms)
 
+    // Footfall ($FSD) animation event times per sequence index, in ms from the
+    // start of the sequence, sorted ascending. These are the authored keyframes
+    // the game client uses to sync footstep sounds to feet hitting the ground.
+    // Empty inner list = no footfall events for that sequence.
+    std::vector<std::vector<uint32_t>> footstepEventTimes;
+
     // Bone lookup table (vertex bone indices reference this to get global bone index)
     std::vector<uint16_t> boneLookupTable;
 

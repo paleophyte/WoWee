@@ -105,6 +105,9 @@ public:
     void setInstanceVisible(uint32_t instanceId, bool visible);
     void removeInstance(uint32_t instanceId);
     bool getAnimationState(uint32_t instanceId, uint32_t& animationId, float& animationTimeMs, float& animationDurationMs) const;
+    /// Footfall ($FSD) event times in ms for the sequence the instance is
+    /// currently playing; nullptr if the model has none for that sequence.
+    const std::vector<uint32_t>* getFootstepEventTimes(uint32_t instanceId) const;
     bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     bool getAnimationSequences(uint32_t instanceId, std::vector<pipeline::M2Sequence>& out) const;
     bool getInstanceModelName(uint32_t instanceId, std::string& modelName) const;

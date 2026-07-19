@@ -3494,6 +3494,27 @@ bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animati
     return true;
 }
 
+const std::vector<uint32_t>* CharacterRenderer::getFootstepEventTimes(uint32_t instanceId) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) {
+        return nullptr;
+    }
+
+    const CharacterInstance& instance = it->second;
+    auto modelIt = models.find(instance.modelId);
+    if (modelIt == models.end()) {
+        return nullptr;
+    }
+
+    const auto& eventTimes = modelIt->second.data.footstepEventTimes;
+    if (instance.currentSequenceIndex < 0 ||
+        instance.currentSequenceIndex >= static_cast<int>(eventTimes.size()) ||
+        eventTimes[instance.currentSequenceIndex].empty()) {
+        return nullptr;
+    }
+    return &eventTimes[instance.currentSequenceIndex];
+}
+
 bool CharacterRenderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
     auto it = instances.find(instanceId);
     if (it == instances.end()) {

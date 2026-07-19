@@ -34,7 +34,8 @@ bool containsAnyToken(const std::string& text, std::initializer_list<const char*
 
 } // namespace
 
-bool FootstepDriver::shouldTriggerFootstepEvent(uint32_t animationId, float animationTimeMs, float animationDurationMs) {
+bool FootstepDriver::shouldTriggerFootstepEvent(uint32_t animationId, float animationTimeMs, float animationDurationMs,
+                                                const std::vector<uint32_t>* eventTimesMs) {
     if (animationDurationMs <= 1.0f) {
         footstepNormInitialized_ = false;
         return false;
@@ -67,7 +68,19 @@ bool FootstepDriver::shouldTriggerFootstepEvent(uint32_t animationId, float anim
         return footstepLastNormTime_ < eventNorm || eventNorm <= norm;
     };
 
-    bool trigger = crossed(0.22f) || crossed(0.72f);
+    bool trigger = false;
+    if (eventTimesMs && !eventTimesMs->empty()) {
+        // Authored $FSD footfall keyframes from the M2 — exact foot-strike sync.
+        for (uint32_t t : *eventTimesMs) {
+            float eventNorm = std::min(static_cast<float>(t) / animationDurationMs, 0.999f);
+            if (crossed(eventNorm)) {
+                trigger = true;
+                break;
+            }
+        }
+    } else {
+        trigger = crossed(0.22f) || crossed(0.72f);
+    }
     footstepLastNormTime_ = norm;
     return trigger;
 }
@@ -135,6 +148,21 @@ audio::FootstepSurface FootstepDriver::resolveFootstepSurface(Renderer* renderer
     return surface;
 }
 
+void FootstepDriver::playWaterStepExtras(Renderer* renderer) const {
+    if (renderer->getAudioCoordinator()->getMovementSoundManager()) {
+        renderer->getAudioCoordinator()->getMovementSoundManager()->playWaterFootstep(audio::MovementSoundManager::CharacterSize::MEDIUM);
+    }
+    auto* swimEffects = renderer->getSwimEffects();
+    auto* waterRenderer = renderer->getWaterRenderer();
+    if (swimEffects && waterRenderer) {
+        const glm::vec3& characterPosition = renderer->getCharacterPosition();
+        auto wh = waterRenderer->getWaterHeightAt(characterPosition.x, characterPosition.y);
+        if (wh) {
+            swimEffects->spawnFootSplash(characterPosition, *wh);
+        }
+    }
+}
+
 // ── Footstep update (moved from AnimationController::updateFootsteps) ────────
 
 void FootstepDriver::update(float deltaTime, Renderer* renderer,
@@ -181,17 +209,58 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
                     }
                     return mountFootstepLastNormTime_ < eventNorm || eventNorm <= norm;
                 };
-                if (crossed(0.25f) || crossed(0.75f)) {
+
+                auto* mountSounds = renderer->getAudioCoordinator()->getMountSoundManager();
+                const auto family = mountSounds
+                    ? mountSounds->getCurrentMountFamily()
+                    : audio::MountFamily::UNKNOWN;
+
+                // Bank: hooves for horse-like mounts, heavy thuds for kodos,
+                // softened character steps for padded paws and everything else.
+                audio::FootstepBank bank = audio::FootstepBank::CHARACTER;
+                switch (family) {
+                    case audio::MountFamily::HORSE:
+                    case audio::MountFamily::UNDEAD_HORSE:
+                    case audio::MountFamily::RAM:
+                        bank = audio::FootstepBank::HORSE;
+                        break;
+                    case audio::MountFamily::KODO:
+                        bank = audio::FootstepBank::HUGE;
+                        break;
+                    default:
+                        break;
+                }
+
+                // Beat timing: prefer the model's authored $FSD footfall
+                // keyframes (exact hoof-strike sync). Models without them fall
+                // back to a synthetic gait: quadrupeds gallop — four beats
+                // clustered in the first half of the stride, then airborne
+                // suspension; two-legged striders alternate biped steps.
+                bool beat = false;
+                const std::vector<uint32_t>* eventTimes =
+                    characterRenderer->getFootstepEventTimes(mountInstanceId);
+                if (eventTimes && !eventTimes->empty()) {
+                    for (uint32_t t : *eventTimes) {
+                        float eventNorm = std::min(static_cast<float>(t) / animDurationMs, 0.999f);
+                        if (crossed(eventNorm)) {
+                            beat = true;
+                            break;
+                        }
+                    }
+                } else {
+                    const bool biped = family == audio::MountFamily::MECHANOSTRIDER ||
+                                       family == audio::MountFamily::TALLSTRIDER ||
+                                       family == audio::MountFamily::DRAGON;
+                    beat = biped
+                        ? (crossed(0.25f) || crossed(0.75f))
+                        : (crossed(0.05f) || crossed(0.20f) || crossed(0.35f) || crossed(0.50f));
+                }
+
+                if (beat) {
                     const auto surface = resolveFootstepSurface(renderer);
-                    auto* mountSounds = renderer->getAudioCoordinator()->getMountSoundManager();
-                    const auto family = mountSounds
-                        ? mountSounds->getCurrentMountFamily()
-                        : audio::MountFamily::UNKNOWN;
-                    if (family == audio::MountFamily::HORSE ||
-                        family == audio::MountFamily::UNDEAD_HORSE) {
-                        footstepManager->playHorseFootstep(surface, true);
-                    } else {
-                        footstepManager->playFootstep(surface, true);
+                    footstepManager->playMountFootstep(surface, bank);
+                    if (surface == audio::FootstepSurface::WATER) {
+                        playWaterStepExtras(renderer);
                     }
                 }
                 mountFootstepLastNormTime_ = norm;
@@ -205,22 +274,12 @@ void FootstepDriver::update(float deltaTime, Renderer* renderer,
         float animTimeMs = 0.0f;
         float animDurationMs = 0.0f;
         if (characterRenderer->getAnimationState(characterInstanceId, animId, animTimeMs, animDurationMs) &&
-            shouldTriggerFootstepEvent(animId, animTimeMs, animDurationMs)) {
+            shouldTriggerFootstepEvent(animId, animTimeMs, animDurationMs,
+                                       characterRenderer->getFootstepEventTimes(characterInstanceId))) {
             auto surface = resolveFootstepSurface(renderer);
             footstepManager->playFootstep(surface, cameraController->isSprinting());
             if (surface == audio::FootstepSurface::WATER) {
-                if (renderer->getAudioCoordinator()->getMovementSoundManager()) {
-                    renderer->getAudioCoordinator()->getMovementSoundManager()->playWaterFootstep(audio::MovementSoundManager::CharacterSize::MEDIUM);
-                }
-                auto* swimEffects = renderer->getSwimEffects();
-                auto* waterRenderer = renderer->getWaterRenderer();
-                if (swimEffects && waterRenderer) {
-                    const glm::vec3& characterPosition = renderer->getCharacterPosition();
-                    auto wh = waterRenderer->getWaterHeightAt(characterPosition.x, characterPosition.y);
-                    if (wh) {
-                        swimEffects->spawnFootSplash(characterPosition, *wh);
-                    }
-                }
+                playWaterStepExtras(renderer);
             }
         }
         mountFootstepNormInitialized_ = false;

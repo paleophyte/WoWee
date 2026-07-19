@@ -928,6 +928,10 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
     }
 
     // Read animation sequences (needed before bones to know sequence count)
+    // Vanilla/TBC sequences live on one shared global timeline; events and
+    // tracks reference it via absolute timestamps, so keep each sequence's
+    // [start, end) window for mapping those back to sequence-local time.
+    std::vector<std::pair<uint32_t, uint32_t>> vanillaSeqWindows;
     if (header.nAnimations > 0 && header.ofsAnimations > 0) {
         header.nAnimations = capCount(header.nAnimations, kMaxM2Animations, "nAnimations");
         model.sequences.reserve(header.nAnimations);
@@ -935,7 +939,9 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         if (header.version < 264) {
             // Vanilla: 68-byte sequence struct (has startTimestamp + endTimestamp)
             auto diskSeqs = readArray<M2SequenceDiskVanilla>(m2Data, header.ofsAnimations, header.nAnimations);
+            vanillaSeqWindows.reserve(diskSeqs.size());
             for (const auto& ds : diskSeqs) {
+                vanillaSeqWindows.emplace_back(ds.startTimestamp, ds.endTimestamp);
                 M2Sequence seq;
                 seq.id = ds.id;
                 seq.variationIndex = ds.variationIndex;
@@ -985,6 +991,75 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         model.globalSequenceDurations = readArray<uint32_t>(m2Data,
             header.ofsGlobalSequences, header.nGlobalSequences);
         core::Logger::getInstance().debug("  Global sequences: ", model.globalSequenceDurations.size());
+    }
+
+    // Read animation events, keeping the $FSD (footfall) timestamps that sync
+    // footstep audio to the frames where feet actually strike the ground.
+    // WotLK events are 36 bytes with per-sequence timestamp arrays; vanilla/TBC
+    // events are 44 bytes with a flat global-timeline array bucketed here by
+    // each sequence's [start, end) window.
+    if (header.nEvents > 0 && header.nEvents < 512 && header.ofsEvents > 0 &&
+        !model.sequences.empty()) {
+        const bool wotlkEvents = header.version >= 264;
+        const size_t eventSize = wotlkEvents ? 36 : 44;
+        const size_t trackOfs = 24;  // identifier(4) + data(4) + bone(4) + position(12)
+        model.footstepEventTimes.resize(model.sequences.size());
+
+        auto rd32 = [&](size_t off) -> uint32_t {
+            if (off + 4 > m2Data.size()) return 0;
+            uint32_t v;
+            std::memcpy(&v, m2Data.data() + off, 4);
+            return v;
+        };
+
+        size_t footfallStamps = 0;
+        for (uint32_t e = 0; e < header.nEvents; e++) {
+            size_t base = header.ofsEvents + e * eventSize;
+            if (base + eventSize > m2Data.size()) break;
+            if (std::memcmp(m2Data.data() + base, "$FSD", 4) != 0) continue;
+
+            if (wotlkEvents) {
+                uint32_t nArrays = rd32(base + trackOfs + 4);
+                uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                uint32_t count = std::min<uint32_t>(nArrays, model.sequences.size());
+                for (uint32_t s = 0; s < count; s++) {
+                    uint32_t nTs = rd32(ofsArrays + s * 8);
+                    uint32_t ofsTs = rd32(ofsArrays + s * 8 + 4);
+                    if (nTs == 0 || nTs > 1024) continue;
+                    if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                    auto stamps = readArray<uint32_t>(m2Data, ofsTs, nTs);
+                    auto& out = model.footstepEventTimes[s];
+                    out.insert(out.end(), stamps.begin(), stamps.end());
+                    footfallStamps += stamps.size();
+                }
+            } else {
+                uint32_t nTs = rd32(base + trackOfs + 12);
+                uint32_t ofsTs = rd32(base + trackOfs + 16);
+                if (nTs == 0 || nTs > 100000) continue;
+                if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                auto stamps = readArray<uint32_t>(m2Data, ofsTs, nTs);
+                for (size_t s = 0; s < vanillaSeqWindows.size() &&
+                                   s < model.footstepEventTimes.size(); s++) {
+                    uint32_t start = vanillaSeqWindows[s].first;
+                    uint32_t end = vanillaSeqWindows[s].second;
+                    if (start >= end) continue;
+                    auto& out = model.footstepEventTimes[s];
+                    for (uint32_t ts : stamps) {
+                        if (ts >= start && ts < end) {
+                            out.push_back(ts - start);
+                            footfallStamps++;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (auto& list : model.footstepEventTimes) {
+            std::sort(list.begin(), list.end());
+        }
+        if (footfallStamps > 0) {
+            core::Logger::getInstance().debug("  Footfall events: ", footfallStamps, " timestamps");
+        }
     }
 
     // Read bones with full animation track data
