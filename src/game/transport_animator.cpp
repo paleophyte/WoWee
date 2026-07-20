@@ -252,11 +252,16 @@ void TransportAnimator::evaluateAndApply(
             } else {
                 transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
             }
-        } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw) {
+        } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw &&
+                   transport.entry != 190536u) {
             // TaxiPathNode route builders encode a dock wait with repeated
             // positions. With no movement tangent, restore the GO's authored
             // spawn orientation so the ship lies alongside the dock rather
             // than retaining its bow-first approach yaw throughout the dwell.
+            // Kraken (190536) has an entry-specific 180-degree hull correction;
+            // restoring its uncorrected spawn yaw here made it turn around for
+            // the stop and turn back again on departure. It retains the arrival
+            // rotation while its route tangent is zero.
             transport.rotation = glm::angleAxis(
                 transport.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
         }

@@ -298,6 +298,31 @@ TEST_CASE("Animator: affected ship hulls face their direction of travel",
     }
 }
 
+TEST_CASE("Animator: Kraken retains arrival heading throughout dock dwell",
+          "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,     glm::vec3(0.0f, 0.0f, 0.0f)},
+        {10000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {70000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {80000, glm::vec3(200.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 190536u, false, true, true);
+    auto t = makeTransport(1, 190536u);
+    t.entry = 190536u;
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+    t.dockYaw = glm::half_pi<float>();
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 5000);
+    const glm::quat arrivalRotation = t.rotation;
+    animator.evaluateAndApply(t, path, 30000);
+
+    REQUIRE(t.rotation.w == Catch::Approx(arrivalRotation.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(arrivalRotation.z).margin(0.001f));
+}
+
 TEST_CASE("Animator: Moonspray holds side-on at its dock dwell", "[transport_animator][transport]") {
     TransportAnimator animator;
     CatmullRomSpline spline({
