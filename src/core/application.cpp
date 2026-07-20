@@ -1938,8 +1938,14 @@ void Application::update(float deltaTime) {
                 glm::vec3 playerRenderPos(0.0f);
                 bool havePlayerPos = false;
                 float playerCollisionRadius = 0.65f;
-                if (auto playerEntity = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
-                    playerPos = glm::vec3(playerEntity->getX(), playerEntity->getY(), playerEntity->getZ());
+                if (gameHandler->getPlayerGuid() != 0) {
+                    // The server does not continuously echo our own movement into
+                    // the cached player Entity. MovementInfo is the live canonical
+                    // position that we render and send to the server; using the
+                    // Entity here eventually distance-culls nearby enemies against
+                    // the player's old spawn position and freezes their visuals.
+                    const auto& movement = gameHandler->getMovementInfo();
+                    playerPos = glm::vec3(movement.x, movement.y, movement.z);
                     playerRenderPos = core::coords::canonicalToRender(playerPos);
                     havePlayerPos = true;
                     glm::vec3 pc;
@@ -1961,6 +1967,9 @@ void Application::update(float deltaTime) {
                 auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
                 auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
                 auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
+                const uint64_t currentTargetGuid = gameHandler->hasTarget()
+                    ? gameHandler->getTargetGuid() : 0;
+                const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                 for (const auto& [guid, instanceId] : _creatureInstances) {
                     auto entity = gameHandler->getEntityManager().getEntity(guid);
                     if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
@@ -1982,7 +1991,9 @@ void Application::update(float deltaTime) {
                     if (havePlayerPos) {
                         glm::vec3 d = latestCanonical - playerPos;
                         canonDistSq = glm::dot(d, d);
-                        if (canonDistSq > syncRadiusSq) continue;
+                        const bool activeCombatTarget =
+                            guid == currentTargetGuid || guid == autoAttackGuid;
+                        if (canonDistSq > syncRadiusSq && !activeCombatTarget) continue;
                     }
 
                     // Use the destination position once the entity has reached its
@@ -2022,8 +2033,6 @@ void Application::update(float deltaTime) {
                     bool isCombatTarget = false;
                     if (havePlayerPos && canonDistSq < 64.0f) { // 8² = melee range
                         auto unit = std::static_pointer_cast<game::Unit>(entity);
-                        const uint64_t currentTargetGuid = gameHandler->hasTarget() ? gameHandler->getTargetGuid() : 0;
-                        const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                         isCombatTarget = (guid == currentTargetGuid || guid == autoAttackGuid);
                         clipGuardEligible = unit->getHealth() > 0 &&
                                             (unit->isHostile() ||
@@ -2194,8 +2203,9 @@ void Application::update(float deltaTime) {
                 auto* charRenderer = renderer->getCharacterRenderer();
                 glm::vec3 pPos(0.0f);
                 bool havePPos = false;
-                if (auto pe = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
-                    pPos = glm::vec3(pe->getX(), pe->getY(), pe->getZ());
+                if (gameHandler->getPlayerGuid() != 0) {
+                    const auto& movement = gameHandler->getMovementInfo();
+                    pPos = glm::vec3(movement.x, movement.y, movement.z);
                     havePPos = true;
                 }
                 const float pSyncRadiusSq = 320.0f * 320.0f;
@@ -2209,6 +2219,9 @@ void Application::update(float deltaTime) {
                 auto& _pCreatureWalkingState = entitySpawner_->getCreatureWalkingState();
                 auto& _pCreatureFlyingState = entitySpawner_->getCreatureFlyingState();
                 auto& _pCreatureRenderPosCache = entitySpawner_->getCreatureRenderPosCache();
+                const uint64_t playerTargetGuid = gameHandler->hasTarget()
+                    ? gameHandler->getTargetGuid() : 0;
+                const uint64_t playerAutoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                 for (const auto& [guid, instanceId] : _playerInstances) {
                     auto entity = gameHandler->getEntityManager().getEntity(guid);
                     if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
@@ -2217,7 +2230,9 @@ void Application::update(float deltaTime) {
                     if (havePPos) {
                         glm::vec3 latestCanonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
                         glm::vec3 d = latestCanonical - pPos;
-                        if (glm::dot(d, d) > pSyncRadiusSq) continue;
+                        const bool activeCombatTarget =
+                            guid == playerTargetGuid || guid == playerAutoAttackGuid;
+                        if (glm::dot(d, d) > pSyncRadiusSq && !activeCombatTarget) continue;
                     }
 
                     // Position sync — clamp to destination during dead-reckoning

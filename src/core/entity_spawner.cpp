@@ -2009,8 +2009,18 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
             if (group == 15) hasGroup15 = true;
         }
 
-        // Only apply to humanoid-like clothing models.
-        if (hasGroup3 || hasGroup4 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15) {
+        // These numeric submesh groups only mean clothing on player-character
+        // models. Creature models reuse the same IDs for unrelated authored
+        // geometry (elementals use them for their built-in wrist pieces), so a
+        // group-number heuristic alone can manufacture a second floating set of
+        // "bracers". CreatureDisplayInfoExtra is the authoritative indication
+        // that this display uses humanoid equipment geosets.
+        const bool hasHumanoidDisplayExtra =
+            itDisplayData != displayDataMap_.end() &&
+            itDisplayData->second.extraDisplayId != 0 &&
+            humanoidExtraMap_.find(itDisplayData->second.extraDisplayId) != humanoidExtraMap_.end();
+        if (hasHumanoidDisplayExtra &&
+            (hasGroup3 || hasGroup4 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15)) {
             bool hasRenderableCape = false;
             std::string capeTexturePath;  // first found cape texture for override
             bool hasEquippedTabard = false;
