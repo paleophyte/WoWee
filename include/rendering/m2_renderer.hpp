@@ -392,6 +392,10 @@ public:
     /// Check if a model instance has a specific animation ID in its sequence table.
     bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     float getInstanceAnimDuration(uint32_t instanceId) const;
+    /// World-space visual bounding sphere of an instance (center + radius),
+    /// used for cursor picking and selection circles. Returns false for an
+    /// unknown instance or a degenerate (zero-radius) model.
+    bool getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const;
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
     void setSkipCollision(uint32_t instanceId, bool skip);

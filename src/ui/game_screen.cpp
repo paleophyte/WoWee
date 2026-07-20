@@ -715,6 +715,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 } else if (target->getType() == game::ObjectType::PLAYER) {
                     showSelectionCircle = true;
                     circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (player)
+                } else if (target->getType() == game::ObjectType::GAMEOBJECT) {
+                    showSelectionCircle = true;
+                    circleColor = glm::vec3(0.2f, 0.8f, 1.0f); // cyan (game object)
                 }
                 if (showSelectionCircle) {
                     renderer->setSelectionCircle(targetGLPos, circleRadius, circleColor);

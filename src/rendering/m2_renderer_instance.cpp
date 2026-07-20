@@ -133,6 +133,15 @@ float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
     return seqs[seqIdx].duration; // in milliseconds
 }
 
+bool M2Renderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    const auto& inst = instances[idxIt->second];
+    outCenter = inst.cachedCullCenter;
+    outRadius = inst.cachedVisualRadius;
+    return outRadius > 0.0f;
+}
+
 void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;

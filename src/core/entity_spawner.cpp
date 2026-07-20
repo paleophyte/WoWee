@@ -888,7 +888,26 @@ std::string EntitySpawner::getGameObjectModelPathForDisplayId(uint32_t displayId
 
 
 bool EntitySpawner::getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const {
-    if (!renderer_ || !renderer_->getCharacterRenderer()) return false;
+    if (!renderer_) return false;
+
+    // M2 game objects (mailboxes, chests, nodes, etc.) render via the M2
+    // renderer, not the character renderer, so their bounds come from a
+    // different instance table. Their true world-space visual sphere makes
+    // cursor picking track the actual model instead of a flat fallback.
+    //
+    // WMO game objects (buildings) are intentionally not resolved here: a
+    // bounding sphere from a building's AABB diagonal is enormous and would
+    // swallow nearby objects in the picker. They keep the conservative
+    // fallback sphere used by the click handlers.
+    auto goIt = gameObjectInstances_.find(guid);
+    if (goIt != gameObjectInstances_.end()) {
+        const auto& go = goIt->second;
+        if (go.isWmo) return false;
+        auto* m2 = renderer_->getM2Renderer();
+        return m2 && m2->getInstanceBounds(go.instanceId, outCenter, outRadius);
+    }
+
+    if (!renderer_->getCharacterRenderer()) return false;
     uint32_t instanceId = 0;
 
     if (gameHandler_ && guid == gameHandler_->getPlayerGuid()) {
