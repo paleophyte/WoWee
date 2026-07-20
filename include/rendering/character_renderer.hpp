@@ -190,6 +190,13 @@ private:
         pipeline::M2Model data;  // Original model data
         std::vector<glm::mat4> bindPose;  // Inverse bind pose matrices
 
+        // Tight bind-pose bounds from rendered vertices. M2 header
+        // boundingBox/boundingRadius describe collision geometry on many
+        // creatures and can cover little more than their feet.
+        glm::vec3 visualBoundMin{0.0f};
+        glm::vec3 visualBoundMax{0.0f};
+        float visualBoundRadius = 0.0f;
+
         // Textures loaded from BLP (indexed by texture array position)
         std::vector<VkTexture*> textureIds;
 

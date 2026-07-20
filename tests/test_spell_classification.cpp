@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game/spell_classification.hpp"
+#include "game/spell_defines.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -34,6 +35,11 @@ private:
 };
 
 } // namespace
+
+TEST_CASE("DONT_REPORT cast failures remain player-facing", "[spell][failure]") {
+    REQUIRE(std::string(wowee::game::getSpellCastResultString(27)) ==
+            "You can't do that right now");
+}
 
 // ---------------------------------------------------------------------------
 // Range classification

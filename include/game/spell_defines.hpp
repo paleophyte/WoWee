@@ -127,7 +127,10 @@ inline const char* getSpellCastResultString(uint8_t result, int powerType = -1) 
         case 24:  return "Charmed";
         case 25:  return "Chest in use";
         case 26:  return "Confused";
-        case 27:  return nullptr; // DONT_REPORT — suppress message
+        // DONT_REPORT carries no localized reason of its own. Returning null
+        // sent it through the unknown-code fallback and exposed "error 27" to
+        // players, which is less useful than a safe generic explanation.
+        case 27:  return "You can't do that right now";
         case 28:  return "Equipped item required";
         case 29:  return "Equipped item class (mainhand)";
         case 30:  return "Equipped item class (mainhand)";
