@@ -634,6 +634,9 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     }
 
     std::string senderName = owner_.lookupName(data.senderGuid);
+    // SMSG_TEXT_EMOTE is the narrated chat line. The server sends the actual
+    // visual separately in SMSG_EMOTE; replaying an animation here restarts
+    // one-shots and replaces correctly resolved STATE_* loops such as /dance.
     if (senderName.empty()) {
         const auto& partyData = owner_.getPartyData();
         for (const auto& member : partyData.members) {
@@ -644,16 +647,11 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         }
     }
 
-    uint32_t animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
-    if (animId != 0 && owner_.emoteAnimCallbackRef()) {
-        owner_.emoteAnimCallbackRef()(data.senderGuid, animId, /*isState=*/false);
-    }
-
     if (senderName.empty()) {
         owner_.queryPlayerName(data.senderGuid);
         LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
                   std::hex, data.senderGuid, std::dec,
-                  " emoteId=", data.textEmoteId, " anim=", animId);
+                  " emoteId=", data.textEmoteId);
         return;
     }
 
@@ -674,7 +672,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
 
     addLocalChatMessage(chatMsg);
 
-    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ", anim=", animId, ")");
+    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ")");
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {
