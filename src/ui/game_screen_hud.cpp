@@ -1191,12 +1191,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
         bool isPlayer = (entityPtr->getType() == game::ObjectType::PLAYER);
         bool isTarget = (guid == targetGuid);
+        const bool isHostile = unit->isHostile();
 
-        // Player nameplates use Shift+V toggle; NPC/enemy nameplates use V toggle.
+        // Friendly player nameplates use Shift+V; enemy players and hostile/NPC
+        // nameplates use V. Reaction, not object type, owns the visual category.
         // The current target ALWAYS gets a nameplate so it's clear what is
         // selected even with nameplates toggled off.
-        if (isPlayer && !settingsPanel_.showFriendlyNameplates_ && !isTarget) continue;
-        if (!isPlayer && !showNameplates_ && !isTarget) continue;
+        if (isPlayer && !isHostile && !settingsPanel_.showFriendlyNameplates_ && !isTarget) continue;
+        if ((!isPlayer || isHostile) && !showNameplates_ && !isTarget) continue;
 
         // For corpses (dead units), only show a minimal grey nameplate if selected
         bool isCorpse = (unit->getHealth() == 0);
@@ -1244,7 +1246,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             // Minimal grey bar for selected corpses (loot/skin targets)
             barColor = IM_COL32(140, 140, 140, A(200));
             bgColor  = IM_COL32(70,  70,  70,  A(160));
-        } else if (unit->isHostile()) {
+        } else if (isHostile) {
             // Check if mob is tapped by another player (grey nameplate)
             uint32_t dynFlags = unit->getDynamicFlags();
             bool tappedByOther = (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0; // TAPPED but not TAPPED_BY_ALL_THREAT_LIST
@@ -1256,22 +1258,10 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 bgColor  = IM_COL32(100, 25,  25,  A(160));
             }
         } else if (isPlayer) {
-            // Player nameplates: use class color for easy identification
-            uint8_t cid = entityClassId(unit);
-            if (cid != 0) {
-                ImVec4 cv = classColorVec4(cid);
-                barColor = IM_COL32(
-                    static_cast<int>(cv.x * 255),
-                    static_cast<int>(cv.y * 255),
-                    static_cast<int>(cv.z * 255), A(210));
-                bgColor  = IM_COL32(
-                    static_cast<int>(cv.x * 80),
-                    static_cast<int>(cv.y * 80),
-                    static_cast<int>(cv.z * 80), A(160));
-            } else {
-                barColor = IM_COL32(60,  200, 80,  A(200));
-                bgColor  = IM_COL32(25,  100, 35,  A(160));
-            }
+            // World-space bars communicate reaction. Class colors belong in
+            // party/social UI, where red DK and pink Paladin cannot imply hostility.
+            barColor = IM_COL32(60,  200, 80,  A(200));
+            bgColor  = IM_COL32(25,  100, 35,  A(160));
         } else {
             barColor = IM_COL32(60,  200, 80,  A(200));
             bgColor  = IM_COL32(25,  100, 35,  A(160));
@@ -1556,16 +1546,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         ImVec2 textSize = ImGui::CalcTextSize(labelBuf);
         float nameX = sx - textSize.x * 0.5f;
         float nameY = sy - barH - 12.0f;
-        // Name color: players get WoW class colors; NPCs use hostility (red/yellow)
+        // Name color communicates reaction too: friendly players blue, enemies red.
         ImU32 nameColor;
         if (isPlayer) {
-            // Class color with cyan fallback for unknown class
-            uint8_t cid = entityClassId(unit);
-            ImVec4 cc = (cid != 0) ? classColorVec4(cid) : ImVec4(0.31f, 0.78f, 1.0f, 1.0f);
-            nameColor = IM_COL32(static_cast<int>(cc.x*255), static_cast<int>(cc.y*255),
-                                  static_cast<int>(cc.z*255), A(230));
+            nameColor = isHostile
+                ? IM_COL32(220, 80, 80, A(230))
+                : IM_COL32(102, 153, 255, A(230));
         } else {
-            nameColor = unit->isHostile()
+            nameColor = isHostile
                 ? IM_COL32(220,  80,  80, A(230))   // red  — hostile NPC
                 : IM_COL32(240, 200, 100, A(230));  // yellow — friendly NPC
         }
