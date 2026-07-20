@@ -71,6 +71,13 @@ public:
     float getServerRunBackSpeed() const { return serverRunBackSpeed_; }
     float getServerTurnRate() const { return serverTurnRate_; }
 
+    // CREATE_OBJECT/LIVING carries the authoritative speed table on login.
+    // Apply it to the same cache used by camera movement and later force-speed
+    // packets so reconnecting while mounted retains the server-provided speed.
+    void applyServerMovementSpeeds(float walk, float run, float runBack,
+                                   float swim, float swimBack, float flight,
+                                   float flightBack, float turn, float pitch);
+
     // Movement flag queries
     bool isPlayerRooted() const {
         return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::ROOT)) != 0;

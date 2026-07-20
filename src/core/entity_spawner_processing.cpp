@@ -24,6 +24,7 @@
 #include <cctype>
 #include <sstream>
 #include <cstring>
+#include <limits>
 
 namespace wowee {
 namespace core {
@@ -1573,6 +1574,169 @@ void EntitySpawner::processPendingMount() {
     charRenderer->playAnimation(instanceId, startAnim, true);
 
     LOG_INFO("processPendingMount: DONE displayId=", mountDisplayId, " model=", m2Path, " heightOffset=", heightOffset);
+}
+
+bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
+                                         std::string& modelPath, float& riderHeight) {
+    modelId = 0;
+    riderHeight = 1.8f;
+    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_) return false;
+    auto* cr = renderer_->getCharacterRenderer();
+
+    modelPath = getModelPathForDisplayId(displayId);
+    if (modelPath.empty()) {
+        LOG_WARNING("Remote player mount has no model path: displayId=", displayId);
+        return false;
+    }
+
+    auto cached = displayIdModelCache_.find(displayId);
+    if (cached != displayIdModelCache_.end() && cr->getModelData(cached->second)) {
+        modelId = cached->second;
+    } else {
+        auto m2Data = assetManager_->readFile(modelPath);
+        if (m2Data.empty()) return false;
+        pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
+        if (model.name.empty()) model.name = modelPath;
+        if (model.vertices.empty()) return false;
+
+        if (model.version >= 264 && modelPath.size() >= 3) {
+            std::string skinPath = modelPath.substr(0, modelPath.size() - 3) + "00.skin";
+            auto skinData = assetManager_->readFile(skinPath);
+            if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, model);
+        }
+        if (!model.isValid()) return false;
+
+        const std::string basePath = modelPath.substr(0, modelPath.size() - 3);
+        for (uint32_t si = 0; si < model.sequences.size(); ++si) {
+            if (model.sequences[si].flags & 0x20) continue;
+            const uint32_t animId = model.sequences[si].id;
+            if (animId != rendering::anim::STAND && animId != rendering::anim::WALK &&
+                animId != rendering::anim::RUN && animId != rendering::anim::FLY_IDLE &&
+                animId != rendering::anim::FLY_FORWARD) continue;
+            char animFile[256];
+            snprintf(animFile, sizeof(animFile), "%s%04u-%02u.anim", basePath.c_str(),
+                     animId, model.sequences[si].variationIndex);
+            auto animData = assetManager_->readFileOptional(animFile);
+            if (!animData.empty()) pipeline::M2Loader::loadAnimFile(m2Data, animData, si, model);
+        }
+
+        modelId = nextCreatureModelId_++;
+        if (!cr->loadModel(model, modelId)) return false;
+        displayIdModelCache_[displayId] = modelId;
+
+        // CreatureDisplayInfo supplies the replaceable mount skins. Mount model
+        // IDs are cached per display ID, so applying them to the model is safe.
+        auto displayIt = displayDataMap_.find(displayId);
+        if (displayIt != displayDataMap_.end()) {
+            CreatureDisplayData skin = displayIt->second;
+            if (skin.skin1.empty() && skin.skin2.empty() && skin.skin3.empty()) {
+                for (const auto& [candidateId, candidate] : displayDataMap_) {
+                    (void)candidateId;
+                    if (candidate.modelId == skin.modelId &&
+                        (!candidate.skin1.empty() || !candidate.skin2.empty() || !candidate.skin3.empty())) {
+                        skin = candidate;
+                        break;
+                    }
+                }
+            }
+            const size_t slash = modelPath.find_last_of("\\/");
+            const std::string dir = slash == std::string::npos ? "" : modelPath.substr(0, slash + 1);
+            if (const auto* md = cr->getModelData(modelId)) {
+                for (size_t ti = 0; ti < md->textures.size(); ++ti) {
+                    std::string name;
+                    if (md->textures[ti].type == 11) name = skin.skin1;
+                    else if (md->textures[ti].type == 12) name = skin.skin2;
+                    else if (md->textures[ti].type == 13) name = skin.skin3;
+                    if (name.empty()) continue;
+                    if (auto* texture = cr->loadTexture(dir + name + ".blp")) {
+                        cr->setModelTexture(modelId, static_cast<uint32_t>(ti), texture);
+                    }
+                }
+            }
+        }
+    }
+
+    if (const auto* md = cr->getModelData(modelId); md && !md->vertices.empty()) {
+        float minZ = std::numeric_limits<float>::max();
+        float maxZ = -std::numeric_limits<float>::max();
+        for (const auto& vertex : md->vertices) {
+            minZ = std::min(minZ, vertex.position.z);
+            maxZ = std::max(maxZ, vertex.position.z);
+        }
+        const float extent = maxZ - minZ;
+        if (extent > 0.5f) {
+            riderHeight = maxZ * 0.8f;
+            if (riderHeight < 1.0f) riderHeight = extent * 0.75f;
+            if (riderHeight < 1.0f) riderHeight = 1.8f;
+        }
+    }
+    return modelId != 0;
+}
+
+void EntitySpawner::processPendingRemotePlayerMounts() {
+    if (pendingRemotePlayerMounts_.empty() || !renderer_) return;
+    auto* cr = renderer_->getCharacterRenderer();
+    if (!cr) return;
+
+    // Mount model loading can touch disk and upload GPU resources. Process at
+    // most one transition per frame, consistent with the other spawn queues.
+    for (auto it = pendingRemotePlayerMounts_.begin();
+         it != pendingRemotePlayerMounts_.end(); ++it) {
+        const uint64_t guid = it->first;
+        const uint32_t displayId = it->second;
+
+        if (displayId == 0) {
+            removeRemotePlayerMount(guid);
+            pendingRemotePlayerMounts_.erase(it);
+            return;
+        }
+        auto playerIt = playerInstances_.find(guid);
+        if (playerIt == playerInstances_.end()) continue; // initial fields can precede rendering
+
+        auto current = remotePlayerMounts_.find(guid);
+        if (current != remotePlayerMounts_.end() && current->second.displayId == displayId) {
+            pendingRemotePlayerMounts_.erase(it);
+            return;
+        }
+        removeRemotePlayerMount(guid);
+
+        uint32_t modelId = 0;
+        float riderHeight = 0.0f;
+        std::string modelPath;
+        if (!loadRemoteMountModel(displayId, modelId, modelPath, riderHeight)) {
+            LOG_WARNING("Failed to load remote player mount: guid=0x", std::hex, guid,
+                        std::dec, " displayId=", displayId);
+            pendingRemotePlayerMounts_.erase(it);
+            return;
+        }
+
+        glm::vec3 pos(0.0f);
+        cr->getInstancePosition(playerIt->second, pos);
+        uint32_t mountInstance = cr->createInstance(modelId, pos, glm::vec3(0.0f), 1.0f);
+        if (mountInstance != 0) {
+            const bool moving = gameHandler_ && [&] {
+                auto entity = gameHandler_->getEntityManager().getEntity(guid);
+                return entity && entity->isActivelyMoving();
+            }();
+            const bool flying = creatureFlyingState_.count(guid) > 0;
+            const bool walking = creatureWalkingState_.count(guid) > 0;
+            uint32_t mountAnim = moving
+                ? (flying ? rendering::anim::FLY_FORWARD
+                          : (walking ? rendering::anim::WALK : rendering::anim::RUN))
+                : (flying ? rendering::anim::FLY_IDLE : rendering::anim::STAND);
+            if (!cr->hasAnimation(mountInstance, mountAnim)) {
+                mountAnim = moving ? rendering::anim::RUN : rendering::anim::STAND;
+            }
+            cr->playAnimation(mountInstance, mountAnim, true);
+            cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
+            remotePlayerMounts_[guid] = {displayId, modelId, mountInstance, riderHeight};
+            LOG_INFO("Remote player mounted: guid=0x", std::hex, guid, std::dec,
+                     " displayId=", displayId, " riderHeight=", riderHeight,
+                     " model=", modelPath);
+        }
+        pendingRemotePlayerMounts_.erase(it);
+        return;
+    }
 }
 
 void EntitySpawner::erasePendingGuidIfUnqueued(uint64_t guid) {

@@ -940,17 +940,15 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
 
         // Speeds (9 values in WotLK: walk/run/runBack/swim/swimBack/flight/flightBack/turn/pitch)
         if (rem() < 36) return false;
-        /*float walkSpeed =*/ packet.readFloat();
-        float runSpeed = packet.readFloat();
-        /*float runBackSpeed =*/ packet.readFloat();
-        /*float swimSpeed =*/ packet.readFloat();
-        /*float swimBackSpeed =*/ packet.readFloat();
-        /*float flightSpeed =*/ packet.readFloat();
-        /*float flightBackSpeed =*/ packet.readFloat();
-        /*float turnRate =*/ packet.readFloat();
-        /*float pitchRate =*/ packet.readFloat();
-
-        block.runSpeed = runSpeed;
+        block.walkSpeed       = packet.readFloat();
+        block.runSpeed        = packet.readFloat();
+        block.runBackSpeed    = packet.readFloat();
+        block.swimSpeed       = packet.readFloat();
+        block.swimBackSpeed   = packet.readFloat();
+        block.flightSpeed     = packet.readFloat();
+        block.flightBackSpeed = packet.readFloat();
+        block.turnRate        = packet.readFloat();
+        block.pitchRate       = packet.readFloat();
         block.moveFlags = moveFlags;
 
         // Spline data

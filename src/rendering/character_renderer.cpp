@@ -204,6 +204,27 @@ static float evalBatchColorAlpha(const pipeline::M2Model& model,
                                  model.globalSequenceDurations, 1.0f);
 }
 
+// Evaluate the material transparency track selected through the skin batch's
+// lookup table. Enchant cards depend on this track for their authored duty
+// cycle and strength; treating the first key as a constant makes every pulse
+// both brighter and several times more frequent than intended.
+static float evalBatchTextureWeight(const pipeline::M2Model& model,
+                                    const pipeline::M2Batch& batch,
+                                    int sequenceIndex, float animationTimeMs,
+                                    float globalTimeMs) {
+    if (batch.transparencyIndex == 0xFFFF ||
+        batch.transparencyIndex >= model.textureWeightLookup.size()) {
+        return 1.0f;
+    }
+    const uint16_t trackIndex = model.textureWeightLookup[batch.transparencyIndex];
+    if (trackIndex == 0xFFFF || trackIndex >= model.textureWeightTracks.size()) {
+        return 1.0f;
+    }
+    return m2_track::sampleFloat(model.textureWeightTracks[trackIndex],
+                                 sequenceIndex, animationTimeMs, globalTimeMs,
+                                 model.globalSequenceDurations, 1.0f);
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
@@ -2625,7 +2646,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     evalBatchColorAlpha(gpuModel.data, batch,
                                         instance.currentSequenceIndex,
                                         instance.animationTime,
-                                        instance.globalSequenceTime),
+                                        instance.globalSequenceTime) *
+                    evalBatchTextureWeight(gpuModel.data, batch,
+                                           instance.currentSequenceIndex,
+                                           instance.animationTime,
+                                           instance.globalSequenceTime),
                     0.0f, 1.0f);
                 if (batchColorAlpha <= 0.01f) {
                     continue;

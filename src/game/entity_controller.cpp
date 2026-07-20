@@ -8,6 +8,7 @@
 #include "game/opcode_table.hpp"
 #include "game/chat_handler.hpp"
 #include "game/transport_manager.hpp"
+#include "game/movement_handler.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
 #include "network/world_socket.hpp"
@@ -781,6 +782,9 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
+            } else if (block.objectType == ObjectType::PLAYER &&
+                       owner_.otherPlayerMountCallbackRef()) {
+                owner_.otherPlayerMountCallbackRef()(block.guid, val);
             }
             unit->setMountDisplayId(val);
         }
@@ -974,6 +978,10 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
+            } else if (entity->getType() == ObjectType::PLAYER &&
+                       val != unit->getMountDisplayId() &&
+                       owner_.otherPlayerMountCallbackRef()) {
+                owner_.otherPlayerMountCallbackRef()(block.guid, val);
             }
             unit->setMountDisplayId(val);
         } else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
@@ -1759,7 +1767,12 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             oldFieldsSnapshot = owner_.lastPlayerFieldsRef();
         }
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            owner_.serverRunSpeedRef() = block.runSpeed;
+            if (auto* movement = owner_.getMovementHandler()) {
+                movement->applyServerMovementSpeeds(
+                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                    block.flightBackSpeed, block.turnRate, block.pitchRate);
+            }
             // Some server dismount paths update run speed without updating mount display field.
             const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
             if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
@@ -1840,7 +1853,12 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
         LOG_DEBUG("  Position: (", pos.x, ", ", pos.y, ", ", pos.z, ")");
         if (block.guid == owner_.getPlayerGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            owner_.serverRunSpeedRef() = block.runSpeed;
+            if (auto* movement = owner_.getMovementHandler()) {
+                movement->applyServerMovementSpeeds(
+                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                    block.flightBackSpeed, block.turnRate, block.pitchRate);
+            }
         }
         // 3b: Track player-on-transport state
         if (block.guid == owner_.getPlayerGuid()) {

@@ -115,6 +115,18 @@ public:
     uint32_t getMountInstanceId() const { return mountInstanceId_; }
     uint32_t getMountModelId() const { return mountModelId_; }
 
+    struct RemotePlayerMount {
+        uint32_t displayId = 0;
+        uint32_t modelId = 0;
+        uint32_t instanceId = 0;
+        float riderHeight = 0.0f;
+    };
+    void setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId);
+    const RemotePlayerMount* getRemotePlayerMount(uint64_t guid) const {
+        auto it = remotePlayerMounts_.find(guid);
+        return it != remotePlayerMounts_.end() ? &it->second : nullptr;
+    }
+
     // Local player GUID exclusion (EntitySpawner skips spawning the local player)
     void setLocalPlayerGuid(uint64_t guid) { spawnedPlayerGuid_ = guid; }
 
@@ -482,6 +494,12 @@ private:
     uint32_t mountModelId_ = 0;
     uint32_t pendingMountDisplayId_ = 0;
     void processPendingMount();
+    std::unordered_map<uint64_t, RemotePlayerMount> remotePlayerMounts_;
+    std::unordered_map<uint64_t, uint32_t> pendingRemotePlayerMounts_;
+    void processPendingRemotePlayerMounts();
+    bool loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
+                              std::string& modelPath, float& riderHeight);
+    void removeRemotePlayerMount(uint64_t guid);
 
     // --- Local player GUID exclusion ---
     uint64_t spawnedPlayerGuid_ = 0;

@@ -353,6 +353,17 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     }
     playerInstances_[guid] = instanceId;
 
+    // The mount field may have arrived before this render instance, or the
+    // player may be re-created without another values update. Reconcile from
+    // retained entity state so already-mounted players are never left on foot.
+    if (gameHandler_) {
+        auto entity = gameHandler_->getEntityManager().getEntity(guid);
+        auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
+        if (unit && unit->getMountDisplayId() != 0) {
+            setRemotePlayerMountDisplayId(guid, unit->getMountDisplayId());
+        }
+    }
+
     OnlinePlayerAppearanceState st;
     st.instanceId = instanceId;
     st.modelId = modelId;
@@ -977,6 +988,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
+    pendingRemotePlayerMounts_.erase(guid);
+    removeRemotePlayerMount(guid);
     auto it = playerInstances_.find(guid);
     if (it == playerInstances_.end()) return;
     auto* charRenderer = renderer_->getCharacterRenderer();

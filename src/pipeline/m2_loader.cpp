@@ -1271,37 +1271,48 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
         core::Logger::getInstance().debug("  Texture transforms: ", model.textureTransforms.size());
     }
 
-    // Read texture transform lookup (nTransLookup)
-    // Note: ofsTransLookup holds the transparency track lookup table (indexed by batch.transparencyIndex).
+    // Read transparency lookup (indexed by batch.transparencyIndex).
     if (header.nTransLookup > 0 && header.ofsTransLookup > 0) {
-        model.textureTransformLookup = readArray<uint16_t>(m2Data, header.ofsTransLookup, header.nTransLookup);
+        model.textureWeightLookup = readArray<uint16_t>(m2Data, header.ofsTransLookup, header.nTransLookup);
+    }
+
+    // Read texture-animation lookup (indexed by batch.textureAnimIndex).
+    if (header.nUVAnimLookup > 0 && header.ofsUVAnimLookup > 0) {
+        model.textureTransformLookup = readArray<uint16_t>(m2Data, header.ofsUVAnimLookup, header.nUVAnimLookup);
     }
 
     // Parse transparency tracks (M2Track<fixed16>) — controls per-batch opacity.
     // fixed16 = uint16_t / 32767.0f, range 0 (transparent) to 1 (opaque).
-    // We extract the "at-rest" value from the first available keyframe.
+    // Keep the full track for runtime evaluation; using only its first key makes
+    // pulsing weapon glints such as Sparkle_A stay at full intensity continuously.
     if (header.nTransparency > 0 && header.ofsTransparency > 0 &&
         header.nTransparency < 4096) {
+        std::vector<uint32_t> seqFlags;
+        seqFlags.reserve(model.sequences.size());
+        for (const auto& seq : model.sequences) seqFlags.push_back(seq.flags);
+
         model.textureWeights.reserve(header.nTransparency);
+        model.textureWeightTracks.resize(header.nTransparency);
+        const bool wotlk = header.version >= 264;
+        const uint32_t trackSize = wotlk ? sizeof(M2TrackDisk) : sizeof(M2TrackDiskVanilla);
         for (uint32_t ti = 0; ti < header.nTransparency; ti++) {
-            uint32_t trackOfs = header.ofsTransparency + ti * sizeof(M2TrackDisk);
-            if (trackOfs + sizeof(M2TrackDisk) > m2Data.size()) {
+            uint32_t trackOfs = header.ofsTransparency + ti * trackSize;
+            if (trackOfs + trackSize > m2Data.size()) {
                 model.textureWeights.push_back(1.0f);
                 continue;
             }
-            M2TrackDisk td = readValue<M2TrackDisk>(m2Data, trackOfs);
+            M2AnimationTrack& track = model.textureWeightTracks[ti];
+            if (wotlk) {
+                M2TrackDisk td = readValue<M2TrackDisk>(m2Data, trackOfs);
+                parseAnimTrack(m2Data, td, track, TrackType::FIXED16, seqFlags);
+            } else {
+                M2TrackDiskVanilla td = readValue<M2TrackDiskVanilla>(m2Data, trackOfs);
+                parseAnimTrackVanilla(m2Data, td, track, TrackType::FIXED16);
+            }
             float opacity = 1.0f;
-            // Scan sub-arrays until we find one with keyframe data
-            if (td.nKeys > 0 && td.ofsKeys > 0 && td.nKeys < 4096) {
-                for (uint32_t si = 0; si < td.nKeys; si++) {
-                    uint32_t hdOfs = td.ofsKeys + si * 8;
-                    if (hdOfs + 8 > m2Data.size()) break;
-                    uint32_t count  = readValue<uint32_t>(m2Data, hdOfs);
-                    uint32_t offset = readValue<uint32_t>(m2Data, hdOfs + 4);
-                    if (count == 0 || offset == 0) continue;
-                    if (offset + sizeof(uint16_t) > m2Data.size()) continue;
-                    uint16_t rawVal = readValue<uint16_t>(m2Data, offset);
-                    opacity = std::min(1.0f, rawVal / 32767.0f);
+            for (const auto& seq : track.sequences) {
+                if (!seq.floatValues.empty()) {
+                    opacity = seq.floatValues[0];
                     break;
                 }
             }

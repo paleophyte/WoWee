@@ -78,6 +78,7 @@ void EntitySpawner::update() {
     processPendingTransportRegistrations();
     processPendingTransportDoodads();
     processPendingMount();
+    processPendingRemotePlayerMounts();
     syncCreatureStealthVisuals();
 }
 
@@ -138,6 +139,8 @@ void EntitySpawner::shutdown() {
     creatureWeaponAttachAttempts_.clear();
     playerInstances_.clear();
     onlinePlayerAppearance_.clear();
+    remotePlayerMounts_.clear();
+    pendingRemotePlayerMounts_.clear();
     gameObjectInstances_.clear();
 }
 
@@ -164,6 +167,8 @@ void EntitySpawner::resetAllState() {
     creatureRenderPosCache_.clear();
     playerInstances_.clear();
     onlinePlayerAppearance_.clear();
+    remotePlayerMounts_.clear();
+    pendingRemotePlayerMounts_.clear();
     gameObjectInstances_.clear();
 
     // Clear animation state maps
@@ -218,6 +223,26 @@ void EntitySpawner::clearMountState() {
     mountInstanceId_ = 0;
     mountModelId_ = 0;
     pendingMountDisplayId_ = 0;
+}
+
+void EntitySpawner::setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId) {
+    if (guid == 0) return;
+    pendingRemotePlayerMounts_[guid] = displayId;
+}
+
+void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
+    auto it = remotePlayerMounts_.find(guid);
+    if (it == remotePlayerMounts_.end()) return;
+    if (renderer_) {
+        if (auto* cr = renderer_->getCharacterRenderer()) {
+            if (it->second.instanceId != 0) cr->removeInstance(it->second.instanceId);
+            auto playerIt = playerInstances_.find(guid);
+            if (playerIt != playerInstances_.end()) {
+                cr->playAnimation(playerIt->second, rendering::anim::STAND, true);
+            }
+        }
+    }
+    remotePlayerMounts_.erase(it);
 }
 
 void EntitySpawner::queueTransportRegistration(uint64_t guid, uint32_t entry, uint32_t displayId,

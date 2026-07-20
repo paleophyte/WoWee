@@ -2248,6 +2248,11 @@ void Application::update(float deltaTime) {
                         posIt != _pCreatureRenderPosCache.end()
                             ? std::optional<glm::vec3>(posIt->second)
                             : std::nullopt;
+                    const auto* remoteMount = entitySpawner_->getRemotePlayerMount(guid);
+                    std::optional<glm::vec3> previousMountPos = previousRenderPos;
+                    if (remoteMount && previousMountPos) {
+                        previousMountPos->z -= remoteMount->riderHeight;
+                    }
 
                     // Match creature projection: terrain alone is not a valid floor in
                     // WMO overlap regions (tunnels, buildings, bridges).
@@ -2255,13 +2260,19 @@ void Application::update(float deltaTime) {
                                               !_pCreatureSwimmingState.count(guid);
                     if (entity->isActivelyMoving() && groundPlayer) {
                         if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
-                                                            previousRenderPos)) {
+                                                            previousMountPos)) {
                             renderPos.z = *floorZ;
                         }
                     }
 
+                    const glm::vec3 mountRenderPos = renderPos;
+                    if (remoteMount) renderPos.z += remoteMount->riderHeight;
+
                     if (posIt == _pCreatureRenderPosCache.end()) {
                         charRenderer->setInstancePosition(instanceId, renderPos);
+                        if (remoteMount) {
+                            charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                        }
                         _pCreatureRenderPosCache[guid] = renderPos;
                     } else {
                         const glm::vec3 prevPos = posIt->second;
@@ -2280,10 +2291,16 @@ void Application::update(float deltaTime) {
 
                         if (deadOrCorpse || largeCorrection) {
                             charRenderer->setInstancePosition(instanceId, renderPos);
+                            if (remoteMount) {
+                                charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                            }
                         } else if (planarDistSq > kMoveThreshSq2 || dz > 0.08f) {
                             float planarDist = std::sqrt(planarDistSq);
                             float duration = std::clamp(planarDist / 5.5f, 0.05f, 0.22f);
                             charRenderer->moveInstanceTo(instanceId, renderPos, duration);
+                            if (remoteMount) {
+                                charRenderer->moveInstanceTo(remoteMount->instanceId, mountRenderPos, duration);
+                            }
                         }
                         posIt->second = renderPos;
 
@@ -2308,7 +2325,23 @@ void Application::update(float deltaTime) {
                             bool gotState = charRenderer->getAnimationState(instanceId, curAnimId, curT, curDur);
                             if (!gotState || curAnimId != rendering::anim::DEATH) {
                                 uint32_t targetAnim;
-                                if (isMovingNow) {
+                                if (remoteMount) {
+                                    // The rider keeps the mounted seat pose; locomotion
+                                    // belongs to the separately rendered mount model.
+                                    targetAnim = rendering::anim::MOUNT;
+                                    uint32_t mountAnim = rendering::anim::STAND;
+                                    if (isMovingNow) {
+                                        if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
+                                        else if (isWalkingNow) mountAnim = rendering::anim::WALK;
+                                        else mountAnim = rendering::anim::RUN;
+                                    } else if (isFlyingNow) {
+                                        mountAnim = rendering::anim::FLY_IDLE;
+                                    }
+                                    if (!charRenderer->hasAnimation(remoteMount->instanceId, mountAnim)) {
+                                        mountAnim = isMovingNow ? rendering::anim::RUN : rendering::anim::STAND;
+                                    }
+                                    charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
+                                } else if (isMovingNow) {
                                     if (isFlyingNow)        targetAnim = rendering::anim::FLY_FORWARD;
                                     else if (isSwimmingNow) targetAnim = rendering::anim::SWIM;
                                     else if (isWalkingNow)  targetAnim = rendering::anim::WALK;
@@ -2326,6 +2359,10 @@ void Application::update(float deltaTime) {
                     // Orientation sync
                     float renderYaw = entity->getOrientation() + glm::radians(90.0f);
                     charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
+                    if (remoteMount) {
+                        charRenderer->setInstanceRotation(remoteMount->instanceId,
+                                                          glm::vec3(0.0f, 0.0f, renderYaw));
+                    }
                 }
             }
             {

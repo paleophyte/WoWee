@@ -479,7 +479,15 @@ struct UpdateBlock {
     // Movement data (for MOVEMENT updates)
     bool hasMovement = false;
     float x = 0.0f, y = 0.0f, z = 0.0f, orientation = 0.0f;
+    float walkSpeed = 0.0f;
     float runSpeed = 0.0f;
+    float runBackSpeed = 0.0f;
+    float swimSpeed = 0.0f;
+    float swimBackSpeed = 0.0f;
+    float flightSpeed = 0.0f;
+    float flightBackSpeed = 0.0f;
+    float turnRate = 0.0f;
+    float pitchRate = 0.0f;
 
     // Update flags from movement block (for detecting transports, etc.)
     uint16_t updateFlags = 0;

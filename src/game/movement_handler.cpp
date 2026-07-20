@@ -70,6 +70,28 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 MovementHandler::MovementHandler(GameHandler& owner)
     : owner_(owner), movementInfo(owner.movementInfoRef()) {}
 
+void MovementHandler::applyServerMovementSpeeds(float walk, float run, float runBack,
+                                                 float swim, float swimBack, float flight,
+                                                 float flightBack, float turn, float pitch) {
+    auto apply = [](float value, float& destination) {
+        if (std::isfinite(value) && value > 0.01f && value < 200.0f) {
+            destination = value;
+        }
+    };
+    apply(walk, serverWalkSpeed_);
+    apply(run, serverRunSpeed_);
+    apply(runBack, serverRunBackSpeed_);
+    apply(swim, serverSwimSpeed_);
+    apply(swimBack, serverSwimBackSpeed_);
+    apply(flight, serverFlightSpeed_);
+    apply(flightBack, serverFlightBackSpeed_);
+    apply(turn, serverTurnRate_);
+    apply(pitch, serverPitchRate_);
+    LOG_INFO("Movement speeds restored from object update: walk=", serverWalkSpeed_,
+             " run=", serverRunSpeed_, " runBack=", serverRunBackSpeed_,
+             " swim=", serverSwimSpeed_, " flight=", serverFlightSpeed_);
+}
+
 void MovementHandler::registerOpcodes(DispatchTable& table) {
     // Creature movement
     table[Opcode::SMSG_MONSTER_MOVE] = [this](network::Packet& packet) { handleMonsterMove(packet); };

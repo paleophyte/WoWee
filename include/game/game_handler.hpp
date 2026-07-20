@@ -1951,6 +1951,10 @@ public:
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
     void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
 
+    // Mount display changes for visible players other than the local character.
+    using OtherPlayerMountCallback = std::function<void(uint64_t guid, uint32_t mountDisplayId)>;
+    void setOtherPlayerMountCallback(OtherPlayerMountCallback cb) { otherPlayerMountCallback_ = std::move(cb); }
+
     // Taxi terrain precaching callback
     using TaxiPrecacheCallback = std::function<void(const std::vector<glm::vec3>&)>;
     void setTaxiPrecacheCallback(TaxiPrecacheCallback cb) { taxiPrecacheCallback_ = std::move(cb); }
@@ -2320,7 +2324,6 @@ public:
     // ── Movement & Transport ─────────────────────────────────────────
     auto& followRenderPosRef() { return followRenderPos_; }
     auto& followTargetGuidRef() { return followTargetGuid_; }
-    auto& serverRunSpeedRef() { return serverRunSpeed_; }
     auto& onTaxiFlightRef() { return onTaxiFlight_; }
     auto& taxiLandingCooldownRef() { return taxiLandingCooldown_; }
     auto& taxiMountActiveRef() { return taxiMountActive_; }
@@ -2546,6 +2549,7 @@ public:
     auto& npcVendorCallbackRef() { return npcVendorCallback_; }
     auto& openLfgCallbackRef() { return openLfgCallback_; }
     auto& otherPlayerLevelUpCallbackRef() { return otherPlayerLevelUpCallback_; }
+    auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerEquipmentCallbackRef() { return playerEquipmentCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
@@ -3620,6 +3624,7 @@ private:
     std::vector<TempEnchantTimer> tempEnchantTimers_;
     std::vector<BookPage> bookPages_;            // pages collected for the current readable item
     OtherPlayerLevelUpCallback otherPlayerLevelUpCallback_;
+    OtherPlayerMountCallback otherPlayerMountCallback_;
     AchievementEarnedCallback achievementEarnedCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
     QuestProgressCallback questProgressCallback_;
@@ -3631,15 +3636,6 @@ private:
     OpenLfgCallback openLfgCallback_;
     uint32_t currentMountDisplayId_ = 0;
     uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
-    float serverRunSpeed_ = 7.0f;
-    float serverWalkSpeed_ = 2.5f;
-    float serverRunBackSpeed_ = 4.5f;
-    float serverSwimSpeed_ = 4.722f;
-    float serverSwimBackSpeed_ = 2.5f;
-    float serverFlightSpeed_ = 7.0f;
-    float serverFlightBackSpeed_ = 4.5f;
-    float serverTurnRate_ = 3.14159f;
-    float serverPitchRate_ = 3.14159f;
     bool playerDead_ = false;
     bool releasedSpirit_ = false;
     uint32_t corpseMapId_ = 0;

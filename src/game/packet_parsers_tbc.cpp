@@ -118,16 +118,14 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
 
         // Speeds (TBC: 8 values — walk, run, runBack, swim, swimBack, fly, flyBack, turn)
         if (rem() < 32) return false;
-        /*float walkSpeed =*/ packet.readFloat();
-        float runSpeed = packet.readFloat();
-        /*float runBackSpeed =*/ packet.readFloat();
-        /*float swimSpeed =*/ packet.readFloat();
-        /*float swimBackSpeed =*/ packet.readFloat();
-        /*float flySpeed =*/ packet.readFloat();
-        /*float flyBackSpeed =*/ packet.readFloat();
-        /*float turnRate =*/ packet.readFloat();
-
-        block.runSpeed = runSpeed;
+        block.walkSpeed       = packet.readFloat();
+        block.runSpeed        = packet.readFloat();
+        block.runBackSpeed    = packet.readFloat();
+        block.swimSpeed       = packet.readFloat();
+        block.swimBackSpeed   = packet.readFloat();
+        block.flightSpeed     = packet.readFloat();
+        block.flightBackSpeed = packet.readFloat();
+        block.turnRate        = packet.readFloat();
         block.moveFlags = moveFlags;
 
         // Spline data (TBC/WotLK: SPLINE_ENABLED = 0x08000000)
