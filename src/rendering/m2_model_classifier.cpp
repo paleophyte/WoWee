@@ -249,9 +249,15 @@ M2ClassificationResult classifyM2Model(
         "lavabubble",     "lavasplash",        "lavasteam",         "levelup",
         "lightshaft",     "mageportal",        "particleemitter",
         "smokepuff",      "sparkle",           "spotlight",
-        "steam",          "volumetriclight",   "wisps",             "worldtreeportal",
+        "volumetriclight", "wisps",            "worldtreeportal",
     });
-    r.isSpellEffect = hasAny(n, kEffectTokens)
+    // A bare "steam" substring collides with solid models — the Steam Tank
+    // vehicle, Steamwheedle doodads — turning them additive/unlit (glowing
+    // translucent). Genuine steam VFX are particle-driven, low-poly emitters,
+    // so gate the steam match on that geometry rather than the name alone.
+    const bool steamVfx = has(n, "steam")
+                        && emitterCount >= 1 && vertexCount <= 200;
+    r.isSpellEffect = hasAny(n, kEffectTokens) || steamVfx
                     || (emitterCount >= 3 && vertexCount <= 200);
     // Instance portals are spell effects too.
     if (r.isInstancePortal) r.isSpellEffect = true;
