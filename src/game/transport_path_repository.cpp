@@ -40,9 +40,11 @@ const PathEntry* TransportPathRepository::findPath(uint32_t pathId) const {
     return it != paths_.end() ? &it->second : nullptr;
 }
 
-const PathEntry* TransportPathRepository::findTaxiPath(uint32_t taxiPathId) const {
+const PathEntry* TransportPathRepository::findTaxiPath(uint32_t taxiPathId, uint32_t mapId) const {
     auto it = taxiPaths_.find(taxiPathId);
-    return it != taxiPaths_.end() ? &it->second : nullptr;
+    if (it == taxiPaths_.end()) return nullptr;
+    auto mIt = it->second.find(mapId);
+    return mIt != it->second.end() ? &mIt->second : nullptr;
 }
 
 bool TransportPathRepository::hasPathForEntry(uint32_t entry) const {
@@ -51,7 +53,12 @@ bool TransportPathRepository::hasPathForEntry(uint32_t entry) const {
 }
 
 bool TransportPathRepository::hasTaxiPath(uint32_t taxiPathId) const {
-    return taxiPaths_.find(taxiPathId) != taxiPaths_.end();
+    auto it = taxiPaths_.find(taxiPathId);
+    return it != taxiPaths_.end() && !it->second.empty();
+}
+
+bool TransportPathRepository::hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const {
+    return findTaxiPath(taxiPathId, mapId) != nullptr;
 }
 
 void TransportPathRepository::storePath(uint32_t pathId, PathEntry entry) {
@@ -497,13 +504,18 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
     LOG_INFO("TaxiPathNode.dbc: ", dbc.getRecordCount(), " records, ",
              dbc.getFieldCount(), " fields per record");
 
-    // Group nodes by PathID, storing (NodeIndex, MapID, X, Y, Z)
+    // Group nodes by (PathID, MapID), storing (NodeIndex, X, Y, Z).
+    // Paths are split per map: a continent-crossing boat path (e.g. Menethil ->
+    // Valgarde) has nodes on two maps, but only the segment on the transport's
+    // current map is valid world geometry. The old loader skipped any multi-map
+    // path entirely (to filter flight-master routes), which dropped every
+    // cross-continent boat. Instead, keep each map's segment separately and let
+    // the assignment pick the one matching the transport's map.
     struct TaxiNode {
         uint32_t nodeIndex;
-        uint32_t mapId;
         float x, y, z;
     };
-    std::map<uint32_t, std::vector<TaxiNode>> nodesByPath;
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<TaxiNode>> nodesByPathMap;
 
     for (uint32_t i = 0; i < dbc.getRecordCount(); i++) {
         uint32_t pathId = dbc.getUInt32(i, 1);    // PathID
@@ -513,26 +525,19 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         float posY = dbc.getFloat(i, 5);          // Y (server coords)
         float posZ = dbc.getFloat(i, 6);          // Z (server coords)
 
-        nodesByPath[pathId].push_back({nodeIdx, mapId, posX, posY, posZ});
+        nodesByPathMap[{pathId, mapId}].push_back({nodeIdx, posX, posY, posZ});
     }
 
-    // Build world-coordinate transport paths
+    // Build world-coordinate transport paths, one segment per (pathId, mapId).
     int pathsLoaded = 0;
-    for (auto& [pathId, nodes] : nodesByPath) {
+    for (auto& [key, nodes] : nodesByPathMap) {
+        const uint32_t pathId = key.first;
+        const uint32_t mapId = key.second;
         if (nodes.size() < 2) continue;
 
         // Sort by NodeIndex
         std::sort(nodes.begin(), nodes.end(),
                   [](const TaxiNode& a, const TaxiNode& b) { return a.nodeIndex < b.nodeIndex; });
-
-        // Skip flight-master paths (nodes on different maps are map teleports)
-        // Transport paths stay on the same map
-        bool sameMap = true;
-        uint32_t firstMap = nodes[0].mapId;
-        for (const auto& node : nodes) {
-            if (node.mapId != firstMap) { sameMap = false; break; }
-        }
-        if (!sameMap) continue;
 
         // Build timed points using distance-based timing (28 units/sec default boat speed)
         const float transportSpeed = 28.0f;  // units per second
@@ -569,11 +574,12 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         keys.push_back({cumulativeMs, keys[0].position});
 
         math::CatmullRomSpline spline(std::move(keys), false);
-        taxiPaths_.emplace(pathId, PathEntry(std::move(spline), pathId, false, true, true));
+        taxiPaths_[pathId].emplace(mapId, PathEntry(std::move(spline), pathId, false, true, true));
         pathsLoaded++;
     }
 
-    LOG_INFO("Loaded ", pathsLoaded, " TaxiPathNode transport paths (", nodesByPath.size(), " total taxi paths)");
+    LOG_INFO("Loaded ", pathsLoaded, " TaxiPathNode transport path segments (",
+             taxiPaths_.size(), " distinct taxi paths across all maps)");
     return pathsLoaded > 0;
 }
 

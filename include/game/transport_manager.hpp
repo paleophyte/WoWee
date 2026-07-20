@@ -152,12 +152,15 @@ public:
     // Load transport paths from TaxiPathNode.dbc (world-coordinate paths for MO_TRANSPORT)
     bool loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr);
 
-    // Check if a TaxiPathNode path exists for a given taxiPathId
+    // Check if a TaxiPathNode path exists for a given taxiPathId (on any map)
     bool hasTaxiPath(uint32_t taxiPathId) const;
+    // Check if a TaxiPathNode segment exists for a taxiPathId on a specific map
+    bool hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const;
 
-    // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives)
-    // Returns true if the transport was updated
-    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId);
+    // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives).
+    // mapId selects the per-map segment (cross-map boat paths only have valid world
+    // geometry on the transport's current map). Returns true if the transport was updated.
+    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId);
 
     // Check if a path exists for a given GameObject entry
     bool hasPathForEntry(uint32_t entry) const;

@@ -2299,16 +2299,29 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
             }
         }
 
-        // MO_TRANSPORT (type 15): assign TaxiPathNode path if available
+        // MO_TRANSPORT (type 15): assign TaxiPathNode path if available.
+        // Temporary WARN-level diagnostics for the WotLK boat routing investigation:
+        // show what the server actually reports for transport-type GOs so we can see
+        // whether type==15 and what taxiPathId (data[0]) it carries.
+        const uint32_t mapId = owner_.getCurrentMapId();
+        const bool transportType = (data.type == 11 || data.type == 15);
+        if (transportType && owner_.getTransportManager()) {
+            const uint32_t d0 = data.hasData ? data.data[0] : 0u;
+            const bool taxiKnown = d0 != 0 && owner_.getTransportManager()->hasTaxiPathForMap(d0, mapId);
+            LOG_DEBUG("Transport GO query: entry=", data.entry, " type=", data.type,
+                      " hasData=", data.hasData, " data[0]=", d0, " map=", mapId,
+                      " taxiPathOnMap=", taxiKnown);
+        }
         if (data.type == 15 && data.hasData && data.data[0] != 0 && owner_.getTransportManager()) {
             uint32_t taxiPathId = data.data[0];
-            if (owner_.getTransportManager()->hasTaxiPath(taxiPathId)) {
-                if (owner_.getTransportManager()->assignTaxiPathToTransport(data.entry, taxiPathId)) {
-                    LOG_DEBUG("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ", taxiPathId);
+            if (owner_.getTransportManager()->hasTaxiPathForMap(taxiPathId, mapId)) {
+                if (owner_.getTransportManager()->assignTaxiPathToTransport(data.entry, taxiPathId, mapId)) {
+                    LOG_INFO("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ", taxiPathId,
+                             " on map ", mapId);
                 }
             } else {
-                LOG_DEBUG("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
-                         " not found in TaxiPathNode.dbc");
+                LOG_WARNING("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
+                         " has no TaxiPathNode segment on map ", mapId);
             }
         }
     }

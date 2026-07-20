@@ -1134,10 +1134,11 @@ void EntitySpawner::processPendingTransportRegistrations() {
             auto goData = gameHandler_->getCachedGameObjectInfo(pending.entry);
             if (goData && goData->type == 15 && goData->hasData && goData->data[0] != 0) {
                 uint32_t taxiPathId = goData->data[0];
-                if (transportManager->hasTaxiPath(taxiPathId)) {
-                    transportManager->assignTaxiPathToTransport(pending.entry, taxiPathId);
+                const uint32_t mapId = gameHandler_->getCurrentMapId();
+                if (transportManager->hasTaxiPathForMap(taxiPathId, mapId)) {
+                    transportManager->assignTaxiPathToTransport(pending.entry, taxiPathId, mapId);
                     LOG_DEBUG("Assigned cached TaxiPathNode path for MO_TRANSPORT entry=", pending.entry,
-                             " taxiPathId=", taxiPathId);
+                             " taxiPathId=", taxiPathId, " map=", mapId);
                 }
             }
         }

@@ -43,9 +43,13 @@ public:
 
     // ── Lookup ──────────────────────────────────────────────
     const PathEntry* findPath(uint32_t pathId) const;
-    const PathEntry* findTaxiPath(uint32_t taxiPathId) const;
+    // Taxi paths are stored per-map: a continent-crossing boat path has nodes on
+    // two maps, and only the segment on the transport's current map is valid world
+    // geometry. mapId selects that segment.
+    const PathEntry* findTaxiPath(uint32_t taxiPathId, uint32_t mapId) const;
     bool hasPathForEntry(uint32_t entry) const;
-    bool hasTaxiPath(uint32_t taxiPathId) const;
+    bool hasTaxiPath(uint32_t taxiPathId) const;              // exists on any map
+    bool hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const;
 
     // ── Query ───────────────────────────────────────────────
     bool hasUsableMovingPathForEntry(uint32_t entry, float minXYRange = 1.0f) const;
@@ -61,7 +65,8 @@ public:
 
 private:
     std::unordered_map<uint32_t, PathEntry> paths_;
-    std::unordered_map<uint32_t, PathEntry> taxiPaths_;
+    // taxiPathId -> mapId -> world-coordinate path segment for that map.
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, PathEntry>> taxiPaths_;
 };
 
 } // namespace wowee::game

@@ -567,10 +567,15 @@ bool TransportManager::hasTaxiPath(uint32_t taxiPathId) const {
     return pathRepo_.hasTaxiPath(taxiPathId);
 }
 
-bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId) {
-    auto* taxiEntry = pathRepo_.findTaxiPath(taxiPathId);
+bool TransportManager::hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const {
+    return pathRepo_.hasTaxiPathForMap(taxiPathId, mapId);
+}
+
+bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId) {
+    auto* taxiEntry = pathRepo_.findTaxiPath(taxiPathId, mapId);
     if (!taxiEntry) {
-        LOG_WARNING("No TaxiPathNode path for taxiPathId=", taxiPathId);
+        LOG_WARNING("No TaxiPathNode segment for taxiPathId=", taxiPathId, " on mapId=", mapId,
+                    " (path exists on another map: ", pathRepo_.hasTaxiPath(taxiPathId), ")");
         return false;
     }
 
