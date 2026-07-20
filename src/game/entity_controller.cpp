@@ -1627,9 +1627,15 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
         owner_.gameObjectSpawnCallbackRef()(block.guid, go->getEntry(), go->getDisplayId(),
             go->getX(), go->getY(), go->getZ(), go->getOrientation(), goScale);
     }
-    // Fire transport move callback for transports (position update on re-creation)
+    // Fire transport move callback for transports (position update on re-creation).
+    // NOTE: do NOT mark the guid as server-updated here. A CREATE only carries the
+    // spawn position, not evidence that the server is authoritatively streaming this
+    // transport's motion. Marking it here forces preferServerData=true at spawn
+    // resolution, which puts client-animated ships/zeppelins into strict mode and
+    // skips the entry->DBC path remap — WotLK ship GO entries don't match
+    // TransportAnimation.dbc 1:1, so they were left stationary. Only genuine
+    // movement updates (onValuesUpdateGameObject / MOVEMENT blocks) set that flag.
     if (transportGuids_.count(block.guid) && owner_.transportMoveCallbackRef()) {
-        serverUpdatedTransportGuids_.insert(block.guid);
         owner_.transportMoveCallbackRef()(block.guid,
             go->getX(), go->getY(), go->getZ(), go->getOrientation());
     }
