@@ -2767,7 +2767,8 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                 ImGui::PushID(static_cast<int>(i));
 
                 bool selected = (gameHandler.getSelectedMailIndex() == static_cast<int>(i));
-                std::string label = mail.subject.empty() ? "(No Subject)" : mail.subject;
+                std::string label = gameHandler.getMailDisplaySubject(mail);
+                if (label.empty()) label = "(No Subject)";
 
                 // Unread indicator
                 if (!mail.read) {
@@ -2796,19 +2797,16 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), " [A]");
                 }
-                // Expiry warning if within 3 days
-                if (mail.expirationTime > 0.0f) {
-                    auto nowSec = static_cast<float>(std::time(nullptr));
-                    float secsLeft = mail.expirationTime - nowSec;
-                    if (secsLeft < 3.0f * 86400.0f && secsLeft > 0.0f) {
-                        ImGui::SameLine();
-                        int daysLeft = static_cast<int>(secsLeft / 86400.0f);
-                        if (daysLeft == 0) {
-                            ImGui::TextColored(colors::kBrightRed, " [expires today!]");
-                        } else {
-                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
-                                " [expires in %dd]", daysLeft);
-                        }
+                // Expiry warning if within 3 days. expirationTime is days
+                // remaining (server sends (expire_time - now) / DAY as a float).
+                if (mail.expirationTime > 0.0f && mail.expirationTime < 3.0f) {
+                    ImGui::SameLine();
+                    int daysLeft = static_cast<int>(mail.expirationTime);
+                    if (daysLeft == 0) {
+                        ImGui::TextColored(colors::kBrightRed, " [expires today!]");
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
+                            " [expires in %dd]", daysLeft);
                     }
                 }
 
@@ -2823,29 +2821,26 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
             int sel = gameHandler.getSelectedMailIndex();
             if (sel >= 0 && sel < static_cast<int>(inbox.size())) {
                 const auto& mail = inbox[sel];
+                const std::string displaySubject = gameHandler.getMailDisplaySubject(mail);
 
                 ImGui::TextColored(colors::kWarmGold, "%s",
-                    mail.subject.empty() ? "(No Subject)" : mail.subject.c_str());
+                    displaySubject.empty() ? "(No Subject)" : displaySubject.c_str());
                 ImGui::Text("From: %s", mail.senderName.c_str());
 
                 if (mail.messageType == 2) {
                     ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.2f, 1.0f), "[Auction House]");
                 }
 
-                // Show expiry date in the detail panel
+                // Show expiry date in the detail panel. expirationTime is days
+                // remaining, so convert to an absolute date relative to now.
                 if (mail.expirationTime > 0.0f) {
-                    auto nowSec = static_cast<float>(std::time(nullptr));
-                    float secsLeft = mail.expirationTime - nowSec;
-                    // Format absolute expiry as a date using struct tm
-                    time_t expT = static_cast<time_t>(mail.expirationTime);
+                    time_t expT = std::time(nullptr) +
+                        static_cast<time_t>(mail.expirationTime * 86400.0f);
                     struct tm* tmExp = std::localtime(&expT);
                     if (tmExp) {
                         const char* mname = kMonthAbbrev[tmExp->tm_mon];
-                        int daysLeft = static_cast<int>(secsLeft / 86400.0f);
-                        if (secsLeft <= 0.0f) {
-                            ImGui::TextColored(kColorGray,
-                                "Expired: %s %d, %d", mname, tmExp->tm_mday, 1900 + tmExp->tm_year);
-                        } else if (secsLeft < 3.0f * 86400.0f) {
+                        int daysLeft = static_cast<int>(mail.expirationTime);
+                        if (mail.expirationTime < 3.0f) {
                             ImGui::TextColored(kColorRed,
                                 "Expires: %s %d, %d (%d day%s!)",
                                 mname, tmExp->tm_mday, 1900 + tmExp->tm_year,
@@ -2858,8 +2853,30 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                 }
                 ImGui::Separator();
 
-                // Body text
-                if (!mail.body.empty()) {
+                // Body text. Auction-house mail carries an encoded invoice
+                // string that the retail client renders as a money breakdown
+                // rather than printing raw.
+                game::AuctionMailInvoice invoice;
+                if (mail.messageType == 2 &&
+                    game::parseAuctionMailBody(mail.body, invoice)) {
+                    if (invoice.bid > 0) {
+                        ImGui::TextDisabled("Bid:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.bid);
+                    }
+                    if (invoice.buyout > 0) {
+                        ImGui::TextDisabled("Buyout:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.buyout);
+                    }
+                    if (invoice.deposit > 0) {
+                        ImGui::TextDisabled("Deposit:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.deposit);
+                    }
+                    if (invoice.consignment > 0) {
+                        ImGui::TextDisabled("Auction House Cut:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.consignment);
+                    }
+                    ImGui::Separator();
+                } else if (!mail.body.empty()) {
                     ImGui::TextWrapped("%s", mail.body.c_str());
                     ImGui::Separator();
                 }

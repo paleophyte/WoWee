@@ -2105,6 +2105,7 @@ public:
     // Mail
     bool isMailboxOpen() const;
     const std::vector<MailMessage>& getMailInbox() const;
+    std::string getMailDisplaySubject(const MailMessage& mail);
     int getSelectedMailIndex() const;
     void setSelectedMailIndex(int idx);
     bool isMailComposeOpen() const;

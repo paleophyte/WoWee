@@ -2013,6 +2013,12 @@ void InventoryHandler::handleMailListResult(network::Packet& packet) {
     if (!owner_.getPacketParsers()->parseMailList(packet, mailInbox_)) return;
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
     for (const auto& mail : mailInbox_) {
+        if (mail.messageType == 2) {
+            AuctionMailSubject auction;
+            if (parseAuctionMailSubject(mail.subject, auction)) {
+                owner_.ensureItemInfo(auction.itemEntry);
+            }
+        }
         for (const auto& att : mail.attachments) {
             if (att.itemId != 0) owner_.ensureItemInfo(att.itemId);
         }
@@ -2808,6 +2814,21 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         owner_.itemInfoCacheRef()[data.entry] = data;
         rebuildOnlineInventory();
         maybeDetectVisibleItemLayout();
+
+        // Auction mail subjects contain an item entry rather than display text.
+        // Refresh FrameXML mail rows once that item's name becomes available.
+        bool resolvedAuctionSubject = false;
+        for (const auto& mail : mailInbox_) {
+            AuctionMailSubject auction;
+            if (mail.messageType == 2 && parseAuctionMailSubject(mail.subject, auction) &&
+                auction.itemEntry == data.entry) {
+                resolvedAuctionSubject = true;
+                break;
+            }
+        }
+        if (resolvedAuctionSubject && owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("MAIL_INBOX_UPDATE", {});
+        }
 
         // Flush any deferred loot notifications waiting on this item's name/quality.
         for (auto it = owner_.pendingItemPushNotifsRef().begin(); it != owner_.pendingItemPushNotifsRef().end(); ) {

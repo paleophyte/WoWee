@@ -10,6 +10,71 @@ Application* Application::instance = nullptr;
 
 using namespace wowee::game;
 
+TEST_CASE("Auction mail subjects decode into localized-style item text", "[mail][auction]") {
+    AuctionMailSubject subject;
+    REQUIRE(parseAuctionMailSubject("4705:0:1:38784081:1", subject));
+    CHECK(subject.itemEntry == 4705);
+    CHECK(subject.response == 1);
+    CHECK(subject.lotId == 38784081);
+    CHECK(subject.itemCount == 1);
+    CHECK(formatAuctionMailSubject(subject, "Test Boots") == "Auction won: Test Boots");
+
+    static constexpr const char* expected[] = {
+        "Outbid on Test Boots",
+        "Auction won: Test Boots",
+        "Auction successful: Test Boots",
+        "Auction expired: Test Boots",
+        "Auction cancelled: Test Boots",
+        "Auction cancelled: Test Boots",
+        "Sale Pending: Test Boots",
+    };
+    for (uint32_t response = 0; response < 7; ++response) {
+        subject.response = response;
+        CHECK(formatAuctionMailSubject(subject, "Test Boots") == expected[response]);
+    }
+
+    CHECK_FALSE(parseAuctionMailSubject("ordinary player subject", subject));
+    CHECK_FALSE(parseAuctionMailSubject("4705:1:1:38784081:1", subject));
+    CHECK_FALSE(parseAuctionMailSubject("4705:0:7:38784081:1", subject));
+
+    REQUIRE(parseAuctionMailSubject("4705:0:3", subject));
+    CHECK(formatAuctionMailSubject(subject, "Test Boots") == "Auction expired: Test Boots");
+}
+
+TEST_CASE("Auction mail invoice body decodes into a money breakdown", "[mail][auction]") {
+    AuctionMailInvoice invoice;
+
+    // Auction-won body: ownerGuid:bid:buyout, with the width-16 space padding
+    // and trailing zero fields some cores append.
+    REQUIRE(parseAuctionMailBody("           88a79:6000:6000:0:0:0:0", invoice));
+    CHECK(invoice.ownerGuidLow == 0x88a79);
+    CHECK(invoice.bid == 6000);
+    CHECK(invoice.buyout == 6000);
+    CHECK(invoice.deposit == 0);
+    CHECK(invoice.consignment == 0);
+
+    // Minimal three-field won body (legacy cores).
+    REQUIRE(parseAuctionMailBody("1a2b:500:0", invoice));
+    CHECK(invoice.ownerGuidLow == 0x1a2b);
+    CHECK(invoice.bid == 500);
+    CHECK(invoice.buyout == 0);
+
+    // Successful-sale body carries deposit and consignment (AH cut).
+    REQUIRE(parseAuctionMailBody("ff:10000:12000:250:600", invoice));
+    CHECK(invoice.bid == 10000);
+    CHECK(invoice.buyout == 12000);
+    CHECK(invoice.deposit == 250);
+    CHECK(invoice.consignment == 600);
+
+    // Non-invoice bodies (ordinary player mail) must not parse.
+    CHECK_FALSE(parseAuctionMailBody("Hey, thanks for the trade!", invoice));
+    CHECK_FALSE(parseAuctionMailBody("88a79:6000", invoice));  // too few fields
+    CHECK_FALSE(parseAuctionMailBody("", invoice));
+    CHECK_FALSE(parseAuctionMailBody("88a79::6000", invoice)); // empty field
+    CHECK_FALSE(parseAuctionMailBody("zzz:1:2", invoice));     // bad hex guid
+    CHECK_FALSE(parseAuctionMailBody("ff:1x:2", invoice));     // bad decimal
+}
+
 TEST_CASE("WotLK mail list parses uint32 attached money and inclusive entry size", "[mail]") {
     wowee::network::Packet entry;
     entry.writeUInt32(0x12345678);          // message id

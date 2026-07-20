@@ -851,10 +851,11 @@ void registerInventoryLuaAPI(lua_State* L) {
             lua_pushstring(L, "Interface\\Icons\\INV_Letter_15"); // packageIcon
             lua_pushstring(L, "Interface\\Icons\\INV_Letter_15"); // stationeryIcon
             lua_pushstring(L, mail.senderName.c_str());           // sender
-            lua_pushstring(L, mail.subject.c_str());              // subject
+            const std::string subject = gh->getMailDisplaySubject(mail);
+            lua_pushstring(L, subject.c_str());                   // subject
             lua_pushnumber(L, mail.money);                        // money (copper)
             lua_pushnumber(L, mail.cod);                          // COD
-            lua_pushnumber(L, mail.expirationTime / 86400.0f);   // daysLeft
+            lua_pushnumber(L, mail.expirationTime);              // daysLeft (server sends days)
             lua_pushboolean(L, mail.attachments.empty() ? 0 : 1); // hasItem
             lua_pushboolean(L, mail.read ? 1 : 0);               // wasRead
             lua_pushboolean(L, 0);                                // wasReturned
