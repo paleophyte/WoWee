@@ -1836,7 +1836,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                             [](const auto& a, const auto& b) {
                                 return a.second.w < b.second.w;
                             });
-                        uint16_t suspensionBone = dominant->first;
+                        size_t suspensionBone = dominant->first;
                         while (suspensionBone < model.bones.size()) {
                             const int16_t parent = model.bones[suspensionBone].parentBone;
                             if (parent < 0 || static_cast<size_t>(parent) >= model.bones.size()) break;
@@ -1846,11 +1846,11 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                             // bulb. Stop before a generic model/root bone at the
                             // placement origin poisons the projection direction.
                             if (span.z <= 0.01f || glm::length(span) > 5.0f) break;
-                            suspensionBone = static_cast<uint16_t>(parent);
+                            suspensionBone = static_cast<size_t>(parent);
                         }
                         if (suspensionBone < model.bones.size() &&
                             suspensionBone != dominant->first) {
-                            bgpu.lightSuspensionBone = suspensionBone;
+                            bgpu.lightSuspensionBone = static_cast<uint16_t>(suspensionBone);
                             bgpu.lightSuspensionPoint = model.bones[suspensionBone].pivot;
                         }
                     }
