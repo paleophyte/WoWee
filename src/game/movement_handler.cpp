@@ -3294,7 +3294,8 @@ void MovementHandler::checkAreaTriggers() {
 
 void MovementHandler::setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                              const glm::vec3& localOffset, bool hasLocalOrientation,
-                                             float localOrientation) {
+                                             float localOrientation,
+                                             bool offsetNeedsTransportResolution) {
     if (childGuid == 0 || transportGuid == 0) {
         return;
     }
@@ -3305,6 +3306,7 @@ void MovementHandler::setTransportAttachment(uint64_t childGuid, ObjectType type
     attachment.localOffset = localOffset;
     attachment.hasLocalOrientation = hasLocalOrientation;
     attachment.localOrientation = localOrientation;
+    attachment.offsetNeedsTransportResolution = offsetNeedsTransportResolution;
 }
 
 void MovementHandler::clearTransportAttachment(uint64_t childGuid) {
@@ -3324,7 +3326,7 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
     std::vector<uint64_t> stale;
     stale.reserve(8);
 
-    for (const auto& [childGuid, attachment] : owner_.transportAttachmentsRef()) {
+    for (auto& [childGuid, attachment] : owner_.transportAttachmentsRef()) {
         auto entity = owner_.getEntityManager().getEntity(childGuid);
         if (!entity) {
             stale.push_back(childGuid);
@@ -3334,6 +3336,12 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
         ActiveTransport* transport = owner_.getTransportManager()->getTransport(attachment.transportGuid);
         if (!transport) {
             continue;
+        }
+
+        if (attachment.offsetNeedsTransportResolution) {
+            attachment.localOffset = owner_.getTransportManager()->serverToTransportLocal(
+                attachment.transportGuid, attachment.localOffset);
+            attachment.offsetNeedsTransportResolution = false;
         }
 
         glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(

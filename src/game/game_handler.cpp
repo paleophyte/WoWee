@@ -1327,8 +1327,11 @@ void GameHandler::loadCharacterConfig() {
 
 void GameHandler::setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                          const glm::vec3& localOffset, bool hasLocalOrientation,
-                                         float localOrientation) {
-    if (movementHandler_) movementHandler_->setTransportAttachment(childGuid, type, transportGuid, localOffset, hasLocalOrientation, localOrientation);
+                                         float localOrientation,
+                                         bool offsetNeedsTransportResolution) {
+    if (movementHandler_) movementHandler_->setTransportAttachment(
+        childGuid, type, transportGuid, localOffset, hasLocalOrientation,
+        localOrientation, offsetNeedsTransportResolution);
 }
 
 void GameHandler::clearTransportAttachment(uint64_t childGuid) {

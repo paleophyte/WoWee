@@ -428,13 +428,20 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
 
     if (block.onTransport && block.transportGuid != 0) {
         const glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
-        glm::vec3 localOffset = owner_.getTransportManager()
+        const bool transportResolved = owner_.getTransportManager() &&
+            owner_.getTransportManager()->getTransport(block.transportGuid);
+        // Preserve the raw wire offset if the child arrives before its parent
+        // transport during a map load. Its coordinate convention depends on
+        // whether that parent is an M2 or WMO and can only be decided once the
+        // transport has registered.
+        glm::vec3 localOffset = transportResolved
             ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
-            : core::coords::serverToCanonical(serverOffset);
+            : serverOffset;
         const bool hasLocalOrientation = (block.updateFlags & 0x0020) != 0; // UPDATEFLAG_LIVING
         float localOriCanonical = core::coords::normalizeAngleRad(-block.transportO);
         owner_.setTransportAttachment(block.guid, entityType, block.transportGuid,
-                               localOffset, hasLocalOrientation, localOriCanonical);
+                               localOffset, hasLocalOrientation, localOriCanonical,
+                               !transportResolved);
         if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(block.transportGuid)) {
             glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(block.transportGuid, localOffset);
             entity->setPosition(composed.x, composed.y, composed.z, entity->getOrientation());

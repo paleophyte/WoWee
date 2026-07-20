@@ -206,6 +206,7 @@ private:
     bool hasWMORideLock_ = false;
     uint64_t lastWMORideTransportGuid_ = 0;
     uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
+    bool krakenDeckFloorPending_ = false;
 
     bool wasAutoAttacking_ = false;
 

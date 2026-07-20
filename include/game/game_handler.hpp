@@ -2592,7 +2592,8 @@ public:
     void sendPing();
     void setTransportAttachment(uint64_t childGuid, ObjectType type,
                                 uint64_t transportGuid, const glm::vec3& localOffset,
-                                bool hasLocalOrientation, float localOrientation);
+                                bool hasLocalOrientation, float localOrientation,
+                                bool offsetNeedsTransportResolution = false);
     void clearTransportAttachment(uint64_t childGuid);
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
@@ -2624,6 +2625,7 @@ public:
         glm::vec3 localOffset{0.0f};
         float localOrientation = 0.0f;
         bool hasLocalOrientation = false;
+        bool offsetNeedsTransportResolution = false;
     };
     struct AreaTriggerEntry {
         uint32_t id = 0;

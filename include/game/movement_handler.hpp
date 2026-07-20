@@ -53,7 +53,8 @@ public:
     // Transport attachment
     void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                 const glm::vec3& localOffset, bool hasLocalOrientation,
-                                float localOrientation);
+                                float localOrientation,
+                                bool offsetNeedsTransportResolution = false);
     void clearTransportAttachment(uint64_t childGuid);
     void updateAttachedTransportChildren(float deltaTime);
 

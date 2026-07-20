@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <string>
 #include <mutex>
+#include <optional>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -150,6 +151,9 @@ public:
     bool isPointOnTransportDeck(uint64_t transportGuid,
                                 const glm::vec3& canonicalPosition,
                                 float maxFloorDelta = 1.25f) const;
+    std::optional<float> getTransportDeckFloorHeight(
+        uint64_t transportGuid,
+        const glm::vec3& canonicalPosition) const;
 
     void loadPathFromNodes(uint32_t pathId, const std::vector<glm::vec3>& waypoints, bool looping = true, float speed = 18.0f);
     void setDeckBounds(uint64_t guid, const glm::vec3& min, const glm::vec3& max);

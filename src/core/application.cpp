@@ -1601,7 +1601,7 @@ void Application::update(float deltaTime) {
                                           !gameHandler->isMounted();
                 renderer->getCameraController()->setExternalFollow(
                     externallyDrivenMotion || landingClampActive || hearthFreeze ||
-                    transportTransferFreeze);
+                    transportTransferFreeze || krakenDeckFloorPending_);
                 renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
                 if (externallyDrivenMotion) {
                     // Drop any stale local movement toggles while server drives taxi motion.
@@ -1787,6 +1787,9 @@ void Application::update(float deltaTime) {
                         const bool sameRideFrame = hasWMORideLock_ &&
                             lastWMORideTransportGuid_ == transportGuid &&
                             lastWMORideMapId_ == mapId;
+                        if (!sameRideFrame && tr->entry == 190536u) {
+                            krakenDeckFloorPending_ = true;
+                        }
                         if (sameRideFrame && renderer->getCameraController()) {
                             const glm::vec3 localMotion =
                                 tentativeRender - lastWMORideLockedRender_;
@@ -1796,6 +1799,35 @@ void Application::update(float deltaTime) {
                             }
                             if (!renderer->getCameraController()->isGrounded()) {
                                 intendedRender.z += localMotion.z;
+                            }
+                        }
+
+                        // Moving WMO instances are intentionally excluded from the
+                        // camera controller's ordinary static-world floor query. Kraken's
+                        // entry ramp therefore needs its exact transport-instance floor
+                        // held after boarding, or gravity is folded into the attachment
+                        // and pulls the rider through the hull. Keep this entry-scoped so
+                        // established ship handling in other expansions is unchanged.
+                        // An upward jump remains fully controlled by vertical physics.
+                        auto* cameraController = renderer->getCameraController();
+                        if (tr->entry == 190536u && cameraController &&
+                            !cameraController->isJumping()) {
+                            const glm::vec3 intendedCanonical =
+                                core::coords::renderToCanonical(intendedRender);
+                            const auto deckFloor = tm->getTransportDeckFloorHeight(
+                                transportGuid, intendedCanonical);
+                            if (deckFloor && intendedRender.z >= *deckFloor - 3.0f &&
+                                intendedRender.z <= *deckFloor + 0.35f) {
+                                intendedRender.z = *deckFloor + 0.10f;
+                                cameraController->suppressVerticalPhysics();
+                                krakenDeckFloorPending_ = false;
+                            } else if (krakenDeckFloorPending_) {
+                                // A continent transfer registers the transport GO
+                                // before its WMO collision necessarily finishes loading.
+                                // Preserve the local offset until this exact instance's
+                                // deck exists instead of releasing gravity after a timer.
+                                intendedRender = expectedRender;
+                                cameraController->suppressVerticalPhysics();
                             }
                         }
 
@@ -1826,6 +1858,7 @@ void Application::update(float deltaTime) {
                     hasWMORideLock_ = false;
                     lastWMORideTransportGuid_ = 0;
                     lastWMORideMapId_ = 0xFFFFFFFFu;
+                    krakenDeckFloorPending_ = false;
                     glm::vec3 renderPos = renderer->getCharacterPosition();
 
                     // M2 transport riding: resolve in canonical space and lock once per frame.
