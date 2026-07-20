@@ -59,6 +59,17 @@ struct M2ModelGPU {
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
+
+        struct LightBoneAnchor {
+            uint16_t bone = 0;
+            // Sum of (vertex position * skin weight, skin weight), divided by
+            // sampled vertex count. Transforming and summing these reproduces
+            // the animated center of the skinned glow geometry.
+            glm::vec4 weightedPoint{0.0f};
+        };
+        std::vector<LightBoneAnchor> lightBoneAnchors;
+        uint16_t lightSuspensionBone = UINT16_MAX;
+        glm::vec3 lightSuspensionPoint{0.0f};
     };
 
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;

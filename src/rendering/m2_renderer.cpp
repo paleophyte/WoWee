@@ -155,8 +155,7 @@ uint32_t M2Renderer::gatherLocalLights(const glm::vec3& cameraPos,
                     if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
                 }
             } else {
-                worldPos = glm::vec3(
-                    instance.modelMatrix * glm::vec4(batch.center, 1.0f));
+                worldPos = animatedBatchLightWorldCenter(instance, batch);
             }
             const glm::vec3 delta = worldPos - cameraPos;
             const float distSq = glm::dot(delta, delta);
@@ -1807,17 +1806,54 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             if ((bgpu.blendMode >= 3 || bgpu.colorKeyBlack || bgpu.glowCardLike) && batch.indexCount > 0) {
                 glm::vec3 sum(0.0f);
                 uint32_t counted = 0;
+                std::unordered_map<uint16_t, glm::vec4> boneAnchorSums;
                 for (uint32_t j = batch.indexStart; j < batch.indexStart + batch.indexCount; j++) {
                     if (j < model.indices.size()) {
                         uint16_t vi = model.indices[j];
                         if (vi < model.vertices.size()) {
-                            sum += model.vertices[vi].position;
+                            const auto& vertex = model.vertices[vi];
+                            sum += vertex.position;
+                            for (size_t influence = 0; influence < 4; ++influence) {
+                                const float weight = static_cast<float>(vertex.boneWeights[influence]) / 255.0f;
+                                if (weight <= 0.0f) continue;
+                                const uint16_t bone = vertex.boneIndices[influence];
+                                boneAnchorSums[bone] += glm::vec4(vertex.position * weight, weight);
+                            }
                             counted++;
                         }
                     }
                 }
                 if (counted > 0) {
                     bgpu.center = sum / static_cast<float>(counted);
+                    bgpu.lightBoneAnchors.reserve(boneAnchorSums.size());
+                    for (const auto& [bone, weightedPoint] : boneAnchorSums) {
+                        bgpu.lightBoneAnchors.push_back({
+                            bone, weightedPoint / static_cast<float>(counted)});
+                    }
+                    if (!boneAnchorSums.empty() && !model.bones.empty()) {
+                        const auto dominant = std::max_element(
+                            boneAnchorSums.begin(), boneAnchorSums.end(),
+                            [](const auto& a, const auto& b) {
+                                return a.second.w < b.second.w;
+                            });
+                        uint16_t suspensionBone = dominant->first;
+                        while (suspensionBone < model.bones.size()) {
+                            const int16_t parent = model.bones[suspensionBone].parentBone;
+                            if (parent < 0 || static_cast<size_t>(parent) >= model.bones.size()) break;
+                            const glm::vec3 span = model.bones[parent].pivot -
+                                                   model.bones[suspensionBone].pivot;
+                            // A hanging chain climbs through parents above the
+                            // bulb. Stop before a generic model/root bone at the
+                            // placement origin poisons the projection direction.
+                            if (span.z <= 0.01f || glm::length(span) > 5.0f) break;
+                            suspensionBone = static_cast<uint16_t>(parent);
+                        }
+                        if (suspensionBone < model.bones.size() &&
+                            suspensionBone != dominant->first) {
+                            bgpu.lightSuspensionBone = suspensionBone;
+                            bgpu.lightSuspensionPoint = model.bones[suspensionBone].pivot;
+                        }
+                    }
                     float maxDist = 0.0f;
                     for (uint32_t j = batch.indexStart; j < batch.indexStart + batch.indexCount; j++) {
                         if (j < model.indices.size()) {

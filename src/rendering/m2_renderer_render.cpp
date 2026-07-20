@@ -1195,8 +1195,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                     if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
                                 }
                             } else {
-                                worldPos = glm::vec3(inst.modelMatrix *
-                                                     glm::vec4(batch.center, 1.0f));
+                                worldPos = animatedBatchWorldCenter(inst, batch);
                             }
                             // Preserved emissive glass writes opaque depth before
                             // this additive point sprite. Move only the visual
