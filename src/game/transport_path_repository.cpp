@@ -120,18 +120,21 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
     };
 
     // Known AzerothCore transport entry remaps (WotLK): server entry -> moving DBC path id.
-    // These entries commonly do not match TransportAnimation.dbc ids 1:1.
+    // Zeppelins are client-animated and map to real zeppelin TransportAnimation paths.
+    // The continent-crossing SHIPS (Maiden's Fancy, Bravery, Black Princess, and the
+    // icebreakers) were previously remapped to Deeprun Tram paths (176080-176085) here
+    // — a straight ~2482-unit underground line — which sailed them underwater to
+    // nowhere. Those ships are server-driven MO_TRANSPORT objects with no
+    // TransportAnimation.dbc entry; they get their route from their taxi path
+    // (GO template data[0] -> TaxiPathNode.dbc), assigned by the GO-query hook. So
+    // they are intentionally NOT listed here — a ship with no real/taxi path stays
+    // docked rather than borrowing an unrelated route (see the looksLikeShip guard below).
     static const std::unordered_map<uint32_t, uint32_t> kEntryRemap = {
-        {176231u, 176080u}, // The Maiden's Fancy
-        {176310u, 176081u}, // The Bravery
-        {20808u,  176082u}, // The Black Princess
-        {164871u, 193182u}, // The Thundercaller
-        {176495u, 193183u}, // The Purple Princess
-        {175080u, 193182u}, // The Iron Eagle
-        {181689u, 193183u}, // Cloudkisser
-        {186238u, 193182u}, // The Mighty Wind
-        {181688u, 176083u}, // Northspear (icebreaker)
-        {190536u, 176084u}, // Stormwind's Pride (icebreaker)
+        {164871u, 193182u}, // The Thundercaller (zeppelin)
+        {176495u, 193183u}, // The Purple Princess (zeppelin)
+        {175080u, 193182u}, // The Iron Eagle (zeppelin)
+        {181689u, 193183u}, // Cloudkisser (zeppelin)
+        {186238u, 193182u}, // The Mighty Wind (zeppelin)
     };
 
     auto itMapped = kEntryRemap.find(entry);
@@ -162,10 +165,13 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
         (displayId == 3031u || displayId == 7546u || displayId == 1587u || displayId == 807u || displayId == 808u);
 
     if (looksLikeShip) {
-        static constexpr uint32_t kShipCandidates[] = {176080u, 176081u, 176082u, 176083u, 176084u, 176085u, 194675u};
-        for (uint32_t id : kShipCandidates) {
-            if (isUsableMovingPath(id)) return id;
-        }
+        // Continent-crossing ships are server-driven MO_TRANSPORT objects: their
+        // route comes from their taxi path (TaxiPathNode.dbc via GO template data[0]),
+        // not from TransportAnimation.dbc. There is no correct TransportAnimation
+        // fallback for them — borrowing any (previously the Deeprun Tram paths) sent
+        // them underwater. Return 0 so the ship stays docked until the GO-query hook
+        // assigns its taxi path; never fabricate a path from an unrelated route.
+        return 0;
     }
 
     if (looksLikeZeppelin) {

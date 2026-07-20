@@ -574,10 +574,15 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         return false;
     }
 
-    // Find transport(s) with matching entry that are at (0,0,0)
+    // Assign to every transport with this entry. TaxiPathNode paths are absolute
+    // world-coordinate routes (worldCoords=true, basePosition=0), so they are
+    // independent of where the GO spawned. MO_TRANSPORT boats spawn at their dock
+    // (a non-origin position), not at (0,0,0), so an origin-only gate here left
+    // every continent-crossing ship without its route and falling back to an
+    // unrelated TransportAnimation path (Deeprun Tram) instead.
+    bool assignedAny = false;
     for (auto& [guid, transport] : transports_) {
         if (transport.entry != entry) continue;
-        if (glm::dot(transport.position, transport.position) > 1.0f) continue;  // Already has real position
 
         // Copy the taxi path into the main paths (indexed by GO entry for this transport)
         PathEntry copied(taxiEntry->spline, entry, taxiEntry->zOnly, taxiEntry->fromDBC, taxiEntry->worldCoords);
@@ -606,11 +611,13 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
                  " waypoints=", storedEntry ? storedEntry->spline.keyCount() : 0u,
                  " duration=", storedEntry ? storedEntry->spline.durationMs() : 0u, "ms",
                  " startPos=(", transport.position.x, ", ", transport.position.y, ", ", transport.position.z, ")");
-        return true;
+        assignedAny = true;
     }
 
-    LOG_DEBUG("No transport at (0,0,0) found for entry=", entry, " taxiPathId=", taxiPathId);
-    return false;
+    if (!assignedAny) {
+        LOG_DEBUG("No registered transport found for entry=", entry, " taxiPathId=", taxiPathId);
+    }
+    return assignedAny;
 }
 
 bool TransportManager::hasPathForEntry(uint32_t entry) const {
