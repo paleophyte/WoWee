@@ -171,3 +171,44 @@ TEST_CASE("SMSG_MESSAGECHAT whispers use the exact layout for every expansion", 
         REQUIRE_FALSE(packet.hasData());
     }
 }
+
+TEST_CASE("Addon chat is identified before it reaches visible whisper history", "[chat][addon]") {
+    MessageChatData addon;
+    addon.type = ChatType::WHISPER;
+    addon.language = ChatLanguage::ADDON;
+    addon.message = "TRP3\tHI_NI\t1";
+
+    std::string prefix;
+    std::string payload;
+    REQUIRE(decodeAddonChatPayload(addon, prefix, payload));
+    REQUIRE(prefix == "TRP3");
+    REQUIRE(payload == "HI_NI\t1");
+
+    SECTION("legacy spoken-language addon envelopes remain hidden") {
+        addon.language = ChatLanguage::COMMON;
+        REQUIRE(decodeAddonChatPayload(addon, prefix, payload));
+    }
+
+    SECTION("ordinary whispers remain player chat") {
+        addon.language = ChatLanguage::COMMON;
+        addon.message = "meet me at the tram";
+        REQUIRE_FALSE(decodeAddonChatPayload(addon, prefix, payload));
+    }
+
+    SECTION("tabs in ordinary say messages remain player chat") {
+        addon.type = ChatType::SAY;
+        addon.language = ChatLanguage::COMMON;
+        addon.message = "hello\tthere";
+        REQUIRE_FALSE(decodeAddonChatPayload(addon, prefix, payload));
+    }
+
+    SECTION("outgoing addon packets use LANG_ADDON") {
+        auto packet = MessageChatPacket::build(
+            ChatType::WHISPER, ChatLanguage::ADDON, "TRP3\tHI_NI\t1", "Frezha");
+        REQUIRE(packet.readUInt32() == static_cast<uint32_t>(ChatType::WHISPER));
+        REQUIRE(packet.readUInt32() == static_cast<uint32_t>(ChatLanguage::ADDON));
+        REQUIRE(packet.readString() == "Frezha");
+        REQUIRE(packet.readString() == "TRP3\tHI_NI\t1");
+        REQUIRE_FALSE(packet.hasData());
+    }
+}

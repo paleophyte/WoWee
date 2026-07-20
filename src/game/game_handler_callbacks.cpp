@@ -1301,6 +1301,10 @@ void GameHandler::sendChatMessage(ChatType type, const std::string& message, con
     if (chatHandler_) chatHandler_->sendChatMessage(type, message, target);
 }
 
+void GameHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
+    if (chatHandler_) chatHandler_->sendAddonMessage(type, message, target);
+}
+
 void GameHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
     if (chatHandler_) chatHandler_->sendTextEmote(textEmoteId, targetGuid);
 }

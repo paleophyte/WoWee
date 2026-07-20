@@ -263,6 +263,7 @@ public:
      * @param target Target name (for whispers, empty otherwise)
      */
     void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
+    void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
     void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
     void joinChannel(const std::string& channelName, const std::string& password = "");
     void leaveChannel(const std::string& channelName);

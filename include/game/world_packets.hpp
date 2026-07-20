@@ -702,6 +702,14 @@ public:
     static bool parse(network::Packet& packet, MessageChatData& data);
 };
 
+// Returns true when a chat packet is addon traffic and extracts the standard
+// prefix<TAB>payload envelope when present. Some legacy clients send the
+// envelope with a spoken language instead of LANG_ADDON, so the envelope itself
+// is also authoritative.
+bool decodeAddonChatPayload(const MessageChatData& data,
+                            std::string& prefix,
+                            std::string& payload);
+
 /**
  * Get human-readable string for chat type
  */

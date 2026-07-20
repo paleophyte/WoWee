@@ -336,6 +336,19 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     addLocalChatMessage(echo);
 }
 
+void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
+    if (owner_.getState() != WorldState::IN_WORLD || message.empty()) return;
+
+    auto packet = MessageChatPacket::build(type, ChatLanguage::ADDON, message, target);
+    if (chatPacketDiagEnabled()) {
+        const auto& raw = packet.getData();
+        LOG_WARNING("CHAT PACKET DIAG TX CMSG_MESSAGECHAT addon type=", getChatTypeString(type),
+                    " target='", target, "' bytes=", raw.size(), " data=[",
+                    raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
+    }
+    owner_.getSocket()->send(packet);
+}
+
 void ChatHandler::handleMessageChat(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_MESSAGECHAT");
     if (chatPacketDiagEnabled()) {
@@ -413,6 +426,19 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     if (data.message.empty()) {
+        return;
+    }
+
+    // Addon messages use the same chat types as player messages, but belong to
+    // CHAT_MSG_ADDON and must never be inserted into visible chat history.
+    std::string addonPrefix;
+    std::string addonPayload;
+    if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
+        if (owner_.addonEventCallbackRef() && !addonPrefix.empty()) {
+            owner_.addonEventCallbackRef()(
+                "CHAT_MSG_ADDON",
+                {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});
+        }
         return;
     }
 
@@ -571,24 +597,6 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     LOG_DEBUG("[", getChatTypeString(data.type), "] ", channelInfo, senderInfo, ": ", data.message);
-
-    // Detect addon messages
-    if (owner_.addonEventCallbackRef() &&
-        data.type != ChatType::SAY && data.type != ChatType::YELL &&
-        data.type != ChatType::EMOTE && data.type != ChatType::TEXT_EMOTE &&
-        data.type != ChatType::MONSTER_SAY && data.type != ChatType::MONSTER_YELL) {
-        auto tabPos = data.message.find('\t');
-        if (tabPos != std::string::npos && tabPos > 0 && tabPos <= 16 &&
-            tabPos < data.message.size() - 1) {
-            std::string prefix = data.message.substr(0, tabPos);
-            if (prefix.find(' ') == std::string::npos) {
-                std::string body = data.message.substr(tabPos + 1);
-                std::string channel = getChatTypeString(data.type);
-                owner_.addonEventCallbackRef()("CHAT_MSG_ADDON", {prefix, body, channel, data.senderName});
-                return;
-            }
-        }
-    }
 
     // Fire CHAT_MSG_* addon events
     if (owner_.addonChatCallbackRef()) owner_.addonChatCallbackRef()(data);

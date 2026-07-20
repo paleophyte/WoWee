@@ -46,6 +46,30 @@ network::Packet MessageChatPacket::build(ChatType type,
     return packet;
 }
 
+bool decodeAddonChatPayload(const MessageChatData& data,
+                            std::string& prefix,
+                            std::string& payload) {
+    prefix.clear();
+    payload.clear();
+
+    const size_t separator = data.message.find('\t');
+    const bool hasEnvelope = separator != std::string::npos &&
+                             separator > 0 && separator <= 16 &&
+                             data.message.substr(0, separator).find(' ') == std::string::npos;
+    const bool supportsLegacyEnvelope =
+        data.type != ChatType::SAY && data.type != ChatType::YELL &&
+        data.type != ChatType::EMOTE && data.type != ChatType::TEXT_EMOTE &&
+        data.type != ChatType::MONSTER_SAY && data.type != ChatType::MONSTER_YELL;
+    if (data.language != ChatLanguage::ADDON &&
+        (!supportsLegacyEnvelope || !hasEnvelope)) return false;
+
+    if (hasEnvelope) {
+        prefix = data.message.substr(0, separator);
+        payload = data.message.substr(separator + 1);
+    }
+    return true;
+}
+
 bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
     // SMSG_MESSAGECHAT format (WoW 3.3.5a):
     // uint8 type
