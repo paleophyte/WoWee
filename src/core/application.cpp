@@ -2308,6 +2308,15 @@ void Application::update(float deltaTime) {
                         const bool isSwimmingNow = _pCreatureSwimmingState.count(guid) > 0;
                         const bool isWalkingNow  = _pCreatureWalkingState.count(guid) > 0;
                         const bool isFlyingNow   = _pCreatureFlyingState.count(guid) > 0;
+                        uint32_t mountedRiderAnim = rendering::anim::MOUNT;
+                        if (remoteMount && isFlyingNow) {
+                            const uint32_t flightPose = isMovingNow
+                                ? rendering::anim::MOUNT_FLIGHT_FORWARD
+                                : rendering::anim::MOUNT_FLIGHT_IDLE;
+                            if (charRenderer->hasAnimation(instanceId, flightPose)) {
+                                mountedRiderAnim = flightPose;
+                            }
+                        }
                         bool prevMoving   = _pCreatureWasMoving[guid];
                         bool prevSwimming = _pCreatureWasSwimming[guid];
                         bool prevFlying   = _pCreatureWasFlying[guid];
@@ -2328,7 +2337,7 @@ void Application::update(float deltaTime) {
                                 if (remoteMount) {
                                     // The rider keeps the mounted seat pose; locomotion
                                     // belongs to the separately rendered mount model.
-                                    targetAnim = rendering::anim::MOUNT;
+                                    targetAnim = mountedRiderAnim;
                                     uint32_t mountAnim = rendering::anim::STAND;
                                     if (isMovingNow) {
                                         if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
@@ -2352,6 +2361,22 @@ void Application::update(float deltaTime) {
                                     else                    targetAnim = rendering::anim::STAND;
                                 }
                                 charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
+                            }
+                        }
+
+                        // Server emotes and state updates can arrive after the mount
+                        // field and replace the one-shot mounted pose with Stand. A
+                        // rider's mount field is authoritative, so repair that pose
+                        // even when their movement state did not transition this frame.
+                        if (remoteMount) {
+                            uint32_t riderAnim = 0;
+                            float riderTime = 0.0f, riderDuration = 0.0f;
+                            const bool haveRiderState = charRenderer->getAnimationState(
+                                instanceId, riderAnim, riderTime, riderDuration);
+                            if ((!haveRiderState || riderAnim != mountedRiderAnim) &&
+                                riderAnim != rendering::anim::DEATH) {
+                                charRenderer->playAnimation(instanceId, mountedRiderAnim,
+                                                            /*loop=*/true);
                             }
                         }
                     }
