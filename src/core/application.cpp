@@ -1586,14 +1586,22 @@ void Application::update(float deltaTime) {
                     worldEntryCallbacks_->update(deltaTime);
                 }
                 if (renderer && renderer->getCameraController()) {
-                const bool externallyDrivenMotion = onTaxi || onWMOTransport || (animationCallbacks_ && animationCallbacks_->isCharging());
+                // A ship carries the player's reference frame, but it must not
+                // freeze local controls like a taxi flight. On-deck walking is
+                // folded into the transport-local offset in the sync block below.
+                const bool externallyDrivenMotion = onTaxi ||
+                    (animationCallbacks_ && animationCallbacks_->isCharging());
                 // Keep physics frozen (externalFollow) during landing clamp when terrain
                 // hasn't loaded yet — prevents gravity from pulling player through void.
                 bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
+                const bool transportTransferFreeze = gameHandler &&
+                    gameHandler->hasPendingPlayerTransportWorldTransfer();
                 bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                                           worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
                                           !gameHandler->isMounted();
-                renderer->getCameraController()->setExternalFollow(externallyDrivenMotion || landingClampActive || hearthFreeze);
+                renderer->getCameraController()->setExternalFollow(
+                    externallyDrivenMotion || landingClampActive || hearthFreeze ||
+                    transportTransferFreeze);
                 renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
                 if (externallyDrivenMotion) {
                     // Drop any stale local movement toggles while server drives taxi motion.
@@ -1754,10 +1762,55 @@ void Application::update(float deltaTime) {
                         }
                     }
                 } else if (onTransport) {
-                    // WMO transport mode (ships): compose world position from transform + local offset
+                    // WMO transport mode (ships): keep the transport-local
+                    // attachment, while folding real WASD/jump movement since
+                    // last frame into that offset. Treating ships as fully
+                    // externally driven cleared movement input and reapplied the
+                    // boarding-time offset forever, freezing the player in a
+                    // running pose at the point where they stepped aboard.
+                    auto* tm = gameHandler->getTransportManager();
+                    auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
+                    if (tr) {
+                        const uint64_t transportGuid = gameHandler->getPlayerTransportGuid();
+                        const uint32_t mapId = gameHandler->getCurrentMapId();
+                        glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+                        const glm::vec3 tentativeRender = renderer->getCharacterPosition();
+                        const glm::vec3 expectedRender(
+                            tr->transform * glm::vec4(localOffset, 1.0f));
+                        glm::vec3 intendedRender = expectedRender;
+
+                        // A cross-map ship transfer can reuse the same synthetic GO
+                        // GUID on the destination map. Never interpret the continent-
+                        // sized difference from the previous map's ride lock as deck
+                        // walking: doing so rewrites a valid server transport offset
+                        // into a huge negative Z and drops the rider underwater.
+                        const bool sameRideFrame = hasWMORideLock_ &&
+                            lastWMORideTransportGuid_ == transportGuid &&
+                            lastWMORideMapId_ == mapId;
+                        if (sameRideFrame && renderer->getCameraController()) {
+                            const glm::vec3 localMotion =
+                                tentativeRender - lastWMORideLockedRender_;
+                            if (renderer->getCameraController()->isMoving()) {
+                                intendedRender.x += localMotion.x;
+                                intendedRender.y += localMotion.y;
+                            }
+                            if (!renderer->getCameraController()->isGrounded()) {
+                                intendedRender.z += localMotion.z;
+                            }
+                        }
+
+                        localOffset = glm::vec3(
+                            tr->invTransform * glm::vec4(intendedRender, 1.0f));
+                        gameHandler->setPlayerTransportOffset(localOffset);
+                    }
+
                     glm::vec3 canonical = gameHandler->getComposedWorldPosition();
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
                     renderer->getCharacterPosition() = renderPos;
+                    lastWMORideLockedRender_ = renderPos;
+                    hasWMORideLock_ = true;
+                    lastWMORideTransportGuid_ = gameHandler->getPlayerTransportGuid();
+                    lastWMORideMapId_ = gameHandler->getCurrentMapId();
                     gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
                     if (renderer->getCameraController()) {
                         glm::vec3* followTarget = renderer->getCameraController()->getFollowTargetMutable();
@@ -1765,10 +1818,14 @@ void Application::update(float deltaTime) {
                             *followTarget = renderPos;
                         }
                     }
+                    gameHandler->updateM2TransportBoarding(canonical);
                 } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
                     // Warrior Charge: interpolation delegated to AnimationCallbackHandler
                     animationCallbacks_->updateCharge(deltaTime);
                 } else {
+                    hasWMORideLock_ = false;
+                    lastWMORideTransportGuid_ = 0;
+                    lastWMORideMapId_ = 0xFFFFFFFFu;
                     glm::vec3 renderPos = renderer->getCharacterPosition();
 
                     // M2 transport riding: resolve in canonical space and lock once per frame.
@@ -1910,7 +1967,7 @@ void Application::update(float deltaTime) {
                         }
                     }
 
-                    // Client-side M2 transport (trams, lifts) board/disembark check - shared
+                    // Client-side transport board/disembark check - shared
                     // with any other driver that knows the player's canonical position (see
                     // GameHandler::updateM2TransportBoarding).
                     if (gameHandler->getTransportManager()) {
@@ -2112,7 +2169,16 @@ void Application::update(float deltaTime) {
                         const bool entityIsMoving = entity->isActivelyMoving();
                         constexpr float kMoveThreshSq = 0.03f * 0.03f;
                         const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
-                        const bool isMovingNow = !deadOrCorpse && (entityIsMoving || (posChanging && !entity->isEntityMoving()));
+                        const bool transportAttached =
+                            gameHandler->transportAttachmentsRef().count(guid) != 0;
+                        // A stationary deck passenger changes world position every
+                        // frame because the parent ship moves. That parent motion is
+                        // not creature locomotion and must not trigger Run. Real
+                        // transport-local spline movement still reports actively moving.
+                        const bool positionOnlyLocomotion =
+                            posChanging && !entity->isEntityMoving() && !transportAttached;
+                        const bool isMovingNow =
+                            !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
                         if (deadOrCorpse || largeCorrection) {
                             charRenderer->setInstancePosition(instanceId, renderPos);
                         } else if (planarDistSq > kMoveThreshSq || dz > 0.08f) {
@@ -2287,7 +2353,12 @@ void Application::update(float deltaTime) {
                         const bool entityIsMoving = entity->isActivelyMoving();
                         constexpr float kMoveThreshSq2 = 0.03f * 0.03f;
                         const bool posChanging2 = planarDistSq > kMoveThreshSq2 || dz > 0.08f;
-                        const bool isMovingNow = !deadOrCorpse && (entityIsMoving || (posChanging2 && !entity->isEntityMoving()));
+                        const bool transportAttached =
+                            gameHandler->transportAttachmentsRef().count(guid) != 0;
+                        const bool positionOnlyLocomotion =
+                            posChanging2 && !entity->isEntityMoving() && !transportAttached;
+                        const bool isMovingNow =
+                            !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
 
                         if (deadOrCorpse || largeCorrection) {
                             charRenderer->setInstancePosition(instanceId, renderPos);

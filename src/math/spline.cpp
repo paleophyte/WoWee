@@ -37,6 +37,13 @@ glm::vec3 CatmullRomSpline::evaluatePosition(uint32_t pathTimeMs) const {
     uint32_t t1Ms = keys_[segIdx].timeMs;
     uint32_t t2Ms = keys_[segIdx + 1].timeMs;
     uint32_t segDuration = (t2Ms > t1Ms) ? (t2Ms - t1Ms) : 1;
+    // Repeated positions encode an intentional stop/dwell. A normal Catmull-Rom
+    // segment with p1 == p2 still bows away from the point because p0/p3 influence
+    // it, making a supposedly docked transport drift and turn in place.
+    if (glm::dot(keys_[segIdx + 1].position - keys_[segIdx].position,
+                 keys_[segIdx + 1].position - keys_[segIdx].position) < 1e-8f) {
+        return keys_[segIdx].position;
+    }
     float t = glm::clamp(static_cast<float>(pathTimeMs - t1Ms)
                        / static_cast<float>(segDuration), 0.0f, 1.0f);
     float t2 = t * t;
@@ -65,6 +72,11 @@ SplineEvalResult CatmullRomSpline::evaluate(uint32_t pathTimeMs) const {
     uint32_t t1Ms = keys_[segIdx].timeMs;
     uint32_t t2Ms = keys_[segIdx + 1].timeMs;
     uint32_t segDuration = (t2Ms > t1Ms) ? (t2Ms - t1Ms) : 1;
+
+    if (glm::dot(keys_[segIdx + 1].position - keys_[segIdx].position,
+                 keys_[segIdx + 1].position - keys_[segIdx].position) < 1e-8f) {
+        return {keys_[segIdx].position, glm::vec3(0.0f)};
+    }
 
     float t = static_cast<float>(pathTimeMs - t1Ms)
             / static_cast<float>(segDuration);

@@ -202,6 +202,10 @@ private:
     // transport riding" block for why the latter is a no-op identity).
     glm::vec3 lastM2RideLockedCanonical_ = glm::vec3(0.0f);
     bool hasM2RideLock_ = false;
+    glm::vec3 lastWMORideLockedRender_ = glm::vec3(0.0f);
+    bool hasWMORideLock_ = false;
+    uint64_t lastWMORideTransportGuid_ = 0;
+    uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
 
     bool wasAutoAttacking_ = false;
 

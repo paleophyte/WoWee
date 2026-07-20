@@ -429,6 +429,30 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
         return;
     }
 
+    if (data.type == ChatType::ACHIEVEMENT ||
+        data.type == ChatType::GUILD_ACHIEVEMENT) {
+        auto replaceAll = [](std::string& text, const std::string& marker,
+                             const std::string& replacement) {
+            size_t pos = 0;
+            while ((pos = text.find(marker, pos)) != std::string::npos) {
+                text.replace(pos, marker.size(), replacement);
+                pos += replacement.size();
+            }
+        };
+
+        if (data.achievementId != 0) {
+            owner_.ensureAchievementNamesLoaded();
+            std::string achievementName = owner_.getAchievementName(data.achievementId);
+            if (achievementName.empty()) {
+                achievementName = "Achievement #" + std::to_string(data.achievementId);
+            }
+            std::ostringstream link;
+            link << "|cffffff00|Hachievement:" << data.achievementId
+                 << ":0:0:0:0:0:0:0:0:0|h[" << achievementName << "]|h|r";
+            replaceAll(data.message, "$a", link.str());
+        }
+    }
+
     // Addon messages use the same chat types as player messages, but belong to
     // CHAT_MSG_ADDON and must never be inserted into visible chat history.
     std::string addonPrefix;

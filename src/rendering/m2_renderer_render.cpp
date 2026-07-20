@@ -92,6 +92,8 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     instance.cachedIsInvisibleTrap = mdlRef.isInvisibleTrap;
     instance.cachedIsInstancePortal = mdlRef.isInstancePortal;
     instance.cachedIsSkyBird = mdlRef.isSkyBird;
+    instance.cachedIsLightBeam = mdlRef.isLightBeam;
+    instance.cachedIsTransportDoodad = mdlRef.isTransportDoodad;
     instance.cachedIsValid = mdlRef.isValid();
     instance.cachedModel = &mdlRef;
     instance.recomputeCachedCullFactors();
@@ -215,6 +217,8 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     instance.cachedIsGroundDetail = mdl2.isGroundDetail;
     instance.cachedIsInvisibleTrap = mdl2.isInvisibleTrap;
     instance.cachedIsSkyBird = mdl2.isSkyBird;
+    instance.cachedIsLightBeam = mdl2.isLightBeam;
+    instance.cachedIsTransportDoodad = mdl2.isTransportDoodad;
     instance.cachedIsValid = mdl2.isValid();
     instance.cachedModel = &mdl2;
     instance.recomputeCachedCullFactors();
@@ -476,14 +480,16 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
         // (always valid — seeded on spawn) and avoid the expensive per-bone work.
-        // Sky birds are exempt: their flight path is baked into bone animation,
-        // so freezing bones freezes the whole bird mid-air.
+        // Sky birds, light beams, and ship machinery are exempt: their visible
+        // motion is baked entirely into bone animation.
         constexpr float kLOD3DistSq = rendering::M2_LOD3_DISTANCE * rendering::M2_LOD3_DISTANCE;
-        if (distSq > kLOD3DistSq && !instance.cachedIsSkyBird) continue;
+        const bool needsDistantBones = instance.cachedIsSkyBird || instance.cachedIsLightBeam ||
+                                       instance.cachedIsTransportDoodad;
+        if (distSq > kLOD3DistSq && !needsDistantBones) continue;
 
         // Distance-based frame skipping: update distant bones less frequently
         uint32_t boneInterval = 1;
-        if (!instance.cachedIsSkyBird) {
+        if (!needsDistantBones) {
             if (distSq > rendering::M2_BONE_SKIP_DIST_FAR * rendering::M2_BONE_SKIP_DIST_FAR) boneInterval = 4;
             else if (distSq > rendering::M2_BONE_SKIP_DIST_MID * rendering::M2_BONE_SKIP_DIST_MID) boneInterval = 2;
         }

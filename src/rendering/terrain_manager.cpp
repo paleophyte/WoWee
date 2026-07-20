@@ -1262,7 +1262,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {
                 uint32_t wmoDoodadInstId = m2Renderer->createInstanceWithMatrix(
                     doodad.modelId, doodad.modelMatrix, doodad.worldPosition);
                 if (wmoDoodadInstId) {
-                    m2Renderer->setSkipCollision(wmoDoodadInstId, true);
+                    // WMO doodads should not add duplicate/over-aggressive wall
+                    // blocking, but structural doodads such as Exodarplatform01
+                    // carry the only authored floor for their walkable ramps.
+                    m2Renderer->setSkipWallCollision(wmoDoodadInstId, true);
                     ft.m2InstanceIds.push_back(wmoDoodadInstId);
                 }
                 ft.wmoDoodadIndex++;

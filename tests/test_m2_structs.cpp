@@ -61,6 +61,25 @@ TEST_CASE("Foliage asset paths never block player movement", "[m2][collision]") 
     REQUIRE(herb.collisionNoBlock);
 }
 
+TEST_CASE("Lighthouse beams are classified for distant bone updates", "[m2][animation]") {
+    const auto beam = wowee::rendering::classifyM2Model(
+        "World\\Generic\\Human\\Passive Doodads\\Stormwind\\Stormwind_LighthouseBeam_01.m2",
+        glm::vec3(-1.0f), glm::vec3(1.0f), 100, 0);
+    REQUIRE(beam.isLightBeam);
+    REQUIRE_FALSE(beam.disableAnimation);
+}
+
+TEST_CASE("Ship machinery is classified for distant bone updates", "[m2][animation][transport]") {
+    const auto sails = wowee::rendering::classifyM2Model(
+        "World\\Generic\\PassiveDoodads\\Ships\\ShipAnimation\\TransportShip_Sails.m2",
+        glm::vec3(-40.0f), glm::vec3(40.0f), 161, 0);
+    const auto paddle = wowee::rendering::classifyM2Model(
+        "World\\Generic\\PassiveDoodads\\Ships\\ShipAnimation\\PaddleWheel\\Icebreaker_Paddlewheel.m2",
+        glm::vec3(-14.0f), glm::vec3(14.0f), 2676, 4);
+    REQUIRE(sails.isTransportDoodad);
+    REQUIRE(paddle.isTransportDoodad);
+}
+
 TEST_CASE("M2Sequence fields are default-initialized", "[m2]") {
     M2Sequence seq{};
     REQUIRE(seq.id == 0);

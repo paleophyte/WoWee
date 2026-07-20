@@ -205,6 +205,14 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
     // Read chat tag
     data.chatTag = packet.readUInt8();
 
+    // WotLK appends the achievement ID after chatTag. The message itself is a
+    // client-format template ("%s has earned the achievement $a"), so dropping
+    // this field leaves the client unable to expand $a.
+    if ((data.type == ChatType::ACHIEVEMENT ||
+         data.type == ChatType::GUILD_ACHIEVEMENT) && packet.hasRemaining(4)) {
+        data.achievementId = packet.readUInt32();
+    }
+
     LOG_DEBUG("Parsed SMSG_MESSAGECHAT:");
     LOG_DEBUG("  Type: ", getChatTypeString(data.type));
     LOG_DEBUG("  Language: ", static_cast<int>(data.language));

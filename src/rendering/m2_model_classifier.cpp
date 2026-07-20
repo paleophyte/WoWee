@@ -235,6 +235,13 @@ M2ClassificationResult classifyM2Model(
     });
     r.isSkyBird = hasAny(n, kSkyBirdTokens) || has(n, "\\bird")
                 || has(n, "\\bat\\") || has(n, "\\bat.");
+    // These meshes are visible from far beyond the normal skeletal LOD radius,
+    // and their sweep is entirely bone-driven. Freezing distant bone matrices
+    // therefore freezes the whole lighthouse beam in its bind pose.
+    r.isLightBeam = has(n, "lighthousebeam") || has(n, "lightbeam")
+                 || has(n, "lightray");
+    r.isTransportDoodad = has(n, "transportship_sails")
+                       || has(n, "icebreaker_paddlewheel");
 
     // ---------------------------------------------------------------
     // Animation / foliage rendering flags

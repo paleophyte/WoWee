@@ -53,6 +53,8 @@ struct M2ClassificationResult {
     bool isGroundFire       = false; ///< Ground fire whose halo follows its lowest flame emitter
     bool isTorch            = false; ///< Wall-mounted or standing torch
     bool isSkyBird          = false; ///< Flying bird/bat doodad (hide until animation range)
+    bool isLightBeam        = false; ///< Distant rotating lighthouse/light-ray beam
+    bool isTransportDoodad  = false; ///< Ship sail/paddle child whose motion must remain visible
 
     // --- Ambient emitter type (for sound system) ---
     AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;

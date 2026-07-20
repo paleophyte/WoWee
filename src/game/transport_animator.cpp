@@ -5,10 +5,12 @@
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
 #include "math/spline.hpp"
+#include "core/logger.hpp"
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 
 namespace wowee::game {
 
@@ -80,6 +82,63 @@ void TransportAnimator::evaluateAndApply(
 
     transport.position = transport.basePosition + pathOffset;
 
+    // The affected ship routes need entry-specific berth headings at their
+    // repeated-position TaxiPath dwell nodes. Blend during the final/first five
+    // seconds and hold the exact authored position for the 60-second stop.
+    float shipDockBlend = 0.0f;
+    glm::vec3 shipApproach(0.0f);
+    bool shipAtDockDwell = false;
+    glm::vec3 shipDockPosition(0.0f);
+    // Keep this entry-scoped: display 7087 is shared by other night-elf ships
+    // across expansions, and those routes must retain their existing docking
+    // orientation unless their own geometry proves they need the maneuver.
+    const bool needsSideOnDock = transport.entry == 176310u ||
+                                 transport.entry == 176244u ||
+                                 transport.entry == 181646u;
+    if (needsSideOnDock && pathEntry.worldCoords) {
+        constexpr uint32_t kDockTurnMs = 5000u;
+        const auto& keys = spline.keys();
+        for (size_t i = 1; i + 1 < keys.size(); ++i) {
+            const glm::vec3 dwellDelta = keys[i].position - keys[i + 1].position;
+            if (glm::dot(dwellDelta, dwellDelta) > 0.01f) continue;
+            const uint32_t dwellStart = keys[i].timeMs;
+            const uint32_t dwellEnd = keys[i + 1].timeMs;
+            const uint32_t turnStart = dwellStart > kDockTurnMs
+                ? dwellStart - kDockTurnMs : 0u;
+            if (pathTimeMs < turnStart || pathTimeMs > dwellEnd + kDockTurnMs) {
+                continue;
+            }
+
+            shipApproach = keys[i].position - keys[i - 1].position;
+            shipApproach.z = 0.0f;
+            const float approachLen = glm::length(shipApproach);
+            if (approachLen <= 0.001f) break;
+            shipApproach /= approachLen;
+
+            if (pathTimeMs < dwellStart) {
+                shipDockBlend = static_cast<float>(
+                    pathTimeMs - turnStart) / static_cast<float>(kDockTurnMs);
+            } else if (pathTimeMs <= dwellEnd) {
+                shipDockBlend = 1.0f;
+                shipAtDockDwell = true;
+                shipDockPosition = keys[i].position;
+            } else {
+                shipDockBlend = 1.0f - static_cast<float>(
+                    pathTimeMs - dwellEnd) / static_cast<float>(kDockTurnMs);
+            }
+            shipDockBlend = std::clamp(shipDockBlend, 0.0f, 1.0f);
+            shipDockBlend = shipDockBlend * shipDockBlend *
+                            (3.0f - 2.0f * shipDockBlend);
+            break;
+        }
+    }
+    if (shipAtDockDwell) {
+        // Catmull-Rom evaluation can sit slightly off a repeated-position key
+        // even during its authored hold. Pin the actual dwell to the TaxiPath
+        // node so the gangway does not retain a visible one-unit gap.
+        transport.position = transport.basePosition + shipDockPosition;
+    }
+
     // Use server yaw if available (authoritative), otherwise compute from spline tangent
     if (transport.hasServerYaw) {
         float effectiveYaw = transport.serverYaw +
@@ -125,7 +184,82 @@ void TransportAnimator::evaluateAndApply(
         if (isDeeprunTram) {
             tangent.z = 0.0f;
         }
-        transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
+        const float tangentLenSq = glm::dot(tangent, tangent);
+        if (tangentLenSq <= 1e-6f && shipDockBlend > 0.0f) {
+            tangent = shipApproach;
+        }
+        const float effectiveTangentLenSq = glm::dot(tangent, tangent);
+        if (effectiveTangentLenSq > 1e-6f) {
+            if (pathEntry.worldCoords && !transport.isM2) {
+                // TaxiPathNode coordinates were converted server -> canonical by
+                // swapping X/Y. WMO transport models face server-space +X, so derive
+                // the same yaw the server would send from the canonical tangent.
+                // The generic spline helper uses a different local-forward convention
+                // and mirrored ship yaw, producing sideways/backwards sailing.
+                // Transport WMO hulls are authored with their bow opposite the
+                // model-space +X axis used by the raw route yaw.
+                float routeYaw = std::atan2(tangent.x, tangent.y);
+                const bool reversedShipHull = transport.entry == 176310u ||
+                                              transport.entry == 176244u ||
+                                              transport.entry == 181646u ||
+                                              transport.entry == 190536u;
+                if (reversedShipHull) {
+                    // These WMO hulls are authored with their visible bow opposite
+                    // the route-local forward axis. Without this correction they
+                    // translate stern-first even though the spline tangent is right.
+                    routeYaw += glm::pi<float>();
+                }
+                float effectiveYaw = routeYaw;
+                if (shipDockBlend > 0.0f && needsSideOnDock) {
+                    // A GO query reports the transport's orientation at the instant
+                    // it is received, not a persistent heading for every berth. Using
+                    // that snapshot as dockYaw made Bravery's result depend on where
+                    // she happened to be when the player logged in. These TaxiPath
+                    // routes run parallel to their berths, so their corrected route
+                    // heading is also the stable broadside dock heading.
+                    float dockTargetYaw = routeYaw;
+                    if (transport.entry == 176310u ||
+                        transport.entry == 176244u ||
+                        transport.entry == 181646u) {
+                        // These Auberdine TaxiPath segments run parallel to their
+                        // berths. The server spawn yaw points the hull diagonally or
+                        // bow-first at the dock; keep the corrected route heading for
+                        // a broadside stop. This remains entry-scoped so ships in
+                        // other expansions retain their established orientation.
+                        dockTargetYaw = routeYaw;
+                    }
+                    const float dockDelta = std::remainder(
+                        dockTargetYaw - routeYaw, glm::two_pi<float>());
+                    effectiveYaw += shipDockBlend * dockDelta;
+                }
+                transport.rotation = glm::angleAxis(
+                    effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+                if (shipDockBlend > 0.999f && needsSideOnDock) {
+                    static std::unordered_set<uint64_t> loggedDockGuids;
+                    if (loggedDockGuids.insert(transport.guid).second) {
+                        LOG_WARNING("SHIP DOCK DIAG entry=", transport.entry,
+                                    " guid=0x", std::hex, transport.guid, std::dec,
+                                    " pathTime=", pathTimeMs,
+                                    " position=(", transport.position.x, ",",
+                                    transport.position.y, ",", transport.position.z, ")",
+                                    " tangent=(", tangent.x, ",", tangent.y, ")",
+                                    " routeYaw=", routeYaw,
+                                    " hasDockYaw=", transport.hasDockYaw,
+                                    " dockYaw=", transport.dockYaw,
+                                    " effectiveYaw=", effectiveYaw);
+                    }
+                }
+            } else {
+                transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
+            }
+        } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw) {
+            // TaxiPathNode route builders encode a dock wait with repeated
+            // positions. With no movement tangent, restore the GO's authored
+            // spawn orientation so the ship lies alongside the dock rather
+            // than retaining its bow-first approach yaw throughout the dwell.
+            transport.rotation = glm::angleAxis(
+                transport.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+        }
     }
 }
 

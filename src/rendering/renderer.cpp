@@ -1516,6 +1516,19 @@ void Renderer::update(float deltaTime) {
     // Update AudioEngine (cleanup finished sounds, etc.)
     audio::AudioEngine::instance().update(deltaTime);
 
+    // M2Renderer::update may rebuild the instance spatial index when streaming
+    // marked it dirty. Footprint spawning below performs an M2 floor query and
+    // traverses that same index. Joining only after footsteps allowed the main
+    // thread to walk unordered_map nodes while the animation worker cleared and
+    // rebuilt them, producing a SIGSEGV in M2Renderer::gatherCandidates. Keep
+    // the useful overlap with character animation and audio above, but finish
+    // structural M2 work before any main-thread collision query.
+    if (m2AnimLaunched) {
+        try { m2AnimFuture.get(); }
+        catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }
+        m2AnimLaunched = false;
+    }
+
     // Footsteps: age visual prints, then let authored footfall events add new ones.
     if (footprintRenderer) footprintRenderer->update(deltaTime);
     if (animationController_) animationController_->updateFootsteps(deltaTime);
@@ -1552,12 +1565,6 @@ void Renderer::update(float deltaTime) {
         zctx.serverZoneId = getCurrentZoneId();
         zctx.zoneManager = zoneManager.get();
         audioCoordinator_->updateZoneAudio(zctx);
-    }
-
-    // Wait for M2 doodad animation to finish (was launched earlier in parallel with character anim)
-    if (m2AnimLaunched) {
-        try { m2AnimFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }
     }
 
     // Update performance HUD

@@ -52,6 +52,8 @@ struct ActiveTransport {
     bool clientAnimationReverse;    // Run client animation in reverse along the selected path
     float serverYaw;                // Server-authoritative yaw (radians)
     bool hasServerYaw;              // Whether we've received server yaw
+    float dockYaw;                  // Authored server spawn yaw used during route dwell
+    bool hasDockYaw;                // Whether dockYaw was captured before client route assignment
     bool serverYawFlipped180;       // Auto-correction when server yaw is consistently opposite movement
     int serverYawAlignmentScore;    // Hysteresis score for yaw flip detection
 
@@ -64,6 +66,7 @@ struct ActiveTransport {
     bool hasServerVelocity;
     bool allowBootstrapVelocity;   // Disable DBC bootstrap when spawn/path mismatch is clearly invalid
     bool isM2 = false;             // True if rendered as M2 (not WMO), uses M2Renderer for transforms
+    bool worldCoords = false;       // TaxiPathNode absolute-world route (client-owned WMO ship)
 };
 
 class TransportManager {
@@ -141,7 +144,12 @@ public:
         return snapshot;
     }
     glm::vec3 getPlayerWorldPosition(uint64_t transportGuid, const glm::vec3& localOffset);
+    glm::vec3 serverToTransportLocal(uint64_t transportGuid,
+                                     const glm::vec3& serverOffset) const;
     glm::mat4 getTransportInvTransform(uint64_t transportGuid);
+    bool isPointOnTransportDeck(uint64_t transportGuid,
+                                const glm::vec3& canonicalPosition,
+                                float maxFloorDelta = 1.25f) const;
 
     void loadPathFromNodes(uint32_t pathId, const std::vector<glm::vec3>& waypoints, bool looping = true, float speed = 18.0f);
     void setDeckBounds(uint64_t guid, const glm::vec3& min, const glm::vec3& max);

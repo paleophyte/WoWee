@@ -1206,9 +1206,8 @@ public:
     bool hasServerTransportUpdate(uint64_t guid) const { return entityController_->hasServerTransportUpdate(guid); }
     glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
-    // Client-side M2 transport (trams, lifts) board/disembark check by proximity to the
-    // transport's live position. Call once per tick with the player's current canonical
-    // world position; safe to call whether or not any M2 transports are registered.
+    // Client-side transport board/disembark check by proximity to the live deck.
+    // Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
     void updateM2TransportBoarding(const glm::vec3& playerCanonical);
     void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
         // Validate transport is registered before attaching player
@@ -1234,6 +1233,15 @@ public:
         playerTransportOffset_ = glm::vec3(0.0f);
         movementInfo.transportGuid = 0;
     }
+    // Preserve an authoritative on-deck offset while a continent transfer tears
+    // down the origin map's transport and constructs its destination instance.
+    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
+                                           const glm::vec3& localOffset);
+    bool hasPendingPlayerTransportWorldTransfer() const {
+        return pendingPlayerTransportTransfer_;
+    }
+    bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
+                                              glm::vec3& worldPosition);
 
     // Cooldowns
     float getSpellCooldown(uint32_t spellId) const;
@@ -1869,6 +1877,7 @@ public:
         static const std::string kEmpty;
         return kEmpty;
     }
+    void ensureAchievementNamesLoaded() { loadAchievementNameCache(); }
     /// Returns the description of an achievement by ID, or empty string if unknown.
     const std::string& getAchievementDescription(uint32_t id) const {
         auto it = achievementDescCache_.find(id);
@@ -3071,6 +3080,11 @@ private:
     glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // Player offset on transport
     uint64_t playerTransportStickyGuid_ = 0;       // Last transport player was on (temporary retention)
     float playerTransportStickyTimer_ = 0.0f;      // Seconds to keep sticky transport alive after transient clears
+    bool pendingPlayerTransportTransfer_ = false;
+    uint64_t pendingPlayerTransportGuid_ = 0;
+    uint32_t pendingPlayerTransportEntry_ = 0;
+    uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4

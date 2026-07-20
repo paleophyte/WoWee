@@ -1409,10 +1409,67 @@ glm::vec3 GameHandler::getComposedWorldPosition() {
     return glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
 }
 
-// Client-side transport boarding/disembark detection for M2 transports (trams, lifts)
-// where the server doesn't send transport attachment data - unlike WMO transports
-// (ships), which get onTransport straight from the server's movement block (see
-// EntityController::applyPlayerTransportState). Shared between the GUI Application's
+void GameHandler::beginPlayerTransportWorldTransfer(
+    uint32_t destinationMapId, const glm::vec3& localOffset) {
+    if (playerTransportGuid_ == 0) return;
+
+    pendingPlayerTransportTransfer_ = true;
+    pendingPlayerTransportGuid_ = playerTransportGuid_;
+    pendingPlayerTransportMapId_ = destinationMapId;
+    pendingPlayerTransportOffset_ = localOffset;
+    pendingPlayerTransportEntry_ = 0;
+    if (transportManager_) {
+        if (const auto* transport = transportManager_->getTransport(playerTransportGuid_)) {
+            pendingPlayerTransportEntry_ = transport->entry;
+        }
+    }
+
+    LOG_WARNING("Transport world transfer armed: guid=0x", std::hex,
+                pendingPlayerTransportGuid_, std::dec,
+                " entry=", pendingPlayerTransportEntry_,
+                " destinationMap=", destinationMapId,
+                " local=(", localOffset.x, ",", localOffset.y, ",", localOffset.z, ")");
+}
+
+bool GameHandler::completePlayerTransportWorldTransfer(
+    uint64_t transportGuid, glm::vec3& worldPosition) {
+    if (!pendingPlayerTransportTransfer_ || !transportManager_ ||
+        currentMapId_ != pendingPlayerTransportMapId_) {
+        return false;
+    }
+
+    auto* transport = transportManager_->getTransport(transportGuid);
+    if (!transport) return false;
+    const bool matchingTransport = transportGuid == pendingPlayerTransportGuid_ ||
+        (pendingPlayerTransportEntry_ != 0 &&
+         transport->entry == pendingPlayerTransportEntry_);
+    if (!matchingTransport) return false;
+
+    setPlayerOnTransport(transportGuid, pendingPlayerTransportOffset_);
+    worldPosition = transportManager_->getPlayerWorldPosition(
+        transportGuid, pendingPlayerTransportOffset_);
+    setPosition(worldPosition.x, worldPosition.y, worldPosition.z);
+
+    LOG_WARNING("Transport world transfer restored: guid=0x", std::hex,
+                transportGuid, std::dec,
+                " entry=", transport->entry,
+                " map=", currentMapId_,
+                " local=(", pendingPlayerTransportOffset_.x, ",",
+                pendingPlayerTransportOffset_.y, ",",
+                pendingPlayerTransportOffset_.z, ") world=(",
+                worldPosition.x, ",", worldPosition.y, ",", worldPosition.z, ")");
+
+    pendingPlayerTransportTransfer_ = false;
+    pendingPlayerTransportGuid_ = 0;
+    pendingPlayerTransportEntry_ = 0;
+    pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    return true;
+}
+
+// Client-side transport boarding/disembark detection for locally animated transports.
+// This includes M2 trams/lifts and TaxiPathNode WMO ships: once the client owns a
+// ship's route, the server's static spawn cannot provide timely attachment data.
+// Shared between the GUI Application's
 // per-frame update loop and any other driver (e.g. a headless harness) that knows the
 // player's current canonical world position but has no renderer/camera of its own.
 void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
@@ -1458,6 +1515,10 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         // platform" approach.
         constexpr float kDeeprunTramBoardHalfLength = 9.18f + 1.5f;  // along direction of travel
         constexpr float kDeeprunTramBoardHalfWidth = 5.68f + 1.5f;   // across the car's width
+        constexpr float kShipBoardHalfLength = 65.0f;
+        constexpr float kShipBoardHalfWidth = 30.0f;
+        constexpr float kShipBoardMinZ = 1.0f;
+        constexpr float kShipBoardMaxZ = 35.0f;
 
         uint64_t bestGuid = 0;
         float bestScore = 1e30f;
@@ -1472,7 +1533,9 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         float nearestDeeprunVertDist = 0.0f;
         const glm::vec3 playerRenderPos = core::coords::canonicalToRender(playerCanonical);
         for (auto& [guid, transport] : tm->getTransports()) {
-            if (!transport.isM2) continue;
+            const bool isClientShip = !transport.isM2 && transport.worldCoords &&
+                                      transport.useClientAnimation;
+            if (!transport.isM2 && !isClientShip) continue;
             const bool isThunderBluffLift =
                 (transport.entry >= 20649u && transport.entry <= 20657u);
             const bool isDeeprunTram =
@@ -1481,6 +1544,21 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
                 (transport.pathId >= 176080u && transport.pathId <= 176085u);
             glm::vec3 diff = playerCanonical - transport.position;
             float vertDist = std::abs(diff.z);
+
+            if (isClientShip) {
+                const glm::vec3 local(transport.invTransform * glm::vec4(playerRenderPos, 1.0f));
+                if (std::abs(local.x) < kShipBoardHalfLength &&
+                    std::abs(local.y) < kShipBoardHalfWidth &&
+                    local.z > kShipBoardMinZ && local.z < kShipBoardMaxZ &&
+                    tm->isPointOnTransportDeck(guid, playerCanonical)) {
+                    const float score = local.x * local.x + local.y * local.y;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestGuid = guid;
+                    }
+                }
+                continue;
+            }
 
             if (isDeeprunTram) {
                 const glm::vec4 local4 = transport.invTransform * glm::vec4(playerRenderPos, 1.0f);
@@ -1545,7 +1623,9 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
                     tr->displayId == 3831u ||
                     (tr->entry >= 176080u && tr->entry <= 176085u) ||
                     (tr->pathId >= 176080u && tr->pathId <= 176085u);
-                const glm::vec3 offset = playerCanonical - tr->position;
+                const glm::vec3 offset = tr->isM2
+                    ? playerCanonical - tr->position
+                    : glm::vec3(tr->invTransform * glm::vec4(playerRenderPos, 1.0f));
                 setPlayerOnTransport(bestGuid, offset);
                 if (isDeeprunTram) {
                     const bool attached = getPlayerTransportGuid() == bestGuid;
@@ -1556,6 +1636,10 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
                                 " player=(", playerCanonical.x, ",", playerCanonical.y, ",", playerCanonical.z, ")",
                                 " tram=(", tr->position.x, ",", tr->position.y, ",", tr->position.z, ")",
                                 " offset=(", offset.x, ",", offset.y, ",", offset.z, ")");
+                } else if (!tr->isM2) {
+                    LOG_WARNING("Client ship boarding accepted: guid=0x", std::hex, bestGuid, std::dec,
+                                " entry=", tr->entry,
+                                " local=(", offset.x, ",", offset.y, ",", offset.z, ")");
                 } else {
                     LOG_DEBUG("M2 transport boarding: guid=0x", std::hex, bestGuid, std::dec);
                 }
@@ -1599,6 +1683,30 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
         tr->displayId == 3831u ||
         (tr->entry >= 176080u && tr->entry <= 176085u) ||
         (tr->pathId >= 176080u && tr->pathId <= 176085u);
+
+    if (!tr->isM2 && tr->worldCoords && tr->useClientAnimation) {
+        constexpr float kShipDisembarkHalfLength = 70.0f;
+        constexpr float kShipDisembarkHalfWidth = 35.0f;
+        constexpr float kShipDisembarkMinZ = -3.0f;
+        constexpr float kShipDisembarkMaxZ = 40.0f;
+        const glm::vec3 playerRenderPos = core::coords::canonicalToRender(playerCanonical);
+        const glm::vec3 local(tr->invTransform * glm::vec4(playerRenderPos, 1.0f));
+        const bool outsideBounds =
+            std::abs(local.x) > kShipDisembarkHalfLength ||
+            std::abs(local.y) > kShipDisembarkHalfWidth ||
+            local.z < kShipDisembarkMinZ || local.z > kShipDisembarkMaxZ;
+        const bool hasDeckSupport =
+            tm->isPointOnTransportDeck(getPlayerTransportGuid(), playerCanonical, 3.0f);
+        if (outsideBounds) {
+            LOG_WARNING("Client ship disembark: guid=0x", std::hex,
+                        getPlayerTransportGuid(), std::dec,
+                        " outsideBounds=", outsideBounds,
+                        " hasDeckSupport=", hasDeckSupport,
+                        " local=(", local.x, ",", local.y, ",", local.z, ")");
+            clearPlayerTransport();
+        }
+        return;
+    }
 
     if (isDeeprunTram) {
         // Same oriented-footprint reasoning as the boarding scan above: an isotropic

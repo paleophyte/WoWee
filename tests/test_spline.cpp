@@ -189,6 +189,19 @@ TEST_CASE("CatmullRomSpline midpoint evaluation", "[spline]") {
     REQUIRE(mid.z == Catch::Approx(0.0f).margin(0.1f));
 }
 
+TEST_CASE("CatmullRomSpline repeated-position segment is an exact dwell", "[spline][transport]") {
+    CatmullRomSpline spline({
+        {0,    glm::vec3(-10.0f, 0.0f, 0.0f)},
+        {1000, glm::vec3(0.0f, 0.0f, 0.0f)},
+        {61000, glm::vec3(0.0f, 0.0f, 0.0f)},
+        {62000, glm::vec3(10.0f, 0.0f, 0.0f)},
+    });
+
+    const auto stopped = spline.evaluate(30000);
+    REQUIRE(stopped.position == glm::vec3(0.0f));
+    REQUIRE(stopped.tangent == glm::vec3(0.0f));
+}
+
 TEST_CASE("CatmullRomSpline clamping at boundaries", "[spline]") {
     CatmullRomSpline spline(linearKeys());
 

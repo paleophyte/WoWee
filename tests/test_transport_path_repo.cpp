@@ -173,6 +173,27 @@ TEST_CASE("hasPathForEntry checks fromDBC flag", "[transport_path_repo]") {
     REQUIRE(repo.hasPathForEntry(701) == true);
 }
 
+TEST_CASE("loadPathFromNodes replaces stale runtime paths but preserves DBC paths",
+          "[transport_path_repo][expansion]") {
+    game::TransportPathRepository repo;
+
+    repo.loadPathFromNodes(710, {{0, 0, 0}, {10, 0, 0}}, false, 10.0f);
+    repo.loadPathFromNodes(710, {{0, 0, 0}, {20, 0, 0}, {40, 0, 0}}, false, 10.0f);
+    REQUIRE(repo.findPath(710)->spline.keyCount() == 3);
+
+    std::vector<math::SplineKey> dbcKeys = {
+        {0, {0, 0, 0}}, {1000, {50, 0, 0}}
+    };
+    math::CatmullRomSpline dbcSpline(std::move(dbcKeys), false);
+    repo.storePath(711, game::PathEntry(std::move(dbcSpline), 711, false, true, false));
+
+    repo.loadPathFromNodes(711, {{1, 2, 3}}, false, 10.0f);
+    const auto* preserved = repo.findPath(711);
+    REQUIRE(preserved != nullptr);
+    REQUIRE(preserved->fromDBC);
+    REQUIRE(preserved->spline.keyCount() == 2);
+}
+
 // ── Repository: hasUsableMovingPathForEntry ─────────────────────
 
 TEST_CASE("hasUsableMovingPathForEntry rejects stationary/z-only", "[transport_path_repo]") {
@@ -238,12 +259,26 @@ TEST_CASE("inferMovingPathForSpawn skips z-only paths", "[transport_path_repo]")
     REQUIRE(result == 0);
 }
 
+TEST_CASE("night-elf ships never borrow unrelated TransportAnimation paths",
+          "[transport_path_repo][transport][expansion]") {
+    game::TransportPathRepository repo;
+    std::vector<math::SplineKey> keys = {
+        {0, {0, 0, 0}}, {1000, {100, 0, 0}}
+    };
+    math::CatmullRomSpline spline(std::move(keys), false);
+    repo.storePath(194675, game::PathEntry(std::move(spline), 194675, false, true, false));
+
+    REQUIRE(repo.pickFallbackMovingPath(176244, 7087) == 0); // Moonspray
+    REQUIRE(repo.pickFallbackMovingPath(181646, 7087) == 0); // Elune's Blessing
+    REQUIRE(repo.pickFallbackMovingPath(177233, 7087) == 0); // shared model, other route
+}
+
 // ── Repository: taxi paths ─────────────────────────────────────
 
 TEST_CASE("hasTaxiPath and findTaxiPath", "[transport_path_repo]") {
     game::TransportPathRepository repo;
     REQUIRE(repo.hasTaxiPath(100) == false);
-    REQUIRE(repo.findTaxiPath(100) == nullptr);
+    REQUIRE(repo.findTaxiPath(100, 0) == nullptr);
 
     // loadTaxiPathNodeDBC would populate this, but we can't test it without AssetManager.
     // This just verifies the API works with empty data.

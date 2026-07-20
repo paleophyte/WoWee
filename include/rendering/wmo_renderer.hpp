@@ -277,6 +277,11 @@ public:
      */
     std::optional<float> getFloorHeight(float glX, float glY, float glZ, float* outNormalZ = nullptr) const;
 
+    /** Query floor collision from one moving WMO instance. */
+    std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
+                                                float glX, float glY, float glZ,
+                                                float* outNormalZ = nullptr) const;
+
     /** Dump diagnostic info about WMO groups overlapping a position */
     void debugDumpGroupsAtPosition(float glX, float glY, float glZ) const;
 

@@ -1432,6 +1432,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
         }
     }
     gpuModel.isSkyBird                   = flightPathDoodad;
+    gpuModel.isLightBeam                 = cls.isLightBeam;
+    gpuModel.isTransportDoodad           = cls.isTransportDoodad;
     gpuModel.ambientEmitterType          = cls.ambientEmitterType;
     gpuModel.boundMin = tightMin;
     gpuModel.boundMax = tightMax;
@@ -1455,7 +1457,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
             break;
         }
     }
-
 
     // Build collision mesh + spatial grid from M2 bounding geometry
     gpuModel.collision.vertices = model.collisionVertices;

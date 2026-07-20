@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <map>
 #include <cmath>
+#include <limits>
 
 namespace wowee::game {
 
@@ -167,7 +168,8 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
 
     // Fallback by display model family.
     const bool looksLikeShip =
-        (displayId == 3015u || displayId == 2454u || displayId == 7446u);
+        (displayId == 3015u || displayId == 2454u || displayId == 7446u ||
+         displayId == 7087u);
     const bool looksLikeZeppelin =
         (displayId == 3031u || displayId == 7546u || displayId == 1587u || displayId == 807u || displayId == 808u);
 
@@ -219,7 +221,12 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
         std::vector<math::SplineKey> keys;
         keys.push_back({0, waypoints[0]});
         math::CatmullRomSpline spline(std::move(keys), false);
-        paths_.emplace(pathId, PathEntry(std::move(spline), pathId, isZOnly, false, false));
+        // Runtime fallbacks may replace stale runtime/taxi copies left under the
+        // same entry, but must never overwrite an authentic expansion DBC path.
+        const auto* existing = findPath(pathId);
+        if (!existing || !existing->fromDBC) {
+            storePath(pathId, PathEntry(std::move(spline), pathId, isZOnly, false, false));
+        }
         LOG_INFO("TransportPathRepository: Loaded stationary path ", pathId);
         return;
     }
@@ -247,7 +254,12 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
     }
 
     math::CatmullRomSpline spline(std::move(keys), false);
-    paths_.emplace(pathId, PathEntry(std::move(spline), pathId, isZOnly, false, false));
+    // Runtime fallbacks may replace stale runtime/taxi copies left under the
+    // same entry, but must never overwrite an authentic expansion DBC path.
+    const auto* existing = findPath(pathId);
+    if (!existing || !existing->fromDBC) {
+        storePath(pathId, PathEntry(std::move(spline), pathId, isZOnly, false, false));
+    }
 
     auto* stored = findPath(pathId);
     LOG_INFO("TransportPathRepository: Loaded path ", pathId,
@@ -514,6 +526,7 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
     struct TaxiNode {
         uint32_t nodeIndex;
         float x, y, z;
+        uint32_t delaySeconds;
     };
     std::map<std::pair<uint32_t, uint32_t>, std::vector<TaxiNode>> nodesByPathMap;
 
@@ -524,9 +537,31 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         float posX = dbc.getFloat(i, 4);          // X (server coords)
         float posY = dbc.getFloat(i, 5);          // Y (server coords)
         float posZ = dbc.getFloat(i, 6);          // Z (server coords)
+        uint32_t delaySeconds = dbc.getUInt32(i, 8); // Dock dwell time
 
-        nodesByPathMap[{pathId, mapId}].push_back({nodeIdx, posX, posY, posZ});
+        nodesByPathMap[{pathId, mapId}].push_back({nodeIdx, posX, posY, posZ, delaySeconds});
     }
+
+    for (auto& [key, nodes] : nodesByPathMap) {
+        std::sort(nodes.begin(), nodes.end(),
+                  [](const TaxiNode& a, const TaxiNode& b) { return a.nodeIndex < b.nodeIndex; });
+    }
+
+    constexpr float transportSpeed = 28.0f;  // units per second
+    auto segmentDurationMs = [](const std::vector<TaxiNode>& segment) {
+        uint64_t duration = 0;
+        for (size_t i = 0; i < segment.size(); ++i) {
+            duration += static_cast<uint64_t>(segment[i].delaySeconds) * 1000u;
+            if (i + 1 < segment.size()) {
+                const float dx = segment[i + 1].x - segment[i].x;
+                const float dy = segment[i + 1].y - segment[i].y;
+                const float dz = segment[i + 1].z - segment[i].z;
+                const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                duration += std::max<uint32_t>(100u, static_cast<uint32_t>(distance / transportSpeed * 1000.0f));
+            }
+        }
+        return static_cast<uint32_t>(std::min<uint64_t>(duration, std::numeric_limits<uint32_t>::max()));
+    };
 
     // Build world-coordinate transport paths, one segment per (pathId, mapId).
     int pathsLoaded = 0;
@@ -535,46 +570,64 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         const uint32_t mapId = key.second;
         if (nodes.size() < 2) continue;
 
-        // Sort by NodeIndex
-        std::sort(nodes.begin(), nodes.end(),
-                  [](const TaxiNode& a, const TaxiNode& b) { return a.nodeIndex < b.nodeIndex; });
+        // Convert nodes to canonical world positions.
+        std::vector<glm::vec3> pts;
+        pts.reserve(nodes.size());
+        for (const auto& node : nodes)
+            pts.push_back(core::coords::serverToCanonical(glm::vec3(node.x, node.y, node.z)));
 
-        // Build timed points using distance-based timing (28 units/sec default boat speed)
-        const float transportSpeed = 28.0f;  // units per second
-        std::vector<math::SplineKey> keys;
-        keys.reserve(nodes.size() + 1);
+        // A continent transport's nodes on one map already describe a complete pass:
+        // horizon -> dock -> horizon. The next node is on the other continent. Never
+        // draw a closing spline across this map or reverse the local segment: the first
+        // cuts through the harbour and the second makes the hull sail backwards.
+        const float endGap = glm::distance(pts.front(), pts.back());
+        const bool closedLoop = endGap < 60.0f;
 
-        uint32_t cumulativeMs = 0;
-        for (size_t i = 0; i < nodes.size(); i++) {
-            // Convert server coords to canonical
-            glm::vec3 serverPos(nodes[i].x, nodes[i].y, nodes[i].z);
-            glm::vec3 canonical = core::coords::serverToCanonical(serverPos);
-
-            keys.push_back({cumulativeMs, canonical});
-
-            if (i + 1 < nodes.size()) {
-                float dx = nodes[i+1].x - nodes[i].x;
-                float dy = nodes[i+1].y - nodes[i].y;
-                float dz = nodes[i+1].z - nodes[i].z;
-                float segDist = std::sqrt(dx*dx + dy*dy + dz*dz);
-                uint32_t segMs = static_cast<uint32_t>((segDist / transportSpeed) * 1000.0f);
-                if (segMs < 100) segMs = 100;  // Minimum 100ms per segment
-                cumulativeMs += segMs;
+        // Account for time spent traversing every other map segment. During this
+        // interval the local instance waits at its last, offshore node (normally past
+        // the useful draw horizon), then teleports to the first offshore node for the
+        // next inbound pass. This keeps the cycle close to the DBC route schedule.
+        uint32_t remoteDurationMs = 0;
+        if (!closedLoop) {
+            for (const auto& [otherKey, otherNodes] : nodesByPathMap) {
+                if (otherKey.first == pathId && otherKey.second != mapId) {
+                    remoteDurationMs += segmentDurationMs(otherNodes);
+                }
             }
         }
 
-        // Add wrap point (return to start) for looping
-        float wrapDx = nodes.front().x - nodes.back().x;
-        float wrapDy = nodes.front().y - nodes.back().y;
-        float wrapDz = nodes.front().z - nodes.back().z;
-        float wrapDist = std::sqrt(wrapDx*wrapDx + wrapDy*wrapDy + wrapDz*wrapDz);
-        uint32_t wrapMs = static_cast<uint32_t>((wrapDist / transportSpeed) * 1000.0f);
-        if (wrapMs < 100) wrapMs = 100;
-        cumulativeMs += wrapMs;
-        keys.push_back({cumulativeMs, keys[0].position});
+        // Build timed keys with the authored dock delays (field 8). Repeated-position
+        // segments are evaluated as exact holds by CatmullRomSpline.
+        std::vector<math::SplineKey> keys;
+        keys.reserve(nodes.size() * 2 + 1);
+        uint32_t cumulativeMs = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            keys.push_back({cumulativeMs, pts[i]});
+            if (nodes[i].delaySeconds != 0) {
+                cumulativeMs += nodes[i].delaySeconds * 1000u;
+                keys.push_back({cumulativeMs, pts[i]});
+            }
+            if (i + 1 < pts.size()) {
+                const float segDist = glm::distance(pts[i], pts[i + 1]);
+                cumulativeMs += std::max<uint32_t>(
+                    100u, static_cast<uint32_t>(segDist / transportSpeed * 1000.0f));
+            }
+        }
+        if (closedLoop) {
+            cumulativeMs += std::max<uint32_t>(
+                100u, static_cast<uint32_t>(endGap / transportSpeed * 1000.0f));
+            keys.push_back({cumulativeMs, pts.front()});
+        } else if (remoteDurationMs != 0) {
+            cumulativeMs += remoteDurationMs;
+            keys.push_back({cumulativeMs, pts.back()});
+        }
 
         math::CatmullRomSpline spline(std::move(keys), false);
-        taxiPaths_[pathId].emplace(mapId, PathEntry(std::move(spline), pathId, false, true, true));
+        // TaxiPathNode is a separate, per-map route source. Do not label it as
+        // TransportAnimation DBC data: copied taxi segments live temporarily in
+        // paths_ for the active transport, and fromDBC=true made later inference
+        // offer Bravery's cached route to unrelated icebreakers after zoning.
+        taxiPaths_[pathId].emplace(mapId, PathEntry(std::move(spline), pathId, false, false, true));
         pathsLoaded++;
     }
 

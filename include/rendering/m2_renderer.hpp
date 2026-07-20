@@ -145,6 +145,8 @@ struct M2ModelGPU {
     bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
     bool isSkyBird = false;         // Flying bird/bat doodad — hide until animation range
+    bool isLightBeam = false;       // Lighthouse/light-ray beam — distant bones must keep updating
+    bool isTransportDoodad = false; // Animated ship sail/paddle child
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
@@ -232,8 +234,11 @@ struct M2Instance {
     bool cachedIsInvisibleTrap = false;
     bool cachedIsInstancePortal = false;
     bool cachedIsSkyBird = false;
+    bool cachedIsLightBeam = false;
+    bool cachedIsTransportDoodad = false;
     bool cachedIsValid = false;
-    bool skipCollision = false;    // WMO interior doodads — skip player wall collision
+    bool skipCollision = false;    // Fully non-collidable visual/effect instance
+    bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
     float cachedBoundRadius = 0.0f;
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
@@ -399,6 +404,7 @@ public:
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
     void setSkipCollision(uint32_t instanceId, bool skip);
+    void setSkipWallCollision(uint32_t instanceId, bool skip);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */

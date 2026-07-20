@@ -172,6 +172,33 @@ TEST_CASE("SMSG_MESSAGECHAT whispers use the exact layout for every expansion", 
     }
 }
 
+TEST_CASE("WotLK guild achievement chat retains its trailing achievement ID",
+          "[chat][achievement]") {
+    constexpr uint64_t kSenderGuid = 0x42ull;
+    constexpr uint64_t kReceiverGuid = 0x99ull;
+    constexpr uint32_t kAchievementId = 2136u;
+    const std::string message = "%s has earned the achievement $a";
+
+    wowee::network::Packet packet(0);
+    packet.writeUInt8(static_cast<uint8_t>(ChatType::GUILD_ACHIEVEMENT));
+    packet.writeUInt32(static_cast<uint32_t>(ChatLanguage::UNIVERSAL));
+    packet.writeUInt64(kSenderGuid);
+    packet.writeUInt32(0);
+    packet.writeUInt64(kReceiverGuid);
+    packet.writeUInt32(static_cast<uint32_t>(message.size() + 1));
+    packet.writeString(message);
+    packet.writeUInt8(0);
+    packet.writeUInt32(kAchievementId);
+
+    MessageChatData parsed;
+    REQUIRE(MessageChatParser::parse(packet, parsed));
+    REQUIRE(parsed.type == ChatType::GUILD_ACHIEVEMENT);
+    REQUIRE(parsed.senderGuid == kSenderGuid);
+    REQUIRE(parsed.message == message);
+    REQUIRE(parsed.achievementId == kAchievementId);
+    REQUIRE_FALSE(packet.hasData());
+}
+
 TEST_CASE("Addon chat is identified before it reaches visible whisper history", "[chat][addon]") {
     MessageChatData addon;
     addon.type = ChatType::WHISPER;

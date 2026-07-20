@@ -104,6 +104,8 @@ struct WorldMapFacade::Impl {
     bool initialized = false;
     bool open = false;
     std::string mapName = "Azeroth";
+    std::string physicalMapName = "Azeroth";
+    bool virtualMapOverride = false;
     std::string pendingMapName;   // stored by external setMapName while in world/cosmic view
     bool userMapOverride = false; // true when user manually navigated to world/cosmic view
 
@@ -358,9 +360,18 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     d.lastFrameTime = now;
     d.viewState.updateTransition(dt);
 
+    const int physicalMapId = folderToMapId(d.physicalMapName);
+    auto displayedPlayerPosition = [&]() {
+        return physicalMapId >= 0
+            ? d.data.transformRenderPosition(
+                  static_cast<uint32_t>(physicalMapId), playerRenderPos)
+            : playerRenderPos;
+    };
+    glm::vec3 displayPlayerRenderPos = displayedPlayerPosition();
+
     // Update exploration state
     if (!d.data.zones().empty()) {
-        d.exploration.update(d.data.zones(), playerRenderPos,
+        d.exploration.update(d.data.zones(), displayPlayerRenderPos,
                              d.viewState.currentZoneIdx(),
                              d.data.exploreFlagByAreaId());
         if (d.exploration.overlaysChanged() && d.viewState.currentZoneIdx() >= 0) {
@@ -376,15 +387,69 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
             d.data.loadZones(d.mapName, *d.assetManager);
             d.zoneMetadata.initialize();
             d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+            displayPlayerRenderPos = displayedPlayerPosition();
         }
 
-        int bestContinent = findBestContinentForPlayer(d.data.zones(), playerRenderPos);
+        int playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+
+        // Some zones are stored on a different physical map from the continent
+        // shown by the world-map UI. The draenei islands are the important case:
+        // terrain/minimap data comes from Expansion01 (map 530), while their
+        // WorldMapArea DisplayMapID is Kalimdor (map 1). Follow that metadata
+        // instead of opening Outland merely because the terrain map is 530.
+        if (!d.virtualMapOverride && playerZone >= 0) {
+            const Zone& zone = d.data.zones()[playerZone];
+            if (zone.displayMapID != 0 &&
+                zone.displayMapID != static_cast<uint32_t>(d.data.currentMapId())) {
+                const char* virtualFolder = mapIdToFolder(zone.displayMapID);
+                if (virtualFolder && *virtualFolder) {
+                    d.physicalMapName = d.mapName;
+                    d.virtualMapOverride = true;
+                    d.mapName = virtualFolder;
+                    if (d.zoneHighlightLayer) d.zoneHighlightLayer->clearTextures();
+                    d.compositor.detachZoneTextures();
+                    d.data.clear();
+                    d.compositor.invalidateComposite();
+                    d.data.loadZones(d.mapName, *d.assetManager);
+                    d.zoneMetadata.initialize();
+                    d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+                    d.viewState.setContinentIdx(-1);
+                    d.viewState.setCurrentZoneIdx(-1);
+                    displayPlayerRenderPos = displayedPlayerPosition();
+                    playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+                    LOG_INFO("World map virtual continent: physical='",
+                             d.physicalMapName, "' display='", d.mapName, "'");
+                }
+            }
+        } else if (d.virtualMapOverride) {
+            const bool stillInVirtualArea = playerZone >= 0 &&
+                d.data.zones()[playerZone].mapID !=
+                    static_cast<uint32_t>(d.data.currentMapId()) &&
+                d.data.zones()[playerZone].displayMapID ==
+                    static_cast<uint32_t>(d.data.currentMapId());
+            if (!stillInVirtualArea) {
+                d.virtualMapOverride = false;
+                d.mapName = d.physicalMapName;
+                if (d.zoneHighlightLayer) d.zoneHighlightLayer->clearTextures();
+                d.compositor.detachZoneTextures();
+                d.data.clear();
+                d.compositor.invalidateComposite();
+                d.data.loadZones(d.mapName, *d.assetManager);
+                d.zoneMetadata.initialize();
+                d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+                d.viewState.setContinentIdx(-1);
+                d.viewState.setCurrentZoneIdx(-1);
+                displayPlayerRenderPos = displayedPlayerPosition();
+                playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+            }
+        }
+
+        int bestContinent = findBestContinentForPlayer(d.data.zones(), displayPlayerRenderPos);
         if (bestContinent >= 0 && bestContinent != d.viewState.continentIdx()) {
             d.viewState.setContinentIdx(bestContinent);
             d.compositor.invalidateComposite();
         }
 
-        int playerZone = findZoneForPlayer(d.data.zones(), playerRenderPos);
         // Flight map is always the continent overview — never open at zone level.
         if (!d.taxiMode &&
             playerZone >= 0 && d.viewState.continentIdx() >= 0 &&
@@ -393,7 +458,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
             d.compositor.loadOverlayTextures(playerZone, d.data.zones());
             d.viewState.setCurrentZoneIdx(playerZone);
             d.viewState.setLevel(ViewLevel::ZONE);
-            d.exploration.update(d.data.zones(), playerRenderPos, playerZone,
+            d.exploration.update(d.data.zones(), displayPlayerRenderPos, playerZone,
                                  d.data.exploreFlagByAreaId());
             d.compositor.requestComposite(playerZone);
         } else if (d.viewState.continentIdx() >= 0) {
@@ -422,7 +487,7 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
             return;
 
         case InputAction::ZOOM_IN: {
-            int playerZone = findZoneForPlayer(d.data.zones(), playerRenderPos);
+            int playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
             // For continent→zone, verify the zone belongs to the current continent
             int candidateZone = hoveredZone >= 0 ? hoveredZone : playerZone;
             if (d.viewState.currentLevel() == ViewLevel::CONTINENT &&
@@ -518,7 +583,8 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
 
     if (!d.open) return;
     bool rightClickConsumed = (inputResult.action == InputAction::RIGHT_CLICK_BACK);
-    d.renderImGuiOverlay(playerRenderPos, screenWidth, screenHeight, playerYawDeg, rightClickConsumed);
+    d.renderImGuiOverlay(displayPlayerRenderPos, screenWidth, screenHeight,
+                         playerYawDeg, rightClickConsumed);
 }
 
 void WorldMapFacade::setMapName(const std::string& name) {
@@ -529,6 +595,12 @@ void WorldMapFacade::setMapName(const std::string& name) {
         d.pendingMapName = name;
         return;
     }
+    // The terrain/minimap continues reporting the physical map (Expansion01)
+    // while Azuremyst is intentionally displayed under Kalimdor. Do not undo
+    // that virtual-continent selection every frame.
+    if (d.virtualMapOverride && name == d.physicalMapName) return;
+    d.physicalMapName = name;
+    d.virtualMapOverride = false;
     if (d.mapName == name && !d.data.zones().empty()) return;
     d.mapName = name;
 

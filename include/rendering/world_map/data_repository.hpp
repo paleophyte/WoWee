@@ -59,6 +59,11 @@ public:
     /// Look up zone index from an AreaTable ID (from ZMP). Returns -1 if not found.
     int zoneIndexForAreaId(uint32_t areaId) const;
 
+    /// Convert a render-space position from a physical map into the currently
+    /// loaded display map using WorldMapTransforms.dbc.
+    glm::vec3 transformRenderPosition(uint32_t sourceMapId,
+                                      const glm::vec3& renderPos) const;
+
     /// ZMP-derived bounding rectangles per zone index (UV [0,1] on display).
     const std::unordered_map<int, ZmpRect>& zmpZoneBounds() const { return zmpZoneBounds_; }
 
@@ -66,7 +71,15 @@ public:
     void clear();
 
 private:
+    struct MapTransform {
+        uint32_t sourceMapId = 0;
+        uint32_t targetMapId = 0;
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+        float offsetX = 0.0f, offsetY = 0.0f;
+    };
+
     std::vector<Zone> zones_;
+    std::vector<MapTransform> mapTransforms_;
     std::vector<POI> poiMarkers_;
     std::vector<CosmicMapEntry> cosmicMaps_;
     std::vector<CosmicMapEntry> azerothRegions_;

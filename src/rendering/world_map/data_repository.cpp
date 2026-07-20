@@ -19,6 +19,7 @@ namespace world_map {
 
 void DataRepository::clear() {
     zones_.clear();
+    mapTransforms_.clear();
     poiMarkers_.clear();
     cosmicMaps_.clear();
     azerothRegions_.clear();
@@ -67,6 +68,26 @@ void DataRepository::loadZones(const std::string& mapName,
         }
     }
 
+    // Physical-map regions that the UI presents on another continent. In
+    // particular, Azuremyst/Bloodmyst use map 530 terrain but are projected
+    // onto Kalimdor (map 1) with a +10133.333/+17600 coordinate offset.
+    auto transformsDbc = assetManager.loadDBC("WorldMapTransforms.dbc");
+    if (transformsDbc && transformsDbc->isLoaded() &&
+        transformsDbc->getFieldCount() >= 9) {
+        for (uint32_t i = 0; i < transformsDbc->getRecordCount(); ++i) {
+            MapTransform tr;
+            tr.sourceMapId = transformsDbc->getUInt32(i, 1);
+            tr.minX = transformsDbc->getFloat(i, 2);
+            tr.minY = transformsDbc->getFloat(i, 3);
+            tr.maxX = transformsDbc->getFloat(i, 4);
+            tr.maxY = transformsDbc->getFloat(i, 5);
+            tr.targetMapId = transformsDbc->getUInt32(i, 6);
+            tr.offsetX = transformsDbc->getFloat(i, 7);
+            tr.offsetY = transformsDbc->getFloat(i, 8);
+            mapTransforms_.push_back(tr);
+        }
+    }
+
     // Use expansion-aware DBC layout when available; fall back to WotLK stock field
     // indices (ID=0, ParentAreaNum=2, ExploreFlag=3) when layout metadata is missing.
     const auto* atL = activeLayout ? activeLayout->getLayout("AreaTable") : nullptr;
@@ -105,18 +126,46 @@ void DataRepository::loadZones(const std::string& mapName,
     int continentIdx = -1;
     for (uint32_t i = 0; i < wmaDbc->getRecordCount(); i++) {
         uint32_t recMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["MapID"] : 1);
-        if (static_cast<int>(recMapID) != mapID) continue;
+        uint32_t displayMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["DisplayMapID"] : 8);
+        // WorldMapArea can place a zone on one physical map while displaying it
+        // under another continent. Azuremyst/Bloodmyst physically live on map
+        // 530, but DisplayMapID=1 makes them children of Kalimdor. Include those
+        // virtual children when building the display continent.
+        if (static_cast<int>(recMapID) != mapID &&
+            static_cast<int>(displayMapID) != mapID) continue;
 
         Zone zone;
         zone.wmaID   = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["ID"] : 0);
+        zone.mapID   = recMapID;
         zone.areaID  = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["AreaID"] : 2);
         zone.areaName = wmaDbc->getString(i, wmaL ? (*wmaL)["AreaName"] : 3);
         zone.bounds.locLeft   = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocLeft"] : 4);
         zone.bounds.locRight  = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocRight"] : 5);
         zone.bounds.locTop    = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocTop"] : 6);
         zone.bounds.locBottom = wmaDbc->getFloat(i, wmaL ? (*wmaL)["LocBottom"] : 7);
-        zone.displayMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["DisplayMapID"] : 8);
+        zone.displayMapID = displayMapID;
         zone.parentWorldMapID = wmaDbc->getUInt32(i, wmaL ? (*wmaL)["ParentWorldMapID"] : 10);
+        if (recMapID != static_cast<uint32_t>(mapID) && displayMapID == static_cast<uint32_t>(mapID)) {
+            const float centerX = (zone.bounds.locLeft + zone.bounds.locRight) * 0.5f;
+            const float centerY = (zone.bounds.locTop + zone.bounds.locBottom) * 0.5f;
+            for (const MapTransform& tr : mapTransforms_) {
+                const float minX = std::min(tr.minX, tr.maxX);
+                const float maxX = std::max(tr.minX, tr.maxX);
+                const float minY = std::min(tr.minY, tr.maxY);
+                const float maxY = std::max(tr.minY, tr.maxY);
+                if (tr.sourceMapId != recMapID || tr.targetMapId != displayMapID ||
+                    centerX < minX || centerX > maxX || centerY < minY || centerY > maxY) {
+                    continue;
+                }
+                zone.virtualOffsetWowX = tr.offsetX;
+                zone.virtualOffsetWowY = tr.offsetY;
+                zone.bounds.locLeft += tr.offsetX;
+                zone.bounds.locRight += tr.offsetX;
+                zone.bounds.locTop += tr.offsetY;
+                zone.bounds.locBottom += tr.offsetY;
+                break;
+            }
+        }
         // Collect the zone's own AreaBit plus all subzone AreaBits
         auto exploreIt = exploreFlagByAreaId.find(zone.areaID);
         if (exploreIt != exploreFlagByAreaId.end())
@@ -257,6 +306,27 @@ void DataRepository::loadZones(const std::string& mapName,
     // Build views based on active expansion
     buildCosmicView();
     buildAzerothView();
+}
+
+glm::vec3 DataRepository::transformRenderPosition(
+    uint32_t sourceMapId, const glm::vec3& renderPos) const {
+    if (currentMapId_ < 0 || sourceMapId == static_cast<uint32_t>(currentMapId_)) {
+        return renderPos;
+    }
+    const float wowX = renderPos.y;
+    const float wowY = renderPos.x;
+    for (const MapTransform& tr : mapTransforms_) {
+        const float minX = std::min(tr.minX, tr.maxX);
+        const float maxX = std::max(tr.minX, tr.maxX);
+        const float minY = std::min(tr.minY, tr.maxY);
+        const float maxY = std::max(tr.minY, tr.maxY);
+        if (tr.sourceMapId == sourceMapId &&
+            tr.targetMapId == static_cast<uint32_t>(currentMapId_) &&
+            wowX >= minX && wowX <= maxX && wowY >= minY && wowY <= maxY) {
+            return glm::vec3(wowY + tr.offsetY, wowX + tr.offsetX, renderPos.z);
+        }
+    }
+    return renderPos;
 }
 
 int DataRepository::getExpansionLevel() {

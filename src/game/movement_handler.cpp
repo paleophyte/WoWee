@@ -1177,7 +1177,8 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     float canYaw = core::coords::serverToCanonicalYaw(info.orientation);
 
     if (onTransport && transportGuid != 0 && owner_.getTransportManager()) {
-        glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(tLocalX, tLocalY, tLocalZ));
+        glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+            transportGuid, glm::vec3(tLocalX, tLocalY, tLocalZ));
         owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, true,
                                core::coords::serverToCanonicalYaw(tLocalO));
         glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
@@ -1662,7 +1663,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 
     if (packet.getReadPos() + 5 > packet.getSize()) {
         if (owner_.getTransportManager()) {
-            glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+            glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+                transportGuid, glm::vec3(localX, localY, localZ));
             owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
@@ -1677,7 +1679,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 
     if (moveType == 1) {
         if (owner_.getTransportManager()) {
-            glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+            glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+                transportGuid, glm::vec3(localX, localY, localZ));
             owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
@@ -1740,10 +1743,12 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         return;
     }
 
-    glm::vec3 startLocalCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+    glm::vec3 startLocalCanonical = owner_.getTransportManager()->serverToTransportLocal(
+        transportGuid, glm::vec3(localX, localY, localZ));
 
     if (hasDest && duration > 0) {
-        glm::vec3 destLocalCanonical = core::coords::serverToCanonical(glm::vec3(destLocalX, destLocalY, destLocalZ));
+        glm::vec3 destLocalCanonical = owner_.getTransportManager()->serverToTransportLocal(
+            transportGuid, glm::vec3(destLocalX, destLocalY, destLocalZ));
         glm::vec3 destWorld  = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, destLocalCanonical);
 
         if (moveType == 0) {
@@ -1900,6 +1905,16 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
     float orientation = packet.readFloat();
+    const bool crossMapTransportTransfer = owner_.isOnTransport() &&
+        mapId != owner_.getCurrentMapId();
+    if (crossMapTransportTransfer) {
+        // While riding a cross-continent transport, SMSG_NEW_WORLD carries the
+        // player's transport-local coordinates. They are not a world position
+        // near map origin. Hold them until the same ship is registered on the
+        // destination map, then compose them through its new transform.
+        owner_.beginPlayerTransportWorldTransfer(
+            mapId, core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ)));
+    }
     const uint32_t transferAreaTriggerId = lastAreaTriggerId_;
     lastAreaTriggerId_ = 0;
     postTransferReturnAreaTriggerId_ = findKnownReturnAreaTrigger(transferAreaTriggerId);
@@ -3326,7 +3341,11 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
 
         float composedOrientation = entity->getOrientation();
         if (attachment.hasLocalOrientation) {
-            float baseYaw = transport->hasServerYaw ? transport->serverYaw : 0.0f;
+            // Client-owned ship routes do not retain hasServerYaw, but their
+            // live quaternion still carries the tangent/dock rotation. Using
+            // zero made attached NPCs face in a fixed world direction while
+            // their deck turned beneath them.
+            float baseYaw = 2.0f * std::atan2(transport->rotation.z, transport->rotation.w);
             composedOrientation = baseYaw + attachment.localOrientation;
         }
 

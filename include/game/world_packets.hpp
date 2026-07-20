@@ -686,6 +686,7 @@ struct MessageChatData {
     std::string message;
     std::string channelName;  // For channel messages
     uint8_t chatTag = 0;      // Player flags (AFK, DND, GM, etc.)
+    uint32_t achievementId = 0; // Trailing field for ACHIEVEMENT/GUILD_ACHIEVEMENT
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     // Monotonic id assigned by ChatHandler when the message enters history.
     // Stable cache key for the chat UI's formatted/parsed line cache.

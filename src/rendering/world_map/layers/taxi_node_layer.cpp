@@ -54,6 +54,41 @@ void formatCost(uint32_t copperTotal, char* buf, size_t bufSize) {
     }
 }
 
+bool projectNodeToDisplayedMap(const TaxiNode& node, const LayerContext& ctx,
+                               glm::vec3& outRenderPos) {
+    if (static_cast<int>(node.mapId) == ctx.currentMapId) {
+        outRenderPos = core::coords::canonicalToRender(
+            glm::vec3(node.wowX, node.wowY, node.wowZ));
+        return true;
+    }
+    if (!ctx.zones || ctx.currentMapId < 0) return false;
+
+    // TaxiNodes retain their physical MapID. Draenei-island nodes therefore
+    // say 530 even though WorldMapArea displays those islands under Kalimdor
+    // (map 1). Admit only nodes that fall inside a virtual child area of the
+    // displayed map; this includes Azuremyst without leaking the rest of the
+    // Outland flight network onto Kalimdor.
+    for (const Zone& zone : *ctx.zones) {
+        if (zone.areaID == 0 || zone.mapID != node.mapId ||
+            static_cast<int>(zone.displayMapID) != ctx.currentMapId) {
+            continue;
+        }
+        const float minX = std::min(zone.bounds.locLeft, zone.bounds.locRight);
+        const float maxX = std::max(zone.bounds.locLeft, zone.bounds.locRight);
+        const float minY = std::min(zone.bounds.locTop, zone.bounds.locBottom);
+        const float maxY = std::max(zone.bounds.locTop, zone.bounds.locBottom);
+        const float displayWowX = node.wowX + zone.virtualOffsetWowX;
+        const float displayWowY = node.wowY + zone.virtualOffsetWowY;
+        if (displayWowX >= minX && displayWowX <= maxX &&
+            displayWowY >= minY && displayWowY <= maxY) {
+            outRenderPos = core::coords::canonicalToRender(
+                glm::vec3(displayWowX, displayWowY, node.wowZ));
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 void TaxiNodeLayer::render(const LayerContext& ctx) {
@@ -85,10 +120,8 @@ void TaxiNodeLayer::renderWorldMapMarkers(const LayerContext& ctx,
     ImVec2 mp = ImGui::GetMousePos();
     for (const auto& node : *nodes_) {
         if (!node.known) continue;
-        if (static_cast<int>(node.mapId) != ctx.currentMapId) continue;
-
-        glm::vec3 rPos = core::coords::canonicalToRender(
-            glm::vec3(node.wowX, node.wowY, node.wowZ));
+        glm::vec3 rPos(0.0f);
+        if (!projectNodeToDisplayedMap(node, ctx, rPos)) continue;
         glm::vec2 uv = renderPosToMapUV(rPos, bounds, isContinent);
         if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) continue;
 
@@ -124,10 +157,8 @@ void TaxiNodeLayer::renderFlightMap(const LayerContext& ctx,
     for (const auto& node : *nodes_) {
         if (!node.known) continue;
         if (!node.current && !node.reachable) continue;
-        if (static_cast<int>(node.mapId) != ctx.currentMapId) continue;
-
-        glm::vec3 rPos = core::coords::canonicalToRender(
-            glm::vec3(node.wowX, node.wowY, node.wowZ));
+        glm::vec3 rPos(0.0f);
+        if (!projectNodeToDisplayedMap(node, ctx, rPos)) continue;
         glm::vec2 uv = renderPosToMapUV(rPos, bounds, isContinent);
         if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) continue;
 

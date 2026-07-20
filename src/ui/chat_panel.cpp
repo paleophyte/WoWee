@@ -66,6 +66,21 @@ namespace {
         else if (msg.chatTag & 0x01) tagPrefix = "<AFK> ";
         else if (msg.chatTag & 0x02) tagPrefix = "<DND> ";
 
+        if (msg.type == CT::ACHIEVEMENT || msg.type == CT::GUILD_ACHIEVEMENT) {
+            // Achievement packets carry only a sender GUID. Name resolution is
+            // asynchronous, so expand %s here—where resolvedSenderName is current—
+            // rather than permanently baking an early GUID/unknown fallback into
+            // chat history when the packet first arrives.
+            std::string rendered = processedMessage;
+            const std::string earner = resolvedSenderName.empty()
+                ? "Someone" : resolvedSenderName;
+            size_t pos = 0;
+            while ((pos = rendered.find("%s", pos)) != std::string::npos) {
+                rendered.replace(pos, 2, earner);
+                pos += earner.size();
+            }
+            return tsPrefix + rendered;
+        }
         if (msg.type == CT::SYSTEM || msg.type == CT::TEXT_EMOTE)
             return tsPrefix + processedMessage;
 

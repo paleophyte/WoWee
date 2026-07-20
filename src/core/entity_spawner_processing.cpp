@@ -2,6 +2,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/character_renderer.hpp"
@@ -831,6 +832,16 @@ void EntitySpawner::processAsyncGameObjectResults() {
 
         gameObjectInstances_[result.guid] = {modelId, instanceId, true};
 
+        // The synchronous WMO path notifies TransportManager after creating the
+        // render instance. Do the same here: unique/uncached transport WMOs (notably
+        // the Kraken icebreaker) otherwise become visible but remain unregistered
+        // and stationary forever.
+        if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
+            gameHandler_->notifyTransportSpawned(
+                result.guid, result.entry, result.displayId,
+                result.x, result.y, result.z, result.orientation);
+        }
+
         // Queue transport doodad loading if applicable
         std::string lowerPath = result.modelPath;
         std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
@@ -1056,7 +1067,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
         const bool shipOrZeppelinDisplay =
             (pending.displayId == 3015 || pending.displayId == 3031 || pending.displayId == 7546 ||
              pending.displayId == 7446 || pending.displayId == 1587 || pending.displayId == 2454 ||
-             pending.displayId == 807 || pending.displayId == 808);
+             pending.displayId == 7087 || pending.displayId == 807 || pending.displayId == 808);
         bool hasUsablePath = transportManager->hasPathForEntry(pending.entry);
         if (shipOrZeppelinDisplay) {
             hasUsablePath = transportManager->hasUsableMovingPathForEntry(pending.entry, 25.0f);
@@ -1159,6 +1170,22 @@ void EntitySpawner::processPendingTransportRegistrations() {
                          " mode=", (tr->useClientAnimation ? "client" : "server"),
                          " serverUpdates=", tr->serverUpdateCount);
             }
+
+            glm::vec3 restoredWorldPosition(0.0f);
+            if (gameHandler_->completePlayerTransportWorldTransfer(
+                    pending.guid, restoredWorldPosition)) {
+                const glm::vec3 renderPosition =
+                    core::coords::canonicalToRender(restoredWorldPosition);
+                renderer_->getCharacterPosition() = renderPosition;
+                if (auto* camera = renderer_->getCameraController()) {
+                    camera->teleportTo(renderPosition);
+                    camera->clearMovementInputs();
+                    camera->suspendGravityFor(2.0f);
+                    if (auto* followTarget = camera->getFollowTargetMutable()) {
+                        *followTarget = renderPosition;
+                    }
+                }
+            }
         } else {
             LOG_DEBUG("Transport registered: guid=0x", std::hex, pending.guid, std::dec,
                      " entry=", pending.entry, " displayId=", pending.displayId,
@@ -1236,6 +1263,20 @@ void EntitySpawner::processPendingTransportDoodads() {
             uint32_t m2InstanceId = m2Renderer->createInstance(doodadModelId, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f);
             if (m2InstanceId == 0) continue;
             m2Renderer->setSkipCollision(m2InstanceId, true);
+            // Ship WMO children use the dedicated transport animation states:
+            // 162=ShipStart, 163=ShipMoving, 164=ShipStop. Leaving them on the
+            // first sequence freezes the icebreaker paddle (its sequence 0 is
+            // static) and can leave the Bravery's sail rig in its furled pose.
+            m2Renderer->setInstanceAnimation(m2InstanceId, 163u, true);
+            std::string doodadPathLower = doodadTemplate.m2Path;
+            std::transform(doodadPathLower.begin(), doodadPathLower.end(), doodadPathLower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (doodadPathLower.find("transportship_sails") != std::string::npos ||
+                doodadPathLower.find("icebreaker_paddlewheel") != std::string::npos) {
+                LOG_WARNING("Transport machinery spawned: ", doodadTemplate.m2Path,
+                            " instance=", m2InstanceId,
+                            " hasShipMoving=", m2Renderer->hasAnimation(m2InstanceId, 163u));
+            }
 
             wmoRenderer->addDoodadToInstance(it->instanceId, m2InstanceId, doodadTemplate.localTransform);
             it->spawnedDoodads++;

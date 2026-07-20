@@ -80,11 +80,14 @@ struct OverlayEntry {
 
 struct Zone {
     uint32_t wmaID = 0;
+    uint32_t mapID = 0;          // Physical map containing the area
     uint32_t areaID = 0;         // 0 = continent level
     std::string areaName;        // texture folder name (from DBC)
     ZoneBounds bounds;
     uint32_t displayMapID = 0;
     uint32_t parentWorldMapID = 0;
+    float virtualOffsetWowX = 0.0f;
+    float virtualOffsetWowY = 0.0f;
     std::vector<uint32_t> exploreBits;  // all AreaBit indices (zone + subzones)
     std::vector<OverlayEntry> overlays;
 };

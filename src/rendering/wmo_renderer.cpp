@@ -3219,6 +3219,79 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
     return bestFloor;
 }
 
+std::optional<float> WMORenderer::getInstanceFloorHeight(uint32_t instanceId,
+                                                         float glX, float glY, float glZ,
+                                                         float* outNormalZ) const {
+    const auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) {
+        return std::nullopt;
+    }
+
+    const auto& instance = instances[idxIt->second];
+    const auto modelIt = loadedModels.find(instance.modelId);
+    if (modelIt == loadedModels.end()) return std::nullopt;
+    const auto& model = modelIt->second;
+
+    if (glX < instance.worldBoundsMin.x || glX > instance.worldBoundsMax.x ||
+        glY < instance.worldBoundsMin.y || glY > instance.worldBoundsMax.y ||
+        glZ < instance.worldBoundsMin.z - 2.0f || glZ > instance.worldBoundsMax.z + 4.0f) {
+        return std::nullopt;
+    }
+
+    const glm::vec3 worldOrigin(glX, glY, glZ + 500.0f);
+    const glm::vec3 worldDir(0.0f, 0.0f, -1.0f);
+    const glm::vec3 localOrigin(instance.invModelMatrix * glm::vec4(worldOrigin, 1.0f));
+    const glm::vec3 localDir = glm::normalize(
+        glm::vec3(instance.invModelMatrix * glm::vec4(worldDir, 0.0f)));
+
+    std::optional<float> bestFloor;
+    float bestNormalZ = 1.0f;
+    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+        if (gi < instance.worldGroupBounds.size()) {
+            const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
+            if (glX < gMin.x || glX > gMax.x ||
+                glY < gMin.y || glY > gMax.y || glZ - 4.0f > gMax.z) {
+                continue;
+            }
+        }
+
+        const auto& group = model.groups[gi];
+        if (!rayIntersectsAABB(localOrigin, localDir,
+                               group.boundingBoxMin, group.boundingBoxMax)) {
+            continue;
+        }
+
+        group.getTrianglesInRange(localOrigin.x - 1.0f, localOrigin.y - 1.0f,
+                                  localOrigin.x + 1.0f, localOrigin.y + 1.0f,
+                                  tl_triScratch);
+        for (uint32_t triStart : tl_triScratch) {
+            const auto& verts = group.collisionVertices;
+            const auto& indices = group.collisionIndices;
+            const glm::vec3& v0 = verts[indices[triStart]];
+            const glm::vec3& v1 = verts[indices[triStart + 1]];
+            const glm::vec3& v2 = verts[indices[triStart + 2]];
+
+            float t = rayTriangleIntersect(localOrigin, localDir, v0, v1, v2);
+            if (t <= 0.0f) t = rayTriangleIntersect(localOrigin, localDir, v0, v2, v1);
+            if (t <= 0.0f) continue;
+
+            const glm::vec3 hitLocal = localOrigin + localDir * t;
+            const glm::vec3 hitWorld(instance.modelMatrix * glm::vec4(hitLocal, 1.0f));
+            if (hitWorld.z > glZ || (bestFloor && hitWorld.z <= *bestFloor)) continue;
+
+            bestFloor = hitWorld.z;
+            glm::vec3 localNormal = group.triNormals[triStart / 3];
+            if (localNormal.z < 0.0f) localNormal = -localNormal;
+            const glm::vec3 worldNormal = glm::normalize(
+                glm::vec3(instance.modelMatrix * glm::vec4(localNormal, 0.0f)));
+            bestNormalZ = std::abs(worldNormal.z);
+        }
+    }
+
+    if (bestFloor && outNormalZ) *outNormalZ = bestNormalZ;
+    return bestFloor;
+}
+
 void WMORenderer::debugDumpGroupsAtPosition(float glX, float glY, float glZ) const {
     LOG_WARNING("=== WMO Floor Debug at render(", glX, ", ", glY, ", ", glZ, ") ===");
 
