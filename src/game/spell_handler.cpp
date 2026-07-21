@@ -546,6 +546,20 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // sending any error, so swap in the highest rank we actually know.
     spellId = resolveHighestKnownRank(spellId);
 
+    // Fishing places a bobber in front of the caster using the facing the server has
+    // on record. The client only sends MSG_MOVE_SET_FACING when the aim changes by >3°
+    // (throttled to 10 Hz), so a small final aim adjustment before pressing cast may not
+    // have reached the server — leaving it with a slightly stale facing that drops the
+    // bobber off to the side or on land ("Face open water"). Push the exact current
+    // facing right before the cast so the bobber lands where the player is aiming.
+    if (spellclass::isFishingCast(spellId) && owner_.getSocket()) {
+        owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
+        const float canonO = owner_.getMovementInfo().orientation;
+        LOG_WARNING("[FISH-FACING] canonical=", canonO, " rad (",
+                    canonO * 180.0f / 3.14159265f, " deg) serverYaw=",
+                    core::coords::canonicalToServerYaw(canonO));
+    }
+
     // Profession spells (Cooking, First Aid, Alchemy, ...) open the crafting
     // window client-side instead of being sent as casts — matching the real
     // client, where these spells just open the tradeskill UI.
