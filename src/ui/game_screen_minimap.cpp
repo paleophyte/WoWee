@@ -257,6 +257,45 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
     }
 
+    // Flight masters are a standard minimap service marker, independent of
+    // the optional generic NPC-dot overlay. Use the live UNIT_NPC_FLAGS value
+    // so an undiscovered flight master is visible before the taxi window has
+    // ever been opened (and therefore before the known-node mask is available).
+    {
+        ImVec2 mouse = ImGui::GetMousePos();
+        for (const auto& entity : minimapUnits) {
+            auto unit = std::static_pointer_cast<game::Unit>(entity);
+            if (!unit || unit->getHealth() == 0 ||
+                (unit->getNpcFlags() & game::NPC_FLAG_FLIGHT_MASTER) == 0) {
+                continue;
+            }
+
+            glm::vec3 flightMasterRender = core::coords::canonicalToRender(
+                glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+            float sx = 0.0f, sy = 0.0f;
+            if (!projectToMinimap(flightMasterRender, sx, sy)) continue;
+
+            constexpr float halfSize = 5.5f;
+            const ImVec2 top(sx, sy - halfSize);
+            const ImVec2 right(sx + halfSize, sy);
+            const ImVec2 bottom(sx, sy + halfSize);
+            const ImVec2 left(sx - halfSize, sy);
+            drawList->AddQuadFilled(top, right, bottom, left,
+                                    IM_COL32(255, 215, 0, 245));
+            drawList->AddQuad(top, right, bottom, left,
+                              IM_COL32(70, 45, 0, 230), 1.5f);
+            drawList->AddCircleFilled(ImVec2(sx, sy), 1.7f,
+                                      IM_COL32(255, 250, 205, 255));
+
+            float mdx = mouse.x - sx, mdy = mouse.y - sy;
+            if (mdx * mdx + mdy * mdy <= 64.0f) {
+                const std::string& name = unit->getName();
+                ImGui::SetTooltip("%s\nFlight Master",
+                                  name.empty() ? "Flight Master" : name.c_str());
+            }
+        }
+    }
+
     // Rare tracker: use the same live creature-rank classification as the world map.
     // This is independent of generic NPC dots so enabling rare tracking consistently
     // shows spawned rares on both maps without adding every nearby creature.
