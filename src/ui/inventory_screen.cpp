@@ -3056,7 +3056,18 @@ void InventoryScreen::renderItemTooltip(const game::ItemDef& item, const game::I
     // Slot type
     if (item.inventoryType > 0) {
         const char* slotName = ui::getInventorySlotName(item.inventoryType);
-        if (slotName[0]) {
+        const auto* qi = gameHandler_ ? gameHandler_->getItemInfo(item.itemId) : nullptr;
+        // Containers (bags, quivers, ammo pouches, specialty bags) show their capacity as
+        // "N Slot Bag", matching the WoW bag tooltip. containerSlots comes from the item
+        // template query; itemClass 1 = Container, 11 = Quiver/ammo.
+        const bool isContainer = qi && qi->valid &&
+                                 (qi->itemClass == 1 || qi->itemClass == 11) &&
+                                 qi->containerSlots > 0;
+        if (isContainer) {
+            const char* bagType = !item.subclassName.empty() ? item.subclassName.c_str()
+                                : (slotName[0] ? slotName : "Bag");
+            ImGui::TextColored(ui::colors::kLightGray, "%u Slot %s", qi->containerSlots, bagType);
+        } else if (slotName[0]) {
             if (!item.subclassName.empty()) {
                 ImGui::TextColored(ui::colors::kLightGray, "%s  %s", slotName, item.subclassName.c_str());
             } else {
@@ -3064,11 +3075,8 @@ void InventoryScreen::renderItemTooltip(const game::ItemDef& item, const game::I
             }
         }
 
-        if (gameHandler_) {
-            const auto* qi = gameHandler_->getItemInfo(item.itemId);
-            if (qi && qi->valid)
-                renderItemTypeWarningIfNeeded(gameHandler_, qi->itemClass, qi->subClass);
-        }
+        if (qi && qi->valid)
+            renderItemTypeWarningIfNeeded(gameHandler_, qi->itemClass, qi->subClass);
     }
 
     auto isWeaponInventoryType = [](uint32_t invType) {
