@@ -1454,6 +1454,7 @@ void GameScreen::saveSettings() {
     out << "show_latency_meter=" << (settingsPanel_.pendingShowLatencyMeter ? 1 : 0) << "\n";
     out << "show_dps_meter=" << (settingsPanel_.showDPSMeter_ ? 1 : 0) << "\n";
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
+    out << "show_rare_tracker=" << (settingsPanel_.showRareTracker_ ? 1 : 0) << "\n";
     out << "separate_bags=" << (settingsPanel_.pendingSeparateBags ? 1 : 0) << "\n";
     out << "show_keyring=" << (settingsPanel_.pendingShowKeyring ? 1 : 0) << "\n";
     out << "bag_scale=" << settingsPanel_.pendingBagScale << "\n";
@@ -1613,6 +1614,8 @@ void GameScreen::loadSettings() {
                 settingsPanel_.showDPSMeter_ = (std::stoi(val) != 0);
             } else if (key == "show_cooldown_tracker") {
                 settingsPanel_.showCooldownTracker_ = (std::stoi(val) != 0);
+            } else if (key == "show_rare_tracker") {
+                settingsPanel_.showRareTracker_ = (std::stoi(val) != 0);
             } else if (key == "separate_bags") {
                 settingsPanel_.pendingSeparateBags = (std::stoi(val) != 0);
                 inventoryScreen.setSeparateBags(settingsPanel_.pendingSeparateBags);

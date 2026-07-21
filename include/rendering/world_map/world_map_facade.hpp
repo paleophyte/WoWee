@@ -45,6 +45,8 @@ public:
     void setTaxiNodes(std::vector<TaxiNode> nodes);
     void setQuestPois(std::vector<QuestPOI> pois);
     void setCorpsePos(bool hasCorpse, glm::vec3 renderPos);
+    /// Nearby rare/rare-elite creatures currently spawned near the player.
+    void setRares(std::vector<RareMark> rares);
 
     bool isOpen() const;
     void close();

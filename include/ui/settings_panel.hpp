@@ -157,6 +157,7 @@ public:
     bool showFriendlyNameplates_ = true;  // Shift+V toggles friendly player nameplates
     bool showDPSMeter_ = false;
     bool showCooldownTracker_ = false;
+    bool showRareTracker_ = false;  // Mark nearby spawned rares/rare-elites on the world map
     bool damageFlashEnabled_ = true;
     bool lowHealthVignetteEnabled_ = true; // Persistent pulsing red vignette below 20% HP
 

@@ -171,6 +171,12 @@ if (ImGui::Checkbox("Show Cooldown Tracker", &showCooldownTracker_)) {
 ImGui::SameLine();
 ImGui::TextDisabled("(active spell cooldowns near action bar)");
 
+if (ImGui::Checkbox("Show Rare Tracker", &showRareTracker_)) {
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(mark nearby spawned rares on the world map)");
+
 ImGui::Spacing();
 ImGui::SeparatorText("Screen Effects");
 ImGui::Spacing();
