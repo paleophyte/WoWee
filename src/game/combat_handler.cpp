@@ -504,9 +504,9 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     // per-school subdamage (float + int), absorb/resist, overkill, and the player's
     // current HP, to see whether "red numbers too high" is inflated parsing or the
     // real post-mitigation value. Throttled to the first 20 incoming hits.
-    if (isPlayerTarget && !data.isMiss()) {
+    if ((isPlayerTarget || isPlayerAttacker) && !data.isMiss()) {
         static int meleeDmgDiag = 0;
-        if (meleeDmgDiag++ < 20) {
+        if (meleeDmgDiag++ < 30) {
             uint32_t playerHp = 0;
             if (auto* pu = owner_.getUnitByGuid(owner_.getPlayerGuid())) playerHp = pu->getHealth();
             std::string subs;
@@ -516,7 +516,8 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
                               s.schoolMask, s.damage, s.intDamage, s.absorbed, s.resisted);
                 subs += b;
             }
-            LOG_WARNING("[MELEE-DMG-DIAG] totalDamage=", data.totalDamage,
+            LOG_WARNING("[MELEE-DMG-DIAG] dir=", (isPlayerAttacker ? "OUT" : "IN"),
+                     " totalDamage=", data.totalDamage,
                      " overkill=", data.overkill, " victimState=", data.victimState,
                      " hitInfo=0x", std::hex, data.hitInfo, std::dec,
                      " subCount=", static_cast<int>(data.subDamageCount), subs,

@@ -586,8 +586,10 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
             entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
             entry.type == game::CombatTextEntry::GLANCING ||
             entry.type == game::CombatTextEntry::CRUSHING) {
+            // Only log the first frame of each entry (age ~0) so repeated frames of one
+            // long-lived number don't burn the cap before a distinct melee hit appears.
             static int renderDmgDiag = 0;
-            if (renderDmgDiag++ < 25) {
+            if (entry.age < 0.05f && renderDmgDiag++ < 40) {
                 LOG_WARNING("[RENDER-DMG-DIAG] type=", static_cast<int>(entry.type),
                             " outgoing=", outgoing, " amount=", entry.amount,
                             " text='", text, "' spellId=", entry.spellId,
