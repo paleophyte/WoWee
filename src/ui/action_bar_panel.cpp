@@ -1365,12 +1365,19 @@ bool ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
                 dl->AddRectFilled(bagSlotMins[i], bagSlotMaxs[i], IM_COL32(0, 0, 0, 150));
             }
 
-            // Tooltip
+            // Tooltip: bag name plus its capacity ("N Slot Bag"). getBagSize is the
+            // authoritative slot count for the equipped bag, independent of whether the
+            // item template query has arrived.
             if (hovered && bagBarPickedSlot_ < 0) {
-                if (bagIcon)
-                    ImGui::SetTooltip("%s", bagItem.item.name.c_str());
-                else
+                if (bagIcon) {
+                    int bagSlots = inv.getBagSize(i);
+                    if (bagSlots > 0)
+                        ImGui::SetTooltip("%s\n%d Slot Bag", bagItem.item.name.c_str(), bagSlots);
+                    else
+                        ImGui::SetTooltip("%s", bagItem.item.name.c_str());
+                } else {
                     ImGui::SetTooltip("Empty Bag Slot");
+                }
             }
 
             // Open bag indicator

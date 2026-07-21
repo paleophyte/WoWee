@@ -3610,7 +3610,15 @@ void InventoryScreen::renderItemTooltip(const game::ItemQueryResponseData& info,
     // Slot / subclass
     if (info.inventoryType > 0) {
         const char* slotName = ui::getInventorySlotName(info.inventoryType);
-        if (slotName[0]) {
+        // Containers (bags, quivers, ammo pouches) show capacity as "N Slot Bag" —
+        // itemClass 1 = Container, 11 = Quiver/ammo. Same treatment as the ItemDef overload.
+        const bool isContainer = (info.itemClass == 1 || info.itemClass == 11) &&
+                                 info.containerSlots > 0;
+        if (isContainer) {
+            const char* bagType = !info.subclassName.empty() ? info.subclassName.c_str()
+                                : (slotName[0] ? slotName : "Bag");
+            ImGui::TextColored(ui::colors::kLightGray, "%u Slot %s", info.containerSlots, bagType);
+        } else if (slotName[0]) {
             if (!info.subclassName.empty())
                 ImGui::TextColored(ui::colors::kLightGray, "%s  %s", slotName, info.subclassName.c_str());
             else
