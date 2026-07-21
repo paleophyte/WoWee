@@ -1601,7 +1601,7 @@ void Application::update(float deltaTime) {
                                           !gameHandler->isMounted();
                 renderer->getCameraController()->setExternalFollow(
                     externallyDrivenMotion || landingClampActive || hearthFreeze ||
-                    transportTransferFreeze || krakenDeckFloorPending_);
+                    transportTransferFreeze || deckFloorPending_);
                 renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
                 if (externallyDrivenMotion) {
                     // Drop any stale local movement toggles while server drives taxi motion.
@@ -1787,8 +1787,8 @@ void Application::update(float deltaTime) {
                         const bool sameRideFrame = hasWMORideLock_ &&
                             lastWMORideTransportGuid_ == transportGuid &&
                             lastWMORideMapId_ == mapId;
-                        if (!sameRideFrame && tr->entry == 190536u) {
-                            krakenDeckFloorPending_ = true;
+                        if (!sameRideFrame && !tr->isM2) {
+                            deckFloorPending_ = true;
                         }
                         if (sameRideFrame && renderer->getCameraController()) {
                             const glm::vec3 localMotion =
@@ -1802,15 +1802,19 @@ void Application::update(float deltaTime) {
                             }
                         }
 
-                        // Moving WMO instances are intentionally excluded from the
-                        // camera controller's ordinary static-world floor query. Kraken's
-                        // entry ramp therefore needs its exact transport-instance floor
-                        // held after boarding, or gravity is folded into the attachment
-                        // and pulls the rider through the hull. Keep this entry-scoped so
-                        // established ship handling in other expansions is unchanged.
-                        // An upward jump remains fully controlled by vertical physics.
+                        // Moving WMO instances are intentionally excluded from the camera
+                        // controller's ordinary static-world floor query, so every WMO ship
+                        // needs its exact transport-instance floor held under the rider —
+                        // otherwise gravity folds into the attachment and pulls them through
+                        // the hull, and multi-deck ships (stairs, ramps) can't be climbed
+                        // because nothing raises the rider onto the upper geometry. This is
+                        // the walkable-deck query for ANY ship, keyed on the transport being
+                        // a WMO (not M2), not on a specific ship entry. getInstanceFloorHeight
+                        // returns the height of whatever deck/stair is under the player, so
+                        // walking up onto a higher deck just follows the collision. An upward
+                        // jump remains fully controlled by vertical physics (skipped below).
                         auto* cameraController = renderer->getCameraController();
-                        if (tr->entry == 190536u && cameraController &&
+                        if (!tr->isM2 && cameraController &&
                             !cameraController->isJumping()) {
                             const glm::vec3 intendedCanonical =
                                 core::coords::renderToCanonical(intendedRender);
@@ -1820,8 +1824,8 @@ void Application::update(float deltaTime) {
                                 intendedRender.z <= *deckFloor + 0.35f) {
                                 intendedRender.z = *deckFloor + 0.10f;
                                 cameraController->suppressVerticalPhysics();
-                                krakenDeckFloorPending_ = false;
-                            } else if (krakenDeckFloorPending_) {
+                                deckFloorPending_ = false;
+                            } else if (deckFloorPending_) {
                                 // A continent transfer registers the transport GO
                                 // before its WMO collision necessarily finishes loading.
                                 // Preserve the local offset until this exact instance's
@@ -1858,7 +1862,7 @@ void Application::update(float deltaTime) {
                     hasWMORideLock_ = false;
                     lastWMORideTransportGuid_ = 0;
                     lastWMORideMapId_ = 0xFFFFFFFFu;
-                    krakenDeckFloorPending_ = false;
+                    deckFloorPending_ = false;
                     glm::vec3 renderPos = renderer->getCharacterPosition();
 
                     // M2 transport riding: resolve in canonical space and lock once per frame.
@@ -1882,9 +1886,7 @@ void Application::update(float deltaTime) {
                             // riding appeared to "float" in place no matter how far the tram
                             // traveled underneath.
                             const bool isDeeprunTram =
-                                tr->displayId == 3831u ||
-                                (tr->entry >= 176080u && tr->entry <= 176085u) ||
-                                (tr->pathId >= 176080u && tr->pathId <= 176085u);
+                                game::TransportManager::isDeeprunTramTransport(*tr);
                             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
                             glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                             if (hasM2RideLock_) {

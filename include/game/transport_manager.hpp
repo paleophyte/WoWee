@@ -97,6 +97,32 @@ public:
                (transport.pathId >= 176080u && transport.pathId <= 176085u);
     }
 
+    // Single source of truth for a transport hull's fixed orientation offset.
+    //
+    // A transport's rendered facing is (its direction of travel) + (a constant per-MODEL
+    // bow offset baked into how the art was authored): 0 means the model's bow already
+    // points along route-forward, PI means the bow is modelled pointing aft. This is a
+    // property of the displayId, not of the per-realm GameObject entry, so keying it by
+    // model makes the same correction apply to that hull on every expansion and realm.
+    //
+    // Every orientation path funnels through this one function instead of re-listing
+    // ships: the client-animated TaxiPath ships add it to their spline-tangent yaw, and
+    // it also decides whether a docked ship restores its spawn yaw or holds its heading.
+    // Server-position-driven transports (trams, zeppelins) need no table entry — they
+    // measure the same offset live from heading-vs-velocity in updateYawAlignment(). This
+    // table is only the seed for hulls the client animates itself and can never observe
+    // move under server control, so there is nothing to learn the offset from.
+    static float transportModelBowOffset(uint32_t displayId) {
+        constexpr float kBowReversed = 3.14159265358979323846f;  // PI
+        switch (displayId) {
+            case 7087u:  // Auberdine night-elf ferry (The Moonspray, Elune's Blessing)
+            case 7446u:  // Icebreaker (Kraken-class)
+                return kBowReversed;
+            default:     // Bravery-class (3015) and every other hull: bow already forward
+                return 0.0f;
+        }
+    }
+
     // Round a path duration to the nearest 500ms for seed-modulo purposes only. Deeprun
     // Tram cars are meant to move as one rigid train, but their individual
     // TransportAnimation.dbc entries don't all report the exact same durationMs (observed:

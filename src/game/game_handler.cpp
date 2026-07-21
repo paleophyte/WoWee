@@ -1542,9 +1542,7 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
             const bool isThunderBluffLift =
                 (transport.entry >= 20649u && transport.entry <= 20657u);
             const bool isDeeprunTram =
-                transport.displayId == 3831u ||
-                (transport.entry >= 176080u && transport.entry <= 176085u) ||
-                (transport.pathId >= 176080u && transport.pathId <= 176085u);
+                TransportManager::isDeeprunTramTransport(transport);
             glm::vec3 diff = playerCanonical - transport.position;
             float vertDist = std::abs(diff.z);
 
@@ -1623,9 +1621,7 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
             auto* tr = tm->getTransport(bestGuid);
             if (tr) {
                 const bool isDeeprunTram =
-                    tr->displayId == 3831u ||
-                    (tr->entry >= 176080u && tr->entry <= 176085u) ||
-                    (tr->pathId >= 176080u && tr->pathId <= 176085u);
+                    TransportManager::isDeeprunTramTransport(*tr);
                 const glm::vec3 offset = tr->isM2
                     ? playerCanonical - tr->position
                     : glm::vec3(tr->invTransform * glm::vec4(playerRenderPos, 1.0f));
@@ -1682,10 +1678,7 @@ void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
 
     const bool isThunderBluffLift =
         (tr->entry >= 20649u && tr->entry <= 20657u);
-    const bool isDeeprunTram =
-        tr->displayId == 3831u ||
-        (tr->entry >= 176080u && tr->entry <= 176085u) ||
-        (tr->pathId >= 176080u && tr->pathId <= 176085u);
+    const bool isDeeprunTram = TransportManager::isDeeprunTramTransport(*tr);
 
     if (!tr->isM2 && tr->worldCoords && tr->useClientAnimation) {
         constexpr float kShipDisembarkHalfLength = 70.0f;

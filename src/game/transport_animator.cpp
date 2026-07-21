@@ -14,6 +14,20 @@
 
 namespace wowee::game {
 
+namespace {
+
+// GO entries whose TaxiPath berth runs parallel to the pier: the ship holds a broadside
+// (side-on) heading through its dock dwell instead of its bow-first approach yaw. Kept
+// entry-scoped on purpose — this is route geometry, not a model trait, so an unrelated
+// ship that happens to reuse one of these display ids keeps its own docking orientation.
+bool berthRunsParallel(uint32_t entry) {
+    return entry == 176310u ||  // The Bravery — Stormwind Harbor
+           entry == 176244u ||  // The Moonspray — Auberdine
+           entry == 181646u;    // Elune's Blessing — Auberdine
+}
+
+}  // namespace
+
 void TransportAnimator::evaluateAndApply(
     ActiveTransport& transport,
     const PathEntry& pathEntry,
@@ -89,12 +103,7 @@ void TransportAnimator::evaluateAndApply(
     glm::vec3 shipApproach(0.0f);
     bool shipAtDockDwell = false;
     glm::vec3 shipDockPosition(0.0f);
-    // Keep this entry-scoped: display 7087 is shared by other night-elf ships
-    // across expansions, and those routes must retain their existing docking
-    // orientation unless their own geometry proves they need the maneuver.
-    const bool needsSideOnDock = transport.entry == 176310u ||
-                                 transport.entry == 176244u ||
-                                 transport.entry == 181646u;
+    const bool needsSideOnDock = berthRunsParallel(transport.entry);
     if (needsSideOnDock && pathEntry.worldCoords) {
         constexpr uint32_t kDockTurnMs = 5000u;
         const auto& keys = spline.keys();
@@ -177,11 +186,7 @@ void TransportAnimator::evaluateAndApply(
         // whether it also reduces clipping. Reverted to a full flatten to match the
         // real client's confirmed behavior; other transports keep full tangent-based
         // orientation.
-        const bool isDeeprunTram =
-            transport.displayId == 3831u ||
-            (transport.entry >= 176080u && transport.entry <= 176085u) ||
-            (transport.pathId >= 176080u && transport.pathId <= 176085u);
-        if (isDeeprunTram) {
+        if (TransportManager::isDeeprunTramTransport(transport)) {
             tangent.z = 0.0f;
         }
         const float tangentLenSq = glm::dot(tangent, tangent);
@@ -198,40 +203,18 @@ void TransportAnimator::evaluateAndApply(
                 // and mirrored ship yaw, producing sideways/backwards sailing.
                 // Transport WMO hulls are authored with their bow opposite the
                 // model-space +X axis used by the raw route yaw.
-                float routeYaw = std::atan2(tangent.x, tangent.y);
-                const bool reversedShipHull = transport.entry == 176310u ||
-                                              transport.entry == 176244u ||
-                                              transport.entry == 181646u ||
-                                              transport.entry == 190536u;
-                if (reversedShipHull) {
-                    // These WMO hulls are authored with their visible bow opposite
-                    // the route-local forward axis. Without this correction they
-                    // translate stern-first even though the spline tangent is right.
-                    routeYaw += glm::pi<float>();
-                }
-                float effectiveYaw = routeYaw;
-                if (shipDockBlend > 0.0f && needsSideOnDock) {
-                    // A GO query reports the transport's orientation at the instant
-                    // it is received, not a persistent heading for every berth. Using
-                    // that snapshot as dockYaw made Bravery's result depend on where
-                    // she happened to be when the player logged in. These TaxiPath
-                    // routes run parallel to their berths, so their corrected route
-                    // heading is also the stable broadside dock heading.
-                    float dockTargetYaw = routeYaw;
-                    if (transport.entry == 176310u ||
-                        transport.entry == 176244u ||
-                        transport.entry == 181646u) {
-                        // These Auberdine TaxiPath segments run parallel to their
-                        // berths. The server spawn yaw points the hull diagonally or
-                        // bow-first at the dock; keep the corrected route heading for
-                        // a broadside stop. This remains entry-scoped so ships in
-                        // other expansions retain their established orientation.
-                        dockTargetYaw = routeYaw;
-                    }
-                    const float dockDelta = std::remainder(
-                        dockTargetYaw - routeYaw, glm::two_pi<float>());
-                    effectiveYaw += shipDockBlend * dockDelta;
-                }
+                // Facing = direction of travel + the hull's fixed bow offset. The offset
+                // is the single per-model constant (0 for a bow-forward hull, PI for one
+                // authored bow-aft); see TransportManager::transportModelBowOffset.
+                float routeYaw = std::atan2(tangent.x, tangent.y) +
+                                 TransportManager::transportModelBowOffset(transport.displayId);
+                // A GO query reports the transport's orientation at the instant it is
+                // received, not a persistent heading for every berth, so using that
+                // snapshot as the dock yaw made the result depend on where the ship
+                // happened to be when the player logged in. berthRunsParallel routes run
+                // parallel to their piers, so the corrected route heading is also the
+                // stable broadside dock heading — the dock dwell holds routeYaw directly.
+                const float effectiveYaw = routeYaw;
                 transport.rotation = glm::angleAxis(
                     effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
                 if (shipDockBlend > 0.999f && needsSideOnDock) {
@@ -253,15 +236,14 @@ void TransportAnimator::evaluateAndApply(
                 transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
             }
         } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw &&
-                   transport.entry != 190536u) {
+                   TransportManager::transportModelBowOffset(transport.displayId) == 0.0f) {
             // TaxiPathNode route builders encode a dock wait with repeated
             // positions. With no movement tangent, restore the GO's authored
             // spawn orientation so the ship lies alongside the dock rather
             // than retaining its bow-first approach yaw throughout the dwell.
-            // Kraken (190536) has an entry-specific 180-degree hull correction;
-            // restoring its uncorrected spawn yaw here made it turn around for
-            // the stop and turn back again on departure. It retains the arrival
-            // rotation while its route tangent is zero.
+            // A hull with a nonzero bow offset (e.g. the icebreaker) is excluded: its
+            // spawn yaw is uncorrected, so restoring it made the ship spin around for the
+            // stop and back on departure — it keeps its (corrected) arrival rotation.
             transport.rotation = glm::angleAxis(
                 transport.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
         }

@@ -189,6 +189,12 @@ void TransportClockSync::updateYawAlignment(
 {
     // Auto-detect 180-degree yaw mismatch by comparing heading to movement direction.
     // Some transports appear to report yaw opposite their actual travel direction.
+    //
+    // This is the server-driven analogue of TransportManager::transportModelBowOffset:
+    // the same per-model "bow vs. direction of travel" offset, but measured live from the
+    // authoritative position stream instead of read from a seed table. Position-driven
+    // transports can learn it here; client-animated TaxiPath ships never stream motion, so
+    // they read the seed table instead. Both feed the one rule: facing = travel + offset.
     glm::vec2 horizontalV(velocity.x, velocity.y);
     float hLenSq = glm::dot(horizontalV, horizontalV);
     if (hLenSq > 0.04f) {

@@ -1848,9 +1848,7 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
         if (auto* transportManager = gameHandler_->getTransportManager()) {
             if (auto* transport = transportManager->getTransport(guid)) {
                 const bool isDeeprunTram =
-                    transport->displayId == 3831u ||
-                    (transport->entry >= 176080u && transport->entry <= 176085u) ||
-                    (transport->pathId >= 176080u && transport->pathId <= 176085u);
+                    game::TransportManager::isDeeprunTramTransport(*transport);
                 if (transport->isM2 && isDeeprunTram && game::isPreWotlk()) {
                     LOG_DEBUG("Keeping Deeprun tram render instance through server despawn: guid=0x",
                                 std::hex, guid, std::dec,

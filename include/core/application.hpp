@@ -206,7 +206,11 @@ private:
     bool hasWMORideLock_ = false;
     uint64_t lastWMORideTransportGuid_ = 0;
     uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
-    bool krakenDeckFloorPending_ = false;
+    // Set when a rider boards or transfers onto a WMO ship whose deck collision hasn't
+    // finished loading yet — holds the boarding-time offset (and freezes camera follow)
+    // until this exact transport instance's deck floor exists, instead of letting gravity
+    // fold into the attachment and drop the rider through the hull.
+    bool deckFloorPending_ = false;
 
     bool wasAutoAttacking_ = false;
 

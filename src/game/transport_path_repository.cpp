@@ -493,6 +493,64 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
 
 // ── DBC: TaxiPathNode ──────────────────────────────────────────
 
+math::CatmullRomSpline TransportPathRepository::buildTaxiSegmentSpline(
+    const std::vector<glm::vec3>& pts,
+    const std::vector<uint32_t>& nodeDelaysMs,
+    float transportSpeed)
+{
+    auto legMs = [transportSpeed](float dist) {
+        return std::max<uint32_t>(100u, static_cast<uint32_t>(dist / transportSpeed * 1000.0f));
+    };
+
+    std::vector<math::SplineKey> keys;
+    if (pts.size() < 2) {
+        if (!pts.empty()) keys.push_back({0u, pts.front()});
+        return math::CatmullRomSpline(std::move(keys), false);
+    }
+
+    const float endGap = glm::distance(pts.front(), pts.back());
+    const bool closedLoop = endGap < 60.0f;
+
+    // Forward pass through the authored nodes, holding each node's dock dwell as a
+    // repeated-position key (CatmullRomSpline evaluates those as exact stops).
+    keys.reserve(pts.size() * 2 + 1);
+    uint32_t cumulativeMs = 0;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        keys.push_back({cumulativeMs, pts[i]});
+        const uint32_t delayMs = (i < nodeDelaysMs.size()) ? nodeDelaysMs[i] : 0u;
+        if (delayMs != 0) {
+            cumulativeMs += delayMs;
+            keys.push_back({cumulativeMs, pts[i]});
+        }
+        if (i + 1 < pts.size()) {
+            cumulativeMs += legMs(glm::distance(pts[i], pts[i + 1]));
+        }
+    }
+
+    if (closedLoop) {
+        // Endpoints already coincide: close the ring back to the first node.
+        cumulativeMs += legMs(endGap);
+        keys.push_back({cumulativeMs, pts.front()});
+    } else {
+        // Open route: the boat oscillates. Append the outbound points in reverse so the
+        // cycle is one continuous there-and-back that is position-closed (ends where it
+        // began), so the modulo phase wrap is seamless. This covers both a single-map
+        // harbour shuttle AND one map's slice of a continent route (nodes run
+        // offshore-in -> dock -> offshore-out): the hull sails out, U-turns at the far
+        // node, and sails back through its dock. It must NEVER hold stationary offshore
+        // for the time it "spends" on the other continent — a rider aboard experiences
+        // that hold as the boat sitting dead at sea. The real cross-continent handoff is
+        // the server's SMSG_NEW_WORLD teleport at the offshore node, independent of this
+        // client animation; the boat just keeps ferrying while it waits for passengers.
+        for (size_t i = pts.size() - 1; i-- > 0; ) {
+            cumulativeMs += legMs(glm::distance(pts[i + 1], pts[i]));
+            keys.push_back({cumulativeMs, pts[i]});
+        }
+    }
+
+    return math::CatmullRomSpline(std::move(keys), false);
+}
+
 bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr) {
     LOG_INFO("Loading TaxiPathNode.dbc...");
 
@@ -548,20 +606,6 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
     }
 
     constexpr float transportSpeed = 28.0f;  // units per second
-    auto segmentDurationMs = [](const std::vector<TaxiNode>& segment) {
-        uint64_t duration = 0;
-        for (size_t i = 0; i < segment.size(); ++i) {
-            duration += static_cast<uint64_t>(segment[i].delaySeconds) * 1000u;
-            if (i + 1 < segment.size()) {
-                const float dx = segment[i + 1].x - segment[i].x;
-                const float dy = segment[i + 1].y - segment[i].y;
-                const float dz = segment[i + 1].z - segment[i].z;
-                const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-                duration += std::max<uint32_t>(100u, static_cast<uint32_t>(distance / transportSpeed * 1000.0f));
-            }
-        }
-        return static_cast<uint32_t>(std::min<uint64_t>(duration, std::numeric_limits<uint32_t>::max()));
-    };
 
     // Build world-coordinate transport paths, one segment per (pathId, mapId).
     int pathsLoaded = 0;
@@ -570,59 +614,23 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         const uint32_t mapId = key.second;
         if (nodes.size() < 2) continue;
 
-        // Convert nodes to canonical world positions.
+        // Convert nodes to canonical world positions and collect their authored dwells.
         std::vector<glm::vec3> pts;
+        std::vector<uint32_t> nodeDelaysMs;
         pts.reserve(nodes.size());
-        for (const auto& node : nodes)
+        nodeDelaysMs.reserve(nodes.size());
+        for (const auto& node : nodes) {
             pts.push_back(core::coords::serverToCanonical(glm::vec3(node.x, node.y, node.z)));
-
-        // A continent transport's nodes on one map already describe a complete pass:
-        // horizon -> dock -> horizon. The next node is on the other continent. Never
-        // draw a closing spline across this map or reverse the local segment: the first
-        // cuts through the harbour and the second makes the hull sail backwards.
-        const float endGap = glm::distance(pts.front(), pts.back());
-        const bool closedLoop = endGap < 60.0f;
-
-        // Account for time spent traversing every other map segment. During this
-        // interval the local instance waits at its last, offshore node (normally past
-        // the useful draw horizon), then teleports to the first offshore node for the
-        // next inbound pass. This keeps the cycle close to the DBC route schedule.
-        uint32_t remoteDurationMs = 0;
-        if (!closedLoop) {
-            for (const auto& [otherKey, otherNodes] : nodesByPathMap) {
-                if (otherKey.first == pathId && otherKey.second != mapId) {
-                    remoteDurationMs += segmentDurationMs(otherNodes);
-                }
-            }
+            nodeDelaysMs.push_back(node.delaySeconds * 1000u);
         }
 
-        // Build timed keys with the authored dock delays (field 8). Repeated-position
-        // segments are evaluated as exact holds by CatmullRomSpline.
-        std::vector<math::SplineKey> keys;
-        keys.reserve(nodes.size() * 2 + 1);
-        uint32_t cumulativeMs = 0;
-        for (size_t i = 0; i < pts.size(); ++i) {
-            keys.push_back({cumulativeMs, pts[i]});
-            if (nodes[i].delaySeconds != 0) {
-                cumulativeMs += nodes[i].delaySeconds * 1000u;
-                keys.push_back({cumulativeMs, pts[i]});
-            }
-            if (i + 1 < pts.size()) {
-                const float segDist = glm::distance(pts[i], pts[i + 1]);
-                cumulativeMs += std::max<uint32_t>(
-                    100u, static_cast<uint32_t>(segDist / transportSpeed * 1000.0f));
-            }
-        }
-        if (closedLoop) {
-            cumulativeMs += std::max<uint32_t>(
-                100u, static_cast<uint32_t>(endGap / transportSpeed * 1000.0f));
-            keys.push_back({cumulativeMs, pts.front()});
-        } else if (remoteDurationMs != 0) {
-            cumulativeMs += remoteDurationMs;
-            keys.push_back({cumulativeMs, pts.back()});
-        }
-
-        math::CatmullRomSpline spline(std::move(keys), false);
+        // Each map's slice is animated independently as a continuous there-and-back
+        // ferry (see buildTaxiSegmentSpline). The cross-continent handoff is the server's
+        // SMSG_NEW_WORLD teleport at the offshore node, not this client animation, so a
+        // slice must never park offshore waiting on the other map — that reads as the boat
+        // sitting dead at sea to anyone aboard.
+        math::CatmullRomSpline spline = buildTaxiSegmentSpline(
+            pts, nodeDelaysMs, transportSpeed);
         // TaxiPathNode is a separate, per-map route source. Do not label it as
         // TransportAnimation DBC data: copied taxi segments live temporarily in
         // paths_ for the active transport, and fromDBC=true made later inference

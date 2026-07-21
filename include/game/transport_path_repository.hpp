@@ -63,6 +63,26 @@ public:
     /// Store or overwrite a path entry (used by assignTaxiPathToTransport).
     void storePath(uint32_t pathId, PathEntry entry);
 
+    // Build the cyclic CatmullRomSpline for one map's slice of a TaxiPathNode route.
+    //
+    // The transport clock samples the result modulo its duration, so the slice must be
+    // position-closed (end where it began) or the hull teleport-snaps at the wrap. Two
+    // topologies:
+    //   - closed loop (endpoints coincide): append the first point to close the ring;
+    //   - open route: append the outbound points in reverse so the slice is one continuous
+    //     there-and-back ferry (offshore-in -> dock -> offshore-out -> U-turn -> back).
+    // A slice is NEVER made to hold stationary offshore for the time the boat "spends" on
+    // another continent: a rider aboard experiences that as the boat sitting dead at sea.
+    // The cross-continent handoff is the server's SMSG_NEW_WORLD teleport at the offshore
+    // node, independent of this client animation. pts are canonical world positions in
+    // NodeIndex order; nodeDelaysMs is the authored per-node dock dwell in milliseconds
+    // (0 where none), matched by index to pts. Static and dependency-free so the wrap
+    // behaviour can be unit-tested without a DBC.
+    static math::CatmullRomSpline buildTaxiSegmentSpline(
+        const std::vector<glm::vec3>& pts,
+        const std::vector<uint32_t>& nodeDelaysMs,
+        float transportSpeed = 28.0f);
+
 private:
     std::unordered_map<uint32_t, PathEntry> paths_;
     // taxiPathId -> mapId -> world-coordinate path segment for that map.

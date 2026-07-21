@@ -245,6 +245,7 @@ TEST_CASE("Animator: Bravery holds side-on at its dock dwell", "[transport_anima
     PathEntry path(std::move(spline), 176310u, false, true, true);
     auto t = makeTransport(1, 176310u);
     t.entry = 176310u;
+    t.displayId = 3015u;     // Bravery-class hull: authored bow-forward, no +PI correction
     t.basePosition = glm::vec3(0.0f);
     t.isM2 = false;
     // Deliberately unrelated live server yaw. Docking must not depend on the
@@ -257,10 +258,10 @@ TEST_CASE("Animator: Bravery holds side-on at its dock dwell", "[transport_anima
     // Keep the authored pier node so the gangway reaches the dock.
     REQUIRE(t.position.x == Catch::Approx(100.0f));
     REQUIRE(t.position.y == Catch::Approx(0.0f));
-    // Route yaw is PI/2 + PI for this reversed hull. Bravery's TaxiPath runs
-    // parallel to the pier, so retaining that heading stops it broadside.
+    // Model 3015 is bow-forward, so route yaw is PI/2 (no hull correction). Bravery's
+    // TaxiPath runs parallel to the pier, so retaining that heading stops it broadside.
     const glm::quat expectedDock = glm::angleAxis(
-        glm::half_pi<float>() + glm::pi<float>(),
+        glm::half_pi<float>(),
         glm::vec3(0.0f, 0.0f, 1.0f));
     REQUIRE(t.rotation.w == Catch::Approx(expectedDock.w).margin(0.001f));
     REQUIRE(t.rotation.z == Catch::Approx(expectedDock.z).margin(0.001f));
@@ -274,25 +275,35 @@ TEST_CASE("Animator: Bravery holds side-on at its dock dwell", "[transport_anima
 
 TEST_CASE("Animator: affected ship hulls face their direction of travel",
           "[transport_animator][transport]") {
-    for (const uint32_t entry : {176310u, 176244u, 181646u, 190536u}) {
+    // The hull bow correction is keyed by MODEL (displayId), not entry. Models 7087 and
+    // 7446 are bow-reversed (+PI); model 3015 (Bravery) is bow-forward (no correction).
+    struct ShipCase { uint32_t entry; uint32_t displayId; bool bowReversed; };
+    for (const ShipCase& sc : {
+             ShipCase{176310u, 3015u, false},  // The Bravery
+             ShipCase{176244u, 7087u, true},   // The Moonspray
+             ShipCase{181646u, 7087u, true},   // Elune's Blessing
+             ShipCase{190536u, 7446u, true},   // Kraken-class icebreaker
+         }) {
         TransportAnimator animator;
         CatmullRomSpline spline({
             {0,    glm::vec3(0.0f, 0.0f, 0.0f)},
             {1000, glm::vec3(10.0f, 0.0f, 0.0f)},
             {2000, glm::vec3(20.0f, 0.0f, 0.0f)},
         });
-        PathEntry path(std::move(spline), entry, false, false, true);
-        auto t = makeTransport(1, entry);
-        t.entry = entry;
+        PathEntry path(std::move(spline), sc.entry, false, false, true);
+        auto t = makeTransport(1, sc.entry);
+        t.entry = sc.entry;
+        t.displayId = sc.displayId;
         t.basePosition = glm::vec3(0.0f);
         t.isM2 = false;
 
         animator.evaluateAndApply(t, path, 500);
 
+        const float expectedYaw = glm::half_pi<float>() +
+                                  (sc.bowReversed ? glm::pi<float>() : 0.0f);
         const glm::quat expected = glm::angleAxis(
-            glm::half_pi<float>() + glm::pi<float>(),
-            glm::vec3(0.0f, 0.0f, 1.0f));
-        INFO("entry=" << entry);
+            expectedYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+        INFO("entry=" << sc.entry << " displayId=" << sc.displayId);
         REQUIRE(t.rotation.w == Catch::Approx(expected.w).margin(0.001f));
         REQUIRE(t.rotation.z == Catch::Approx(expected.z).margin(0.001f));
     }
@@ -310,6 +321,7 @@ TEST_CASE("Animator: Kraken retains arrival heading throughout dock dwell",
     PathEntry path(std::move(spline), 190536u, false, true, true);
     auto t = makeTransport(1, 190536u);
     t.entry = 190536u;
+    t.displayId = 7446u;     // Icebreaker hull: excluded from spawn-yaw restore at dwell
     t.basePosition = glm::vec3(0.0f);
     t.isM2 = false;
     t.dockYaw = glm::half_pi<float>();
