@@ -1100,14 +1100,19 @@ void EntitySpawner::processPendingTransportRegistrations() {
                              " for entry ", pending.entry, " displayId=", pending.displayId,
                              " (usableEntryPath=", transportManager->hasPathForEntry(pending.entry), ")");
                 } else {
-                    LOG_WARNING("No TransportAnimation.dbc path for entry ", pending.entry,
-                                " - transport will be stationary");
+                    // DEBUG, not WARNING: TaxiPath-driven ships (Auberdine/Stormwind boats,
+                    // etc.) legitimately have no TransportAnimation.dbc entry and hit this
+                    // spawn-time fallback, then receive their real route via
+                    // assignTaxiPathToTransport and sail normally — so this fired for boats
+                    // that move fine and was misleading noise when scanning the log.
+                    LOG_DEBUG("No TransportAnimation.dbc path for entry ", pending.entry,
+                              " - transport will be stationary until a route is assigned");
                     std::vector<glm::vec3> path = { canonicalSpawnPos };
                     transportManager->loadPathFromNodes(pathId, path, false, 0.0f);
                 }
             }
         } else {
-            LOG_WARNING("Using real transport path from TransportAnimation.dbc for entry ", pending.entry);
+            LOG_DEBUG("Using real transport path from TransportAnimation.dbc for entry ", pending.entry);
         }
 
         const bool isM2Transport = !goIt->second.isWmo;

@@ -220,7 +220,7 @@ void TransportAnimator::evaluateAndApply(
                 if (shipDockBlend > 0.999f && needsSideOnDock) {
                     static std::unordered_set<uint64_t> loggedDockGuids;
                     if (loggedDockGuids.insert(transport.guid).second) {
-                        LOG_WARNING("SHIP DOCK DIAG entry=", transport.entry,
+                        LOG_DEBUG("SHIP DOCK DIAG entry=", transport.entry,
                                     " guid=0x", std::hex, transport.guid, std::dec,
                                     " pathTime=", pathTimeMs,
                                     " position=(", transport.position.x, ",",
