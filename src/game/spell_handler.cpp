@@ -2152,10 +2152,13 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
 }
 
 void SpellHandler::handleAchievementEarned(network::Packet& packet) {
-    size_t remaining = packet.getRemainingSize();
-    if (remaining < 16) return;
-
-    uint64_t guid          = packet.readUInt64();
+    // WotLK SMSG_ACHIEVEMENT_EARNED: packGUID player + uint32 achievementId + packedTime.
+    // The player GUID is a PACKED guid, not a full uint64 — reading it as uint64 swallowed
+    // 4 bytes of the achievement id (showing the raw guid + a garbage id), so decode the
+    // packed guid and the fixed fields follow at the correct offset.
+    if (!packet.hasFullPackedGuid()) return;
+    uint64_t guid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8)) return;  // achievementId(4) + packedTime(4)
     uint32_t achievementId = packet.readUInt32();
     uint32_t earnDate      = packet.readUInt32();
 

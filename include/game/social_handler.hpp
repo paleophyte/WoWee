@@ -320,6 +320,9 @@ private:
     void handleGuildRoster(network::Packet& packet);
     void handleGuildQueryResponse(network::Packet& packet);
     void handleGuildEvent(network::Packet& packet);
+    // Updates a roster member's cached online flag; returns true only on a real change so
+    // the login-time SIGNED_ON flood (state unchanged) is suppressed from guild chat.
+    bool guildMemberOnlineTransition(const std::string& name, bool nowOnline);
     void handleGuildInvite(network::Packet& packet);
     void handleGuildCommandResult(network::Packet& packet);
     void handlePetitionShowlist(network::Packet& packet);

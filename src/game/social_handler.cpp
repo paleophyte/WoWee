@@ -1956,6 +1956,20 @@ void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
     }
 }
 
+// Returns true only when the member's cached online state actually changes (and updates
+// it), so callers announce genuine online/offline transitions and silently drop the
+// redundant SIGNED_ON flood the server emits at login for already-online members.
+bool SocialHandler::guildMemberOnlineTransition(const std::string& name, bool nowOnline) {
+    for (auto& m : guildRoster_.members) {
+        if (m.name == name) {
+            if (m.online == nowOnline) return false;
+            m.online = nowOnline;
+            return true;
+        }
+    }
+    return true;  // not in the cached roster yet — announce rather than swallow
+}
+
 void SocialHandler::handleGuildEvent(network::Packet& packet) {
     GuildEventData data;
     if (!GuildEventParser::parse(packet, data)) return;
@@ -1997,10 +2011,15 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("PLAYER_GUILD_UPDATE", {});
             break;
         case GuildEvent::SIGNED_ON:
-            if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has come online.";
+            // Only announce a real offline→online transition. On login the server floods
+            // SIGNED_ON for members the roster already lists as online; suppressing those
+            // (state unchanged) matches the real client and stops the guild-chat spam.
+            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true))
+                msg = "[Guild] " + data.strings[0] + " has come online.";
             break;
         case GuildEvent::SIGNED_OFF:
-            if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has gone offline.";
+            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false))
+                msg = "[Guild] " + data.strings[0] + " has gone offline.";
             break;
         default:
             msg = "Guild event " + std::to_string(data.eventType);
