@@ -579,21 +579,19 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 break;
         }
 
-        // DIAG: what value/text is actually drawn for damage entries — pinpoints whether
-        // the on-screen "167772160" is a corrupted amount at render time or a wrong source.
-        if (entry.type == game::CombatTextEntry::MELEE_DAMAGE ||
-            entry.type == game::CombatTextEntry::SPELL_DAMAGE ||
-            entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
-            entry.type == game::CombatTextEntry::GLANCING ||
-            entry.type == game::CombatTextEntry::CRUSHING) {
-            // Only log the first frame of each entry (age ~0) so repeated frames of one
-            // long-lived number don't burn the cap before a distinct melee hit appears.
+        // DIAG: log EVERY floating combat-text entry on its first frame (any type), so
+        // whatever produces the on-screen "-167772160" — whatever damage type or source —
+        // is captured with its type and amount. Absurd values are flagged.
+        {
+            const bool absurd = (entry.amount > 100000 || entry.amount < -100000);
             static int renderDmgDiag = 0;
-            if (entry.age < 0.05f && renderDmgDiag++ < 40) {
+            if (entry.age < 0.05f && (renderDmgDiag++ < 60 || absurd)) {
                 LOG_WARNING("[RENDER-DMG-DIAG] type=", static_cast<int>(entry.type),
                             " outgoing=", outgoing, " amount=", entry.amount,
+                            (absurd ? " *ABSURD*" : ""),
                             " text='", text, "' spellId=", entry.spellId,
-                            " age=", entry.age);
+                            " srcGuid=0x", std::hex, entry.srcGuid,
+                            " dstGuid=0x", entry.dstGuid, std::dec);
             }
         }
 
