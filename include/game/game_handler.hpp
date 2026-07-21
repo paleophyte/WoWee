@@ -988,6 +988,16 @@ public:
     using MeleeSwingCallback = std::function<void(uint32_t spellId)>;
     void setMeleeSwingCallback(MeleeSwingCallback cb) { meleeSwingCallback_ = std::move(cb); }
 
+    // Snap the character to face the camera's current look direction and return the
+    // resulting canonical orientation. Used by fishing so the bobber lands in front of
+    // where the player is looking: while standing still the character yaw does not track
+    // the free-look camera, so without this the bobber would drop toward a stale heading.
+    using FaceCameraProvider = std::function<float()>;
+    void setFaceCameraProvider(FaceCameraProvider cb) { faceCameraProvider_ = std::move(cb); }
+    float faceCameraDirection() {
+        return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
+    }
+
     // Ranged weapon swap callback — show=true: swap to ranged weapon, false: back to melee
     using RangedWeaponSwapCallback = std::function<void(bool show)>;
     void setRangedWeaponSwapCallback(RangedWeaponSwapCallback cb) { rangedWeaponSwapCallback_ = std::move(cb); }
@@ -3638,6 +3648,7 @@ private:
     AppearanceChangedCallback appearanceChangedCallback_;
     GhostStateCallback ghostStateCallback_;
     MeleeSwingCallback meleeSwingCallback_;
+    FaceCameraProvider faceCameraProvider_;
     RangedWeaponSwapCallback rangedWeaponSwapCallback_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler

@@ -553,11 +553,13 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // bobber off to the side or on land ("Face open water"). Push the exact current
     // facing right before the cast so the bobber lands where the player is aiming.
     if (spellclass::isFishingCast(spellId) && owner_.getSocket()) {
+        // Snap the character to face where the camera is looking, then push that facing to
+        // the server, so the bobber lands in front of the player's view. Standing still the
+        // character yaw doesn't follow the free-look camera, so without this the bobber
+        // dropped toward a stale heading (off to the side / on land → "Face open water").
+        const float canonO = owner_.faceCameraDirection();
+        owner_.setOrientation(canonO);
         owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
-        const float canonO = owner_.getMovementInfo().orientation;
-        LOG_WARNING("[FISH-FACING] canonical=", canonO, " rad (",
-                    canonO * 180.0f / 3.14159265f, " deg) serverYaw=",
-                    core::coords::canonicalToServerYaw(canonO));
     }
 
     // Profession spells (Cooking, First Aid, Alchemy, ...) open the crafting

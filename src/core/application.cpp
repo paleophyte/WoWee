@@ -1133,6 +1133,18 @@ void Application::setState(AppState newState) {
                 cc->setUseWoWSpeed(true);
             }
             if (gameHandler) {
+                gameHandler->setFaceCameraProvider([this]() -> float {
+                    // Turn the character to the camera's look direction and report it in
+                    // canonical space (same camera-yaw→canonical mapping as the per-frame
+                    // orientation sync). Lets a fishing cast drop the bobber in front of
+                    // where the player is aiming even while standing still.
+                    if (!renderer || !renderer->getCameraController())
+                        return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
+                    float camYawDeg = renderer->getCameraController()->getFacingYaw();
+                    renderer->setCharacterYaw(camYawDeg);
+                    return core::coords::normalizeAngleRad(glm::radians(180.0f - camYawDeg));
+                });
+
                 gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
                     if (renderer) {
                         // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
