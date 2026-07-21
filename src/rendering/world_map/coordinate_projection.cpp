@@ -150,7 +150,16 @@ int findZoneForPlayer(const std::vector<Zone>& zones,
     float wowX = playerRenderPos.y;
     float wowY = playerRenderPos.x;
 
+    // WorldMapArea bounds are axis-aligned rectangles around irregular zones, so
+    // adjacent zones' boxes overlap heavily (e.g. Darkshore's box clips Felwood's and
+    // Winterspring's). Picking the smallest-area containing box mis-resolved a player
+    // standing deep in a large zone to a smaller neighbor whose box merely reached them,
+    // which left the real zone fogged. Instead pick the box the player sits deepest
+    // inside — the largest normalized distance to the nearest edge — which favors the
+    // zone genuinely containing them over one they only clip at the border. Smaller area
+    // breaks ties so a subzone still wins over its parent when equally central.
     int bestIdx = -1;
+    float bestCentrality = -1.0f;
     float bestArea = std::numeric_limits<float>::max();
 
     for (int i = 0; i < static_cast<int>(zones.size()); i++) {
@@ -165,8 +174,16 @@ int findZoneForPlayer(const std::vector<Zone>& zones,
         if (spanX < 0.001f || spanY < 0.001f) continue;
 
         if (wowX >= minX && wowX <= maxX && wowY >= minY && wowY <= maxY) {
+            float cx = std::min(wowX - minX, maxX - wowX) / spanX;  // [0, 0.5]
+            float cy = std::min(wowY - minY, maxY - wowY) / spanY;
+            float centrality = std::min(cx, cy);
             float area = spanX * spanY;
-            if (area < bestArea) { bestArea = area; bestIdx = i; }
+            if (centrality > bestCentrality + 1e-4f ||
+                (centrality > bestCentrality - 1e-4f && area < bestArea)) {
+                bestCentrality = centrality;
+                bestArea = area;
+                bestIdx = i;
+            }
         }
     }
     return bestIdx;
