@@ -2673,6 +2673,8 @@ public:
         uint32_t permanentEnchantId = 0;
         uint32_t temporaryEnchantId = 0;
         std::array<uint32_t, 3> socketEnchantIds{};
+        uint32_t flags = 0;              // ITEM_FIELD_FLAGS (bit 0x1 = soulbound)
+        int32_t  randomPropertyId = 0;   // ITEM_FIELD_RANDOM_PROPERTIES_ID (signed)
     };
     bool isHostileFaction(uint32_t factionTemplateId) const {
         auto it = factionHostileMap_.find(factionTemplateId);

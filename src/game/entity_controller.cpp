@@ -1259,6 +1259,17 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
     auto stackIt = block.fields.find(fieldIndex(UF::ITEM_FIELD_STACK_COUNT));
     auto durIt   = block.fields.find(fieldIndex(UF::ITEM_FIELD_DURABILITY));
     auto maxDurIt= block.fields.find(fieldIndex(UF::ITEM_FIELD_MAXDURABILITY));
+    // ITEM_FIELD_FLAGS is 7 fields after STACK_COUNT (DURATION + 5×SPELL_CHARGES = 6, then
+    // FLAGS) across every expansion; the enchant block that follows starts at +8.
+    const uint16_t flagsField = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
+        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 7u) : 0xFFFFu;
+    // ITEM_FIELD_RANDOM_PROPERTIES_ID sits just before ITEM_FIELD_DURABILITY: pre-WotLK an
+    // ITEM_TEXT_ID field separates them (DUR-2), WotLK dropped that field so it is DUR-1.
+    const uint16_t randPropField = (fieldIndex(UF::ITEM_FIELD_DURABILITY) != 0xFFFF)
+        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_DURABILITY) - (isPreWotlk() ? 2u : 1u))
+        : 0xFFFFu;
+    auto flagsIt    = (flagsField != 0xFFFF)    ? block.fields.find(flagsField)    : block.fields.end();
+    auto randPropIt = (randPropField != 0xFFFF) ? block.fields.find(randPropField) : block.fields.end();
     const uint16_t enchBase = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
         ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 8u) : 0xFFFFu;
     auto permEnchIt  = (enchBase != 0xFFFF) ? block.fields.find(enchBase)       : block.fields.end();
@@ -1279,6 +1290,8 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
         if (sock1EnchIt != block.fields.end()) info.socketEnchantIds[0]  = sock1EnchIt->second;
         if (sock2EnchIt != block.fields.end()) info.socketEnchantIds[1]  = sock2EnchIt->second;
         if (sock3EnchIt != block.fields.end()) info.socketEnchantIds[2]  = sock3EnchIt->second;
+        if (flagsIt    != block.fields.end()) info.flags                 = flagsIt->second;
+        if (randPropIt != block.fields.end()) info.randomPropertyId      = static_cast<int32_t>(randPropIt->second);
         auto [itemIt, isNew] = owner_.onlineItemsRef().insert_or_assign(block.guid, info);
         if (isNew) newItemCreated = true;
         owner_.queryItemInfo(info.entry, block.guid);
@@ -1307,6 +1320,11 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
     const uint16_t itemSock1EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 6u)  : 0xFFFF;
     const uint16_t itemSock2EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 9u)  : 0xFFFF;
     const uint16_t itemSock3EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 12u) : 0xFFFF;
+    // ITEM_FIELD_FLAGS (STACK+7) carries the soulbound bit that a BoE item gains on equip;
+    // RANDOM_PROPERTIES_ID sits before DURABILITY (DUR-2 pre-WotLK, DUR-1 on WotLK).
+    const uint16_t itemFlagsField    = (itemStackField != 0xFFFF) ? (itemStackField + 7u) : 0xFFFF;
+    const uint16_t itemRandPropField = (itemDurField != 0xFFFF)
+        ? static_cast<uint16_t>(itemDurField - (isPreWotlk() ? 2u : 1u)) : 0xFFFF;
 
     auto it = owner_.onlineItemsRef().find(block.guid);
     bool isItemInInventory = (it != owner_.onlineItemsRef().end());
@@ -1374,6 +1392,16 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
         } else if (isItemInInventory && itemSock3EnchField != 0xFFFF && key == itemSock3EnchField) {
             if (it->second.socketEnchantIds[2] != val) {
                 it->second.socketEnchantIds[2] = val;
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemFlagsField != 0xFFFF && key == itemFlagsField) {
+            if (it->second.flags != val) {
+                it->second.flags = val;
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemRandPropField != 0xFFFF && key == itemRandPropField) {
+            if (it->second.randomPropertyId != static_cast<int32_t>(val)) {
+                it->second.randomPropertyId = static_cast<int32_t>(val);
                 inventoryChanged = true;
             }
         }
