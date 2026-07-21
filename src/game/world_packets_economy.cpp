@@ -239,32 +239,40 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
     size_t remaining = packet.getRemainingSize();
     if (remaining < 5) return false;
 
+    const size_t payloadSizeTotal = packet.getSize();
     uint32_t totalCount = packet.readUInt32();
     uint8_t shownCount = packet.readUInt8();
     (void)totalCount;
 
-    LOG_INFO("SMSG_MAIL_LIST_RESULT (WotLK): total=", totalCount, " shown=", static_cast<int>(shownCount));
+    LOG_INFO("SMSG_MAIL_LIST_RESULT (WotLK): total=", totalCount, " shown=", static_cast<int>(shownCount),
+             " payloadBytes=", payloadSizeTotal);
 
     inbox.clear();
     inbox.reserve(shownCount);
 
+    // Each entry: uint16 size + msgId(4) + type(1) + sender(min 4) + 7 fixed
+    // uint32/float(28) + subject NUL(1) + body NUL(1) + attachCount(1) = 42 bytes.
+    constexpr size_t kMinMailEntryBytes = 42;
+    // Per attachment: slot(1) + guidLow(4) + itemId(4) + 7 enchant triplets(84)
+    // + randProp(4) + suffix(4) + stack(4) + charges(4) + maxDur(4) + dur(4)
+    // + trailing(1) = 118 bytes.
+    constexpr size_t kAttachmentBytes = 1 + 4 + 4 + 7 * 12 + 4 + 4 + 4 + 4 + 4 + 4 + 1;
+
     for (uint8_t i = 0; i < shownCount; ++i) {
         remaining = packet.getRemainingSize();
-        if (remaining < 2) break;
+        if (remaining < kMinMailEntryBytes) break;
 
-        uint16_t msgSize = packet.readUInt16();
-        size_t startPos = packet.getReadPos();
+        // The per-entry uint16 size is present on the wire but NOT trusted for
+        // framing: some AzerothCore-derived cores over-declare it (observed a
+        // consistent +4 per mail), so skipping to the declared end overshoots and
+        // desyncs every mail after the first. Instead we advance by the natural
+        // parse position — our field parse reads the complete documented WotLK
+        // entry, so it lands exactly on the next entry on both correct and
+        // over-declaring servers.
+        packet.readUInt16(); // declared size (advisory only)
+        const size_t startPos = packet.getReadPos();
 
         MailMessage msg;
-        // The WotLK wire value includes its own uint16 size field, so only
-        // msgSize - 2 bytes remain after reading it.
-        if (msgSize < 2 || remaining < static_cast<size_t>(msgSize)) {
-            LOG_WARNING("Mail entry ", static_cast<int>(i), " truncated");
-            break;
-        }
-        const size_t payloadSize = static_cast<size_t>(msgSize) - 2;
-        const size_t entryEnd = startPos + payloadSize;
-
         msg.messageId = packet.readUInt32();
         msg.messageType = packet.readUInt8();
 
@@ -289,7 +297,18 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
 
         uint8_t attachCount = packet.readUInt8();
         msg.attachments.reserve(attachCount);
+        bool truncatedAttachment = false;
         for (uint8_t j = 0; j < attachCount; ++j) {
+            if (!packet.hasRemaining(kAttachmentBytes)) {
+                // Genuine buffer shortage mid-attachment (not the size-field quirk).
+                LOG_WARNING("Mail entry ", static_cast<int>(i), " attachment ", static_cast<int>(j),
+                            " truncated: remaining=", packet.getRemainingSize(),
+                            " payloadBytes=", payloadSizeTotal);
+                LOG_WARNING("Mail payload hex: ",
+                            core::toHexString(packet.getData().data(), packet.getSize(), true));
+                truncatedAttachment = true;
+                break;
+            }
             MailAttachment att;
             att.slot = packet.readUInt8();
             att.itemGuidLow = packet.readUInt32();
@@ -313,13 +332,9 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
         msg.read = (msg.flags & 0x01) != 0;
         inbox.push_back(std::move(msg));
 
-        // Skip unread bytes
-        if (packet.getReadPos() < entryEnd) {
-            packet.setReadPos(entryEnd);
-        } else if (packet.getReadPos() > entryEnd) {
-            LOG_WARNING("Mail entry ", static_cast<int>(i),
-                        " exceeded declared size by ", packet.getReadPos() - entryEnd, " bytes");
-        }
+        if (truncatedAttachment) break;
+        // Guard against a corrupt entry that consumed nothing, which would spin.
+        if (packet.getReadPos() <= startPos) break;
     }
 
     LOG_INFO("Parsed ", inbox.size(), " mail messages");
