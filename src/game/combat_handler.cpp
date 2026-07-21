@@ -516,7 +516,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
                               s.schoolMask, s.damage, s.intDamage, s.absorbed, s.resisted);
                 subs += b;
             }
-            LOG_INFO("[MELEE-DMG-DIAG] totalDamage=", data.totalDamage,
+            LOG_WARNING("[MELEE-DMG-DIAG] totalDamage=", data.totalDamage,
                      " overkill=", data.overkill, " victimState=", data.victimState,
                      " hitInfo=0x", std::hex, data.hitInfo, std::dec,
                      " subCount=", static_cast<int>(data.subDamageCount), subs,
