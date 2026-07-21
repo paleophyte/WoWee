@@ -147,9 +147,58 @@ bool shouldDespawnGatherTarget(uint8_t result) {
     return result == kSpellFailedAlreadyOpen || result == kSpellFailedChestInUse;
 }
 
-std::string gatherCastFailureMessage(uint8_t result, const std::string& fallback) {
+bool isMiningGatherSpell(uint32_t spellId) {
+    static constexpr uint32_t kMiningRanks[] = {2575, 2576, 3564, 10248, 29354};
+    for (uint32_t rank : kMiningRanks) {
+        if (spellId == rank) return true;
+    }
+    return false;
+}
+
+uint32_t gatherRequiredSkillRank(GameHandler& owner, uint64_t goGuid) {
+    auto entity = owner.getEntityManager().getEntity(goGuid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return 0;
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    const auto* info = owner.getCachedGameObjectInfo(go->getEntry());
+    if (!info || !info->hasData || info->data[0] == 0) return 0;
+
+    auto* assets = owner.services().assetManager;
+    auto lockDbc = assets ? assets->loadDBC("Lock.dbc") : nullptr;
+    if (!lockDbc || !lockDbc->isLoaded() || lockDbc->getFieldCount() < 33) return 0;
+
+    const uint32_t lockId = info->data[0];
+    for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
+        if (lockDbc->getUInt32(row, 0) != lockId) continue;
+        // Lock.dbc: Type[8], Index[8], Skill[8], Action[8]. Resource
+        // nodes have a LOCK_KEY_SKILL entry whose Skill value is the exact
+        // Mining/Herbalism rank enforced by the server.
+        for (uint32_t slot = 0; slot < 8; ++slot) {
+            constexpr uint32_t kLockKeySkill = 2;
+            if (lockDbc->getUInt32(row, 1 + slot) != kLockKeySkill) continue;
+            const uint32_t required = lockDbc->getUInt32(row, 17 + slot);
+            if (required != 0) return required;
+        }
+        break;
+    }
+    return 0;
+}
+
+std::string gatherCastFailureMessage(GameHandler& owner, uint64_t goGuid,
+                                     uint32_t spellId, uint8_t result,
+                                     const std::string& fallback) {
     if (result == kSpellFailedTryAgain) return "Failed.";
     if (result == kSpellFailedChestInUse) return "Already in use.";
+    // LOW_CASTLEVEL is the server's generic wording for an insufficient
+    // gathering profession rank. MIN_SKILL_REQUIRED is used by some cores.
+    if (result == 49 || result == 150) {
+        const char* skill = isMiningGatherSpell(spellId) ? "Mining" : "Herbalism";
+        const uint32_t required = gatherRequiredSkillRank(owner, goGuid);
+        if (required != 0) {
+            return std::string("Requires ") + skill + " skill " +
+                   std::to_string(required) + ".";
+        }
+        return std::string("Your ") + skill + " skill is too low for this node.";
+    }
     return fallback;
 }
 
@@ -1453,7 +1502,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
                                             data.miscArg, data.miscArg2);
     if (gatherCast) {
-        errMsg = gatherCastFailureMessage(data.result, errMsg);
+        errMsg = gatherCastFailureMessage(owner_, gatherGoGuid, data.spellId,
+                                          data.result, errMsg);
         if (shouldDespawnGatherTarget(data.result)) {
             owner_.despawnGameObjectLocally(gatherGoGuid);
         }
@@ -3161,7 +3211,8 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                                                      castResult, playerPowerType,
                                                      castResultMiscArg, castResultMiscArg2);
             if (gatherCast) {
-                errMsg = gatherCastFailureMessage(castResult, errMsg);
+                errMsg = gatherCastFailureMessage(owner_, gatherGoGuid,
+                                                  castResultSpellId, castResult, errMsg);
                 if (shouldDespawnGatherTarget(castResult)) {
                     owner_.despawnGameObjectLocally(gatherGoGuid);
                 }
