@@ -1103,22 +1103,18 @@ void CombatHandler::handleResurrectFailed(network::Packet& packet) {
 // Targeting
 // ============================================================
 
-bool CombatHandler::isSelectableUnit(uint64_t guid) const {
-    if (guid == 0) return true; // clearing the target
-    auto entity = owner_.getEntityManager().getEntity(guid);
-    if (!entity) return true; // unknown entity — let the server arbitrate
-    // Only creature corpses are filtered. Players keep ObjectType::PLAYER even when
-    // dead, so their corpses stay targetable for resurrection.
-    if (entity->getType() != ObjectType::UNIT) return true;
-    auto unit = std::dynamic_pointer_cast<Unit>(entity);
-    if (!unit) return true;
-    if (unit->getHealth() > 0) return true; // alive
-
-    // A corpse is only worth selecting while it still has something to take.
-    constexpr uint32_t UNIT_FLAG_SKINNABLE   = 0x04000000;
-    if (unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE) return true;
-    if (unit->getUnitFlags() & UNIT_FLAG_SKINNABLE) return true;
-    return false;
+bool CombatHandler::isSelectableUnit(uint64_t /*guid*/) const {
+    // Everything the player clicks is selectable; the server arbitrates whether a
+    // corpse actually holds loot when we send CMSG_LOOT. We deliberately do NOT
+    // gate dead creature corpses on UNIT_DYNFLAG_LOOTABLE: that bit is computed
+    // per-viewer by the server and the client's cached copy goes stale across a
+    // death/resurrect cycle (you kill something, die in the same fight, and on
+    // return the corpse's loot bit was last evaluated while you were a ghost).
+    // Gating on it left a genuinely lootable corpse permanently unclickable.
+    // Empty, fully-looted corpses are already removed locally by the
+    // lootableCleared -> despawnCreatureLocally path (see
+    // EntityController::onValuesUpdateUnit), so they don't return as click targets.
+    return true;
 }
 
 void CombatHandler::setTarget(uint64_t guid) {
