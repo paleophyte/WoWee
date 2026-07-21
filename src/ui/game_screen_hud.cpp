@@ -461,8 +461,23 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
         std::vector<rendering::WorldMapTaxiNode> taxiNodes;
         const auto& nodes = gameHandler.getTaxiNodes();
         uint32_t currentTaxiNode = gameHandler.getTaxiCurrentNode();
+        const bool playerAlliance = gameHandler.isPlayerAlliance();
         taxiNodes.reserve(nodes.size());
         for (const auto& [id, node] : nodes) {
+            const bool known = gameHandler.isKnownTaxiNode(id);
+            // Undiscovered nodes are shown so the player can see where flight
+            // paths exist, but only ones their faction can actually use. A node's
+            // faction is inferred from which taxi mount TaxiNodes.dbc lists:
+            // own-faction mount → show; both mounts → neutral flight point, show;
+            // opposite-faction-only OR no mount at all (boat/zeppelin/script
+            // nodes) → hide. Known nodes are always shown.
+            if (!known) {
+                const bool hasAlliance = node.mountDisplayIdAlliance != 0;
+                const bool hasHorde    = node.mountDisplayIdHorde != 0;
+                const bool bothFactions = hasAlliance && hasHorde;   // neutral hub
+                const bool ownFaction   = playerAlliance ? hasAlliance : hasHorde;
+                if (!bothFactions && !ownFaction) continue;
+            }
             rendering::WorldMapTaxiNode wtn;
             wtn.id    = node.id;
             wtn.mapId = node.mapId;
@@ -475,7 +490,7 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
             wtn.wowY  = canonical.y;
             wtn.wowZ  = canonical.z;
             wtn.name  = node.name;
-            wtn.known = gameHandler.isKnownTaxiNode(id);
+            wtn.known = known;
             wtn.costCopper = gameHandler.getTaxiCostTo(id);
             wtn.current    = (id == currentTaxiNode);
             wtn.reachable  = gameHandler.hasTaxiRouteTo(id);

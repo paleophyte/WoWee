@@ -119,7 +119,6 @@ void TaxiNodeLayer::renderWorldMapMarkers(const LayerContext& ctx,
                                           bool isContinent) {
     ImVec2 mp = ImGui::GetMousePos();
     for (const auto& node : *nodes_) {
-        if (!node.known) continue;
         glm::vec3 rPos(0.0f);
         if (!projectNodeToDisplayedMap(node, ctx, rPos)) continue;
         glm::vec2 uv = renderPosToMapUV(rPos, bounds, isContinent);
@@ -128,13 +127,26 @@ void TaxiNodeLayer::renderWorldMapMarkers(const LayerContext& ctx,
         float px = ctx.imgMin.x + uv.x * ctx.displayW;
         float py = ctx.imgMin.y + uv.y * ctx.displayH;
 
-        drawDiamond(ctx.drawList, px, py, 5.0f,
-                    IM_COL32(255, 215, 0, 230), IM_COL32(80, 50, 0, 200), 1.2f);
+        // Discovered nodes are gold; undiscovered flight masters are drawn in
+        // green so the player can see where flight paths exist before visiting
+        // them (matches the green flight-point icon from the game).
+        if (node.known) {
+            drawDiamond(ctx.drawList, px, py, 5.0f,
+                        IM_COL32(255, 215, 0, 230), IM_COL32(80, 50, 0, 200), 1.2f);
+        } else {
+            drawDiamond(ctx.drawList, px, py, 4.5f,
+                        IM_COL32(70, 200, 90, 210), IM_COL32(15, 60, 25, 200), 1.2f);
+        }
 
         if (!node.name.empty()) {
             float mdx = mp.x - px, mdy = mp.y - py;
             if (mdx * mdx + mdy * mdy < 49.0f) {
-                ImGui::SetTooltip("%s\n(Flight Master)", node.name.c_str());
+                if (node.known) {
+                    ImGui::SetTooltip("%s\n(Flight Master)", node.name.c_str());
+                } else {
+                    ImGui::SetTooltip("%s\n(Flight Master — not yet discovered)",
+                                      node.name.c_str());
+                }
             }
         }
     }

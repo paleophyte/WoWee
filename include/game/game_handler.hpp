@@ -1298,6 +1298,17 @@ public:
         const Character* ch = getActiveCharacter();
         return ch ? static_cast<uint8_t>(ch->race) : 0;
     }
+    // Horde races: Orc, Undead, Tauren, Troll, Goblin, Blood Elf. Everything
+    // else (including an unknown/zero race) defaults to Alliance.
+    bool isPlayerAlliance() const {
+        switch (static_cast<Race>(getPlayerRace())) {
+            case Race::ORC: case Race::UNDEAD: case Race::TAUREN:
+            case Race::TROLL: case Race::GOBLIN: case Race::BLOOD_ELF:
+                return false;
+            default:
+                return true;
+        }
+    }
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
     // Player death state
