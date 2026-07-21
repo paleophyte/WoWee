@@ -27,6 +27,11 @@ namespace ui {
 
 namespace {
 
+// ITEM_FLAG_OPENABLE: the server template, not item class, is authoritative for
+// loot containers. Fishing finds such as Message in a Bottle and Tightly Sealed
+// Trunk are miscellaneous items that still need CMSG_OPEN_ITEM on right-click.
+constexpr uint32_t kItemFlagOpenable = 0x00000004u;
+
 // Reputation rank names (indexed 0-7: Hated..Exalted)
 constexpr const char* kRepRankNames[8] = {
     "Hated", "Hostile", "Unfriendly", "Neutral",
@@ -2892,12 +2897,15 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
                         gameHandler_->autoEquipItemBySlot(backpackIndex);
                     }
                 } else {
-                    // itemClass==1 (Container) with inventoryType==0 means a lockbox;
-                    // use CMSG_OPEN_ITEM so the server checks keyring automatically.
+                    // Openable is an item flag, not an item-class guarantee. Some fishing
+                    // containers are miscellaneous items and otherwise fall through to an
+                    // empty CMSG_USE_ITEM that the server silently ignores.
                     auto* info = gameHandler_->getItemInfo(item.itemId);
                     if (info && info->valid && info->pageTextId != 0) {
                         gameHandler_->readItemBySlot(backpackIndex);
-                    } else if (info && info->valid && info->itemClass == 1) {
+                    } else if (info && info->valid &&
+                               ((info->itemFlags & kItemFlagOpenable) != 0 ||
+                                info->itemClass == 1)) {
                         gameHandler_->openItemBySlot(backpackIndex);
                     } else {
                         gameHandler_->useItemBySlot(backpackIndex);
@@ -2925,7 +2933,9 @@ void InventoryScreen::renderItemSlot(game::Inventory& inventory, const game::Ite
                     auto* info = gameHandler_->getItemInfo(item.itemId);
                     if (info && info->valid && info->pageTextId != 0) {
                         gameHandler_->readItemInBag(bagIndex, bagSlotIndex);
-                    } else if (info && info->valid && info->itemClass == 1) {
+                    } else if (info && info->valid &&
+                               ((info->itemFlags & kItemFlagOpenable) != 0 ||
+                                info->itemClass == 1)) {
                         gameHandler_->openItemInBag(bagIndex, bagSlotIndex);
                     } else {
                         gameHandler_->useItemInBag(bagIndex, bagSlotIndex);

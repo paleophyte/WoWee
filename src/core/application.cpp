@@ -1148,7 +1148,16 @@ void Application::setState(AppState newState) {
                     float camYawDeg = renderer->getCameraController()->getYaw();
                     renderer->setCharacterYaw(camYawDeg);
                     renderer->getCameraController()->setFacingYaw(camYawDeg);
-                    return core::coords::normalizeAngleRad(glm::radians(180.0f - camYawDeg));
+                    // "Face land to fish" ⇒ the bobber landed 180° opposite the aim, so the
+                    // canonical is a half-turn off here (getYaw's zero is opposite the look
+                    // vector). Add the half-turn so the bobber lands where the camera looks.
+                    float canon = core::coords::normalizeAngleRad(glm::radians(360.0f - camYawDeg));
+                    LOG_WARNING("[FISH-AIM] getYaw=", camYawDeg,
+                                " getFacingYaw=", renderer->getCameraController()->getFacingYaw(),
+                                " charYaw=", renderer->getCharacterYaw(),
+                                " canonicalDeg=", canon * 57.29578f,
+                                " serverYawDeg=", core::coords::canonicalToServerYaw(canon) * 57.29578f);
+                    return canon;
                 });
 
                 gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
