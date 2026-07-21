@@ -1317,6 +1317,18 @@ bool UpdateObjectParser::parse(network::Packet& packet, UpdateObjectData& data) 
                           " (", i, " blocks parsed, ", lostBlocks, " blocks LOST",
                           ", remaining=", packet.getRemainingSize(), " bytes)");
                 LOG_ERROR("  blockStartPos=", blockStartPos, " packetSize=", packet.getSize());
+                // The failing block is partially parsed: parseMovementBlock stores its
+                // updateFlags/moveFlags into `block` before it can fail, and the object
+                // type is read first. Log them here so the FIRST block failing (i==0, no
+                // prevBlock context) still reveals which movement layout desynced — the
+                // moveFlags identify which optional field (transport/spline/falling/pitch)
+                // consumed the wrong byte count and misaligned the update-field mask.
+                LOG_ERROR("  failedBlock: updateType=", static_cast<int>(block.updateType),
+                          " objType=", static_cast<int>(block.objectType),
+                          " updateFlags=0x", std::hex, block.updateFlags,
+                          " moveFlags=0x", block.moveFlags,
+                          " guid=0x", block.guid, std::dec,
+                          " consumedBeforeFail=", packet.getSize() - packet.getRemainingSize() - blockStartPos);
                 if (i > 0) {
                     LOG_ERROR("  prevBlock: type=", static_cast<int>(prevUpdateType),
                               " objType=", static_cast<int>(prevObjectType),
