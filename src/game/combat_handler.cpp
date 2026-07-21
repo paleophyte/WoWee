@@ -500,6 +500,30 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         autoTargetAttacker(data.attackerGuid);
     }
 
+    // DIAG: incoming melee damage — compare the displayed totalDamage against the
+    // per-school subdamage (float + int), absorb/resist, overkill, and the player's
+    // current HP, to see whether "red numbers too high" is inflated parsing or the
+    // real post-mitigation value. Throttled to the first 20 incoming hits.
+    if (isPlayerTarget && !data.isMiss()) {
+        static int meleeDmgDiag = 0;
+        if (meleeDmgDiag++ < 20) {
+            uint32_t playerHp = 0;
+            if (auto* pu = owner_.getUnitByGuid(owner_.getPlayerGuid())) playerHp = pu->getHealth();
+            std::string subs;
+            for (const auto& s : data.subDamages) {
+                char b[96];
+                std::snprintf(b, sizeof(b), " [school=0x%x fdmg=%.1f idmg=%u abs=%u res=%u]",
+                              s.schoolMask, s.damage, s.intDamage, s.absorbed, s.resisted);
+                subs += b;
+            }
+            LOG_INFO("[MELEE-DMG-DIAG] totalDamage=", data.totalDamage,
+                     " overkill=", data.overkill, " victimState=", data.victimState,
+                     " hitInfo=0x", std::hex, data.hitInfo, std::dec,
+                     " subCount=", static_cast<int>(data.subDamageCount), subs,
+                     " playerHP=", playerHp);
+        }
+    }
+
     // Play combat sounds via CombatSoundManager + character vocalizations
     if (auto* ac = owner_.services().audioCoordinator) {
         if (auto* csm = ac->getCombatSoundManager()) {
