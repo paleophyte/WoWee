@@ -1268,8 +1268,13 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
     const uint16_t randPropField = (fieldIndex(UF::ITEM_FIELD_DURABILITY) != 0xFFFF)
         ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_DURABILITY) - (isPreWotlk() ? 2u : 1u))
         : 0xFFFFu;
+    // ITEM_FIELD_PROPERTY_SEED (the random-suffix stat scale) sits immediately before
+    // RANDOM_PROPERTIES_ID; the client multiplies each suffix allocation % by it.
+    const uint16_t seedField = (randPropField != 0xFFFF && randPropField > 0)
+        ? static_cast<uint16_t>(randPropField - 1u) : 0xFFFFu;
     auto flagsIt    = (flagsField != 0xFFFF)    ? block.fields.find(flagsField)    : block.fields.end();
     auto randPropIt = (randPropField != 0xFFFF) ? block.fields.find(randPropField) : block.fields.end();
+    auto seedIt     = (seedField != 0xFFFF)     ? block.fields.find(seedField)     : block.fields.end();
     const uint16_t enchBase = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
         ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 8u) : 0xFFFFu;
     auto permEnchIt  = (enchBase != 0xFFFF) ? block.fields.find(enchBase)       : block.fields.end();
@@ -1292,6 +1297,7 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
         if (sock3EnchIt != block.fields.end()) info.socketEnchantIds[2]  = sock3EnchIt->second;
         if (flagsIt    != block.fields.end()) info.flags                 = flagsIt->second;
         if (randPropIt != block.fields.end()) info.randomPropertyId      = static_cast<int32_t>(randPropIt->second);
+        if (seedIt     != block.fields.end()) info.suffixFactor          = seedIt->second;
         auto [itemIt, isNew] = owner_.onlineItemsRef().insert_or_assign(block.guid, info);
         if (isNew) newItemCreated = true;
         owner_.queryItemInfo(info.entry, block.guid);
@@ -1325,6 +1331,8 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
     const uint16_t itemFlagsField    = (itemStackField != 0xFFFF) ? (itemStackField + 7u) : 0xFFFF;
     const uint16_t itemRandPropField = (itemDurField != 0xFFFF)
         ? static_cast<uint16_t>(itemDurField - (isPreWotlk() ? 2u : 1u)) : 0xFFFF;
+    const uint16_t itemSeedField = (itemRandPropField != 0xFFFF && itemRandPropField > 0)
+        ? static_cast<uint16_t>(itemRandPropField - 1u) : 0xFFFF;
 
     auto it = owner_.onlineItemsRef().find(block.guid);
     bool isItemInInventory = (it != owner_.onlineItemsRef().end());
@@ -1402,6 +1410,11 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
         } else if (isItemInInventory && itemRandPropField != 0xFFFF && key == itemRandPropField) {
             if (it->second.randomPropertyId != static_cast<int32_t>(val)) {
                 it->second.randomPropertyId = static_cast<int32_t>(val);
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemSeedField != 0xFFFF && key == itemSeedField) {
+            if (it->second.suffixFactor != val) {
+                it->second.suffixFactor = val;
                 inventoryChanged = true;
             }
         }

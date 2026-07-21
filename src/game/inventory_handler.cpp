@@ -3115,7 +3115,8 @@ void InventoryHandler::extractContainerFields(uint64_t containerGuid, const Flat
 // paste sites in rebuildOnlineInventory.
 ItemDef InventoryHandler::buildItemDef(uint32_t entry, uint32_t stackCount,
                                        uint32_t curDur, uint32_t maxDur, uint64_t guid,
-                                       uint32_t flags, int32_t randomPropertyId) {
+                                       uint32_t flags, int32_t randomPropertyId,
+                                       uint32_t suffixFactor) {
     ItemDef def;
     def.itemId = entry;
     def.guid = guid;
@@ -3159,6 +3160,23 @@ ItemDef InventoryHandler::buildItemDef(uint32_t entry, uint32_t stackCount,
         def.name = "Item " + std::to_string(def.itemId);
         queryItemInfo(def.itemId, guid);
     }
+
+    // Merge the rolled random-suffix/property stats on top of the base template. Primary
+    // stats fold into their dedicated fields; everything else (ratings, AP, spell power)
+    // joins extraStats so the existing tooltip rendering shows them as green stat lines.
+    if (randomPropertyId != 0) {
+        for (const auto& b : owner_.getRandomStatBonuses(randomPropertyId, suffixFactor)) {
+            if (b.value == 0) continue;
+            switch (b.statType) {
+                case 3: def.agility   += b.value; break;
+                case 4: def.strength  += b.value; break;
+                case 5: def.intellect += b.value; break;
+                case 6: def.spirit    += b.value; break;
+                case 7: def.stamina   += b.value; break;
+                default: def.extraStats.push_back({b.statType, b.value}); break;
+            }
+        }
+    }
     return def;
 }
 
@@ -3174,7 +3192,7 @@ void InventoryHandler::rebuildOnlineInventory() {
         if (guid == 0) continue;
         auto itemIt = owner_.onlineItemsRef().find(guid);
         if (itemIt == owner_.onlineItemsRef().end()) continue;
-        owner_.inventoryRef().setEquipSlot(static_cast<EquipSlot>(i), buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId));
+        owner_.inventoryRef().setEquipSlot(static_cast<EquipSlot>(i), buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId, itemIt->second.suffixFactor));
     }
 
     // Backpack slots
@@ -3183,7 +3201,7 @@ void InventoryHandler::rebuildOnlineInventory() {
         if (guid == 0) continue;
         auto itemIt = owner_.onlineItemsRef().find(guid);
         if (itemIt == owner_.onlineItemsRef().end()) continue;
-        owner_.inventoryRef().setBackpackSlot(i, buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId));
+        owner_.inventoryRef().setBackpackSlot(i, buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId, itemIt->second.suffixFactor));
     }
 
     // Keyring slots
@@ -3192,7 +3210,7 @@ void InventoryHandler::rebuildOnlineInventory() {
         if (guid == 0) continue;
         auto itemIt = owner_.onlineItemsRef().find(guid);
         if (itemIt == owner_.onlineItemsRef().end()) continue;
-        owner_.inventoryRef().setKeyringSlot(i, buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId));
+        owner_.inventoryRef().setKeyringSlot(i, buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, guid, itemIt->second.flags, itemIt->second.randomPropertyId, itemIt->second.suffixFactor));
     }
 
     // Bag contents (BAG1-BAG4 are equip slots 19-22)
@@ -3245,7 +3263,7 @@ void InventoryHandler::rebuildOnlineInventory() {
 
             auto itemIt = owner_.onlineItemsRef().find(itemGuid);
             if (itemIt == owner_.onlineItemsRef().end()) continue;
-            ItemDef def = buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, itemGuid, itemIt->second.flags, itemIt->second.randomPropertyId);
+            ItemDef def = buildItemDef(itemIt->second.entry, itemIt->second.stackCount, itemIt->second.curDurability, itemIt->second.maxDurability, itemGuid, itemIt->second.flags, itemIt->second.randomPropertyId, itemIt->second.suffixFactor);
             // Bags inside bags need containerSlots for the UI slot-count display.
             auto bagInfoIt = owner_.itemInfoCacheRef().find(itemIt->second.entry);
             if (bagInfoIt != owner_.itemInfoCacheRef().end())

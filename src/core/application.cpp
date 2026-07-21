@@ -577,27 +577,131 @@ bool Application::initialize() {
                     if (!amPtr || id == 0) return {};
                     if (!*propLoaded) {
                         *propLoaded = true;
-                        // ItemRandomProperties.dbc: ID=0, Name=4 (string)
+                        // Both DBCs carry the display name ("of the Bear" / "of Strength") as
+                        // the first string column, field 1, across classic/tbc/wotlk/turtle.
+                        constexpr uint32_t kNameField = 1;
+                        // ItemRandomProperties.dbc: ID=0, Name=1 (positive IDs)
                         if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
-                            uint32_t nameField = (dbc->getFieldCount() > 4) ? 4 : 1;
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                std::string name = dbc->getString(r, nameField);
+                                std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[rid] = name;
                             }
                         }
-                        // ItemRandomSuffix.dbc: ID=0, Name=4 (string) — stored as negative IDs
+                        // ItemRandomSuffix.dbc: ID=0, Name=1 — keyed as negative IDs
                         if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
-                            uint32_t nameField = (dbc->getFieldCount() > 4) ? 4 : 1;
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                std::string name = dbc->getString(r, nameField);
+                                std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[-rid] = name;
                             }
                         }
                     }
                     auto it = propNames->find(id);
                     return (it != propNames->end()) ? it->second : std::string{};
+                });
+            }
+            // Wire random-suffix/property stat resolver. Reproduces the server's roll from the
+            // same DBCs: a suffix (negative id) scales each SpellItemEnchantment STAT amount by
+            // AllocationPct*suffixFactor/10000; a property (positive id) uses the enchant's fixed
+            // amount. Caches all three tables on first use.
+            {
+                struct EnchEffect { uint32_t type; uint32_t arg; int32_t minAmount; };
+                auto suffixMap = std::make_shared<std::unordered_map<int32_t, std::vector<std::pair<uint32_t,uint32_t>>>>();
+                auto propMap   = std::make_shared<std::unordered_map<int32_t, std::vector<uint32_t>>>();
+                auto enchMap   = std::make_shared<std::unordered_map<uint32_t, std::vector<EnchEffect>>>();
+                auto loaded    = std::make_shared<bool>(false);
+                auto* amPtr = assetManager.get();
+                gameHandler->setRandomStatResolver(
+                    [suffixMap, propMap, enchMap, loaded, amPtr](int32_t id, uint32_t suffixFactor)
+                        -> std::vector<game::GameHandler::RandomStatBonus> {
+                    std::vector<game::GameHandler::RandomStatBonus> out;
+                    if (!amPtr || id == 0) return out;
+                    if (!*loaded) {
+                        *loaded = true;
+                        // SpellItemEnchantment: enchId -> up to 3 (type, statArg, minAmount).
+                        // Arg (stat type) is the 3 fields before Name; the effect-type array
+                        // precedes the amount block(s) — 2 blocks (Min+Max) on TBC/WotLK, 1 on Vanilla.
+                        if (auto dbc = amPtr->loadDBC("SpellItemEnchantment.dbc"); dbc && dbc->isLoaded()) {
+                            const auto* sieL = pipeline::getActiveDBCLayout()
+                                ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
+                            const uint32_t fc = dbc->getFieldCount();
+                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
+                            if (nameF >= 12 && nameF < fc) {
+                                const uint32_t argBase = nameF - 3;
+                                const bool singleAmount = fc < 34;  // Vanilla/Turtle: no separate Max array
+                                const uint32_t effBase = argBase - (singleAmount ? 6u : 9u);
+                                const uint32_t minBase = effBase + 3u;
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    uint32_t enchId = dbc->getUInt32(r, 0);
+                                    if (enchId == 0) continue;
+                                    std::vector<EnchEffect> effs;
+                                    for (uint32_t s = 0; s < 3; ++s) {
+                                        uint32_t type = dbc->getUInt32(r, effBase + s);
+                                        if (type == 0) continue;
+                                        effs.push_back({type, dbc->getUInt32(r, argBase + s), dbc->getInt32(r, minBase + s)});
+                                    }
+                                    if (!effs.empty()) (*enchMap)[enchId] = std::move(effs);
+                                }
+                            }
+                        }
+                        // ItemRandomSuffix: enchant array at field 19, AllocationPct follows; N=(fc-19)/2.
+                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                            const uint32_t fc = dbc->getFieldCount();
+                            if (fc > 21 && (fc - 19u) % 2u == 0u) {
+                                const uint32_t n = (fc - 19u) / 2u;
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                    if (sid <= 0) continue;
+                                    std::vector<std::pair<uint32_t,uint32_t>> ens;
+                                    for (uint32_t k = 0; k < n; ++k) {
+                                        uint32_t ench = dbc->getUInt32(r, 19u + k);
+                                        uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
+                                        if (ench != 0) ens.emplace_back(ench, pct);
+                                    }
+                                    if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
+                                }
+                            }
+                        }
+                        // ItemRandomProperties: up to 5 enchant ids at fields 2..6 (fixed amount).
+                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
+                            if (dbc->getFieldCount() > 6) {
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                    if (pid <= 0) continue;
+                                    std::vector<uint32_t> ens;
+                                    for (uint32_t k = 2; k <= 6; ++k) {
+                                        uint32_t ench = dbc->getUInt32(r, k);
+                                        if (ench != 0) ens.push_back(ench);
+                                    }
+                                    if (!ens.empty()) (*propMap)[pid] = std::move(ens);
+                                }
+                            }
+                        }
+                    }
+                    auto addEnchant = [&](uint32_t enchId, int32_t computedAmount, bool useComputed) {
+                        auto eit = enchMap->find(enchId);
+                        if (eit == enchMap->end()) return;
+                        for (const auto& e : eit->second) {
+                            if (e.type != 5) continue;  // ITEM_ENCHANTMENT_TYPE_STAT only
+                            int32_t amount = (useComputed && e.minAmount == 0) ? computedAmount : e.minAmount;
+                            if (amount != 0) out.push_back({e.arg, amount});
+                        }
+                    };
+                    if (id < 0) {
+                        auto sit = suffixMap->find(-id);
+                        if (sit != suffixMap->end())
+                            for (const auto& [ench, pct] : sit->second) {
+                                int32_t amount = static_cast<int32_t>(
+                                    (static_cast<int64_t>(pct) * suffixFactor) / 10000);
+                                addEnchant(ench, amount, true);
+                            }
+                    } else {
+                        auto pit = propMap->find(id);
+                        if (pit != propMap->end())
+                            for (uint32_t ench : pit->second) addEnchant(ench, 0, false);
+                    }
+                    return out;
                 });
             }
             LOG_INFO("Addon system initialized, found ", addonManager_->getAddons().size(), " addon(s)");

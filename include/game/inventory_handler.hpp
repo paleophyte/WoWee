@@ -263,7 +263,7 @@ public:
     bool applyInventoryFields(const FlatFieldMap& fields);
     void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
     ItemDef buildItemDef(uint32_t entry, uint32_t stackCount, uint32_t curDur, uint32_t maxDur, uint64_t guid,
-                         uint32_t flags = 0, int32_t randomPropertyId = 0);
+                         uint32_t flags = 0, int32_t randomPropertyId = 0, uint32_t suffixFactor = 0);
     void rebuildOnlineInventory();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);
