@@ -579,22 +579,6 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 break;
         }
 
-        // DIAG: log EVERY floating combat-text entry on its first frame (any type), so
-        // whatever produces the on-screen "-167772160" — whatever damage type or source —
-        // is captured with its type and amount. Absurd values are flagged.
-        {
-            const bool absurd = (entry.amount > 100000 || entry.amount < -100000);
-            static int renderDmgDiag = 0;
-            if (entry.age < 0.05f && (renderDmgDiag++ < 60 || absurd)) {
-                LOG_WARNING("[RENDER-DMG-DIAG] type=", static_cast<int>(entry.type),
-                            " outgoing=", outgoing, " amount=", entry.amount,
-                            (absurd ? " *ABSURD*" : ""),
-                            " text='", text, "' spellId=", entry.spellId,
-                            " srcGuid=0x", std::hex, entry.srcGuid,
-                            " dstGuid=0x", entry.dstGuid, std::dec);
-            }
-        }
-
         // --- Rendering style ---
         bool isCrit = (entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
                        entry.type == game::CombatTextEntry::CRIT_HEAL);

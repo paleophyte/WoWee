@@ -3619,9 +3619,9 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
-    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint8 powerType + int32 amount
-    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint8 powerType + int32 amount
-    // Classic/Vanilla: packed_guid (same as WotLK)
+    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint32 powerType + int32 amount
+    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint32 powerType + int32 amount
+    // Classic/Vanilla: packed_guid (same as WotLK). PowerType is uint32 in every expansion.
     const bool energizeTbc = isActiveExpansion("tbc");
     auto readEnergizeGuid = [&]() -> uint64_t {
         if (energizeTbc)
@@ -3638,11 +3638,15 @@ void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
         packet.skipAll(); return;
     }
     uint64_t casterGuid = readEnergizeGuid();
-    if (!packet.hasRemaining(9)) {
+    // spellId(4) + powerType(4) + amount(4) = 12. PowerType is a uint32 on the wire in
+    // every expansion (Vanilla/TBC/WotLK); reading it as a uint8 left 3 bytes in front of
+    // amount, turning a small power gain (e.g. 10 = 0x0000000A after powerType 0x00000001)
+    // into 0x0A000000 = 167772160 floating combat text.
+    if (!packet.hasRemaining(12)) {
         packet.skipAll(); return;
     }
     uint32_t spellId       = packet.readUInt32();
-    uint8_t  energizePowerType = packet.readUInt8();
+    uint8_t  energizePowerType = static_cast<uint8_t>(packet.readUInt32());
     int32_t  amount        = static_cast<int32_t>(packet.readUInt32());
     bool isPlayerVictim = (victimGuid == owner_.getPlayerGuid());
     bool isPlayerCaster = (casterGuid == owner_.getPlayerGuid());
