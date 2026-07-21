@@ -3,7 +3,6 @@
 // (Phase 3 of refactoring plan).
 #include "rendering/world_map/exploration_state.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/logger.hpp"
 
 #include <cmath>
 
@@ -76,39 +75,6 @@ void ExplorationState::update(const std::vector<Zone>& zones,
         if (newExploredOverlays != exploredOverlays_) {
             exploredOverlays_ = std::move(newExploredOverlays);
             overlaysChanged_ = true;
-        }
-
-        // One-shot-per-zone diagnostic: when a zone with overlays reveals none of them
-        // (the zone map draws full fog), dump why — how many mask bits are set overall,
-        // the zone's own AreaBit state, and each overlay's first AreaID → ExploreFlag →
-        // bit state. This distinguishes "server never set the bits" from a client mapping
-        // bug. Logged only when the viewed zone changes, so it is not spammy.
-        if (currentZoneIdx >= 0 && currentZoneIdx != diagLoggedZone_ &&
-            currentZoneIdx < static_cast<int>(zones.size())) {
-            const auto& cz = zones[currentZoneIdx];
-            if (!cz.overlays.empty() && exploredOverlays_.empty()) {
-                diagLoggedZone_ = currentZoneIdx;
-                size_t setBits = 0;
-                for (uint32_t w : serverMask_) setBits += static_cast<size_t>(__builtin_popcount(w));
-                uint32_t zoneBit = 0;
-                auto zbIt = exploreFlagByAreaId.find(cz.areaID);
-                if (zbIt != exploreFlagByAreaId.end()) zoneBit = zbIt->second;
-                LOG_INFO("[EXPLORE-DIAG] zone='", cz.areaName, "' areaID=", cz.areaID,
-                         " zoneBit=", zoneBit, " zoneBitSet=", isBitSet(zoneBit),
-                         " totalMaskBitsSet=", setBits, " maskWords=", serverMask_.size(),
-                         " overlays=", cz.overlays.size(), " (none revealed)");
-                int shown = 0;
-                for (const auto& ov : cz.overlays) {
-                    if (shown++ >= 6) break;
-                    uint32_t aid = ov.areaIDs[0];
-                    auto fIt = exploreFlagByAreaId.find(aid);
-                    uint32_t flag = (fIt != exploreFlagByAreaId.end()) ? fIt->second : 0xFFFFFFFFu;
-                    LOG_INFO("[EXPLORE-DIAG]   overlay areaID=", aid, " exploreFlag=", flag,
-                             " bitSet=", (flag != 0xFFFFFFFFu && isBitSet(flag)));
-                }
-            } else {
-                diagLoggedZone_ = currentZoneIdx;
-            }
         }
         return;
     }

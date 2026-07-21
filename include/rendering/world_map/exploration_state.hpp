@@ -46,7 +46,6 @@ private:
     std::unordered_set<int> exploredOverlays_;
     std::unordered_set<int> locallyExploredZones_;
     bool overlaysChanged_ = false;
-    int diagLoggedZone_ = -2;  // throttle: last zone index the exploration diagnostic logged
 };
 
 } // namespace world_map
