@@ -678,6 +678,30 @@ void GameHandler::registerOpcodeHandlers() {
             movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
             return;
         }
+
+        // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
+        // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
+        // damage (notably periodic poison) without actually removing the mount
+        // aura or clearing the update field.  Treating that transient packet as
+        // state made the local model dismount even though the player remained
+        // mounted server-side.  A real dismount also clears the update field;
+        // let that values update drive the visual when the two signals disagree.
+        if (isActiveExpansion("wotlk")) {
+            const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
+            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
+            const uint32_t serverMountDisplay =
+                (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
+                    ? playerEntity->getField(mountField)
+                    : 0;
+            if (serverMountDisplay != 0) {
+                LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
+                            serverMountDisplay,
+                            " casting=", isCasting(),
+                            " channeling=", isChanneling(),
+                            " spell=", getCurrentCastSpellId());
+                return;
+            }
+        }
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
     };

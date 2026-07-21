@@ -540,6 +540,12 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         return;
     }
     uint32_t old = owner_.currentMountDisplayIdRef();
+    if (old != 0 && newMountDisplayId == 0) {
+        LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
+                    " casting=", owner_.isCasting(),
+                    " channeling=", owner_.isChanneling(),
+                    " spell=", owner_.getCurrentCastSpellId());
+    }
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
     if (newMountDisplayId != old)
