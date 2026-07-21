@@ -59,6 +59,15 @@ namespace {
     constexpr auto& kColorBrightGreen= kBrightGreen;
     constexpr auto& kColorYellow     = kYellow;
 
+    // Upper bound on a game object's cursor-pick sphere. A wide/tall M2 GO (a forge, an
+    // anvil, a large brazier) reports a legitimately big visual radius, but its bounding
+    // sphere is a poor click target: the half-diagonal reaches well past the geometry and
+    // swallows NPCs standing next to it, so those units become unclickable. Clamping the
+    // GO pick radius keeps large objects clickable near their center without stealing the
+    // click from a neighbor. Units are never clamped — this is a GO-only correction, the
+    // same reasoning that already makes WMO GOs fall back to a conservative fixed sphere.
+    constexpr float kMaxGameObjectPickRadius = 3.0f;
+
     bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
         glm::vec3 oc = ray.origin - center;
         float b = glm::dot(oc, ray.direction);
@@ -1254,8 +1263,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     hitCenter.z += isGo ? 1.2f : 1.0f;
                 } else {
                     // Resource nodes can have very tight render bounds; keep
-                    // their click target close to the no-bounds fallback.
-                    hitRadius = std::max(hitRadius * 1.25f, isGo ? 2.5f : 1.0f);
+                    // their click target close to the no-bounds fallback. Cap GO
+                    // spheres so a wide forge/anvil doesn't swallow nearby NPCs.
+                    hitRadius = isGo
+                        ? std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius)
+                        : std::max(hitRadius * 1.25f, 1.0f);
                 }
 
                 float hitT;
@@ -1352,10 +1364,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                         }
                         hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
                         hitCenter.z += heightOffset;
+                    } else if (t == game::ObjectType::GAMEOBJECT) {
+                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
+                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
                     } else {
-                        hitRadius = std::max(
-                            hitRadius * 1.25f,
-                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
+                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
                     }
 
                     float hitT;
@@ -1533,10 +1546,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                                             ") r=", hitRadius);
                             }
                         }
+                    } else if (t == game::ObjectType::GAMEOBJECT) {
+                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
+                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
                     } else {
-                        hitRadius = std::max(
-                            hitRadius * 1.25f,
-                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
+                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
                     }
 
                     float hitT;
