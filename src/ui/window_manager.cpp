@@ -3516,6 +3516,32 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
     int tab = gameHandler.getAuctionActiveTab();
 
+    // Draw a list item icon with the WoW-style stack-count badge in the
+    // bottom-right corner, so stacked auctions read as multiples (e.g. "20")
+    // rather than a bare single-item icon. Leaves the cursor on SameLine for
+    // the name that follows, matching the previous inline layout.
+    auto drawAuctionIcon = [&inventoryScreen](uint32_t displayInfoId, uint32_t stackCount) -> bool {
+        if (displayInfoId == 0) return false;
+        VkDescriptorSet icon = inventoryScreen.getItemIcon(displayInfoId);
+        if (!icon) return false;
+        const float kIconSize = 18.0f;
+        ImGui::Image((void*)(intptr_t)icon, ImVec2(kIconSize, kIconSize));
+        if (stackCount > 1) {
+            char cnt[16];
+            snprintf(cnt, sizeof(cnt), "%u", stackCount);
+            ImVec2 mn = ImGui::GetItemRectMin();
+            ImVec2 mx = ImGui::GetItemRectMax();
+            float cw = ImGui::CalcTextSize(cnt).x;
+            float ch = ImGui::GetFontSize();
+            ImVec2 tp(mx.x - cw - 1.0f, mn.y + (kIconSize - ch));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(tp.x + 1.0f, tp.y + 1.0f), IM_COL32(0, 0, 0, 210), cnt);
+            dl->AddText(tp, IM_COL32(255, 255, 255, 235), cnt);
+        }
+        ImGui::SameLine();
+        return true;
+    };
+
     // Tab buttons
     const char* tabNames[] = {"Browse", "Bids", "Auctions"};
     for (int i = 0; i < 3; i++) {
@@ -3860,14 +3886,9 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
-                    // Item icon
-                    if (info && info->valid && info->displayInfoId != 0) {
-                        VkDescriptorSet iconTex = inventoryScreen.getItemIcon(info->displayInfoId);
-                        if (iconTex) {
-                            ImGui::Image((void*)(intptr_t)iconTex, ImVec2(16, 16));
-                            ImGui::SameLine();
-                        }
-                    }
+                    // Item icon with stack-count badge
+                    if (info && info->valid)
+                        drawAuctionIcon(info->displayInfoId, auction.stackCount);
                     ImGui::TextColored(qc, "%s", name.c_str());
                     // Item tooltip on hover; hold Shift to compare against the
                     // equipped item in the same slot; shift-click inserts a link.
@@ -4077,13 +4098,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                if (info && info->valid && info->displayInfoId != 0) {
-                    VkDescriptorSet bIcon = inventoryScreen.getItemIcon(info->displayInfoId);
-                    if (bIcon) {
-                        ImGui::Image((void*)(intptr_t)bIcon, ImVec2(16, 16));
-                        ImGui::SameLine();
-                    }
-                }
+                if (info && info->valid)
+                    drawAuctionIcon(info->displayInfoId, a.stackCount);
                 // High bidder indicator
                 bool isHighBidder = (a.bidderGuid != 0 && a.bidderGuid == gameHandler.getPlayerGuid());
                 if (isHighBidder) {
@@ -4161,13 +4177,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImVec4 oqc = InventoryScreen::getQualityColor(quality);
-                if (info && info->valid && info->displayInfoId != 0) {
-                    VkDescriptorSet oIcon = inventoryScreen.getItemIcon(info->displayInfoId);
-                    if (oIcon) {
-                        ImGui::Image((void*)(intptr_t)oIcon, ImVec2(16, 16));
-                        ImGui::SameLine();
-                    }
-                }
+                if (info && info->valid)
+                    drawAuctionIcon(info->displayInfoId, a.stackCount);
                 // Bid activity indicator for seller
                 if (a.bidderGuid != 0) {
                     ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[Bid]");
