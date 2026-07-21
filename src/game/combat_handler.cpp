@@ -53,6 +53,8 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
         autoAttackRequested_ = false;
+        autoAttackRetryPending_ = false;
+        hostileAttackers_.clear();
     };
 
     // ---- Attack/combat delegates ----
@@ -203,11 +205,6 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     if (targetGuid == owner_.getPlayerGuid()) return;
     if (targetGuid == 0) return;
 
-    // Dismount when entering combat
-    if (owner_.isMounted()) {
-        owner_.dismount();
-    }
-
     // Client-side range gate to avoid starting "swing forever" loops when
     // target is already clearly out of range.
     if (auto target = owner_.getEntityManager().getEntity(targetGuid)) {
@@ -229,6 +226,13 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
             }
             return;
         }
+    }
+
+    // Only dismount once this is a valid attack attempt. Doing it before the
+    // target/range gate knocked the player off a mount even though no combat
+    // request was sent.
+    if (owner_.isMounted()) {
+        owner_.dismount();
     }
 
     autoAttackRequested_ = true;

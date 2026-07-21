@@ -2012,11 +2012,31 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     LOG_INFO("Removed spell: ", spellId);
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
 
-    const std::string& name = owner_.getSpellName(spellId);
-    if (!name.empty())
-        owner_.addSystemChatMessage("You have unlearned: " + name + ".");
-    else
-        owner_.addSystemChatMessage("A spell has been removed.");
+    // Learning a new talent rank legitimately removes/replaces its internal
+    // talent spell. That is rank bookkeeping, not the player unlearning the
+    // talent, and presenting it as "You have unlearned" is backwards.
+    loadTalentDbc();
+    bool isTalentRankSpell = false;
+    for (const auto& [talentId, talent] : talentCache_) {
+        (void)talentId;
+        for (uint32_t rankSpell : talent.rankSpells) {
+            if (rankSpell == spellId) {
+                isTalentRankSpell = true;
+                break;
+            }
+        }
+        if (isTalentRankSpell) break;
+    }
+
+    if (!isTalentRankSpell) {
+        const std::string& name = owner_.getSpellName(spellId);
+        if (!name.empty())
+            owner_.addSystemChatMessage("You have unlearned: " + name + ".");
+        else
+            owner_.addSystemChatMessage("A spell has been removed.");
+    } else {
+        LOG_DEBUG("Suppressed talent-rank removal chat for spell ", spellId);
+    }
 
     bool barChanged = false;
     for (auto& slot : owner_.actionBarRef()) {

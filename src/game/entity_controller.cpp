@@ -889,6 +889,14 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.flags) {
             uint32_t oldFlags = unit->getUnitFlags();
             unit->setUnitFlags(val);
+            // UNIT_FIELD_FLAGS is the server's authoritative combat state. Spell-only
+            // attackers do not necessarily produce SMSG_ATTACKSTOP, so retaining them
+            // after this bit clears leaves the client permanently "in combat".
+            if (block.guid == owner_.getPlayerGuid() &&
+                (oldFlags & UNIT_FLAG_IN_COMBAT) != 0 &&
+                (val & UNIT_FLAG_IN_COMBAT) == 0 && owner_.getCombatHandler()) {
+                owner_.getCombatHandler()->clearHostileAttackers();
+            }
             // Detect stun state change on local player
             constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;
             if (block.guid == owner_.getPlayerGuid() && owner_.stunStateCallbackRef()) {

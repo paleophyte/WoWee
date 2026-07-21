@@ -616,7 +616,28 @@ void GameHandler::registerOpcodeHandlers() {
     };
 
     // Mount/dismount
-    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& /*packet*/) {
+    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {
+        // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
+        // every nearby unit's dismount to the local player made an enemy
+        // dismounting to attack knock us off our own mount. Classic variants
+        // may send the legacy empty packet, which is implicitly local.
+        uint64_t dismountGuid = playerGuid;
+        if (packet.hasRemaining(1)) {
+            dismountGuid = packet.readPackedGuid();
+            if (dismountGuid == 0) {
+                LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
+                return;
+            }
+        }
+        if (dismountGuid != playerGuid) {
+            LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
+                      dismountGuid, std::dec);
+            if (otherPlayerMountCallback_) {
+                otherPlayerMountCallback_(dismountGuid, 0);
+            }
+            return;
+        }
+
         // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
         // own server-side flight-completion estimate firing early, well before
         // the client-simulated path actually finishes) - obeying it unconditionally

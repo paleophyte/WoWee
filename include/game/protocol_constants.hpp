@@ -19,6 +19,7 @@ constexpr uint32_t COPPER_PER_SILVER = 100;
 // 46 in Classic/TBC/Turtle. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
 constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
+constexpr uint32_t UNIT_FLAG_IN_COMBAT   = 0x00080000;
 
 // Unit visibility flags (byte 2 of UNIT_FIELD_BYTES_1).
 // CREEP marks a unit using the client-side stealth presentation. The server

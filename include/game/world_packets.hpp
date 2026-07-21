@@ -1174,8 +1174,8 @@ namespace GuildEvent {
     constexpr uint8_t LEADER_IS      = 6;
     constexpr uint8_t LEADER_CHANGED = 7;
     constexpr uint8_t DISBANDED      = 8;
-    constexpr uint8_t SIGNED_ON      = 14;
-    constexpr uint8_t SIGNED_OFF     = 15;
+    constexpr uint8_t SIGNED_ON      = 12;
+    constexpr uint8_t SIGNED_OFF     = 13;
 }
 
 /** SMSG_GUILD_QUERY_RESPONSE data */
