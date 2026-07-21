@@ -2997,17 +2997,49 @@ void SocialHandler::handleInitializeFactions(network::Packet& packet) {
 }
 
 void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
-    if (!packet.hasRemaining(5)) return;
-    /*uint8_t showVisual =*/ packet.readUInt8();
+    // Expansion wire layouts differ before the shared count + entries payload:
+    //   Classic: count
+    //   TBC:     RAF bonus (float), count
+    //   WotLK:   RAF bonus (float), showVisual (uint8), count
+    // Treating WotLK's first float byte as showVisual shifted the entire packet,
+    // producing bogus counts, faction names, standings, and chat messages.
+    if (isActiveExpansion("wotlk")) {
+        if (!packet.hasRemaining(9)) return;
+        /*float rafBonus =*/ packet.readFloat();
+        /*uint8_t showVisual =*/ packet.readUInt8();
+    } else if (isActiveExpansion("tbc")) {
+        if (!packet.hasRemaining(8)) return;
+        /*float rafBonus =*/ packet.readFloat();
+    } else if (!packet.hasRemaining(4)) {
+        return;
+    }
+
     uint32_t count = packet.readUInt32();
     count = std::min(count, 128u);
     owner_.loadFactionNameCache();
     for (uint32_t i = 0; i < count && packet.hasRemaining(8); ++i) {
-        uint32_t factionId = packet.readUInt32();
+        // The packet carries Faction.dbc ReputationListID, not the faction ID.
+        uint32_t repListId = packet.readUInt32();
         int32_t  standing  = static_cast<int32_t>(packet.readUInt32());
+
+        uint32_t factionId = owner_.getFactionIdByRepListId(repListId);
+        if (factionId == 0) {
+            LOG_WARNING("SMSG_SET_FACTION_STANDING: unknown repListId=", repListId,
+                        " standing=", standing);
+            continue;
+        }
+
         int32_t  oldStanding = 0;
-        auto it = owner_.factionStandingsRef().find(factionId);
-        if (it != owner_.factionStandingsRef().end()) oldStanding = it->second;
+        // SMSG_INITIALIZE_FACTIONS is indexed by ReputationListID and supplies the
+        // standing before incremental updates. Without using it, the first message
+        // reports the character's entire accumulated reputation as the gained amount.
+        if (repListId < owner_.initialFactionsRef().size()) {
+            oldStanding = owner_.initialFactionsRef()[repListId].standing;
+            owner_.initialFactionsRef()[repListId].standing = standing;
+        } else {
+            auto it = owner_.factionStandingsRef().find(factionId);
+            if (it != owner_.factionStandingsRef().end()) oldStanding = it->second;
+        }
         owner_.factionStandingsRef()[factionId] = standing;
         int32_t delta = standing - oldStanding;
         if (delta != 0) {
