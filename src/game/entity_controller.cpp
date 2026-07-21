@@ -1284,8 +1284,9 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
     auto sock3EnchIt = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 12u) : block.fields.end();
     if (entryIt != block.fields.end() && entryIt->second != 0) {
         // Preserve existing info when doing partial updates
-        GameHandler::OnlineItemInfo info = owner_.onlineItemsRef().count(block.guid)
+        GameHandler::OnlineItemInfo prev = owner_.onlineItemsRef().count(block.guid)
             ? owner_.onlineItemsRef()[block.guid] : GameHandler::OnlineItemInfo{};
+        GameHandler::OnlineItemInfo info = prev;
         info.entry = entryIt->second;
         if (stackIt    != block.fields.end()) info.stackCount            = stackIt->second;
         if (durIt      != block.fields.end()) info.curDurability         = durIt->second;
@@ -1299,7 +1300,23 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
         if (randPropIt != block.fields.end()) info.randomPropertyId      = static_cast<int32_t>(randPropIt->second);
         if (seedIt     != block.fields.end()) info.suffixFactor          = seedIt->second;
         auto [itemIt, isNew] = owner_.onlineItemsRef().insert_or_assign(block.guid, info);
-        if (isNew) newItemCreated = true;
+        // A CREATE_OBJECT that re-sends an already-tracked item with a changed stack
+        // count (AzerothCore does this when crafting consumes a reagent) must still
+        // refresh the built inventory — otherwise bag and crafting-window counts stay
+        // stale until some later rebuild. Flag the batch rebuild on any tracked change,
+        // not just brand-new items.
+        const bool itemChanged = isNew ||
+            info.stackCount        != prev.stackCount ||
+            info.curDurability     != prev.curDurability ||
+            info.maxDurability     != prev.maxDurability ||
+            info.entry             != prev.entry ||
+            info.flags             != prev.flags ||
+            info.randomPropertyId  != prev.randomPropertyId ||
+            info.suffixFactor      != prev.suffixFactor ||
+            info.permanentEnchantId != prev.permanentEnchantId ||
+            info.temporaryEnchantId != prev.temporaryEnchantId ||
+            info.socketEnchantIds  != prev.socketEnchantIds;
+        if (itemChanged) newItemCreated = true;
         owner_.queryItemInfo(info.entry, block.guid);
     }
     // Extract container slot GUIDs for bags
