@@ -301,7 +301,19 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
         }
     } else if (!hasUsablePath) {
         bool allowZOnly = (displayId == 455 || displayId == 462);
-        uint32_t inferredPath = inferDbcPathForSpawn(canonicalSpawnPos, 1200.0f, allowZOnly);
+        // Continent-crossing ships are server-driven MO_TRANSPORT objects whose
+        // route only ever comes from their taxi path (TaxiPathNode.dbc via GO
+        // template data[0]), assigned by the GO-query hook. They must NOT infer a
+        // nearby TransportAnimation.dbc path at spawn: a ship spawned in a harbour
+        // can otherwise borrow an unrelated local animation loop (e.g. an elevator)
+        // and circle in place until — or unless — its taxi path arrives. The ship
+        // guard in pickFallbackMovingPath already returns 0 for these displays; skip
+        // inference too so the same guard actually holds, leaving the ship docked.
+        const bool looksLikeShip =
+            (displayId == 3015u || displayId == 2454u || displayId == 7446u ||
+             displayId == 7087u);
+        uint32_t inferredPath =
+            looksLikeShip ? 0u : inferDbcPathForSpawn(canonicalSpawnPos, 1200.0f, allowZOnly);
         if (inferredPath != 0) {
             pathId = inferredPath;
             LOG_INFO("Auto-spawned transport with inferred path: entry=", entry,
