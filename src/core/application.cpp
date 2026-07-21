@@ -1140,8 +1140,14 @@ void Application::setState(AppState newState) {
                     // where the player is aiming even while standing still.
                     if (!renderer || !renderer->getCameraController())
                         return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
-                    float camYawDeg = renderer->getCameraController()->getFacingYaw();
+                    // Use the CAMERA's live look yaw (getYaw), not getFacingYaw: the latter is
+                    // the character's facing, which is NOT updated by left-mouse orbit, so while
+                    // aiming at the water standing still it is stale. Turn the character to the
+                    // camera aim and use the same yaw→canonical mapping the (working) melee
+                    // facing uses, so the bobber lands where the player is looking.
+                    float camYawDeg = renderer->getCameraController()->getYaw();
                     renderer->setCharacterYaw(camYawDeg);
+                    renderer->getCameraController()->setFacingYaw(camYawDeg);
                     return core::coords::normalizeAngleRad(glm::radians(180.0f - camYawDeg));
                 });
 
