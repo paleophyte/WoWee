@@ -1844,22 +1844,14 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             oldFieldsSnapshot = owner_.lastPlayerFieldsRef();
         }
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
+            // Speed is independent of mount ownership: slows and ordinary movement
+            // snapshots may report base-speed values while UNIT_FIELD_MOUNTDISPLAYID
+            // still authoritatively says the player is mounted.
             if (auto* movement = owner_.getMovementHandler()) {
                 movement->applyServerMovementSpeeds(
                     block.walkSpeed, block.runSpeed, block.runBackSpeed,
                     block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
                     block.flightBackSpeed, block.turnRate, block.pitchRate);
-            }
-            // Some server dismount paths update run speed without updating mount display field.
-            const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
-            if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
-                owner_.currentMountDisplayIdRef() != 0 && block.runSpeed <= 8.5f) {
-                LOG_INFO("Auto-clearing mount from movement speed update: speed=", block.runSpeed,
-                         " displayId=", owner_.currentMountDisplayIdRef());
-                owner_.currentMountDisplayIdRef() = 0;
-                if (owner_.mountCallbackRef()) {
-                    owner_.mountCallbackRef()(0);
-                }
             }
         }
         // Merge block fields into the persistent snapshot. Both are sorted, so

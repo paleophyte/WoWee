@@ -175,7 +175,13 @@ if (ImGui::Checkbox("Show Rare Tracker", &showRareTracker_)) {
     saveCallback();
 }
 ImGui::SameLine();
-ImGui::TextDisabled("(mark nearby spawned rares on the world map)");
+ImGui::TextDisabled("(mark nearby spawned rares on the world map and minimap)");
+
+if (ImGui::Checkbox("Show Chest Tracker", &showChestTracker_)) {
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(mark nearby spawned loot chests on the world map and minimap)");
 
 ImGui::Spacing();
 ImGui::SeparatorText("Screen Effects");

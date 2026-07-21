@@ -982,16 +982,9 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
 }
 
 void MovementHandler::handleForceRunSpeedChange(network::Packet& packet) {
+    // A speed change is not a dismount signal. Mount ownership is updated by
+    // SMSG_DISMOUNT / UNIT_FIELD_MOUNTDISPLAYID instead.
     handleForceSpeedChange(packet, "RUN_SPEED", Opcode::CMSG_FORCE_RUN_SPEED_CHANGE_ACK, &serverRunSpeed_);
-
-    if (!onTaxiFlight_ && !taxiMountActive_ && owner_.currentMountDisplayIdRef() != 0 && serverRunSpeed_ <= 8.5f) {
-        LOG_INFO("Auto-clearing mount from speed change: speed=", serverRunSpeed_,
-                 " displayId=", owner_.currentMountDisplayIdRef());
-        owner_.currentMountDisplayIdRef() = 0;
-        if (owner_.mountCallbackRef()) {
-            owner_.mountCallbackRef()(0);
-        }
-    }
 }
 
 void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool rooted) {

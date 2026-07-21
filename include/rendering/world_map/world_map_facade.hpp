@@ -47,6 +47,8 @@ public:
     void setCorpsePos(bool hasCorpse, glm::vec3 renderPos);
     /// Nearby rare/rare-elite creatures currently spawned near the player.
     void setRares(std::vector<RareMark> rares);
+    /// Nearby chest-type game objects currently spawned near the player.
+    void setChests(std::vector<ChestMark> chests);
 
     bool isOpen() const;
     void close();

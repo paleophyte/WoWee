@@ -164,6 +164,27 @@ TEST_CASE("A superseded rank resolves to the highest known rank", "[spell][rank]
     REQUIRE(resolveHighestKnownRank(11549, known, dbc.lookup()) == 6192);
 }
 
+TEST_CASE("Rank resolution tolerates a lookup adapter with reused storage", "[spell][rank]") {
+    const std::unordered_map<uint32_t, SpellRankInfo> entries{
+        {6673, {"Battle Shout", "Rank 1"}},
+        {5242, {"Battle Shout", "Rank 2"}},
+        {6192, {"Battle Shout", "Rank 3"}},
+        {133,  {"Fireball", "Rank 14"}},
+    };
+    SpellRankInfo scratch;
+    auto reusedLookup = [&entries, &scratch](uint32_t id) -> const SpellRankInfo* {
+        auto it = entries.find(id);
+        if (it == entries.end()) return nullptr;
+        scratch = it->second;
+        return &scratch;
+    };
+
+    // The production Spell.dbc adapter reuses scratch storage. Looking up Fireball
+    // must not overwrite the requested Battle Shout name and win merely by rank.
+    const std::unordered_set<uint32_t> known{5242, 6192, 133};
+    REQUIRE(resolveHighestKnownRank(6673, known, reusedLookup) == 6192);
+}
+
 TEST_CASE("A known spell is left alone", "[spell][rank]") {
     FakeSpellDbc dbc;
     dbc.add(772, "Rend", "Rank 1");
