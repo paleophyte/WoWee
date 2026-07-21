@@ -579,6 +579,22 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
                 break;
         }
 
+        // DIAG: what value/text is actually drawn for damage entries — pinpoints whether
+        // the on-screen "167772160" is a corrupted amount at render time or a wrong source.
+        if (entry.type == game::CombatTextEntry::MELEE_DAMAGE ||
+            entry.type == game::CombatTextEntry::SPELL_DAMAGE ||
+            entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
+            entry.type == game::CombatTextEntry::GLANCING ||
+            entry.type == game::CombatTextEntry::CRUSHING) {
+            static int renderDmgDiag = 0;
+            if (renderDmgDiag++ < 25) {
+                LOG_WARNING("[RENDER-DMG-DIAG] type=", static_cast<int>(entry.type),
+                            " outgoing=", outgoing, " amount=", entry.amount,
+                            " text='", text, "' spellId=", entry.spellId,
+                            " age=", entry.age);
+            }
+        }
+
         // --- Rendering style ---
         bool isCrit = (entry.type == game::CombatTextEntry::CRIT_DAMAGE ||
                        entry.type == game::CombatTextEntry::CRIT_HEAL);
