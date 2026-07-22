@@ -1333,6 +1333,13 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 uint64_t closestGuid = 0;
                 float closestHostileUnitT = 1e30f;
                 uint64_t closestHostileUnitGuid = 0;
+                // Rank unit-vs-object by distance to the entity CENTER along the ray (not
+                // the inflated hit-sphere entry) so a unit in front is never lost to a big
+                // object sphere behind it.
+                float bestUnitCenterT = 1e30f;
+                uint64_t bestUnitGuid = 0;
+                float bestGoCenterT = 1e30f;
+                uint64_t bestGoGuid = 0;
 
                 const uint64_t myGuid = gameHandler.getPlayerGuid();
                 for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
@@ -1373,12 +1380,28 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
 
                     float hitT;
                     if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                            if (hostileUnit && hitT < closestHostileUnitT) {
-                                closestHostileUnitT = hitT;
-                                closestHostileUnitGuid = guid;
+                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
+                            if (centerT < bestUnitCenterT) {
+                                bestUnitCenterT = centerT;
+                                bestUnitGuid = guid;
+                            }
+                            if (t == game::ObjectType::UNIT) {
+                                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
+                                if (hostileUnit && hitT < closestHostileUnitT) {
+                                    closestHostileUnitT = hitT;
+                                    closestHostileUnitGuid = guid;
+                                }
+                            }
+                        } else if (t == game::ObjectType::GAMEOBJECT) {
+                            // Purely-decorative objects (GENERIC, type 5) have no interaction
+                            // and must never steal a click from a unit.
+                            auto go = std::static_pointer_cast<game::GameObject>(entity);
+                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
+                                bestGoCenterT = centerT;
+                                bestGoGuid = guid;
                             }
                         }
                         if (hitT < closestT) {
@@ -1388,9 +1411,17 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     }
                 }
 
-                // Prefer hostile monsters over nearby gameobjects/others when both are hittable.
-                if (closestHostileUnitGuid != 0) {
-                    closestGuid = closestHostileUnitGuid;
+                // A unit wins over a game object unless the object's center is clearly in
+                // front of the unit's, so a creature is never lost to a decorative or
+                // backing object behind it. Hostile units keep their targeting priority.
+                constexpr float kUnitOverGoBias = 2.0f;
+                if (bestUnitGuid != 0 &&
+                    (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
+                    closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
+                } else if (bestGoGuid != 0) {
+                    closestGuid = bestGoGuid;
+                } else {
+                    closestGuid = 0;
                 }
 
                 if (closestGuid != 0) {
@@ -1512,8 +1543,12 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 uint64_t closestQuestGoGuid = 0;
                 float hookedBobberT = 1e30f;
                 uint64_t hookedBobberGuid = 0;
-                float closestGoT = 1e30f;
-                uint64_t closestGoGuid = 0;
+                // Nearest unit and nearest (non-decorative) object by distance to the
+                // entity CENTER, so a unit in front beats a big object sphere behind it.
+                float bestUnitCenterT = 1e30f;
+                uint64_t bestUnitGuid = 0;
+                float bestGoCenterT = 1e30f;
+                uint64_t bestGoGuid = 0;
                 const uint64_t myGuid = gameHandler.getPlayerGuid();
                 for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
                     auto t = entity->getType();
@@ -1570,25 +1605,34 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
 
                     float hitT;
                     if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                            if (hostileUnit && hitT < closestHostileUnitT) {
-                                closestHostileUnitT = hitT;
-                                closestHostileUnitGuid = guid;
+                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
+                            if (centerT < bestUnitCenterT) {
+                                bestUnitCenterT = centerT;
+                                bestUnitGuid = guid;
+                            }
+                            if (t == game::ObjectType::UNIT) {
+                                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
+                                if (hostileUnit && hitT < closestHostileUnitT) {
+                                    closestHostileUnitT = hitT;
+                                    closestHostileUnitGuid = guid;
+                                }
                             }
                         }
                         if (t == game::ObjectType::GAMEOBJECT) {
+                            auto go = std::static_pointer_cast<game::GameObject>(entity);
                             if (guid == gameHandler.getHookedFishingBobberGuid() && hitT < hookedBobberT) {
                                 hookedBobberT = hitT;
                                 hookedBobberGuid = guid;
                             }
-                            if (hitT < closestGoT) {
-                                closestGoT = hitT;
-                                closestGoGuid = guid;
+                            // Skip purely-decorative objects (GENERIC, type 5).
+                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
+                                bestGoCenterT = centerT;
+                                bestGoGuid = guid;
                             }
                             if (!questObjectiveGoEntries.empty()) {
-                                auto go = std::static_pointer_cast<game::GameObject>(entity);
                                 if (questObjectiveGoEntries.count(go->getEntry())) {
                                     if (hitT < closestQuestGoT) {
                                         closestQuestGoT = hitT;
@@ -1614,21 +1658,21 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 } else if (closestQuestGoGuid != 0) {
                     closestGuid = closestQuestGoGuid;
                     closestType = game::ObjectType::GAMEOBJECT;
-                } else if (closestGoGuid != 0 && closestHostileUnitGuid != 0) {
-                    // Both a GO and hostile unit were hit — prefer whichever is closer.
-                    if (closestGoT <= closestHostileUnitT) {
-                        closestGuid = closestGoGuid;
+                } else {
+                    // A unit wins over a game object unless the object's center is clearly
+                    // in front of the unit's, so a creature is never lost to a decorative
+                    // or backing object behind it. Hostile units keep attack priority.
+                    constexpr float kUnitOverGoBias = 2.0f;
+                    if (bestUnitGuid != 0 &&
+                        (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
+                        closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
+                        closestType = game::ObjectType::UNIT;
+                    } else if (bestGoGuid != 0) {
+                        closestGuid = bestGoGuid;
                         closestType = game::ObjectType::GAMEOBJECT;
                     } else {
-                        closestGuid = closestHostileUnitGuid;
-                        closestType = game::ObjectType::UNIT;
+                        closestGuid = 0;
                     }
-                } else if (closestGoGuid != 0) {
-                    closestGuid = closestGoGuid;
-                    closestType = game::ObjectType::GAMEOBJECT;
-                } else if (closestHostileUnitGuid != 0) {
-                    closestGuid = closestHostileUnitGuid;
-                    closestType = game::ObjectType::UNIT;
                 }
 
                 if (closestGuid != 0) {
