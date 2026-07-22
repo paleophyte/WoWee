@@ -2146,6 +2146,17 @@ void CameraController::processMouseMotion(const SDL_MouseMotionEvent& event) {
         return;
     }
 
+    // Hold rotation until the drag clears a small dead-zone, so a select-click with
+    // slight jitter doesn't rotate the view (which makes NPCs seem to move away).
+    if (!rotateArmed_) {
+        dragPixelsSincePress_ += std::abs(static_cast<float>(event.xrel)) +
+                                 std::abs(static_cast<float>(event.yrel));
+        if (dragPixelsSincePress_ < kRotateDeadzonePixels) {
+            return;
+        }
+        rotateArmed_ = true;  // past the dead-zone: this is a deliberate drag
+    }
+
     // Directly update stored yaw/pitch (no lossy forward-vector derivation)
     yaw -= event.xrel * mouseSensitivity;
     // SDL yrel > 0 = mouse moved DOWN. In WoW, mouse-down = look down = pitch decreases.
@@ -2180,8 +2191,12 @@ void CameraController::processMouseButton(const SDL_MouseButtonEvent& event) {
     bool anyDown = leftMouseDown || rightMouseDown;
     if (anyDown && !mouseButtonDown) {
         SDL_SetRelativeMouseMode(SDL_TRUE);
+        // Arm the rotation dead-zone fresh for this press.
+        rotateArmed_ = false;
+        dragPixelsSincePress_ = 0.0f;
     } else if (!anyDown && mouseButtonDown) {
         SDL_SetRelativeMouseMode(SDL_FALSE);
+        rotateArmed_ = false;
     }
     mouseButtonDown = anyDown;
 }
@@ -2190,6 +2205,8 @@ void CameraController::releaseMouseCapture() {
     leftMouseDown = false;
     rightMouseDown = false;
     mouseButtonDown = false;
+    rotateArmed_ = false;
+    dragPixelsSincePress_ = 0.0f;
     SDL_SetRelativeMouseMode(SDL_FALSE);
     SDL_ShowCursor(SDL_ENABLE);
 }
