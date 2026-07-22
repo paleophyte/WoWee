@@ -848,11 +848,19 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
     }
     if (toShow.empty()) return;
 
-    // Apply completion filter (0=All, 1=Active, 2=Done). Keep the window open
-    // even when the filter hides everything so the user can cycle it back.
-    if (questTrackerFilter_ != 0) {
+    // Apply filter (0=All, 1=Active, 2=Done, 3=Zone). Keep the window open even when
+    // the filter hides everything so the user can cycle it back.
+    // Zone filter needs the player's current zone; if it isn't known yet (0), fall
+    // back to showing everything rather than an empty tracker.
+    const uint32_t currentZoneId = gameHandler.getWorldStateZoneId();
+    if (questTrackerFilter_ == 1 || questTrackerFilter_ == 2) {
         std::erase_if(toShow, [this](const game::GameHandler::QuestLogEntry* q) {
             return questTrackerFilter_ == 1 ? q->complete : !q->complete;
+        });
+    } else if (questTrackerFilter_ == 3 && currentZoneId != 0) {
+        std::erase_if(toShow, [currentZoneId](const game::GameHandler::QuestLogEntry* q) {
+            // zoneOrSort > 0 is an AreaTable zone id; keep only quests for this zone.
+            return q->zoneOrSort <= 0 || static_cast<uint32_t>(q->zoneOrSort) != currentZoneId;
         });
     }
 
@@ -935,7 +943,7 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
 
     if (ImGui::Begin("##QuestTracker", nullptr, flags)) {
         // Header row: quest count + completion filter (click to cycle) + hide
-        static const char* kFilterNames[] = {"All", "Active", "Done"};
+        static const char* kFilterNames[] = {"All", "Active", "Done", "Zone"};
         ImGui::TextDisabled("Quests (%d)", static_cast<int>(toShow.size()));
         {
             const ImGuiStyle& style = ImGui::GetStyle();
@@ -946,11 +954,11 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
                         (filterW + style.ItemSpacing.x + hideW);
             if (off > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off);
             if (ImGui::SmallButton(kFilterNames[questTrackerFilter_])) {
-                questTrackerFilter_ = (questTrackerFilter_ + 1) % 3;
+                questTrackerFilter_ = (questTrackerFilter_ + 1) % 4;
                 saveSettings();
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Filter: All / Active / Done (click to cycle)");
+                ImGui::SetTooltip("Filter: All / Active / Done / Zone (click to cycle)");
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("-")) {
@@ -963,8 +971,11 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
         }
         ImGui::Separator();
         if (toShow.empty()) {
-            ImGui::TextDisabled("%s", questTrackerFilter_ == 1 ? "No active quests"
-                                                               : "No completed quests");
+            const char* emptyMsg = "No quests";
+            if (questTrackerFilter_ == 1)      emptyMsg = "No active quests";
+            else if (questTrackerFilter_ == 2) emptyMsg = "No completed quests";
+            else if (questTrackerFilter_ == 3) emptyMsg = "No quests in this zone";
+            ImGui::TextDisabled("%s", emptyMsg);
         }
 
         for (int i = 0; i < static_cast<int>(toShow.size()); ++i) {

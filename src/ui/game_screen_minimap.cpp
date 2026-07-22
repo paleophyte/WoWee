@@ -1886,7 +1886,7 @@ void GameScreen::loadSettings() {
                 questTrackerSize_.y = std::max(60.0f, std::stof(val));
             }
             else if (key == "quest_tracker_filter") {
-                questTrackerFilter_ = std::clamp(std::stoi(val), 0, 2);
+                questTrackerFilter_ = std::clamp(std::stoi(val), 0, 3);
             }
             else if (key == "quest_tracker_collapsed") {
                 questTrackerCollapsed_ = (std::stoi(val) != 0);

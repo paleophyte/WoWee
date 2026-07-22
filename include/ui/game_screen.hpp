@@ -114,7 +114,7 @@ private:
     ImVec2 questTrackerSize_ = ImVec2(220.0f, 200.0f); // saved size
     float questTrackerRightOffset_ = -1.0f;            // pixels from right edge; <0 = use default
     bool questTrackerPosInit_ = false;
-    int questTrackerFilter_ = 0;                        // 0=All, 1=Active, 2=Done
+    int questTrackerFilter_ = 3;                        // 0=All, 1=Active, 2=Done, 3=Zone (default)
     bool questTrackerCollapsed_ = false;                // collapsed to floating bubble
 
 
