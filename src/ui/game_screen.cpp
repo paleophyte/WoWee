@@ -1407,9 +1407,24 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         }
     }
 
-    // Right-click: select NPC (if needed) then interact / loot / auto-attack
-    // Suppress when left button is held (both-button run)
+    // Right-click: select NPC (if needed) then interact / loot / auto-attack.
+    // Record the press position; the action only fires on release for a tap (below),
+    // never for a right-drag camera rotate — otherwise turning the view toward a nearby
+    // mob would auto-attack it without the player intending to engage.
     if (!io.WantCaptureMouse && input.isMouseButtonJustPressed(SDL_BUTTON_RIGHT) && !input.isMouseButtonPressed(SDL_BUTTON_LEFT)) {
+        rightClickPressPos_ = input.getMousePosition();
+        rightClickWasPress_ = true;
+    }
+
+    // On right mouse-up, act only if it was a click (not a drag / camera rotate).
+    if (rightClickWasPress_ && input.isMouseButtonJustReleased(SDL_BUTTON_RIGHT)) {
+        rightClickWasPress_ = false;
+        glm::vec2 rDragDelta = input.getMousePosition() - rightClickPressPos_;
+        constexpr float RCLICK_THRESHOLD = 5.0f;  // pixels
+        if (glm::dot(rDragDelta, rDragDelta) >= RCLICK_THRESHOLD * RCLICK_THRESHOLD) {
+            // Treated as a camera rotate — do not interact/attack.
+            return;
+        }
         // Fishing bobbers are tiny and partly submerged, so their model bounds can
         // miss a cursor ray that visibly lands on the float. Test the authoritative
         // water position first with a forgiving sphere and reel directly, before

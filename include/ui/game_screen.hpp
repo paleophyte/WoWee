@@ -212,6 +212,10 @@ private:
     // Left-click targeting: distinguish click from camera drag
     glm::vec2 leftClickPressPos_ = glm::vec2(0.0f);
     bool leftClickWasPress_ = false;
+    // Right-click interact/attack fires on release only if the press was a tap, not a
+    // camera-rotation drag — so turning the view near a mob doesn't auto-attack it.
+    glm::vec2 rightClickPressPos_ = glm::vec2(0.0f);
+    bool rightClickWasPress_ = false;
 
 
     bool appearanceCallbackSet_ = false;
