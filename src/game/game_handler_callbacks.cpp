@@ -996,6 +996,7 @@ const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHan
             converted[i].displayId = src[i].displayId;
             converted[i].stackCount = src[i].stackCount;
             converted[i].itemGuid = src[i].itemGuid;
+            converted[i].occupied = (src[i].itemId != 0);
         }
         return converted;
     }
@@ -1010,6 +1011,7 @@ const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHan
             converted[i].displayId = src[i].displayId;
             converted[i].stackCount = src[i].stackCount;
             converted[i].itemGuid = src[i].itemGuid;
+            converted[i].occupied = (src[i].itemId != 0);
         }
         return converted;
     }

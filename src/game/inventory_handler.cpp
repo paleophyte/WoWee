@@ -2589,7 +2589,7 @@ void InventoryHandler::handleTradeStatusExtended(network::Packet& packet) {
     uint32_t whichPlayer = packet.readUInt32();   // 0=self, 1=peer (uint32 not uint8!)
     uint32_t tradeCount = packet.readUInt32();
     auto& slots = (whichPlayer == 0) ? myTradeSlots_ : peerTradeSlots_;
-    if (tradeCount > 8) tradeCount = 8;  // 7 trade slots + 1 "will not be traded" slot
+    if (tradeCount > TRADE_SLOT_COUNT) tradeCount = TRADE_SLOT_COUNT;  // 6 traded + 1 non-traded slot
     LOG_WARNING("  whichPlayer=", whichPlayer, " tradeCount=", tradeCount);
 
     for (uint32_t i = 0; i < tradeCount; ++i) {
