@@ -4,6 +4,7 @@
 #include "addons/toc_parser.hpp"
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wowee::addons {
@@ -25,6 +26,14 @@ public:
     LuaEngine* getLuaEngine() { return &luaEngine_; }
     bool isInitialized() const { return luaEngine_.isInitialized(); }
 
+    // Per-addon enable/disable (persisted). Disabled addons are skipped by
+    // loadAllAddons; changes take effect on the next load (world enter or /reload).
+    bool isAddonEnabled(const std::string& addonName) const;
+    void setAddonEnabled(const std::string& addonName, bool enabled);
+    // True once any addon has been loaded this session (so the UI can note that a
+    // toggle only applies after the next reload).
+    bool addonsLoaded() const { return addonsLoaded_; }
+
     void saveAllSavedVariables();
     void setCharacterName(const std::string& name) { characterName_ = name; }
 
@@ -42,6 +51,13 @@ private:
     std::string getSavedVariablesPath(const TocFile& addon) const;
     std::string getSavedVariablesPerCharacterPath(const TocFile& addon) const;
     std::string characterName_;
+
+    // addonName -> enabled. Absent means enabled (default on).
+    std::unordered_map<std::string, bool> addonEnabled_;
+    bool addonsLoaded_ = false;
+    static std::string enabledStatePath();
+    void loadEnabledState();
+    void saveEnabledState() const;
 };
 
 } // namespace wowee::addons
