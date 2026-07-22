@@ -185,36 +185,36 @@ void ChatPanel::render(game::GameHandler& gameHandler,
     float chatH = settings.windowHeight > 0.0f ? settings.windowHeight : 220.0f;
     float chatX = 8.0f;
     float chatY = screenH - chatH - 80.0f;  // Above action bar
-    if (chatWindowLocked_) {
-        // Always recompute position from current window size when locked
+    if (!chatWindowPosInit_) {
         chatWindowPos_ = ImVec2(chatX, chatY);
-        ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_Always);
+        chatWindowPosInit_ = true;
+    }
+    // The window is always resizable via its grips. Seed the size on first use, then
+    // let the user drag it; the size is captured below so it persists. Locking only
+    // pins the position (top-left, so the bottom-right grip stays usable) and blocks
+    // moving — it does NOT disable resizing.
+    ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 120.0f), ImVec2(screenW, screenH));
+    if (chatWindowLocked_) {
         ImGui::SetNextWindowPos(chatWindowPos_, ImGuiCond_Always);
     } else {
-        if (!chatWindowPosInit_) {
-            chatWindowPos_ = ImVec2(chatX, chatY);
-            chatWindowPosInit_ = true;
-        }
-        ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(chatWindowPos_, ImGuiCond_FirstUseEver);
-        // Keep the window usable — never let a resize collapse it past readable.
-        ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 120.0f),
-                                            ImVec2(screenW, screenH));
     }
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavInputs;
     if (chatWindowLocked_) {
-        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize;
+        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar;
     }
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.08f, settings.backgroundAlpha));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, settings.backgroundAlpha * 0.5f));
     ImGui::Begin("Chat", nullptr, flags);
 
+    // Persist the current size (resizable in either lock state) so a manual resize
+    // survives locking and restart. Position is only tracked while unlocked.
+    ImVec2 sz = ImGui::GetWindowSize();
+    settings.windowWidth  = sz.x;
+    settings.windowHeight = sz.y;
     if (!chatWindowLocked_) {
         chatWindowPos_ = ImGui::GetWindowPos();
-        // Persist the current size so a manual resize survives locking / restart.
-        ImVec2 sz = ImGui::GetWindowSize();
-        settings.windowWidth  = sz.x;
-        settings.windowHeight = sz.y;
     }
 
     // Update unread counts via ChatTabManager (Phase 1.3)

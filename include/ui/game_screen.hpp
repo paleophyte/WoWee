@@ -138,6 +138,9 @@ private:
      * Render target frame
      */
     void renderTargetFrame(game::GameHandler& gameHandler);
+    // Last measured width of the auto-sizing target frame, used to keep it centered
+    // (position is set before the window lays out, so it lags by one frame).
+    float lastTargetFrameWidth_ = 250.0f;
     void renderFocusFrame(game::GameHandler& gameHandler);
 
     /**

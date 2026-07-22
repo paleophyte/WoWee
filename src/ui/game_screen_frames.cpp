@@ -954,39 +954,17 @@ void GameScreen::renderTargetFrame(game::GameHandler& gameHandler) {
     auto* window = services_.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
 
-    // Base width is 250, but grow the frame so long names / subtitles / guild names
-    // are never clipped. Health/power bars fill the frame (-1) so they follow along.
-    float frameW = 250.0f;
-    {
-        std::string tname = getEntityName(target);
-        // Name line: name + icons, plus the right-aligned class label for players.
-        float nameLineW = ImGui::CalcTextSize(tname.c_str()).x;
-        if (gameHandler.getEntityRaidMark(target->getGuid()) < game::GameHandler::kRaidMarkCount)
-            nameLineW += 18.0f;                 // raid mark glyph
-        nameLineW += 36.0f;                     // leader crown + quest-giver icon allowance
-        float otherLinesW = 0.0f;               // subtitle / guild lines sit on their own row
-        if (target->getType() == game::ObjectType::PLAYER) {
-            uint8_t cid = entityClassId(target.get());
-            if (cid != 0) nameLineW += 8.0f + ImGui::CalcTextSize(classNameStr(cid)).x;
-            uint32_t guildId = gameHandler.getEntityGuildId(target->getGuid());
-            if (guildId != 0) {
-                const std::string& gn = gameHandler.lookupGuildName(guildId);
-                if (!gn.empty())
-                    otherLinesW = std::max(otherLinesW, ImGui::CalcTextSize(("<" + gn + ">").c_str()).x);
-            }
-        } else if (target->getType() == game::ObjectType::UNIT) {
-            auto unit = std::static_pointer_cast<game::Unit>(target);
-            const std::string sub = gameHandler.getCachedCreatureSubName(unit->getEntry());
-            if (!sub.empty())
-                otherLinesW = std::max(otherLinesW, ImGui::CalcTextSize(("<" + sub + ">").c_str()).x);
-        }
-        float need = std::max(nameLineW, otherLinesW) + ImGui::GetStyle().WindowPadding.x * 2.0f;
-        frameW = std::clamp(need, 250.0f, screenW * 0.5f);
-    }
+    // The frame auto-sizes (AlwaysAutoResize) to its widest content, so long names,
+    // subtitles, guild tags, and the level/classification line all fit without
+    // clipping. A 250px floor keeps the default look; the health/power bars use -1
+    // width so they fill whatever the frame grows to. Centering uses last frame's
+    // measured width since the position is set before the window lays out.
+    float frameW = lastTargetFrameWidth_;
     float frameX = (screenW - frameW) / 2.0f;
 
     ImGui::SetNextWindowPos(ImVec2(frameX, 30.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(frameW, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(250.0f, 0.0f),
+                                        ImVec2(screenW * 0.6f, static_cast<float>(window ? window->getHeight() : 720)));
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
@@ -1052,6 +1030,9 @@ void GameScreen::renderTargetFrame(game::GameHandler& gameHandler) {
     ImGui::PushStyleColor(ImGuiCol_Border, borderColor);
 
     if (ImGui::Begin("##TargetFrame", nullptr, flags)) {
+        // Record the auto-fitted width so next frame can center the window correctly.
+        frameW = ImGui::GetWindowSize().x;
+        lastTargetFrameWidth_ = frameW;
         // Raid mark icon (Star/Circle/Diamond/Triangle/Moon/Square/Cross/Skull)
         static constexpr struct { const char* sym; ImU32 col; } kRaidMarks[] = {
             { "\xe2\x98\x85", IM_COL32(255, 220,  50, 255) },  // 0 Star     (yellow)
