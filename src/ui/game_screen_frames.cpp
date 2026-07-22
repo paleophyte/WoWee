@@ -954,7 +954,35 @@ void GameScreen::renderTargetFrame(game::GameHandler& gameHandler) {
     auto* window = services_.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
 
+    // Base width is 250, but grow the frame so long names / subtitles / guild names
+    // are never clipped. Health/power bars fill the frame (-1) so they follow along.
     float frameW = 250.0f;
+    {
+        std::string tname = getEntityName(target);
+        // Name line: name + icons, plus the right-aligned class label for players.
+        float nameLineW = ImGui::CalcTextSize(tname.c_str()).x;
+        if (gameHandler.getEntityRaidMark(target->getGuid()) < game::GameHandler::kRaidMarkCount)
+            nameLineW += 18.0f;                 // raid mark glyph
+        nameLineW += 36.0f;                     // leader crown + quest-giver icon allowance
+        float otherLinesW = 0.0f;               // subtitle / guild lines sit on their own row
+        if (target->getType() == game::ObjectType::PLAYER) {
+            uint8_t cid = entityClassId(target.get());
+            if (cid != 0) nameLineW += 8.0f + ImGui::CalcTextSize(classNameStr(cid)).x;
+            uint32_t guildId = gameHandler.getEntityGuildId(target->getGuid());
+            if (guildId != 0) {
+                const std::string& gn = gameHandler.lookupGuildName(guildId);
+                if (!gn.empty())
+                    otherLinesW = std::max(otherLinesW, ImGui::CalcTextSize(("<" + gn + ">").c_str()).x);
+            }
+        } else if (target->getType() == game::ObjectType::UNIT) {
+            auto unit = std::static_pointer_cast<game::Unit>(target);
+            const std::string sub = gameHandler.getCachedCreatureSubName(unit->getEntry());
+            if (!sub.empty())
+                otherLinesW = std::max(otherLinesW, ImGui::CalcTextSize(("<" + sub + ">").c_str()).x);
+        }
+        float need = std::max(nameLineW, otherLinesW) + ImGui::GetStyle().WindowPadding.x * 2.0f;
+        frameW = std::clamp(need, 250.0f, screenW * 0.5f);
+    }
     float frameX = (screenW - frameW) / 2.0f;
 
     ImGui::SetNextWindowPos(ImVec2(frameX, 30.0f), ImGuiCond_Always);

@@ -179,8 +179,10 @@ void ChatPanel::render(game::GameHandler& gameHandler,
     auto* assetMgr = services_.assetManager;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
     float screenH = window ? static_cast<float>(window->getHeight()) : 720.0f;
-    float chatW = std::min(500.0f, screenW * 0.4f);
-    float chatH = 220.0f;
+    // Use the persisted size when the user has resized the window, otherwise fall
+    // back to a responsive default sized against the current screen.
+    float chatW = settings.windowWidth  > 0.0f ? settings.windowWidth  : std::min(500.0f, screenW * 0.4f);
+    float chatH = settings.windowHeight > 0.0f ? settings.windowHeight : 220.0f;
     float chatX = 8.0f;
     float chatY = screenH - chatH - 80.0f;  // Above action bar
     if (chatWindowLocked_) {
@@ -195,6 +197,9 @@ void ChatPanel::render(game::GameHandler& gameHandler,
         }
         ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(chatWindowPos_, ImGuiCond_FirstUseEver);
+        // Keep the window usable — never let a resize collapse it past readable.
+        ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 120.0f),
+                                            ImVec2(screenW, screenH));
     }
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavInputs;
     if (chatWindowLocked_) {
@@ -206,6 +211,10 @@ void ChatPanel::render(game::GameHandler& gameHandler,
 
     if (!chatWindowLocked_) {
         chatWindowPos_ = ImGui::GetWindowPos();
+        // Persist the current size so a manual resize survives locking / restart.
+        ImVec2 sz = ImGui::GetWindowSize();
+        settings.windowWidth  = sz.x;
+        settings.windowHeight = sz.y;
     }
 
     // Update unread counts via ChatTabManager (Phase 1.3)
