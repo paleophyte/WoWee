@@ -557,9 +557,13 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 } else {
                     double heldFor = ImGui::GetTime() - actionBarHoldStart_;
                     if (heldFor >= kActionBarPickupDelay) {
-                        // Pick up: carry this action on the cursor.
+                        // Pick up: lift this action onto the cursor and empty its slot
+                        // so it visibly leaves the bar while carried.
                         actionBarDragSlot_ = absSlot;
                         actionBarDragIcon_ = iconTex;
+                        actionBarCarryType_ = static_cast<uint8_t>(slot.type);
+                        actionBarCarryId_ = slot.id;
+                        gameHandler.setActionBarSlot(absSlot, game::ActionBarSlot::EMPTY, 0);
                         actionBarHoldSlot_ = -1;
                         // The initiating press is still down; swallow its release so it
                         // doesn't immediately drop the action back into its own slot.
@@ -621,14 +625,23 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             if (actionBarCarryPressActive_) {
                 // Release of the press that completed the pickup — keep carrying.
             } else {
-                if (absSlot != actionBarDragSlot_) {
-                    const auto& dragSrc = bar[actionBarDragSlot_];
-                    gameHandler.setActionBarSlot(actionBarDragSlot_, slot.type, slot.id);
-                    gameHandler.setActionBarSlot(absSlot, dragSrc.type, dragSrc.id);
+                // Capture whatever is here before overwriting it (the slot is a live
+                // reference, so read the displaced action first).
+                const auto displacedType = slot.type;
+                const uint32_t displacedId = slot.id;
+                gameHandler.setActionBarSlot(
+                    absSlot, static_cast<game::ActionBarSlot::Type>(actionBarCarryType_),
+                    actionBarCarryId_);
+                // A displaced action falls back into the now-empty origin slot (a swap).
+                // Dropping onto the origin itself just restores the carried action.
+                if (absSlot != actionBarDragSlot_ &&
+                    displacedType != game::ActionBarSlot::EMPTY && displacedId != 0) {
+                    gameHandler.setActionBarSlot(actionBarDragSlot_, displacedType, displacedId);
                 }
-                // Clicking the source slot again with no swap simply cancels the carry.
                 actionBarDragSlot_ = -1;
                 actionBarDragIcon_ = 0;
+                actionBarCarryType_ = 0;
+                actionBarCarryId_ = 0;
             }
         } else if (clicked && !slot.isEmpty()) {
             if (slot.type == game::ActionBarSlot::SPELL && slot.isReady()) {
@@ -1157,21 +1170,33 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             bool insideBar = (mousePos.x >= barX && mousePos.x <= barX + barW &&
                               mousePos.y >= barY && mousePos.y <= barY + barH);
 
-            // Left-release on empty space cancels the carry harmlessly; a left-release on
-            // a slot is consumed by the per-slot swap logic above (this block is then skipped).
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !insideBar) {
+            // Helper: put the carried action back where it was lifted from.
+            auto restoreCarried = [&]() {
+                gameHandler.setActionBarSlot(
+                    actionBarDragSlot_,
+                    static_cast<game::ActionBarSlot::Type>(actionBarCarryType_),
+                    actionBarCarryId_);
+            };
+            auto endCarry = [&]() {
                 actionBarDragSlot_ = -1;
                 actionBarDragIcon_ = 0;
+                actionBarCarryType_ = 0;
+                actionBarCarryId_ = 0;
+            };
+
+            // Left-release on empty space cancels the carry, returning the action to its
+            // origin. A left-release on a slot is consumed by the per-slot drop logic
+            // above (this block is then skipped since the carry has already ended).
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !insideBar) {
+                restoreCarried();
+                endCarry();
             }
 
-            // Right-release drops the carried action: off the bar removes it,
-            // over the bar simply cancels the move.
+            // Right-release drops the carried action: off the bar removes it (the origin
+            // slot was already emptied on pickup), over the bar cancels and restores it.
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-                if (!insideBar) {
-                    gameHandler.setActionBarSlot(actionBarDragSlot_, game::ActionBarSlot::EMPTY, 0);
-                }
-                actionBarDragSlot_ = -1;
-                actionBarDragIcon_ = 0;
+                if (insideBar) restoreCarried();
+                endCarry();
             }
         }
     }
