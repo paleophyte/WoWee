@@ -544,6 +544,43 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             ImGui::PopStyleColor();
         }
 
+        // Press-and-hold to pick a slot up for reorganizing. Holding the left mouse
+        // button on a filled slot for kActionBarPickupDelay lifts its action onto the
+        // cursor; a normal quick click still casts/uses as before. Once carried, click
+        // another slot to swap (see the drop handling below).
+        if (actionBarDragSlot_ < 0) {
+            const bool held = ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+            if (held && !slot.isEmpty()) {
+                if (actionBarHoldSlot_ != absSlot) {
+                    actionBarHoldSlot_  = absSlot;
+                    actionBarHoldStart_ = ImGui::GetTime();
+                } else {
+                    double heldFor = ImGui::GetTime() - actionBarHoldStart_;
+                    if (heldFor >= kActionBarPickupDelay) {
+                        // Pick up: carry this action on the cursor.
+                        actionBarDragSlot_ = absSlot;
+                        actionBarDragIcon_ = iconTex;
+                        actionBarHoldSlot_ = -1;
+                        // The initiating press is still down; swallow its release so it
+                        // doesn't immediately drop the action back into its own slot.
+                        actionBarCarryPressActive_ = true;
+                    } else {
+                        // Draw a rising fill as feedback that a pickup is charging.
+                        float t = static_cast<float>(heldFor / kActionBarPickupDelay);
+                        ImVec2 rMin = ImGui::GetItemRectMin();
+                        ImVec2 rMax = ImGui::GetItemRectMax();
+                        float fillTop = rMax.y - (rMax.y - rMin.y) * t;
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            ImVec2(rMin.x, fillTop), rMax,
+                            IM_COL32(255, 220, 80, 70));
+                    }
+                }
+            } else if (actionBarHoldSlot_ == absSlot) {
+                // Released or dragged off before the delay — cancel this hold.
+                actionBarHoldSlot_ = -1;
+            }
+        }
+
         // Error-flash overlay: red fade on spell cast failure (~0.5 s).
         // Check both spell slots directly and macro slots via their primary spell.
         {
@@ -581,13 +618,18 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             gameHandler.setActionBarSlot(absSlot, game::ActionBarSlot::ITEM, held.itemId);
             inventoryScreen.returnHeldItem(gameHandler.getInventory());
         } else if (clicked && actionBarDragSlot_ >= 0) {
-            if (absSlot != actionBarDragSlot_) {
-                const auto& dragSrc = bar[actionBarDragSlot_];
-                gameHandler.setActionBarSlot(actionBarDragSlot_, slot.type, slot.id);
-                gameHandler.setActionBarSlot(absSlot, dragSrc.type, dragSrc.id);
+            if (actionBarCarryPressActive_) {
+                // Release of the press that completed the pickup — keep carrying.
+            } else {
+                if (absSlot != actionBarDragSlot_) {
+                    const auto& dragSrc = bar[actionBarDragSlot_];
+                    gameHandler.setActionBarSlot(actionBarDragSlot_, slot.type, slot.id);
+                    gameHandler.setActionBarSlot(absSlot, dragSrc.type, dragSrc.id);
+                }
+                // Clicking the source slot again with no swap simply cancels the carry.
+                actionBarDragSlot_ = -1;
+                actionBarDragIcon_ = 0;
             }
-            actionBarDragSlot_ = -1;
-            actionBarDragIcon_ = 0;
         } else if (clicked && !slot.isEmpty()) {
             if (slot.type == game::ActionBarSlot::SPELL && slot.isReady()) {
                 // Check if this spell belongs to an item (e.g., Hearthstone spell 8690).
@@ -1106,16 +1148,31 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 IM_COL32(80, 80, 120, 180));
         }
 
-        // On right mouse release, check if outside the action bar area
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        if (actionBarCarryPressActive_) {
+            // Still waiting for the initiating hold-press to be released — swallow it
+            // so it doesn't count as a drop, then the carry is "armed" for real clicks.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                actionBarCarryPressActive_ = false;
+        } else {
             bool insideBar = (mousePos.x >= barX && mousePos.x <= barX + barW &&
                               mousePos.y >= barY && mousePos.y <= barY + barH);
-            if (!insideBar) {
-                // Dropped outside - clear the slot
-                gameHandler.setActionBarSlot(actionBarDragSlot_, game::ActionBarSlot::EMPTY, 0);
+
+            // Left-release on empty space cancels the carry harmlessly; a left-release on
+            // a slot is consumed by the per-slot swap logic above (this block is then skipped).
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !insideBar) {
+                actionBarDragSlot_ = -1;
+                actionBarDragIcon_ = 0;
             }
-            actionBarDragSlot_ = -1;
-            actionBarDragIcon_ = 0;
+
+            // Right-release drops the carried action: off the bar removes it,
+            // over the bar simply cancels the move.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                if (!insideBar) {
+                    gameHandler.setActionBarSlot(actionBarDragSlot_, game::ActionBarSlot::EMPTY, 0);
+                }
+                actionBarDragSlot_ = -1;
+                actionBarDragIcon_ = 0;
+            }
         }
     }
 }
