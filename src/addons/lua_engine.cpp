@@ -201,6 +201,10 @@ static int lua_Frame_CreateTexture(lua_State* L) {
         "function t:SetDesaturated() end "
         "function t:SetBlendMode() end "
         "function t:SetDrawLayer() end "
+        // Unimplemented texture methods (SetRotation, SetGradient, ...) → no-op.
+        "setmetatable(t, { __index = function(_, k) "
+        "  if type(k)=='string' and string.find(k,'^%u') then return function() end end "
+        "end }) "
         "end");
     lua_pushvalue(L, -2); // push the table
     lua_call(L, 1, 0);    // call the function with the table
@@ -234,6 +238,10 @@ static int lua_Frame_CreateFontString(lua_State* L) {
         "function fs:SetShadowColor() end "
         "function fs:SetWidth() end "
         "function fs:SetHeight() end "
+        // Unimplemented font-string methods → no-op.
+        "setmetatable(fs, { __index = function(_, k) "
+        "  if type(k)=='string' and string.find(k,'^%u') then return function() end end "
+        "end }) "
         "end");
     lua_pushvalue(L, -2);
     lua_call(L, 1, 0);
@@ -586,6 +594,26 @@ void LuaEngine::registerCoreAPI() {
         "function mt:StopMovingOrSizing() end\n"
         "function mt:IsMouseOver() return false end\n"
         "function mt:GetObjectType() return 'Frame' end\n"
+    );
+
+    // Catch-all for unimplemented widget methods. Frames are logic-only stubs (not
+    // natively rendered), so UI-heavy addons call many widget methods we don't model
+    // (sliders: SetMinMaxValues/SetValue; check buttons: SetChecked; buttons:
+    // SetNormalTexture; etc.). Without this, the first such call raises "attempt to
+    // call a nil value" and aborts the addon before it can register its slash commands.
+    // WoW widget methods are PascalCase, so an unknown key starting with an uppercase
+    // letter is treated as an unimplemented method (harmless no-op); anything else
+    // falls through to nil so ordinary addon fields keep their normal (falsy) meaning.
+    luaL_dostring(L_,
+        "local mt = __WoweeFrameMT\n"
+        "local methods = mt\n"
+        "local noop = function() end\n"
+        "mt.__index = function(tbl, key)\n"
+        "    local v = rawget(methods, key)\n"
+        "    if v ~= nil then return v end\n"
+        "    if type(key) == 'string' and string.find(key, '^%u') then return noop end\n"
+        "    return nil\n"
+        "end\n"
     );
 
     // CreateFrame function
