@@ -40,6 +40,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/quest_marker_renderer.hpp"
+#include "rendering/footprint_renderer.hpp"
 #include "rendering/loading_screen.hpp"
 #include "audio/music_manager.hpp"
 #include "audio/footstep_manager.hpp"
@@ -576,27 +577,131 @@ bool Application::initialize() {
                     if (!amPtr || id == 0) return {};
                     if (!*propLoaded) {
                         *propLoaded = true;
-                        // ItemRandomProperties.dbc: ID=0, Name=4 (string)
+                        // Both DBCs carry the display name ("of the Bear" / "of Strength") as
+                        // the first string column, field 1, across classic/tbc/wotlk/turtle.
+                        constexpr uint32_t kNameField = 1;
+                        // ItemRandomProperties.dbc: ID=0, Name=1 (positive IDs)
                         if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
-                            uint32_t nameField = (dbc->getFieldCount() > 4) ? 4 : 1;
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                std::string name = dbc->getString(r, nameField);
+                                std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[rid] = name;
                             }
                         }
-                        // ItemRandomSuffix.dbc: ID=0, Name=4 (string) — stored as negative IDs
+                        // ItemRandomSuffix.dbc: ID=0, Name=1 — keyed as negative IDs
                         if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
-                            uint32_t nameField = (dbc->getFieldCount() > 4) ? 4 : 1;
                             for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
                                 int32_t rid = static_cast<int32_t>(dbc->getUInt32(r, 0));
-                                std::string name = dbc->getString(r, nameField);
+                                std::string name = dbc->getString(r, kNameField);
                                 if (!name.empty() && rid > 0) (*propNames)[-rid] = name;
                             }
                         }
                     }
                     auto it = propNames->find(id);
                     return (it != propNames->end()) ? it->second : std::string{};
+                });
+            }
+            // Wire random-suffix/property stat resolver. Reproduces the server's roll from the
+            // same DBCs: a suffix (negative id) scales each SpellItemEnchantment STAT amount by
+            // AllocationPct*suffixFactor/10000; a property (positive id) uses the enchant's fixed
+            // amount. Caches all three tables on first use.
+            {
+                struct EnchEffect { uint32_t type; uint32_t arg; int32_t minAmount; };
+                auto suffixMap = std::make_shared<std::unordered_map<int32_t, std::vector<std::pair<uint32_t,uint32_t>>>>();
+                auto propMap   = std::make_shared<std::unordered_map<int32_t, std::vector<uint32_t>>>();
+                auto enchMap   = std::make_shared<std::unordered_map<uint32_t, std::vector<EnchEffect>>>();
+                auto loaded    = std::make_shared<bool>(false);
+                auto* amPtr = assetManager.get();
+                gameHandler->setRandomStatResolver(
+                    [suffixMap, propMap, enchMap, loaded, amPtr](int32_t id, uint32_t suffixFactor)
+                        -> std::vector<game::GameHandler::RandomStatBonus> {
+                    std::vector<game::GameHandler::RandomStatBonus> out;
+                    if (!amPtr || id == 0) return out;
+                    if (!*loaded) {
+                        *loaded = true;
+                        // SpellItemEnchantment: enchId -> up to 3 (type, statArg, minAmount).
+                        // Arg (stat type) is the 3 fields before Name; the effect-type array
+                        // precedes the amount block(s) — 2 blocks (Min+Max) on TBC/WotLK, 1 on Vanilla.
+                        if (auto dbc = amPtr->loadDBC("SpellItemEnchantment.dbc"); dbc && dbc->isLoaded()) {
+                            const auto* sieL = pipeline::getActiveDBCLayout()
+                                ? pipeline::getActiveDBCLayout()->getLayout("SpellItemEnchantment") : nullptr;
+                            const uint32_t fc = dbc->getFieldCount();
+                            const uint32_t nameF = pipeline::detectEnchantmentNameField(dbc.get(), sieL);
+                            if (nameF >= 12 && nameF < fc) {
+                                const uint32_t argBase = nameF - 3;
+                                const bool singleAmount = fc < 34;  // Vanilla/Turtle: no separate Max array
+                                const uint32_t effBase = argBase - (singleAmount ? 6u : 9u);
+                                const uint32_t minBase = effBase + 3u;
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    uint32_t enchId = dbc->getUInt32(r, 0);
+                                    if (enchId == 0) continue;
+                                    std::vector<EnchEffect> effs;
+                                    for (uint32_t s = 0; s < 3; ++s) {
+                                        uint32_t type = dbc->getUInt32(r, effBase + s);
+                                        if (type == 0) continue;
+                                        effs.push_back({type, dbc->getUInt32(r, argBase + s), dbc->getInt32(r, minBase + s)});
+                                    }
+                                    if (!effs.empty()) (*enchMap)[enchId] = std::move(effs);
+                                }
+                            }
+                        }
+                        // ItemRandomSuffix: enchant array at field 19, AllocationPct follows; N=(fc-19)/2.
+                        if (auto dbc = amPtr->loadDBC("ItemRandomSuffix.dbc"); dbc && dbc->isLoaded()) {
+                            const uint32_t fc = dbc->getFieldCount();
+                            if (fc > 21 && (fc - 19u) % 2u == 0u) {
+                                const uint32_t n = (fc - 19u) / 2u;
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    int32_t sid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                    if (sid <= 0) continue;
+                                    std::vector<std::pair<uint32_t,uint32_t>> ens;
+                                    for (uint32_t k = 0; k < n; ++k) {
+                                        uint32_t ench = dbc->getUInt32(r, 19u + k);
+                                        uint32_t pct  = dbc->getUInt32(r, 19u + n + k);
+                                        if (ench != 0) ens.emplace_back(ench, pct);
+                                    }
+                                    if (!ens.empty()) (*suffixMap)[sid] = std::move(ens);
+                                }
+                            }
+                        }
+                        // ItemRandomProperties: up to 5 enchant ids at fields 2..6 (fixed amount).
+                        if (auto dbc = amPtr->loadDBC("ItemRandomProperties.dbc"); dbc && dbc->isLoaded()) {
+                            if (dbc->getFieldCount() > 6) {
+                                for (uint32_t r = 0; r < dbc->getRecordCount(); ++r) {
+                                    int32_t pid = static_cast<int32_t>(dbc->getUInt32(r, 0));
+                                    if (pid <= 0) continue;
+                                    std::vector<uint32_t> ens;
+                                    for (uint32_t k = 2; k <= 6; ++k) {
+                                        uint32_t ench = dbc->getUInt32(r, k);
+                                        if (ench != 0) ens.push_back(ench);
+                                    }
+                                    if (!ens.empty()) (*propMap)[pid] = std::move(ens);
+                                }
+                            }
+                        }
+                    }
+                    auto addEnchant = [&](uint32_t enchId, int32_t computedAmount, bool useComputed) {
+                        auto eit = enchMap->find(enchId);
+                        if (eit == enchMap->end()) return;
+                        for (const auto& e : eit->second) {
+                            if (e.type != 5) continue;  // ITEM_ENCHANTMENT_TYPE_STAT only
+                            int32_t amount = (useComputed && e.minAmount == 0) ? computedAmount : e.minAmount;
+                            if (amount != 0) out.push_back({e.arg, amount});
+                        }
+                    };
+                    if (id < 0) {
+                        auto sit = suffixMap->find(-id);
+                        if (sit != suffixMap->end())
+                            for (const auto& [ench, pct] : sit->second) {
+                                int32_t amount = static_cast<int32_t>(
+                                    (static_cast<int64_t>(pct) * suffixFactor) / 10000);
+                                addEnchant(ench, amount, true);
+                            }
+                    } else {
+                        auto pit = propMap->find(id);
+                        if (pit != propMap->end())
+                            for (uint32_t ench : pit->second) addEnchant(ench, 0, false);
+                    }
+                    return out;
                 });
             }
             LOG_INFO("Addon system initialized, found ", addonManager_->getAddons().size(), " addon(s)");
@@ -1028,6 +1133,33 @@ void Application::setState(AppState newState) {
                 cc->setUseWoWSpeed(true);
             }
             if (gameHandler) {
+                gameHandler->setFaceCameraProvider([this]() -> float {
+                    // Turn the character to the camera's look direction and report it in
+                    // canonical space (same camera-yaw→canonical mapping as the per-frame
+                    // orientation sync). Lets a fishing cast drop the bobber in front of
+                    // where the player is aiming even while standing still.
+                    if (!renderer || !renderer->getCameraController())
+                        return gameHandler ? gameHandler->getMovementInfo().orientation : 0.0f;
+                    // Use the CAMERA's live look yaw (getYaw), not getFacingYaw: the latter is
+                    // the character's facing, which is NOT updated by left-mouse orbit, so while
+                    // aiming at the water standing still it is stale. Turn the character to the
+                    // camera aim and use the same yaw→canonical mapping the (working) melee
+                    // facing uses, so the bobber lands where the player is looking.
+                    float camYawDeg = renderer->getCameraController()->getYaw();
+                    renderer->setCharacterYaw(camYawDeg);
+                    renderer->getCameraController()->setFacingYaw(camYawDeg);
+                    // "Face land to fish" ⇒ the bobber landed 180° opposite the aim, so the
+                    // canonical is a half-turn off here (getYaw's zero is opposite the look
+                    // vector). Add the half-turn so the bobber lands where the camera looks.
+                    float canon = core::coords::normalizeAngleRad(glm::radians(360.0f - camYawDeg));
+                    LOG_WARNING("[FISH-AIM] getYaw=", camYawDeg,
+                                " getFacingYaw=", renderer->getCameraController()->getFacingYaw(),
+                                " charYaw=", renderer->getCharacterYaw(),
+                                " canonicalDeg=", canon * 57.29578f,
+                                " serverYawDeg=", core::coords::canonicalToServerYaw(canon) * 57.29578f);
+                    return canon;
+                });
+
                 gameHandler->setMeleeSwingCallback([this](uint32_t spellId) {
                     if (renderer) {
                         // Ranged auto-attack spells: Auto Shot (75), Shoot (5019), Throw (2764)
@@ -1087,6 +1219,10 @@ void Application::setState(AppState newState) {
                             renderer->getCameraController()->cancelAutoFollow();
                         }
                     }
+                });
+                // Barber shop and other live appearance changes rebuild the model.
+                gameHandler->setPlayerModelRebuildCallback([this]() {
+                    refreshPlayerCharacterModel();
                 });
             }
             // Load quest marker models
@@ -1264,6 +1400,9 @@ void Application::performLogoutToLogin() {
         }
         if (auto* questMarkers = renderer->getQuestMarkerRenderer()) {
             questMarkers->clear();
+        }
+        if (auto* footprints = renderer->getFootprintRenderer()) {
+            footprints->clear();
         }
         if (auto* ac = renderer->getAnimationController()) ac->clearMount();
         renderer->setCharacterFollow(0);
@@ -1582,14 +1721,22 @@ void Application::update(float deltaTime) {
                     worldEntryCallbacks_->update(deltaTime);
                 }
                 if (renderer && renderer->getCameraController()) {
-                const bool externallyDrivenMotion = onTaxi || onWMOTransport || (animationCallbacks_ && animationCallbacks_->isCharging());
+                // A ship carries the player's reference frame, but it must not
+                // freeze local controls like a taxi flight. On-deck walking is
+                // folded into the transport-local offset in the sync block below.
+                const bool externallyDrivenMotion = onTaxi ||
+                    (animationCallbacks_ && animationCallbacks_->isCharging());
                 // Keep physics frozen (externalFollow) during landing clamp when terrain
                 // hasn't loaded yet — prevents gravity from pulling player through void.
                 bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
+                const bool transportTransferFreeze = gameHandler &&
+                    gameHandler->hasPendingPlayerTransportWorldTransfer();
                 bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                                           worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
                                           !gameHandler->isMounted();
-                renderer->getCameraController()->setExternalFollow(externallyDrivenMotion || landingClampActive || hearthFreeze);
+                renderer->getCameraController()->setExternalFollow(
+                    externallyDrivenMotion || landingClampActive || hearthFreeze ||
+                    transportTransferFreeze || deckFloorPending_);
                 renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
                 if (externallyDrivenMotion) {
                     // Drop any stale local movement toggles while server drives taxi motion.
@@ -1750,10 +1897,91 @@ void Application::update(float deltaTime) {
                         }
                     }
                 } else if (onTransport) {
-                    // WMO transport mode (ships): compose world position from transform + local offset
+                    // WMO transport mode (ships): keep the transport-local
+                    // attachment, while folding real WASD/jump movement since
+                    // last frame into that offset. Treating ships as fully
+                    // externally driven cleared movement input and reapplied the
+                    // boarding-time offset forever, freezing the player in a
+                    // running pose at the point where they stepped aboard.
+                    auto* tm = gameHandler->getTransportManager();
+                    auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
+                    if (tr) {
+                        const uint64_t transportGuid = gameHandler->getPlayerTransportGuid();
+                        const uint32_t mapId = gameHandler->getCurrentMapId();
+                        glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
+                        const glm::vec3 tentativeRender = renderer->getCharacterPosition();
+                        const glm::vec3 expectedRender(
+                            tr->transform * glm::vec4(localOffset, 1.0f));
+                        glm::vec3 intendedRender = expectedRender;
+
+                        // A cross-map ship transfer can reuse the same synthetic GO
+                        // GUID on the destination map. Never interpret the continent-
+                        // sized difference from the previous map's ride lock as deck
+                        // walking: doing so rewrites a valid server transport offset
+                        // into a huge negative Z and drops the rider underwater.
+                        const bool sameRideFrame = hasWMORideLock_ &&
+                            lastWMORideTransportGuid_ == transportGuid &&
+                            lastWMORideMapId_ == mapId;
+                        if (!sameRideFrame && !tr->isM2) {
+                            deckFloorPending_ = true;
+                        }
+                        if (sameRideFrame && renderer->getCameraController()) {
+                            const glm::vec3 localMotion =
+                                tentativeRender - lastWMORideLockedRender_;
+                            if (renderer->getCameraController()->isMoving()) {
+                                intendedRender.x += localMotion.x;
+                                intendedRender.y += localMotion.y;
+                            }
+                            if (!renderer->getCameraController()->isGrounded()) {
+                                intendedRender.z += localMotion.z;
+                            }
+                        }
+
+                        // Moving WMO instances are intentionally excluded from the camera
+                        // controller's ordinary static-world floor query, so every WMO ship
+                        // needs its exact transport-instance floor held under the rider —
+                        // otherwise gravity folds into the attachment and pulls them through
+                        // the hull, and multi-deck ships (stairs, ramps) can't be climbed
+                        // because nothing raises the rider onto the upper geometry. This is
+                        // the walkable-deck query for ANY ship, keyed on the transport being
+                        // a WMO (not M2), not on a specific ship entry. getInstanceFloorHeight
+                        // returns the height of whatever deck/stair is under the player, so
+                        // walking up onto a higher deck just follows the collision. An upward
+                        // jump remains fully controlled by vertical physics (skipped below).
+                        auto* cameraController = renderer->getCameraController();
+                        if (!tr->isM2 && cameraController &&
+                            !cameraController->isJumping()) {
+                            const glm::vec3 intendedCanonical =
+                                core::coords::renderToCanonical(intendedRender);
+                            const auto deckFloor = tm->getTransportDeckFloorHeight(
+                                transportGuid, intendedCanonical);
+                            if (deckFloor && intendedRender.z >= *deckFloor - 3.0f &&
+                                intendedRender.z <= *deckFloor + 0.35f) {
+                                intendedRender.z = *deckFloor + 0.10f;
+                                cameraController->suppressVerticalPhysics();
+                                deckFloorPending_ = false;
+                            } else if (deckFloorPending_) {
+                                // A continent transfer registers the transport GO
+                                // before its WMO collision necessarily finishes loading.
+                                // Preserve the local offset until this exact instance's
+                                // deck exists instead of releasing gravity after a timer.
+                                intendedRender = expectedRender;
+                                cameraController->suppressVerticalPhysics();
+                            }
+                        }
+
+                        localOffset = glm::vec3(
+                            tr->invTransform * glm::vec4(intendedRender, 1.0f));
+                        gameHandler->setPlayerTransportOffset(localOffset);
+                    }
+
                     glm::vec3 canonical = gameHandler->getComposedWorldPosition();
                     glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
                     renderer->getCharacterPosition() = renderPos;
+                    lastWMORideLockedRender_ = renderPos;
+                    hasWMORideLock_ = true;
+                    lastWMORideTransportGuid_ = gameHandler->getPlayerTransportGuid();
+                    lastWMORideMapId_ = gameHandler->getCurrentMapId();
                     gameHandler->setPosition(canonical.x, canonical.y, canonical.z);
                     if (renderer->getCameraController()) {
                         glm::vec3* followTarget = renderer->getCameraController()->getFollowTargetMutable();
@@ -1761,10 +1989,15 @@ void Application::update(float deltaTime) {
                             *followTarget = renderPos;
                         }
                     }
+                    gameHandler->updateM2TransportBoarding(canonical);
                 } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
                     // Warrior Charge: interpolation delegated to AnimationCallbackHandler
                     animationCallbacks_->updateCharge(deltaTime);
                 } else {
+                    hasWMORideLock_ = false;
+                    lastWMORideTransportGuid_ = 0;
+                    lastWMORideMapId_ = 0xFFFFFFFFu;
+                    deckFloorPending_ = false;
                     glm::vec3 renderPos = renderer->getCharacterPosition();
 
                     // M2 transport riding: resolve in canonical space and lock once per frame.
@@ -1788,9 +2021,7 @@ void Application::update(float deltaTime) {
                             // riding appeared to "float" in place no matter how far the tram
                             // traveled underneath.
                             const bool isDeeprunTram =
-                                tr->displayId == 3831u ||
-                                (tr->entry >= 176080u && tr->entry <= 176085u) ||
-                                (tr->pathId >= 176080u && tr->pathId <= 176085u);
+                                game::TransportManager::isDeeprunTramTransport(*tr);
                             glm::vec3 localOffset = gameHandler->getPlayerTransportOffset();
                             glm::vec3 tentativeCanonical = core::coords::renderToCanonical(renderPos);
                             if (hasM2RideLock_) {
@@ -1906,7 +2137,7 @@ void Application::update(float deltaTime) {
                         }
                     }
 
-                    // Client-side M2 transport (trams, lifts) board/disembark check - shared
+                    // Client-side transport board/disembark check - shared
                     // with any other driver that knows the player's canonical position (see
                     // GameHandler::updateM2TransportBoarding).
                     if (gameHandler->getTransportManager()) {
@@ -1934,8 +2165,14 @@ void Application::update(float deltaTime) {
                 glm::vec3 playerRenderPos(0.0f);
                 bool havePlayerPos = false;
                 float playerCollisionRadius = 0.65f;
-                if (auto playerEntity = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
-                    playerPos = glm::vec3(playerEntity->getX(), playerEntity->getY(), playerEntity->getZ());
+                if (gameHandler->getPlayerGuid() != 0) {
+                    // The server does not continuously echo our own movement into
+                    // the cached player Entity. MovementInfo is the live canonical
+                    // position that we render and send to the server; using the
+                    // Entity here eventually distance-culls nearby enemies against
+                    // the player's old spawn position and freezes their visuals.
+                    const auto& movement = gameHandler->getMovementInfo();
+                    playerPos = glm::vec3(movement.x, movement.y, movement.z);
                     playerRenderPos = core::coords::canonicalToRender(playerPos);
                     havePlayerPos = true;
                     glm::vec3 pc;
@@ -1957,6 +2194,9 @@ void Application::update(float deltaTime) {
                 auto& _creatureWasSwimming = entitySpawner_->getCreatureWasSwimming();
                 auto& _creatureWasFlying = entitySpawner_->getCreatureWasFlying();
                 auto& _creatureWasWalking = entitySpawner_->getCreatureWasWalking();
+                const uint64_t currentTargetGuid = gameHandler->hasTarget()
+                    ? gameHandler->getTargetGuid() : 0;
+                const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                 for (const auto& [guid, instanceId] : _creatureInstances) {
                     auto entity = gameHandler->getEntityManager().getEntity(guid);
                     if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
@@ -1978,7 +2218,9 @@ void Application::update(float deltaTime) {
                     if (havePlayerPos) {
                         glm::vec3 d = latestCanonical - playerPos;
                         canonDistSq = glm::dot(d, d);
-                        if (canonDistSq > syncRadiusSq) continue;
+                        const bool activeCombatTarget =
+                            guid == currentTargetGuid || guid == autoAttackGuid;
+                        if (canonDistSq > syncRadiusSq && !activeCombatTarget) continue;
                     }
 
                     // Use the destination position once the entity has reached its
@@ -2018,8 +2260,6 @@ void Application::update(float deltaTime) {
                     bool isCombatTarget = false;
                     if (havePlayerPos && canonDistSq < 64.0f) { // 8² = melee range
                         auto unit = std::static_pointer_cast<game::Unit>(entity);
-                        const uint64_t currentTargetGuid = gameHandler->hasTarget() ? gameHandler->getTargetGuid() : 0;
-                        const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                         isCombatTarget = (guid == currentTargetGuid || guid == autoAttackGuid);
                         clipGuardEligible = unit->getHealth() > 0 &&
                                             (unit->isHostile() ||
@@ -2099,7 +2339,16 @@ void Application::update(float deltaTime) {
                         const bool entityIsMoving = entity->isActivelyMoving();
                         constexpr float kMoveThreshSq = 0.03f * 0.03f;
                         const bool posChanging = planarDistSq > kMoveThreshSq || dz > 0.08f;
-                        const bool isMovingNow = !deadOrCorpse && (entityIsMoving || (posChanging && !entity->isEntityMoving()));
+                        const bool transportAttached =
+                            gameHandler->transportAttachmentsRef().count(guid) != 0;
+                        // A stationary deck passenger changes world position every
+                        // frame because the parent ship moves. That parent motion is
+                        // not creature locomotion and must not trigger Run. Real
+                        // transport-local spline movement still reports actively moving.
+                        const bool positionOnlyLocomotion =
+                            posChanging && !entity->isEntityMoving() && !transportAttached;
+                        const bool isMovingNow =
+                            !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
                         if (deadOrCorpse || largeCorrection) {
                             charRenderer->setInstancePosition(instanceId, renderPos);
                         } else if (planarDistSq > kMoveThreshSq || dz > 0.08f) {
@@ -2190,8 +2439,9 @@ void Application::update(float deltaTime) {
                 auto* charRenderer = renderer->getCharacterRenderer();
                 glm::vec3 pPos(0.0f);
                 bool havePPos = false;
-                if (auto pe = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
-                    pPos = glm::vec3(pe->getX(), pe->getY(), pe->getZ());
+                if (gameHandler->getPlayerGuid() != 0) {
+                    const auto& movement = gameHandler->getMovementInfo();
+                    pPos = glm::vec3(movement.x, movement.y, movement.z);
                     havePPos = true;
                 }
                 const float pSyncRadiusSq = 320.0f * 320.0f;
@@ -2205,6 +2455,9 @@ void Application::update(float deltaTime) {
                 auto& _pCreatureWalkingState = entitySpawner_->getCreatureWalkingState();
                 auto& _pCreatureFlyingState = entitySpawner_->getCreatureFlyingState();
                 auto& _pCreatureRenderPosCache = entitySpawner_->getCreatureRenderPosCache();
+                const uint64_t playerTargetGuid = gameHandler->hasTarget()
+                    ? gameHandler->getTargetGuid() : 0;
+                const uint64_t playerAutoAttackGuid = gameHandler->getAutoAttackTargetGuid();
                 for (const auto& [guid, instanceId] : _playerInstances) {
                     auto entity = gameHandler->getEntityManager().getEntity(guid);
                     if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
@@ -2213,7 +2466,9 @@ void Application::update(float deltaTime) {
                     if (havePPos) {
                         glm::vec3 latestCanonical(entity->getLatestX(), entity->getLatestY(), entity->getLatestZ());
                         glm::vec3 d = latestCanonical - pPos;
-                        if (glm::dot(d, d) > pSyncRadiusSq) continue;
+                        const bool activeCombatTarget =
+                            guid == playerTargetGuid || guid == playerAutoAttackGuid;
+                        if (glm::dot(d, d) > pSyncRadiusSq && !activeCombatTarget) continue;
                     }
 
                     // Position sync — clamp to destination during dead-reckoning
@@ -2229,6 +2484,11 @@ void Application::update(float deltaTime) {
                         posIt != _pCreatureRenderPosCache.end()
                             ? std::optional<glm::vec3>(posIt->second)
                             : std::nullopt;
+                    const auto* remoteMount = entitySpawner_->getRemotePlayerMount(guid);
+                    std::optional<glm::vec3> previousMountPos = previousRenderPos;
+                    if (remoteMount && previousMountPos) {
+                        previousMountPos->z -= remoteMount->riderHeight;
+                    }
 
                     // Match creature projection: terrain alone is not a valid floor in
                     // WMO overlap regions (tunnels, buildings, bridges).
@@ -2236,13 +2496,19 @@ void Application::update(float deltaTime) {
                                               !_pCreatureSwimmingState.count(guid);
                     if (entity->isActivelyMoving() && groundPlayer) {
                         if (auto floorZ = movingEntityFloor(renderer.get(), renderPos,
-                                                            previousRenderPos)) {
+                                                            previousMountPos)) {
                             renderPos.z = *floorZ;
                         }
                     }
 
+                    const glm::vec3 mountRenderPos = renderPos;
+                    if (remoteMount) renderPos.z += remoteMount->riderHeight;
+
                     if (posIt == _pCreatureRenderPosCache.end()) {
                         charRenderer->setInstancePosition(instanceId, renderPos);
+                        if (remoteMount) {
+                            charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                        }
                         _pCreatureRenderPosCache[guid] = renderPos;
                     } else {
                         const glm::vec3 prevPos = posIt->second;
@@ -2257,14 +2523,25 @@ void Application::update(float deltaTime) {
                         const bool entityIsMoving = entity->isActivelyMoving();
                         constexpr float kMoveThreshSq2 = 0.03f * 0.03f;
                         const bool posChanging2 = planarDistSq > kMoveThreshSq2 || dz > 0.08f;
-                        const bool isMovingNow = !deadOrCorpse && (entityIsMoving || (posChanging2 && !entity->isEntityMoving()));
+                        const bool transportAttached =
+                            gameHandler->transportAttachmentsRef().count(guid) != 0;
+                        const bool positionOnlyLocomotion =
+                            posChanging2 && !entity->isEntityMoving() && !transportAttached;
+                        const bool isMovingNow =
+                            !deadOrCorpse && (entityIsMoving || positionOnlyLocomotion);
 
                         if (deadOrCorpse || largeCorrection) {
                             charRenderer->setInstancePosition(instanceId, renderPos);
+                            if (remoteMount) {
+                                charRenderer->setInstancePosition(remoteMount->instanceId, mountRenderPos);
+                            }
                         } else if (planarDistSq > kMoveThreshSq2 || dz > 0.08f) {
                             float planarDist = std::sqrt(planarDistSq);
                             float duration = std::clamp(planarDist / 5.5f, 0.05f, 0.22f);
                             charRenderer->moveInstanceTo(instanceId, renderPos, duration);
+                            if (remoteMount) {
+                                charRenderer->moveInstanceTo(remoteMount->instanceId, mountRenderPos, duration);
+                            }
                         }
                         posIt->second = renderPos;
 
@@ -2272,6 +2549,15 @@ void Application::update(float deltaTime) {
                         const bool isSwimmingNow = _pCreatureSwimmingState.count(guid) > 0;
                         const bool isWalkingNow  = _pCreatureWalkingState.count(guid) > 0;
                         const bool isFlyingNow   = _pCreatureFlyingState.count(guid) > 0;
+                        uint32_t mountedRiderAnim = rendering::anim::MOUNT;
+                        if (remoteMount && isFlyingNow) {
+                            const uint32_t flightPose = isMovingNow
+                                ? rendering::anim::MOUNT_FLIGHT_FORWARD
+                                : rendering::anim::MOUNT_FLIGHT_IDLE;
+                            if (charRenderer->hasAnimation(instanceId, flightPose)) {
+                                mountedRiderAnim = flightPose;
+                            }
+                        }
                         bool prevMoving   = _pCreatureWasMoving[guid];
                         bool prevSwimming = _pCreatureWasSwimming[guid];
                         bool prevFlying   = _pCreatureWasFlying[guid];
@@ -2289,7 +2575,23 @@ void Application::update(float deltaTime) {
                             bool gotState = charRenderer->getAnimationState(instanceId, curAnimId, curT, curDur);
                             if (!gotState || curAnimId != rendering::anim::DEATH) {
                                 uint32_t targetAnim;
-                                if (isMovingNow) {
+                                if (remoteMount) {
+                                    // The rider keeps the mounted seat pose; locomotion
+                                    // belongs to the separately rendered mount model.
+                                    targetAnim = mountedRiderAnim;
+                                    uint32_t mountAnim = rendering::anim::STAND;
+                                    if (isMovingNow) {
+                                        if (isFlyingNow) mountAnim = rendering::anim::FLY_FORWARD;
+                                        else if (isWalkingNow) mountAnim = rendering::anim::WALK;
+                                        else mountAnim = rendering::anim::RUN;
+                                    } else if (isFlyingNow) {
+                                        mountAnim = rendering::anim::FLY_IDLE;
+                                    }
+                                    if (!charRenderer->hasAnimation(remoteMount->instanceId, mountAnim)) {
+                                        mountAnim = isMovingNow ? rendering::anim::RUN : rendering::anim::STAND;
+                                    }
+                                    charRenderer->playAnimation(remoteMount->instanceId, mountAnim, true);
+                                } else if (isMovingNow) {
                                     if (isFlyingNow)        targetAnim = rendering::anim::FLY_FORWARD;
                                     else if (isSwimmingNow) targetAnim = rendering::anim::SWIM;
                                     else if (isWalkingNow)  targetAnim = rendering::anim::WALK;
@@ -2302,11 +2604,31 @@ void Application::update(float deltaTime) {
                                 charRenderer->playAnimation(instanceId, targetAnim, /*loop=*/true);
                             }
                         }
+
+                        // Server emotes and state updates can arrive after the mount
+                        // field and replace the one-shot mounted pose with Stand. A
+                        // rider's mount field is authoritative, so repair that pose
+                        // even when their movement state did not transition this frame.
+                        if (remoteMount) {
+                            uint32_t riderAnim = 0;
+                            float riderTime = 0.0f, riderDuration = 0.0f;
+                            const bool haveRiderState = charRenderer->getAnimationState(
+                                instanceId, riderAnim, riderTime, riderDuration);
+                            if ((!haveRiderState || riderAnim != mountedRiderAnim) &&
+                                riderAnim != rendering::anim::DEATH) {
+                                charRenderer->playAnimation(instanceId, mountedRiderAnim,
+                                                            /*loop=*/true);
+                            }
+                        }
                     }
 
                     // Orientation sync
                     float renderYaw = entity->getOrientation() + glm::radians(90.0f);
                     charRenderer->setInstanceRotation(instanceId, glm::vec3(0.0f, 0.0f, renderYaw));
+                    if (remoteMount) {
+                        charRenderer->setInstanceRotation(remoteMount->instanceId,
+                                                          glm::vec3(0.0f, 0.0f, renderYaw));
+                    }
                 }
             }
             {
@@ -2719,6 +3041,48 @@ void Application::spawnPlayerCharacter() {
         // Load equipped weapons (sword + shield)
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
     }
+}
+
+void Application::refreshPlayerCharacterModel() {
+    if (!playerCharacterSpawned || !gameHandler) return;
+    const game::Character* ch = gameHandler->getActiveCharacter();
+    if (!ch) return;
+    // Only rebuild when the visible appearance actually changed. PLAYER_BYTES_2
+    // also carries rest state, so the appearance hook fires on entering/leaving
+    // inns and cities — a full respawn on those would be needless and jarring.
+    if (ch->appearanceBytes == spawnedAppearanceBytes_ &&
+        ch->facialFeatures == spawnedFacialFeatures_) {
+        return;
+    }
+    LOG_INFO("Rebuilding player model in place for appearance change (barber shop)");
+
+    // Keep the character exactly where it is — this is the same respawn path
+    // teleport uses (so equipment/geometry are fully re-applied), just live.
+    const glm::vec3 savedPos = renderer ? renderer->getCharacterPosition() : glm::vec3(0.0f);
+
+    if (renderer && renderer->getCharacterRenderer()) {
+        uint32_t oldInst = renderer->getCharacterInstanceId();
+        if (oldInst > 0) {
+            renderer->setCharacterFollow(0);
+            if (auto* ac = renderer->getAnimationController()) ac->clearMount();
+            renderer->getCharacterRenderer()->removeInstance(oldInst);
+        }
+    }
+    playerCharacterSpawned = false;
+    spawnedPlayerGuid_ = 0;
+    spawnedAppearanceBytes_ = 0;
+    spawnedFacialFeatures_ = 0;
+
+    spawnSnapToGround = false; // don't snap Z — stay at the current position
+    if (appearanceComposer_) appearanceComposer_->setWeaponsSheathed(false);
+    spawnPlayerCharacter();
+
+    if (renderer) renderer->getCharacterPosition() = savedPos;
+
+    // Force equipment geosets/textures to be re-composited onto the fresh model
+    // next frame — the respawn only builds the base body, and equipment isn't
+    // "dirty" (nothing was equipped), so without this the model loses its armor.
+    if (gameHandler) gameHandler->resetEquipmentDirtyTracking();
 }
 
 void Application::buildFactionHostilityMap(uint8_t playerRace) {

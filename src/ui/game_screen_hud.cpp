@@ -1,4 +1,5 @@
 #include "ui/game_screen.hpp"
+#include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "rendering/vk_context.hpp"
@@ -398,14 +399,29 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 // ============================================================
 
 void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
-    if (!showWorldMap_) return;
-
     auto& app = core::Application::getInstance();
     auto* renderer = app.getRenderer();
     if (!renderer) return;
 
     auto* wm = renderer->getWorldMap();
     if (!wm) return;
+
+    // Flight master window drives the world map's flight-map (taxi selection)
+    // mode: opening SMSG_SHOWTAXINODES opens the map, activating a flight or
+    // closing the gossip closes it. A user-dismissed map (Escape / X) closes
+    // the flight master window through the onClose handler.
+    const bool taxiWanted = gameHandler.isTaxiWindowOpen();
+    if (taxiWanted && !wm->isTaxiMapOpen()) {
+        auto* gh = &gameHandler;
+        wm->openTaxiMap(
+            [gh](uint32_t dest) { return gh->getTaxiRouteTo(dest); },
+            [gh](uint32_t dest) { gh->activateTaxi(dest); },
+            [gh]() { gh->closeTaxi(); });
+    } else if (!taxiWanted && wm->isTaxiMapOpen()) {
+        wm->closeTaxiMap();
+    }
+
+    if (!showWorldMap_ && !wm->isTaxiMapOpen()) return;
 
     // Keep map name in sync with minimap's map name
     auto* minimap = renderer->getMinimap();
@@ -445,16 +461,40 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
     {
         std::vector<rendering::WorldMapTaxiNode> taxiNodes;
         const auto& nodes = gameHandler.getTaxiNodes();
+        uint32_t currentTaxiNode = gameHandler.getTaxiCurrentNode();
+        const bool playerAlliance = gameHandler.isPlayerAlliance();
         taxiNodes.reserve(nodes.size());
         for (const auto& [id, node] : nodes) {
+            const bool known = gameHandler.isKnownTaxiNode(id);
+            // Undiscovered nodes are shown so the player can see where flight
+            // paths exist, but only ones their faction can actually use. A node's
+            // faction is inferred from which taxi mount TaxiNodes.dbc lists:
+            // own-faction mount → show; both mounts → neutral flight point, show;
+            // opposite-faction-only OR no mount at all (boat/zeppelin/script
+            // nodes) → hide. Known nodes are always shown.
+            if (!known) {
+                const bool hasAlliance = node.mountDisplayIdAlliance != 0;
+                const bool hasHorde    = node.mountDisplayIdHorde != 0;
+                const bool bothFactions = hasAlliance && hasHorde;   // neutral hub
+                const bool ownFaction   = playerAlliance ? hasAlliance : hasHorde;
+                if (!bothFactions && !ownFaction) continue;
+            }
             rendering::WorldMapTaxiNode wtn;
             wtn.id    = node.id;
             wtn.mapId = node.mapId;
-            wtn.wowX  = node.x;
-            wtn.wowY  = node.y;
-            wtn.wowZ  = node.z;
+            // TaxiNodes.dbc stores server/wire-order coordinates — convert to
+            // canonical (X=north, Y=west) like the taxi flight path code does,
+            // or the markers land transposed on the map.
+            glm::vec3 canonical = core::coords::serverToCanonical(
+                glm::vec3(node.x, node.y, node.z));
+            wtn.wowX  = canonical.x;
+            wtn.wowY  = canonical.y;
+            wtn.wowZ  = canonical.z;
             wtn.name  = node.name;
-            wtn.known = gameHandler.isKnownTaxiNode(id);
+            wtn.known = known;
+            wtn.costCopper = gameHandler.getTaxiCostTo(id);
+            wtn.current    = (id == currentTaxiNode);
+            wtn.reachable  = gameHandler.hasTaxiRouteTo(id);
             taxiNodes.push_back(std::move(wtn));
         }
         wm->setTaxiNodes(std::move(taxiNodes));
@@ -548,6 +588,50 @@ void GameScreen::renderWorldMap(game::GameHandler& gameHandler) {
             ? core::coords::canonicalToRender(glm::vec3(corpseCanX, corpseCanY, 0.0f))
             : glm::vec3{};
         wm->setCorpsePos(ghostWithCorpse, corpseRender);
+    }
+
+    // Rare tracker: mark every spawned rare / rare-elite the client currently has loaded.
+    // Entities only exist while near the player, so a marker means that rare is out now.
+    // Opt-in via the Interface setting; when off, feed an empty list so markers clear.
+    {
+        std::vector<rendering::WorldMapRareMark> rares;
+        if (settingsPanel_.showRareTracker_)
+        for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
+            if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
+            auto unit = std::static_pointer_cast<game::Unit>(entity);
+            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            if (rank != 2 && rank != 4) continue;      // 2 = Rare Elite, 4 = Rare
+            if (unit->getHealth() == 0) continue;       // skip dead/looted rares
+            rendering::WorldMapRareMark m;
+            m.renderPos = core::coords::canonicalToRender(
+                glm::vec3(unit->getX(), unit->getY(), unit->getZ()));
+            m.name = unit->getName();
+            m.rank = rank;
+            rares.push_back(std::move(m));
+        }
+        wm->setRares(std::move(rares));
+    }
+
+    // Chest tracker: mark loaded type-3 chest objects while excluding mining and
+    // herbalism nodes, which share GAMEOBJECT_TYPE_CHEST on the wire.
+    {
+        std::vector<rendering::WorldMapChestMark> chests;
+        if (settingsPanel_.showChestTracker_) {
+            for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
+                if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) continue;
+                auto chest = std::static_pointer_cast<game::GameObject>(entity);
+                const auto* info = gameHandler.getCachedGameObjectInfo(chest->getEntry());
+                if (!info || !info->isValid() || info->type != 3) continue;
+                if (gameHandler.isGatherGameObject(guid)) continue;
+
+                rendering::WorldMapChestMark mark;
+                mark.renderPos = core::coords::canonicalToRender(
+                    glm::vec3(chest->getX(), chest->getY(), chest->getZ()));
+                mark.name = chest->getName().empty() ? info->name : chest->getName();
+                chests.push_back(std::move(mark));
+            }
+        }
+        wm->setChests(std::move(chests));
     }
 
     glm::vec3 playerPos = renderer->getCharacterPosition();
@@ -765,11 +849,19 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
     }
     if (toShow.empty()) return;
 
-    // Apply completion filter (0=All, 1=Active, 2=Done). Keep the window open
-    // even when the filter hides everything so the user can cycle it back.
-    if (questTrackerFilter_ != 0) {
+    // Apply filter (0=All, 1=Active, 2=Done, 3=Zone). Keep the window open even when
+    // the filter hides everything so the user can cycle it back.
+    // Zone filter needs the player's current zone; if it isn't known yet (0), fall
+    // back to showing everything rather than an empty tracker.
+    const uint32_t currentZoneId = gameHandler.getWorldStateZoneId();
+    if (questTrackerFilter_ == 1 || questTrackerFilter_ == 2) {
         std::erase_if(toShow, [this](const game::GameHandler::QuestLogEntry* q) {
             return questTrackerFilter_ == 1 ? q->complete : !q->complete;
+        });
+    } else if (questTrackerFilter_ == 3 && currentZoneId != 0) {
+        std::erase_if(toShow, [currentZoneId](const game::GameHandler::QuestLogEntry* q) {
+            // zoneOrSort > 0 is an AreaTable zone id; keep only quests for this zone.
+            return q->zoneOrSort <= 0 || static_cast<uint32_t>(q->zoneOrSort) != currentZoneId;
         });
     }
 
@@ -852,7 +944,7 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
 
     if (ImGui::Begin("##QuestTracker", nullptr, flags)) {
         // Header row: quest count + completion filter (click to cycle) + hide
-        static const char* kFilterNames[] = {"All", "Active", "Done"};
+        static const char* kFilterNames[] = {"All", "Active", "Done", "Zone"};
         ImGui::TextDisabled("Quests (%d)", static_cast<int>(toShow.size()));
         {
             const ImGuiStyle& style = ImGui::GetStyle();
@@ -863,11 +955,11 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
                         (filterW + style.ItemSpacing.x + hideW);
             if (off > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off);
             if (ImGui::SmallButton(kFilterNames[questTrackerFilter_])) {
-                questTrackerFilter_ = (questTrackerFilter_ + 1) % 3;
+                questTrackerFilter_ = (questTrackerFilter_ + 1) % 4;
                 saveSettings();
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Filter: All / Active / Done (click to cycle)");
+                ImGui::SetTooltip("Filter: All / Active / Done / Zone (click to cycle)");
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("-")) {
@@ -880,8 +972,11 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
         }
         ImGui::Separator();
         if (toShow.empty()) {
-            ImGui::TextDisabled("%s", questTrackerFilter_ == 1 ? "No active quests"
-                                                               : "No completed quests");
+            const char* emptyMsg = "No quests";
+            if (questTrackerFilter_ == 1)      emptyMsg = "No active quests";
+            else if (questTrackerFilter_ == 2) emptyMsg = "No completed quests";
+            else if (questTrackerFilter_ == 3) emptyMsg = "No quests in this zone";
+            ImGui::TextDisabled("%s", emptyMsg);
         }
 
         for (int i = 0; i < static_cast<int>(toShow.size()); ++i) {
@@ -1167,12 +1262,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
         bool isPlayer = (entityPtr->getType() == game::ObjectType::PLAYER);
         bool isTarget = (guid == targetGuid);
+        const bool isHostile = unit->isHostile();
 
-        // Player nameplates use Shift+V toggle; NPC/enemy nameplates use V toggle.
+        // Friendly player nameplates use Shift+V; enemy players and hostile/NPC
+        // nameplates use V. Reaction, not object type, owns the visual category.
         // The current target ALWAYS gets a nameplate so it's clear what is
         // selected even with nameplates toggled off.
-        if (isPlayer && !settingsPanel_.showFriendlyNameplates_ && !isTarget) continue;
-        if (!isPlayer && !showNameplates_ && !isTarget) continue;
+        if (isPlayer && !isHostile && !settingsPanel_.showFriendlyNameplates_ && !isTarget) continue;
+        if ((!isPlayer || isHostile) && !showNameplates_ && !isTarget) continue;
 
         // For corpses (dead units), only show a minimal grey nameplate if selected
         bool isCorpse = (unit->getHealth() == 0);
@@ -1220,7 +1317,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             // Minimal grey bar for selected corpses (loot/skin targets)
             barColor = IM_COL32(140, 140, 140, A(200));
             bgColor  = IM_COL32(70,  70,  70,  A(160));
-        } else if (unit->isHostile()) {
+        } else if (isHostile) {
             // Check if mob is tapped by another player (grey nameplate)
             uint32_t dynFlags = unit->getDynamicFlags();
             bool tappedByOther = (dynFlags & 0x0004) != 0 && (dynFlags & 0x0008) == 0; // TAPPED but not TAPPED_BY_ALL_THREAT_LIST
@@ -1232,22 +1329,10 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                 bgColor  = IM_COL32(100, 25,  25,  A(160));
             }
         } else if (isPlayer) {
-            // Player nameplates: use class color for easy identification
-            uint8_t cid = entityClassId(unit);
-            if (cid != 0) {
-                ImVec4 cv = classColorVec4(cid);
-                barColor = IM_COL32(
-                    static_cast<int>(cv.x * 255),
-                    static_cast<int>(cv.y * 255),
-                    static_cast<int>(cv.z * 255), A(210));
-                bgColor  = IM_COL32(
-                    static_cast<int>(cv.x * 80),
-                    static_cast<int>(cv.y * 80),
-                    static_cast<int>(cv.z * 80), A(160));
-            } else {
-                barColor = IM_COL32(60,  200, 80,  A(200));
-                bgColor  = IM_COL32(25,  100, 35,  A(160));
-            }
+            // World-space bars communicate reaction. Class colors belong in
+            // party/social UI, where red DK and pink Paladin cannot imply hostility.
+            barColor = IM_COL32(60,  200, 80,  A(200));
+            bgColor  = IM_COL32(25,  100, 35,  A(160));
         } else {
             barColor = IM_COL32(60,  200, 80,  A(200));
             bgColor  = IM_COL32(25,  100, 35,  A(160));
@@ -1532,16 +1617,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         ImVec2 textSize = ImGui::CalcTextSize(labelBuf);
         float nameX = sx - textSize.x * 0.5f;
         float nameY = sy - barH - 12.0f;
-        // Name color: players get WoW class colors; NPCs use hostility (red/yellow)
+        // Name color communicates reaction too: friendly players blue, enemies red.
         ImU32 nameColor;
         if (isPlayer) {
-            // Class color with cyan fallback for unknown class
-            uint8_t cid = entityClassId(unit);
-            ImVec4 cc = (cid != 0) ? classColorVec4(cid) : ImVec4(0.31f, 0.78f, 1.0f, 1.0f);
-            nameColor = IM_COL32(static_cast<int>(cc.x*255), static_cast<int>(cc.y*255),
-                                  static_cast<int>(cc.z*255), A(230));
+            nameColor = isHostile
+                ? IM_COL32(220, 80, 80, A(230))
+                : IM_COL32(102, 153, 255, A(230));
         } else {
-            nameColor = unit->isHostile()
+            nameColor = isHostile
                 ? IM_COL32(220,  80,  80, A(230))   // red  — hostile NPC
                 : IM_COL32(240, 200, 100, A(230));  // yellow — friendly NPC
         }
@@ -1596,23 +1679,27 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
             drawList->AddText(ImVec2(crownX,         nameY),         IM_COL32(255, 215, 0, A(240)), crownSym);
         }
 
-        // Raid mark (if any) to the left of the name
+        // Raid mark: the real Blizzard icon art floating above the unit, the way
+        // the original client presents it. This used to be a text glyph beside
+        // the name, but the ImGui font carries no skull/moon/cross code points,
+        // so every mark drew as a '?' box.
         {
-            static constexpr struct { const char* sym; ImU32 col; } kNPMarks[] = {
-                { "\xe2\x98\x85", IM_COL32(255,220, 50,230) },  // Star
-                { "\xe2\x97\x8f", IM_COL32(255,140,  0,230) },  // Circle
-                { "\xe2\x97\x86", IM_COL32(160, 32,240,230) },  // Diamond
-                { "\xe2\x96\xb2", IM_COL32( 50,200, 50,230) },  // Triangle
-                { "\xe2\x97\x8c", IM_COL32( 80,160,255,230) },  // Moon
-                { "\xe2\x96\xa0", IM_COL32( 50,200,220,230) },  // Square
-                { "\xe2\x9c\x9d", IM_COL32(255, 80, 80,230) },  // Cross
-                { "\xe2\x98\xa0", IM_COL32(255,255,255,230) },  // Skull
-            };
             uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
             if (raidMark < game::GameHandler::kRaidMarkCount) {
-                float markX = nameX - 14.0f;
-                drawList->AddText(ImVec2(markX + 1.0f, nameY + 1.0f), IM_COL32(0,0,0,120), kNPMarks[raidMark].sym);
-                drawList->AddText(ImVec2(markX,         nameY),        kNPMarks[raidMark].col, kNPMarks[raidMark].sym);
+                VkDescriptorSet markTex = ui::getRaidTargetIcon(raidMark, services_.assetManager);
+                if (markTex) {
+                    // Sits above the name, and above the target chevron when this
+                    // is the current target, so the three never overlap.
+                    constexpr float kMarkSize = 32.0f;
+                    const float markBottom = nameY - (isTarget ? 16.0f : 3.0f);
+                    const float markTop    = markBottom - kMarkSize;
+                    drawList->AddImage(
+                        (ImTextureID)(uintptr_t)markTex,
+                        ImVec2(sx - kMarkSize * 0.5f, markTop),
+                        ImVec2(sx + kMarkSize * 0.5f, markBottom),
+                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                        IM_COL32(255, 255, 255, A(255)));
+                }
             }
 
             // Quest kill objective indicator: small yellow sword icon to the right of the name

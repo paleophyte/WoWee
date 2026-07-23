@@ -29,6 +29,7 @@
 #include "rendering/minimap.hpp"
 #include "rendering/world_map.hpp"
 #include "rendering/quest_marker_renderer.hpp"
+#include "rendering/footprint_renderer.hpp"
 #include "game/game_handler.hpp"
 #include "pipeline/m2_loader.hpp"
 #include <algorithm>
@@ -575,6 +576,7 @@ bool Renderer::initialize(core::Window* win) {
     levelUpEffect = std::make_unique<LevelUpEffect>();
 
     questMarkerRenderer = std::make_unique<QuestMarkerRenderer>();
+    footprintRenderer = std::make_unique<FootprintRenderer>();
 
     LOG_INFO("Vulkan sub-renderers initialized (Phase 3)");
 
@@ -675,6 +677,11 @@ void Renderer::shutdown() {
     if (swimEffects) {
         swimEffects->shutdown();
         swimEffects.reset();
+    }
+
+    if (footprintRenderer) {
+        footprintRenderer->shutdown();
+        footprintRenderer.reset();
     }
 
     LOG_DEBUG("Renderer::shutdown - characterRenderer...");
@@ -819,6 +826,7 @@ void Renderer::applyMsaaChange() {
     if (outlandSkyRenderer_) outlandSkyRenderer_->recreatePipelines();
     if (characterRenderer) characterRenderer->recreatePipelines();
     if (questMarkerRenderer) questMarkerRenderer->recreatePipelines();
+    if (footprintRenderer) footprintRenderer->recreatePipelines();
     if (weather) weather->recreatePipelines();
     if (lightning) lightning->recreatePipelines();
     if (swimEffects) swimEffects->recreatePipelines();
@@ -1508,7 +1516,21 @@ void Renderer::update(float deltaTime) {
     // Update AudioEngine (cleanup finished sounds, etc.)
     audio::AudioEngine::instance().update(deltaTime);
 
-    // Footsteps: delegated to AnimationController (§4.2)
+    // M2Renderer::update may rebuild the instance spatial index when streaming
+    // marked it dirty. Footprint spawning below performs an M2 floor query and
+    // traverses that same index. Joining only after footsteps allowed the main
+    // thread to walk unordered_map nodes while the animation worker cleared and
+    // rebuilt them, producing a SIGSEGV in M2Renderer::gatherCandidates. Keep
+    // the useful overlap with character animation and audio above, but finish
+    // structural M2 work before any main-thread collision query.
+    if (m2AnimLaunched) {
+        try { m2AnimFuture.get(); }
+        catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }
+        m2AnimLaunched = false;
+    }
+
+    // Footsteps: age visual prints, then let authored footfall events add new ones.
+    if (footprintRenderer) footprintRenderer->update(deltaTime);
     if (animationController_) animationController_->updateFootsteps(deltaTime);
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
@@ -1543,12 +1565,6 @@ void Renderer::update(float deltaTime) {
         zctx.serverZoneId = getCurrentZoneId();
         zctx.zoneManager = zoneManager.get();
         audioCoordinator_->updateZoneAudio(zctx);
-    }
-
-    // Wait for M2 doodad animation to finish (was launched earlier in parallel with character anim)
-    if (m2AnimLaunched) {
-        try { m2AnimFuture.get(); }
-        catch (const std::exception& e) { LOG_ERROR("M2 animation worker: ", e.what()); }
     }
 
     // Update performance HUD
@@ -1604,6 +1620,8 @@ void Renderer::runDeferredWorldInitStep(float deltaTime) {
         case 5:
             if (questMarkerRenderer && !questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, cachedAssetManager))
                 LOG_WARNING("Quest marker renderer re-init failed (non-fatal)");
+            if (footprintRenderer && !footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, cachedAssetManager))
+                LOG_WARNING("Footprint renderer re-init failed (non-fatal)");
             break;
         default:
             deferredWorldInitPending_ = false;
@@ -1828,6 +1846,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (swimEffects && camera) swimEffects->render(cmd, perFrameSet);
             if (mountDust && camera) mountDust->render(cmd, perFrameSet);
             if (chargeEffect && camera) chargeEffect->render(cmd, perFrameSet);
+            if (footprintRenderer && camera) footprintRenderer->render(cmd, perFrameSet, *camera);
             if (questMarkerRenderer && camera) questMarkerRenderer->render(cmd, perFrameSet, *camera);
 
             if (overlaySystem_ && waterRenderer && camera) {
@@ -2005,6 +2024,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (swimEffects && camera) swimEffects->render(currentCmd, perFrameSet);
         if (mountDust && camera) mountDust->render(currentCmd, perFrameSet);
         if (chargeEffect && camera) chargeEffect->render(currentCmd, perFrameSet);
+        if (footprintRenderer && camera) footprintRenderer->render(currentCmd, perFrameSet, *camera);
         if (questMarkerRenderer && camera) questMarkerRenderer->render(currentCmd, perFrameSet, *camera);
     }
 
@@ -2296,6 +2316,10 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
                 if (!questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
                     LOG_WARNING("Quest marker renderer initialization failed (non-fatal)");
             }
+            if (footprintRenderer) {
+                if (!footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, assetManager))
+                    LOG_WARNING("Footprint renderer initialization failed (non-fatal)");
+            }
 
             if (envFlagEnabled("WOWEE_PREWARM_ZONE_MUSIC", false)) {
                 if (zoneManager) {
@@ -2510,6 +2534,10 @@ bool Renderer::loadTerrainArea(const std::string& mapName, int centerX, int cent
             if (!questMarkerRenderer->initialize(vkCtx, perFrameSetLayout, cachedAssetManager))
                 LOG_WARNING("Quest marker renderer re-init failed (non-fatal)");
         }
+        if (footprintRenderer && cachedAssetManager) {
+            if (!footprintRenderer->initialize(this, vkCtx, perFrameSetLayout, cachedAssetManager))
+                LOG_WARNING("Footprint renderer re-init failed (non-fatal)");
+        }
     } else {
         deferredWorldInitPending_ = true;
         deferredWorldInitStage_ = 0;
@@ -2591,21 +2619,14 @@ glm::mat4 Renderer::computeLightSpaceMatrix() {
         sunDir = glm::normalize(sunDir);
     }
 
-    // Lighting transitions are deliberately smoothed every frame. Feeding that
-    // continuously rotating direction straight into the shadow camera rotates
-    // the entire shadow texel grid and makes otherwise stationary shadows
-    // shimmer. Hold the projection direction until the lighting has moved by a
-    // visible amount; diffuse lighting can continue to transition smoothly.
-    constexpr float kShadowDirectionUpdateCos = 0.9999619f; // cos(0.5 degrees)
-    if (!shadowLightDirectionInitialized_ ||
-        glm::dot(shadowLightDirection_, sunDir) < kShadowDirectionUpdateCos) {
-        shadowLightDirection_ = sunDir;
-        shadowLightDirectionInitialized_ = true;
-    }
-    sunDir = shadowLightDirection_;
+    // LightingManager already smooths the directional light every frame. Keep
+    // that continuous direction for the shadow projection as well. Quantizing
+    // it into 0.5-degree steps made the entire 600-yard shadow footprint rotate
+    // in a single frame, producing a wide light-switch flicker whenever the
+    // threshold was crossed. Translation remains stabilized by texel snapping.
 
-    // Shadow center follows the player directly; texel snapping below keeps
-    // translation aligned with the now-stable projection axes.
+    // Shadow center follows the player directly; texel snapping below prevents
+    // camera translation from shimmering the projection.
     glm::vec3 desiredCenter = characterPosition;
     if (!shadowCenterInitialized) {
         if (glm::dot(desiredCenter, desiredCenter) < 1.0f) {

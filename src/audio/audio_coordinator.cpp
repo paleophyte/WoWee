@@ -100,6 +100,24 @@ void AudioCoordinator::playZoneMusic(const std::string& music) {
     }
 }
 
+void AudioCoordinator::onOriginalSoundtrackDisabled(game::ZoneManager* zm) {
+    if (!zm || !musicManager_) return;
+    if (!musicManager_->isCurrentTrackFile()) return;
+    if (!musicManager_->isPlaying() && !musicManager_->isLoading()) return;
+    // Only act in-world with a known zone; the login screen intentionally
+    // plays a file track and is not part of the zone rotation this setting
+    // controls.
+    if (currentZoneId_ == 0) return;
+
+    std::string music = zm->getRandomMusic(currentZoneId_);
+    if (!music.empty() && music.rfind("file:", 0) != 0) {
+        playZoneMusic(music);
+        musicSwitchCooldown_ = 6.0f;
+    } else {
+        musicManager_->stopMusic();
+    }
+}
+
 void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
     float deltaTime = ctx.deltaTime;
     if (musicSwitchCooldown_ > 0.0f) {

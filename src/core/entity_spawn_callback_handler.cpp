@@ -73,6 +73,11 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         entitySpawner_.queuePlayerEquipment(guid, displayInfoIds, inventoryTypes);
     });
 
+    gameHandler_.setOtherPlayerMountCallback([this](uint64_t guid, uint32_t mountDisplayId) {
+        if (isLocalPlayerGuid_(guid)) return;
+        entitySpawner_.setRemotePlayerMountDisplayId(guid, mountDisplayId);
+    });
+
     // Creature despawn callback (online mode) - remove creature models
     gameHandler_.setCreatureDespawnCallback([this](uint64_t guid) {
         entitySpawner_.despawnCreature(guid);

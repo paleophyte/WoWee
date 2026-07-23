@@ -59,6 +59,17 @@ struct M2ModelGPU {
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
+
+        struct LightBoneAnchor {
+            uint16_t bone = 0;
+            // Sum of (vertex position * skin weight, skin weight), divided by
+            // sampled vertex count. Transforming and summing these reproduces
+            // the animated center of the skinned glow geometry.
+            glm::vec4 weightedPoint{0.0f};
+        };
+        std::vector<LightBoneAnchor> lightBoneAnchors;
+        uint16_t lightSuspensionBone = UINT16_MAX;
+        glm::vec3 lightSuspensionPoint{0.0f};
     };
 
     ::VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -90,6 +101,7 @@ struct M2ModelGPU {
     bool isBrazierOrFire = false;   // Brazier / campfire / bonfire model
     bool isGroundFire = false;      // Ground fire whose halo follows its lowest flame emitter
     bool isTorch = false;           // Wall-mounted or standing torch
+    bool isForge = false;           // Smithy forge (contained fire, lights its surroundings)
     AmbientEmitterType ambientEmitterType = AmbientEmitterType::None;
 
     // Collision mesh with spatial grid (from M2 bounding geometry)
@@ -134,6 +146,8 @@ struct M2ModelGPU {
     bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
     bool isSkyBird = false;         // Flying bird/bat doodad — hide until animation range
+    bool isLightBeam = false;       // Lighthouse/light-ray beam — distant bones must keep updating
+    bool isTransportDoodad = false; // Animated ship sail/paddle child
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
@@ -221,8 +235,11 @@ struct M2Instance {
     bool cachedIsInvisibleTrap = false;
     bool cachedIsInstancePortal = false;
     bool cachedIsSkyBird = false;
+    bool cachedIsLightBeam = false;
+    bool cachedIsTransportDoodad = false;
     bool cachedIsValid = false;
-    bool skipCollision = false;    // WMO interior doodads — skip player wall collision
+    bool skipCollision = false;    // Fully non-collidable visual/effect instance
+    bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
     float cachedBoundRadius = 0.0f;
     glm::vec3 cachedCullCenter{0.0f};              // transformed visual-bounds center
     float cachedVisualRadius = 0.0f;               // transformed visual-bounds half diagonal
@@ -233,6 +250,23 @@ struct M2Instance {
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
+
+    // Result of the most recent GPU cull dispatch that actually covered this
+    // instance, matched back by instance ID (never by array index — see
+    // cullSubmittedIds_).  Defaults to visible so an instance created after the
+    // in-flight dispatch draws immediately instead of waiting ~2 frames for its
+    // first cull result.
+    uint8_t lastCullVisible = 1;
+    // Consecutive frames this instance has been culled (capped at 3), used for
+    // the HiZ `previouslyVisible` hysteresis.  Defaults to 2 ("not recently
+    // visible") so a freshly spawned instance skips the HiZ test rather than
+    // being judged against depth data that never contained it.
+    uint8_t hizPrevCulledFrames = 2;
+    // Server game object (mailbox, chest, node, door): exempt from the adaptive
+    // ambient-doodad distance, which collapses to ~200 units in a city and hid
+    // interactable objects long before the server stopped sending them.
+    // Set by the spawner; see M2_GAME_OBJECT_MIN_RENDER_DISTANCE.
+    bool isGameObject = false;
 
     void recomputeCachedCullFactors();
 
@@ -381,14 +415,35 @@ public:
     /// Check if a model instance has a specific animation ID in its sequence table.
     bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
     float getInstanceAnimDuration(uint32_t instanceId) const;
+    /// World-space visual bounding sphere of an instance (center + radius),
+    /// used for cursor picking and selection circles. Returns false for an
+    /// unknown instance or a degenerate (zero-radius) model.
+    bool getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const;
+    /// True while the instance is still live in the renderer. Owners that cache
+    /// instance IDs (game objects, transports) use this to notice an instance
+    /// that was dropped underneath them — e.g. by a renderer-wide clear — and
+    /// respawn it instead of silently addressing a dead handle forever.
+    bool hasInstance(uint32_t instanceId) const {
+        return instanceIndexById.find(instanceId) != instanceIndexById.end();
+    }
     void removeInstance(uint32_t instanceId);
     void removeInstances(const std::vector<uint32_t>& instanceIds);
+    /// Mark an instance as a server game object so the adaptive doodad render
+    /// distance can't cull it while the server still considers it visible.
+    void setInstanceIsGameObject(uint32_t instanceId, bool isGameObject);
     void setSkipCollision(uint32_t instanceId, bool skip);
+    void setSkipWallCollision(uint32_t instanceId, bool skip);
     void clear();
     /** Drop all instances but keep models in GPU memory. Cheap path for the
      *  editor's rebuild loop where the same model is re-instanced repeatedly. */
     void clearInstances();
     void cleanupUnusedModels();
+    /// Keep a model resident even while it has no instances. Game object models
+    /// are a small, bounded set (one per display ID actually encountered) that
+    /// goes instance-free every time the player leaves an area and comes back —
+    /// exactly the reap/reload churn seen in the field. Pinning them keeps that
+    /// cycle out of the picture entirely; ambient doodads still get reaped.
+    void setModelPinned(uint32_t modelId, bool pinned);
     /** Return and clear the model IDs evicted by cleanupUnusedModels() since the
      *  last call. Lets callers that track uploaded models drop stale entries. */
     std::vector<uint32_t> drainReapedModelIds();
@@ -566,11 +621,19 @@ private:
     // as the depth buffer the HiZ pyramid was built from.
     glm::mat4 prevVP_{1.0f};
 
-    // Per-instance visibility from the previous frame.  Used to set the
-    // `previouslyVisible` flag (bit 3) on each CullInstance so the shader
-    // skips the HiZ test for objects that weren't rendered last frame
-    // (their depth data is unreliable).
-    std::vector<uint8_t> prevFrameVisible_;
+    // Instance IDs, in dispatch order, for the cull results a frame slot holds.
+    //
+    // The visibility SSBO is read back one full slot cycle after it is written:
+    // dispatchCullCompute() records a dispatch into this frame's command buffer,
+    // and render() reads the mapped output of the dispatch recorded on the SAME
+    // slot ~2 frames earlier.  Array indices are not stable across that gap —
+    // createInstance() appends and removeInstance() swap-removes, so slot i can
+    // easily describe a different object by the time it is read.  Recording the
+    // IDs lets render() match each result back to the instance it was computed
+    // for.  cullSubmittedIds_ is the dispatch just recorded (results not ready);
+    // cullReadableIds_ is the previous one, matching the mapped data now.
+    std::vector<uint32_t> cullSubmittedIds_[2];
+    std::vector<uint32_t> cullReadableIds_[2];
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     static constexpr size_t MAX_RIBBON_VERTS = 2048;  // 9 floats each
@@ -595,6 +658,7 @@ private:
     // Grace period for model cleanup: track when a model first became instanceless.
     // Models are only evicted after 60 seconds with no instances.
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> modelUnusedSince_;
+    std::unordered_set<uint32_t> pinnedModelIds_;
     // Model IDs evicted by cleanupUnusedModels() since the last drain. Owners that
     // cache "already uploaded" model IDs (e.g. TerrainManager) reconcile against
     // this so a reaped model is re-loaded instead of skipped as a stale hit.

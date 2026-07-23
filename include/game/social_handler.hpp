@@ -206,6 +206,10 @@ public:
     void clearMainTank();
     void clearMainAssist();
     void setRaidMark(uint64_t guid, uint8_t icon);
+    // Apply a mark without the server round-trip, used when the player has no
+    // group (the server would drop the request). Grouped marking stays
+    // server-authoritative so every member sees the same icons.
+    void setRaidMarkLocally(uint64_t guid, uint8_t icon);
     void requestRaidInfo();
 
     // Instance lockouts
@@ -324,6 +328,9 @@ private:
     void handleGuildRoster(network::Packet& packet);
     void handleGuildQueryResponse(network::Packet& packet);
     void handleGuildEvent(network::Packet& packet);
+    // Updates a roster member's cached online flag; returns true only on a real change so
+    // the login-time SIGNED_ON flood (state unchanged) is suppressed from guild chat.
+    bool guildMemberOnlineTransition(const std::string& name, bool nowOnline);
     void handleGuildInvite(network::Packet& packet);
     void handleGuildCommandResult(network::Packet& packet);
     void handlePetitionShowlist(network::Packet& packet);

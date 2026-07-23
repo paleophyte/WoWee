@@ -353,6 +353,17 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     }
     playerInstances_[guid] = instanceId;
 
+    // The mount field may have arrived before this render instance, or the
+    // player may be re-created without another values update. Reconcile from
+    // retained entity state so already-mounted players are never left on foot.
+    if (gameHandler_) {
+        auto entity = gameHandler_->getEntityManager().getEntity(guid);
+        auto unit = std::dynamic_pointer_cast<game::Unit>(entity);
+        if (unit && unit->getMountDisplayId() != 0) {
+            setRemotePlayerMountDisplayId(guid, unit->getMountDisplayId());
+        }
+    }
+
     OnlinePlayerAppearanceState st;
     st.instanceId = instanceId;
     st.modelId = modelId;
@@ -977,6 +988,8 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
 
 void EntitySpawner::despawnPlayer(uint64_t guid) {
     if (!renderer_ || !renderer_->getCharacterRenderer()) return;
+    pendingRemotePlayerMounts_.erase(guid);
+    removeRemotePlayerMount(guid);
     auto it = playerInstances_.find(guid);
     if (it == playerInstances_.end()) return;
     auto* charRenderer = renderer_->getCharacterRenderer();
@@ -1012,6 +1025,30 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
              " pos=(", x, ", ", y, ", ", z, ")");
 
     auto goIt = gameObjectInstances_.find(guid);
+    if (goIt != gameObjectInstances_.end()) {
+        // A tracked instance ID is only meaningful while the renderer still holds
+        // it. Renderer-wide clears (map change, device reset) drop instances
+        // without going through despawnGameObject(), which used to leave this map
+        // pointing at a dead handle — every later server CREATE for that GUID then
+        // took the position-update path below and the object stayed invisible for
+        // the rest of the session. Treat a dead handle as "not spawned".
+        bool instanceAlive = false;
+        if (renderer_) {
+            if (goIt->second.isWmo) {
+                auto* wr = renderer_->getWMORenderer();
+                instanceAlive = wr && wr->hasInstance(goIt->second.instanceId);
+            } else {
+                auto* mr = renderer_->getM2Renderer();
+                instanceAlive = mr && mr->hasInstance(goIt->second.instanceId);
+            }
+        }
+        if (!instanceAlive) {
+            LOG_WARNING("GO render instance vanished — respawning: guid=0x", std::hex, guid, std::dec,
+                        " displayId=", displayId, " instanceId=", goIt->second.instanceId);
+            gameObjectInstances_.erase(goIt);
+            goIt = gameObjectInstances_.end();
+        }
+    }
     if (goIt != gameObjectInstances_.end()) {
         if (gameHandler_ && gameHandler_->isTransportGuid(guid)) {
             if (auto* transportManager = gameHandler_->getTransportManager()) {
@@ -1309,6 +1346,11 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
                 return;
             }
 
+            // Keep game object models resident across the away-and-back cycle.
+            // Leaving town drops every instance of them, and the 60s reaper then
+            // evicted the model — the log showed PostBoxHuman.m2 (the mailbox)
+            // going through exactly that reap/reload churn on every return trip.
+            m2Renderer->setModelPinned(modelId, true);
             gameObjectDisplayIdModelCache_[displayId] = modelId;
         }
 
@@ -1318,6 +1360,12 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             LOG_WARNING("Failed to create gameobject instance for guid 0x", std::hex, guid, std::dec);
             return;
         }
+
+        // Server game objects are gameplay props, not scenery: exempt them from the
+        // adaptive doodad render distance, which drops to ~200 units in a city and
+        // was hiding mailboxes/chests well inside the range the server still
+        // considers them visible.
+        m2Renderer->setInstanceIsGameObject(instanceId, true);
 
         // Deeprun Tram cars: riding never used real mesh collision to begin with (Z is
         // fully code-locked to the transport's simulated position while boarded, not

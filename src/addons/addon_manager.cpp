@@ -1,7 +1,9 @@
 #include "addons/addon_manager.hpp"
 #include "core/logger.hpp"
+#include "core/config_paths.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -53,17 +55,75 @@ void AddonManager::scanAddons(const std::string& addonsPath) {
     }
 
     LOG_INFO("AddonManager: scanned ", addons_.size(), " addons");
+    // Load persisted enable/disable choices now that we know which addons exist.
+    loadEnabledState();
 }
 
 void AddonManager::loadAllAddons() {
-    luaEngine_.setAddonList(addons_);
-    int loaded = 0, failed = 0;
+    // Only hand the Lua VM the addons that are actually enabled, so disabled ones
+    // don't appear via GetNumAddOns/IsAddOnLoaded either.
+    std::vector<TocFile> enabled;
+    enabled.reserve(addons_.size());
     for (const auto& addon : addons_) {
+        if (isAddonEnabled(addon.addonName)) enabled.push_back(addon);
+    }
+    luaEngine_.setAddonList(enabled);
+    int loaded = 0, failed = 0, skipped = 0;
+    for (const auto& addon : addons_) {
+        if (!isAddonEnabled(addon.addonName)) {
+            LOG_INFO("AddonManager: skipping disabled addon: ", addon.addonName);
+            skipped++;
+            continue;
+        }
         if (loadAddon(addon)) loaded++;
         else failed++;
     }
+    addonsLoaded_ = true;
     LOG_INFO("AddonManager: loaded ", loaded, " addons",
-             (failed > 0 ? (", " + std::to_string(failed) + " failed") : ""));
+             (failed > 0 ? (", " + std::to_string(failed) + " failed") : ""),
+             (skipped > 0 ? (", " + std::to_string(skipped) + " disabled") : ""));
+}
+
+// ---- Per-addon enable/disable (persisted) ----------------------------------
+
+bool AddonManager::isAddonEnabled(const std::string& addonName) const {
+    auto it = addonEnabled_.find(addonName);
+    return (it == addonEnabled_.end()) ? true : it->second;  // default: enabled
+}
+
+void AddonManager::setAddonEnabled(const std::string& addonName, bool enabled) {
+    addonEnabled_[addonName] = enabled;
+    saveEnabledState();
+}
+
+std::string AddonManager::enabledStatePath() {
+    return core::getConfigRoot() + "/addons.cfg";
+}
+
+void AddonManager::loadEnabledState() {
+    std::ifstream in(enabledStatePath());
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string name = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        if (!name.empty()) addonEnabled_[name] = (val == "1");
+    }
+}
+
+void AddonManager::saveEnabledState() const {
+    std::ofstream out(enabledStatePath(), std::ios::trunc);
+    if (!out) {
+        LOG_WARNING("AddonManager: could not write ", enabledStatePath());
+        return;
+    }
+    // Persist an explicit line only for addons we actually know about, so stale
+    // entries for removed addons don't accumulate.
+    for (const auto& addon : addons_) {
+        out << addon.addonName << "=" << (isAddonEnabled(addon.addonName) ? "1" : "0") << "\n";
+    }
 }
 
 std::string AddonManager::getSavedVariablesPath(const TocFile& addon) const {

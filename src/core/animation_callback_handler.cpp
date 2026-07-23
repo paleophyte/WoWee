@@ -386,7 +386,22 @@ void AnimationCallbackHandler::setupCallbacks() {
         }
         emoteInstanceId = entitySpawner_.getPlayerInstanceId(guid);
         if (emoteInstanceId != 0) {
-            cr->playAnimation(emoteInstanceId, emoteAnim, isState);
+            if (emoteAnim == 0) {
+                cr->playAnimation(emoteInstanceId, rendering::anim::STAND, true);
+            } else if (isState) {
+                // Emotes.dbc state entries commonly point at the introductory
+                // one-shot (dance, laugh, eat, etc.). Other players need the
+                // same looping STATE_* resolution as NPCs or they visibly
+                // repeat the intro instead of holding the real emote pose.
+                const uint32_t stateAnim =
+                    rendering::EmoteRegistry::instance().getStateVariant(emoteAnim);
+                const uint32_t persistentAnim =
+                    stateAnim != 0 && cr->hasAnimation(emoteInstanceId, stateAnim)
+                        ? stateAnim : emoteAnim;
+                cr->playAnimation(emoteInstanceId, persistentAnim, true);
+            } else {
+                cr->playAnimation(emoteInstanceId, emoteAnim, false);
+            }
         }
     });
 

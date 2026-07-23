@@ -50,6 +50,7 @@ class Minimap;
 namespace world_map { class WorldMapFacade; }
 using WorldMap = world_map::WorldMapFacade;
 class QuestMarkerRenderer;
+class FootprintRenderer;
 class CharacterPreview;
 class AmdFsr3Runtime;
 class SpellVisualSystem;
@@ -141,6 +142,7 @@ public:
     Minimap* getMinimap() const { return minimap.get(); }
     WorldMap* getWorldMap() const { return worldMap.get(); }
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
+    FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
     SkySystem* getSkySystem() const { return skySystem.get(); }
     const std::string& getCurrentZoneName() const;
     uint32_t getCurrentZoneId() const;
@@ -223,6 +225,7 @@ private:
     std::unique_ptr<Minimap> minimap;
     std::unique_ptr<WorldMap> worldMap;
     std::unique_ptr<QuestMarkerRenderer> questMarkerRenderer;
+    std::unique_ptr<FootprintRenderer> footprintRenderer;
     audio::AudioCoordinator* audioCoordinator_ = nullptr;  // Owned by Application
     std::unique_ptr<AnimationController> animationController_;  // §4.2
     std::unique_ptr<game::ZoneManager> zoneManager;
@@ -241,9 +244,7 @@ private:
     VkImageLayout shadowDepthLayout_[2] = {};
     glm::mat4 lightSpaceMatrix = glm::mat4(1.0f);
     glm::vec3 shadowCenter = glm::vec3(0.0f);
-    glm::vec3 shadowLightDirection_ = glm::vec3(0.0f);
     bool shadowCenterInitialized = false;
-    bool shadowLightDirectionInitialized_ = false;
     bool shadowsEnabled = true;
     float shadowDistance_ = 300.0f;  // Shadow frustum half-extent (default: 300 units)
     float viewDistance_ = 1200.0f;

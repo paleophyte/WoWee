@@ -1689,8 +1689,37 @@ void SocialHandler::clearMainAssist() {
     owner_.addSystemChatMessage("Main assist cleared.");
 }
 
+void SocialHandler::setRaidMarkLocally(uint64_t guid, uint8_t icon) {
+    // Mirrors what the server does for a group: an icon is unique, and a unit
+    // carries at most one mark, so placing one clears any previous holder.
+    if (icon == 0xFF) {
+        for (uint32_t i = 0; i < kRaidMarkCount; ++i) {
+            if (raidTargetGuids_[i] == guid) raidTargetGuids_[i] = 0;
+        }
+    } else if (icon < kRaidMarkCount) {
+        for (uint32_t i = 0; i < kRaidMarkCount; ++i) {
+            if (raidTargetGuids_[i] == guid) raidTargetGuids_[i] = 0;
+        }
+        raidTargetGuids_[icon] = guid;
+    } else {
+        return;
+    }
+    owner_.fireAddonEvent("RAID_TARGET_UPDATE", {});
+}
+
 void SocialHandler::setRaidMark(uint64_t guid, uint8_t icon) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
+    // Raid marks are group state on the server: it drops MSG_RAID_TARGET_UPDATE
+    // from an ungrouped player and broadcasts nothing back, so a solo mark used
+    // to do nothing at all. Apply it locally instead — a deliberate divergence
+    // from Blizzlike behaviour, since a solo player marking their own targets
+    // harms nobody and the alternative is a feature that cannot be used, or
+    // tested, without a second player. Joining a group later is safe: the
+    // server's full list is authoritative and replaces these marks wholesale.
+    if (!isInGroup()) {
+        setRaidMarkLocally(guid, icon);
+        return;
+    }
     if (icon == 0xFF) {
         for (int i = 0; i < 8; ++i) {
             if (raidTargetGuids_[i] == guid) {
@@ -1991,6 +2020,20 @@ void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
     }
 }
 
+// Returns true only when the member's cached online state actually changes (and updates
+// it), so callers announce genuine online/offline transitions and silently drop the
+// redundant SIGNED_ON flood the server emits at login for already-online members.
+bool SocialHandler::guildMemberOnlineTransition(const std::string& name, bool nowOnline) {
+    for (auto& m : guildRoster_.members) {
+        if (m.name == name) {
+            if (m.online == nowOnline) return false;
+            m.online = nowOnline;
+            return true;
+        }
+    }
+    return true;  // not in the cached roster yet — announce rather than swallow
+}
+
 void SocialHandler::handleGuildEvent(network::Packet& packet) {
     GuildEventData data;
     if (!GuildEventParser::parse(packet, data)) return;
@@ -2035,10 +2078,15 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             msg = "Guild tabard changed.";
             break;
         case GuildEvent::SIGNED_ON:
-            if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has come online.";
+            // Only announce a real offline→online transition. On login the server floods
+            // SIGNED_ON for members the roster already lists as online; suppressing those
+            // (state unchanged) matches the real client and stops the guild-chat spam.
+            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true))
+                msg = "[Guild] " + data.strings[0] + " has come online.";
             break;
         case GuildEvent::SIGNED_OFF:
-            if (data.numStrings >= 1) msg = "[Guild] " + data.strings[0] + " has gone offline.";
+            if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false))
+                msg = "[Guild] " + data.strings[0] + " has gone offline.";
             break;
         case GuildEvent::GUILD_BANK_BAG_SLOTS_CHANGED:
             msg = "Guild bank bag slots changed.";
@@ -3028,17 +3076,49 @@ void SocialHandler::handleInitializeFactions(network::Packet& packet) {
 }
 
 void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
-    if (!packet.hasRemaining(5)) return;
-    /*uint8_t showVisual =*/ packet.readUInt8();
+    // Expansion wire layouts differ before the shared count + entries payload:
+    //   Classic: count
+    //   TBC:     RAF bonus (float), count
+    //   WotLK:   RAF bonus (float), showVisual (uint8), count
+    // Treating WotLK's first float byte as showVisual shifted the entire packet,
+    // producing bogus counts, faction names, standings, and chat messages.
+    if (isActiveExpansion("wotlk")) {
+        if (!packet.hasRemaining(9)) return;
+        /*float rafBonus =*/ packet.readFloat();
+        /*uint8_t showVisual =*/ packet.readUInt8();
+    } else if (isActiveExpansion("tbc")) {
+        if (!packet.hasRemaining(8)) return;
+        /*float rafBonus =*/ packet.readFloat();
+    } else if (!packet.hasRemaining(4)) {
+        return;
+    }
+
     uint32_t count = packet.readUInt32();
     count = std::min(count, 128u);
     owner_.loadFactionNameCache();
     for (uint32_t i = 0; i < count && packet.hasRemaining(8); ++i) {
-        uint32_t factionId = packet.readUInt32();
+        // The packet carries Faction.dbc ReputationListID, not the faction ID.
+        uint32_t repListId = packet.readUInt32();
         int32_t  standing  = static_cast<int32_t>(packet.readUInt32());
+
+        uint32_t factionId = owner_.getFactionIdByRepListId(repListId);
+        if (factionId == 0) {
+            LOG_WARNING("SMSG_SET_FACTION_STANDING: unknown repListId=", repListId,
+                        " standing=", standing);
+            continue;
+        }
+
         int32_t  oldStanding = 0;
-        auto it = owner_.factionStandingsRef().find(factionId);
-        if (it != owner_.factionStandingsRef().end()) oldStanding = it->second;
+        // SMSG_INITIALIZE_FACTIONS is indexed by ReputationListID and supplies the
+        // standing before incremental updates. Without using it, the first message
+        // reports the character's entire accumulated reputation as the gained amount.
+        if (repListId < owner_.initialFactionsRef().size()) {
+            oldStanding = owner_.initialFactionsRef()[repListId].standing;
+            owner_.initialFactionsRef()[repListId].standing = standing;
+        } else {
+            auto it = owner_.factionStandingsRef().find(factionId);
+            if (it != owner_.factionStandingsRef().end()) oldStanding = it->second;
+        }
         owner_.factionStandingsRef()[factionId] = standing;
         int32_t delta = standing - oldStanding;
         if (delta != 0) {

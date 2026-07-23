@@ -214,6 +214,12 @@ private:
     bool mouseButtonDown = false;
     bool leftMouseDown = false;
     bool rightMouseDown = false;
+    // Camera rotation only begins once the mouse moves past a small dead-zone while a
+    // button is held. This keeps a click (to select an NPC) from nudging the view on
+    // tiny hand jitter — which made NPCs appear to shift out from under the cursor.
+    bool rotateArmed_ = false;
+    float dragPixelsSincePress_ = 0.0f;
+    static constexpr float kRotateDeadzonePixels = 5.0f;
 
     // Third-person orbit camera (WoW-style)
     bool thirdPerson = false;

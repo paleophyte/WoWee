@@ -7,6 +7,7 @@
 #include "core/application.hpp"
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
+#include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <cstdlib>
@@ -44,6 +45,10 @@ static uint64_t hashEquipment(const std::vector<game::EquipmentItem>& eq) {
 static ImVec4 classColor(uint8_t classId) { return ui::getClassColor(classId); }
 
 void CharacterScreen::render(game::GameHandler& gameHandler) {
+    // AddOns manager is its own top-level window; render it first so it works
+    // regardless of which character-selection layout path runs below.
+    renderAddonsWindow();
+
     ImGuiViewport* vp = ImGui::GetMainViewport();
     const SelectionScreenLayout layout = makeSelectionScreenLayout(*vp);
 
@@ -106,6 +111,8 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Create Character", ImVec2(160, 36))) { if (onCreateCharacter) onCreateCharacter(); }
+        ImGui::SameLine();
+        if (ImGui::Button("AddOns", ImVec2(120, 36))) { showAddonsWindow_ = true; }
         ImGui::End();
         return;
     }
@@ -428,6 +435,8 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
     if (ImGui::Button("Create Character", layout.button(160.0f))) {
         if (onCreateCharacter) onCreateCharacter();
     }
+    ImGui::SameLine(0.0f, layout.gap());
+    if (ImGui::Button("AddOns", layout.button())) { showAddonsWindow_ = true; }
 
     const ImVec2 primarySize = layout.primaryButton(180.0f);
     const ImVec2 deleteSize = layout.button(90.0f);
@@ -527,6 +536,73 @@ void CharacterScreen::render(game::GameHandler& gameHandler) {
 void CharacterScreen::setStatus(const std::string& message, bool isError) {
     statusMessage = message;
     statusIsError = isError;
+}
+
+void CharacterScreen::renderAddonsWindow() {
+    if (!showAddonsWindow_) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->GetCenter().y),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 400.0f), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("AddOns", &showAddonsWindow_, ImGuiWindowFlags_NoCollapse)) {
+        auto* am = services_.addonManager;
+        if (!am) {
+            ImGui::TextDisabled("Addon system unavailable.");
+            ImGui::End();
+            return;
+        }
+
+        const auto& addons = am->getAddons();
+        ImGui::Text("Installed AddOns (%d)", static_cast<int>(addons.size()));
+        ImGui::TextDisabled("Enabled addons load when you enter the world (or /reload).");
+        ImGui::Separator();
+
+        ImGui::BeginChild("AddonList", ImVec2(0.0f, -1.0f), true);
+        if (addons.empty()) {
+            ImGui::TextDisabled("No addons installed.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Place addon folders in your data path under "
+                               "interface/AddOns/, then restart the client.");
+        }
+        for (const auto& a : addons) {
+            ImGui::PushID(a.addonName.c_str());
+            bool enabled = am->isAddonEnabled(a.addonName);
+            if (ImGui::Checkbox("##enabled", &enabled)) {
+                am->setAddonEnabled(a.addonName, enabled);
+            }
+            ImGui::SameLine();
+
+            const ImVec4 titleCol = enabled ? ImVec4(1.0f, 0.95f, 0.75f, 1.0f)
+                                            : ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+            ImGui::TextColored(titleCol, "%s", a.getTitle().c_str());
+
+            auto verIt = a.directives.find("Version");
+            if (verIt != a.directives.end() && !verIt->second.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("v%s", verIt->second.c_str());
+            }
+            auto authIt = a.directives.find("Author");
+            if (authIt != a.directives.end() && !authIt->second.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("by %s", authIt->second.c_str());
+            }
+
+            auto notesIt = a.directives.find("Notes");
+            if (notesIt != a.directives.end() && !notesIt->second.empty()) {
+                ImGui::Indent(26.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                ImGui::TextWrapped("%s", notesIt->second.c_str());
+                ImGui::PopStyleColor();
+                ImGui::Unindent(26.0f);
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
 }
 
 void CharacterScreen::selectCharacterByName(const std::string& name) {

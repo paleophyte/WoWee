@@ -389,6 +389,19 @@ void ChatHandler::sendChatMessage(ChatType type, const std::string& message, con
     addLocalChatMessage(echo);
 }
 
+void ChatHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
+    if (owner_.getState() != WorldState::IN_WORLD || message.empty()) return;
+
+    auto packet = MessageChatPacket::build(type, ChatLanguage::ADDON, message, target);
+    if (chatPacketDiagEnabled()) {
+        const auto& raw = packet.getData();
+        LOG_WARNING("CHAT PACKET DIAG TX CMSG_MESSAGECHAT addon type=", getChatTypeString(type),
+                    " target='", target, "' bytes=", raw.size(), " data=[",
+                    raw.empty() ? std::string{} : core::toHexString(raw.data(), raw.size(), true), "]");
+    }
+    owner_.getSocket()->send(packet);
+}
+
 void ChatHandler::handleMessageChat(network::Packet& packet) {
     LOG_DEBUG("Handling SMSG_MESSAGECHAT");
     if (chatPacketDiagEnabled()) {
@@ -466,6 +479,43 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     if (data.message.empty()) {
+        return;
+    }
+
+    if (data.type == ChatType::ACHIEVEMENT ||
+        data.type == ChatType::GUILD_ACHIEVEMENT) {
+        auto replaceAll = [](std::string& text, const std::string& marker,
+                             const std::string& replacement) {
+            size_t pos = 0;
+            while ((pos = text.find(marker, pos)) != std::string::npos) {
+                text.replace(pos, marker.size(), replacement);
+                pos += replacement.size();
+            }
+        };
+
+        if (data.achievementId != 0) {
+            owner_.ensureAchievementNamesLoaded();
+            std::string achievementName = owner_.getAchievementName(data.achievementId);
+            if (achievementName.empty()) {
+                achievementName = "Achievement #" + std::to_string(data.achievementId);
+            }
+            std::ostringstream link;
+            link << "|cffffff00|Hachievement:" << data.achievementId
+                 << ":0:0:0:0:0:0:0:0:0|h[" << achievementName << "]|h|r";
+            replaceAll(data.message, "$a", link.str());
+        }
+    }
+
+    // Addon messages use the same chat types as player messages, but belong to
+    // CHAT_MSG_ADDON and must never be inserted into visible chat history.
+    std::string addonPrefix;
+    std::string addonPayload;
+    if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
+        if (owner_.addonEventCallbackRef() && !addonPrefix.empty()) {
+            owner_.addonEventCallbackRef()(
+                "CHAT_MSG_ADDON",
+                {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});
+        }
         return;
     }
 
@@ -625,24 +675,6 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
 
     LOG_DEBUG("[", getChatTypeString(data.type), "] ", channelInfo, senderInfo, ": ", data.message);
 
-    // Detect addon messages
-    if (owner_.addonEventCallbackRef() &&
-        data.type != ChatType::SAY && data.type != ChatType::YELL &&
-        data.type != ChatType::EMOTE && data.type != ChatType::TEXT_EMOTE &&
-        data.type != ChatType::MONSTER_SAY && data.type != ChatType::MONSTER_YELL) {
-        auto tabPos = data.message.find('\t');
-        if (tabPos != std::string::npos && tabPos > 0 && tabPos <= 16 &&
-            tabPos < data.message.size() - 1) {
-            std::string prefix = data.message.substr(0, tabPos);
-            if (prefix.find(' ') == std::string::npos) {
-                std::string body = data.message.substr(tabPos + 1);
-                std::string channel = getChatTypeString(data.type);
-                owner_.addonEventCallbackRef()("CHAT_MSG_ADDON", {prefix, body, channel, data.senderName});
-                return;
-            }
-        }
-    }
-
     // Fire CHAT_MSG_* addon events
     if (owner_.addonChatCallbackRef()) owner_.addonChatCallbackRef()(data);
     if (owner_.addonEventCallbackRef()) {
@@ -695,6 +727,9 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
 
     wowee::core::setCrashNote("SMSG_TEXT_EMOTE: sender lookup");
     std::string senderName = owner_.lookupName(data.senderGuid);
+    // SMSG_TEXT_EMOTE is the narrated chat line. The server sends the actual
+    // visual separately in SMSG_EMOTE; replaying an animation here restarts
+    // one-shots and replaces correctly resolved STATE_* loops such as /dance.
     if (senderName.empty()) {
         const auto& partyData = owner_.getPartyData();
         for (const auto& member : partyData.members) {
@@ -705,21 +740,11 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
         }
     }
 
-    uint32_t animId = 0;
-    if (!headlessModeEnabled()) {
-        wowee::core::setCrashNote("SMSG_TEXT_EMOTE: animation lookup");
-        animId = rendering::AnimationController::getEmoteAnimByDbcId(data.textEmoteId);
-    }
-    if (!headlessModeEnabled() && animId != 0 && owner_.emoteAnimCallbackRef()) {
-        wowee::core::setCrashNote("SMSG_TEXT_EMOTE: animation callback");
-        owner_.emoteAnimCallbackRef()(data.senderGuid, animId, /*isState=*/false);
-    }
-
     if (senderName.empty()) {
         owner_.queryPlayerName(data.senderGuid);
         LOG_DEBUG("Deferred chat text for unresolved SMSG_TEXT_EMOTE sender=0x",
                   std::hex, data.senderGuid, std::dec,
-                  " emoteId=", data.textEmoteId, " anim=", animId);
+                  " emoteId=", data.textEmoteId);
         return;
     }
 
@@ -748,8 +773,7 @@ void ChatHandler::handleTextEmote(network::Packet& packet) {
     wowee::core::setCrashNote("SMSG_TEXT_EMOTE: add chat");
     addLocalChatMessage(chatMsg);
 
-    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ", anim=", animId, ")");
-    wowee::core::setCrashNote("SMSG_TEXT_EMOTE: done");
+    LOG_INFO("TEXT_EMOTE from ", senderName, " (emoteId=", data.textEmoteId, ")");
 }
 
 void ChatHandler::joinChannel(const std::string& channelName, const std::string& password) {

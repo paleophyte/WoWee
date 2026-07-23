@@ -53,6 +53,8 @@ void CombatHandler::registerOpcodes(DispatchTable& table) {
         autoAttacking_ = false;
         autoAttackTarget_ = 0;
         autoAttackRequested_ = false;
+        autoAttackRetryPending_ = false;
+        hostileAttackers_.clear();
     };
 
     // ---- Attack/combat delegates ----
@@ -203,11 +205,6 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     if (targetGuid == owner_.getPlayerGuid()) return;
     if (targetGuid == 0) return;
 
-    // Dismount when entering combat
-    if (owner_.isMounted()) {
-        owner_.dismount();
-    }
-
     // Client-side range gate to avoid starting "swing forever" loops when
     // target is already clearly out of range.
     if (auto target = owner_.getEntityManager().getEntity(targetGuid)) {
@@ -229,6 +226,13 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
             }
             return;
         }
+    }
+
+    // Only dismount once this is a valid attack attempt. Doing it before the
+    // target/range gate knocked the player off a mount even though no combat
+    // request was sent.
+    if (owner_.isMounted()) {
+        owner_.dismount();
     }
 
     autoAttackRequested_ = true;
@@ -388,6 +392,25 @@ void CombatHandler::autoTargetAttacker(uint64_t attackerGuid) {
 void CombatHandler::handleAttackStart(network::Packet& packet) {
     AttackStartData data;
     if (!AttackStartParser::parse(packet, data)) return;
+
+    // CREEP is a client presentation flag, not an instruction to keep a unit
+    // translucent after it has openly engaged. Some legacy realms do not send
+    // a matching UNIT_FIELD_BYTES_1 update when an NPC breaks stealth, but the
+    // stock client reveals both combatants at ATTACKSTART. Clear the cached
+    // presentation state here so the normal creature visual sync restores full
+    // opacity instead of leaving an invisible monster in melee.
+    auto revealCombatant = [this](uint64_t guid) {
+        auto entity = owner_.getEntityManager().getEntity(guid);
+        if (!entity || !entity->isUnit()) return;
+        auto unit = std::static_pointer_cast<Unit>(entity);
+        if (!unit->hasCreepVisibility()) return;
+        unit->clearCreepVisibility();
+        if (guid == owner_.getPlayerGuid() && owner_.stealthStateCallbackRef()) {
+            owner_.stealthStateCallbackRef()(false);
+        }
+    };
+    revealCombatant(data.attackerGuid);
+    revealCombatant(data.victimGuid);
 
     if (data.attackerGuid == owner_.getPlayerGuid()) {
         autoAttackRequested_ = true;
@@ -1080,22 +1103,18 @@ void CombatHandler::handleResurrectFailed(network::Packet& packet) {
 // Targeting
 // ============================================================
 
-bool CombatHandler::isSelectableUnit(uint64_t guid) const {
-    if (guid == 0) return true; // clearing the target
-    auto entity = owner_.getEntityManager().getEntity(guid);
-    if (!entity) return true; // unknown entity — let the server arbitrate
-    // Only creature corpses are filtered. Players keep ObjectType::PLAYER even when
-    // dead, so their corpses stay targetable for resurrection.
-    if (entity->getType() != ObjectType::UNIT) return true;
-    auto unit = std::dynamic_pointer_cast<Unit>(entity);
-    if (!unit) return true;
-    if (unit->getHealth() > 0) return true; // alive
-
-    // A corpse is only worth selecting while it still has something to take.
-    constexpr uint32_t UNIT_FLAG_SKINNABLE   = 0x04000000;
-    if (unit->getDynamicFlags() & UNIT_DYNFLAG_LOOTABLE) return true;
-    if (unit->getUnitFlags() & UNIT_FLAG_SKINNABLE) return true;
-    return false;
+bool CombatHandler::isSelectableUnit(uint64_t /*guid*/) const {
+    // Everything the player clicks is selectable; the server arbitrates whether a
+    // corpse actually holds loot when we send CMSG_LOOT. We deliberately do NOT
+    // gate dead creature corpses on UNIT_DYNFLAG_LOOTABLE: that bit is computed
+    // per-viewer by the server and the client's cached copy goes stale across a
+    // death/resurrect cycle (you kill something, die in the same fight, and on
+    // return the corpse's loot bit was last evaluated while you were a ghost).
+    // Gating on it left a genuinely lootable corpse permanently unclickable.
+    // Empty, fully-looted corpses are already removed locally by the
+    // lootableCleared -> despawnCreatureLocally path (see
+    // EntityController::onValuesUpdateUnit), so they don't return as click targets.
+    return true;
 }
 
 void CombatHandler::setTarget(uint64_t guid) {

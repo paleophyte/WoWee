@@ -53,7 +53,8 @@ public:
     // Transport attachment
     void setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                 const glm::vec3& localOffset, bool hasLocalOrientation,
-                                float localOrientation);
+                                float localOrientation,
+                                bool offsetNeedsTransportResolution = false);
     void clearTransportAttachment(uint64_t childGuid);
     void updateAttachedTransportChildren(float deltaTime);
 
@@ -70,6 +71,13 @@ public:
     float getServerFlightBackSpeed() const { return serverFlightBackSpeed_; }
     float getServerRunBackSpeed() const { return serverRunBackSpeed_; }
     float getServerTurnRate() const { return serverTurnRate_; }
+
+    // CREATE_OBJECT/LIVING carries the authoritative speed table on login.
+    // Apply it to the same cache used by camera movement and later force-speed
+    // packets so reconnecting while mounted retains the server-provided speed.
+    void applyServerMovementSpeeds(float walk, float run, float runBack,
+                                   float swim, float swimBack, float flight,
+                                   float flightBack, float turn, float pitch);
 
     // Movement flag queries
     bool isPlayerRooted() const {
@@ -140,6 +148,10 @@ public:
         return (knownTaxiMask_[idx / 32] & (1u << (idx % 32))) != 0;
     }
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
+    /// True when the taxi cost map has a route from the current node to dest.
+    bool hasTaxiRouteTo(uint32_t destNodeId) const;
+    /// Node-id hop chain current → dest (inclusive); empty if unreachable.
+    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;
@@ -350,6 +362,8 @@ private:
     uint32_t knownTaxiMask_[12] = {};
     bool taxiMaskInitialized_ = false;
     std::unordered_map<uint32_t, uint32_t> taxiCostMap_;
+    // BFS predecessor per node from buildTaxiCostMap; getTaxiRouteTo walks it.
+    std::unordered_map<uint32_t, uint32_t> taxiPrevMap_;
 
     bool followMoveMoving_ = false;  // whether MSG_MOVE_START_FORWARD has been sent for the current follow
 };

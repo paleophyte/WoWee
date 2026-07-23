@@ -66,6 +66,21 @@ namespace {
         else if (msg.chatTag & 0x01) tagPrefix = "<AFK> ";
         else if (msg.chatTag & 0x02) tagPrefix = "<DND> ";
 
+        if (msg.type == CT::ACHIEVEMENT || msg.type == CT::GUILD_ACHIEVEMENT) {
+            // Achievement packets carry only a sender GUID. Name resolution is
+            // asynchronous, so expand %s here—where resolvedSenderName is current—
+            // rather than permanently baking an early GUID/unknown fallback into
+            // chat history when the packet first arrives.
+            std::string rendered = processedMessage;
+            const std::string earner = resolvedSenderName.empty()
+                ? "Someone" : resolvedSenderName;
+            size_t pos = 0;
+            while ((pos = rendered.find("%s", pos)) != std::string::npos) {
+                rendered.replace(pos, 2, earner);
+                pos += earner.size();
+            }
+            return tsPrefix + rendered;
+        }
         if (msg.type == CT::SYSTEM || msg.type == CT::TEXT_EMOTE)
             return tsPrefix + processedMessage;
 
@@ -164,31 +179,40 @@ void ChatPanel::render(game::GameHandler& gameHandler,
     auto* assetMgr = services_.assetManager;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
     float screenH = window ? static_cast<float>(window->getHeight()) : 720.0f;
-    float chatW = std::min(500.0f, screenW * 0.4f);
-    float chatH = 220.0f;
+    // Use the persisted size when the user has resized the window, otherwise fall
+    // back to a responsive default sized against the current screen.
+    float chatW = settings.windowWidth  > 0.0f ? settings.windowWidth  : std::min(500.0f, screenW * 0.4f);
+    float chatH = settings.windowHeight > 0.0f ? settings.windowHeight : 220.0f;
     float chatX = 8.0f;
     float chatY = screenH - chatH - 80.0f;  // Above action bar
-    if (chatWindowLocked_) {
-        // Always recompute position from current window size when locked
+    if (!chatWindowPosInit_) {
         chatWindowPos_ = ImVec2(chatX, chatY);
-        ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_Always);
+        chatWindowPosInit_ = true;
+    }
+    // The window is always resizable via its grips. Seed the size on first use, then
+    // let the user drag it; the size is captured below so it persists. Locking only
+    // pins the position (top-left, so the bottom-right grip stays usable) and blocks
+    // moving — it does NOT disable resizing.
+    ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 120.0f), ImVec2(screenW, screenH));
+    if (chatWindowLocked_) {
         ImGui::SetNextWindowPos(chatWindowPos_, ImGuiCond_Always);
     } else {
-        if (!chatWindowPosInit_) {
-            chatWindowPos_ = ImVec2(chatX, chatY);
-            chatWindowPosInit_ = true;
-        }
-        ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(chatWindowPos_, ImGuiCond_FirstUseEver);
     }
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNavInputs;
     if (chatWindowLocked_) {
-        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize;
+        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar;
     }
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.08f, settings.backgroundAlpha));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, settings.backgroundAlpha * 0.5f));
     ImGui::Begin("Chat", nullptr, flags);
 
+    // Persist the current size (resizable in either lock state) so a manual resize
+    // survives locking and restart. Position is only tracked while unlocked.
+    ImVec2 sz = ImGui::GetWindowSize();
+    settings.windowWidth  = sz.x;
+    settings.windowHeight = sz.y;
     if (!chatWindowLocked_) {
         chatWindowPos_ = ImGui::GetWindowPos();
     }

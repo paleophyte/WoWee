@@ -171,6 +171,18 @@ if (ImGui::Checkbox("Show Cooldown Tracker", &showCooldownTracker_)) {
 ImGui::SameLine();
 ImGui::TextDisabled("(active spell cooldowns near action bar)");
 
+if (ImGui::Checkbox("Show Rare Tracker", &showRareTracker_)) {
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(mark nearby spawned rares on the world map and minimap)");
+
+if (ImGui::Checkbox("Show Chest Tracker", &showChestTracker_)) {
+    saveCallback();
+}
+ImGui::SameLine();
+ImGui::TextDisabled("(mark nearby spawned loot chests on the world map and minimap)");
+
 ImGui::Spacing();
 ImGui::SeparatorText("Screen Effects");
 ImGui::Spacing();
@@ -539,6 +551,11 @@ if (ImGui::Checkbox("Enable WoWee Music", &pendingUseOriginalSoundtrack)) {
     if (renderer) {
         if (auto* zm = renderer->getZoneManager()) {
             zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
+            if (!pendingUseOriginalSoundtrack) {
+                if (auto* ac = renderer->getAudioCoordinator()) {
+                    ac->onOriginalSoundtrackDisabled(zm);
+                }
+            }
         }
     }
     saveCallback();

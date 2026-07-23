@@ -47,6 +47,30 @@ network::Packet MessageChatPacket::build(ChatType type,
     return packet;
 }
 
+bool decodeAddonChatPayload(const MessageChatData& data,
+                            std::string& prefix,
+                            std::string& payload) {
+    prefix.clear();
+    payload.clear();
+
+    const size_t separator = data.message.find('\t');
+    const bool hasEnvelope = separator != std::string::npos &&
+                             separator > 0 && separator <= 16 &&
+                             data.message.substr(0, separator).find(' ') == std::string::npos;
+    const bool supportsLegacyEnvelope =
+        data.type != ChatType::SAY && data.type != ChatType::YELL &&
+        data.type != ChatType::EMOTE && data.type != ChatType::TEXT_EMOTE &&
+        data.type != ChatType::MONSTER_SAY && data.type != ChatType::MONSTER_YELL;
+    if (data.language != ChatLanguage::ADDON &&
+        (!supportsLegacyEnvelope || !hasEnvelope)) return false;
+
+    if (hasEnvelope) {
+        prefix = data.message.substr(0, separator);
+        payload = data.message.substr(separator + 1);
+    }
+    return true;
+}
+
 bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
     // SMSG_MESSAGECHAT format (WoW 3.3.5a):
     // uint8 type
@@ -181,6 +205,14 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
 
     // Read chat tag
     data.chatTag = packet.readUInt8();
+
+    // WotLK appends the achievement ID after chatTag. The message itself is a
+    // client-format template ("%s has earned the achievement $a"), so dropping
+    // this field leaves the client unable to expand $a.
+    if ((data.type == ChatType::ACHIEVEMENT ||
+         data.type == ChatType::GUILD_ACHIEVEMENT) && packet.hasRemaining(4)) {
+        data.achievementId = packet.readUInt32();
+    }
 
     LOG_DEBUG("Parsed SMSG_MESSAGECHAT:");
     LOG_DEBUG("  Type: ", getChatTypeString(data.type));
@@ -1102,6 +1134,37 @@ network::Packet RaidTargetUpdatePacket::build(uint8_t targetIndex, uint64_t targ
     packet.writeUInt64(targetGuid);
     LOG_DEBUG("Built MSG_RAID_TARGET_UPDATE, index: ", static_cast<uint32_t>(targetIndex), ", guid: 0x", std::hex, targetGuid, std::dec);
     return packet;
+}
+
+bool RaidTargetUpdateParser::parse(network::Packet& packet, RaidTargetUpdateData& data) {
+    data = RaidTargetUpdateData{};
+    if (!packet.hasRemaining(1)) return false;
+
+    const uint8_t type = packet.readUInt8();
+    if (type == 1) {
+        // Full list — variable length, only the icons that are set.
+        data.fullList = true;
+        while (packet.hasRemaining(9)) {
+            const uint8_t  icon = packet.readUInt8();
+            const uint64_t guid = packet.readUInt64();
+            data.marks.emplace_back(icon, guid);
+        }
+        return true;
+    }
+
+    // Single set. WotLK: whoGuid + icon + targetGuid (17 bytes); classic/TBC:
+    // icon + targetGuid (9). Size tells them apart, so no expansion check is
+    // needed and a server that differs from its era still decodes.
+    const size_t remaining = packet.getRemainingSize();
+    if (remaining >= 17) {
+        packet.readUInt64();  // whoGuid — who placed the mark, not needed
+    } else if (remaining < 9) {
+        return false;
+    }
+    const uint8_t  icon = packet.readUInt8();
+    const uint64_t guid = packet.readUInt64();
+    data.marks.emplace_back(icon, guid);
+    return true;
 }
 
 network::Packet RequestRaidInfoPacket::build() {

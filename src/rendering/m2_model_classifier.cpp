@@ -77,9 +77,19 @@ M2ClassificationResult classifyM2Model(
     r.isWaterfall       = has(n, "waterfall");
 
     r.isElvenLike   = has(n, "elf")     || has(n, "elven") || has(n, "quel");
-    r.isLanternLike = has(n, "lantern") || has(n, "lamp")  || has(n, "light") ||
-                      has(n, "sconce")  || has(n, "candle") ||
-                      has(n, "candelabra") || has(n, "chandelier");
+    // Directional volumetric light effects (lighthouse beam, light rays/shafts) match
+    // the broad "light" token but are NOT point lanterns. They are animated additive
+    // meshes — e.g. the Stormwind lighthouse beam rotates via a looped single-bone
+    // animation. Classifying them as lanterns routed their batch through the glow-card
+    // path, which skips the mesh and draws a static billboard instead, freezing the
+    // sweep. Exclude beams/rays/shafts so their animated mesh renders normally.
+    const bool volumetricLightBeam =
+        has(n, "beam")     || has(n, "lighthouse") || has(n, "lightray") ||
+        has(n, "lightshaft") || has(n, "godray")   || has(n, "sunray");
+    r.isLanternLike = (has(n, "lantern") || has(n, "lamp")  || has(n, "light") ||
+                       has(n, "sconce")  || has(n, "candle") ||
+                       has(n, "candelabra") || has(n, "chandelier"))
+                      && !volumetricLightBeam;
     r.isKoboldFlame = has(n, "kobold")
                     && (has(n, "candle") || has(n, "torch") || has(n, "mine"));
 
@@ -94,6 +104,7 @@ M2ClassificationResult classifyM2Model(
     // follow the lowest flame emitter rather than the mesh/card center.
     r.isGroundFire    = (fireName && !brazierName) || has(n, "taurenlamppost");
     r.isTorch         = torchName;
+    r.isForge         = forgeName;
 
     // ---------------------------------------------------------------
     // Collision: shape categories (mirrors original logic ordering)
@@ -225,6 +236,13 @@ M2ClassificationResult classifyM2Model(
     });
     r.isSkyBird = hasAny(n, kSkyBirdTokens) || has(n, "\\bird")
                 || has(n, "\\bat\\") || has(n, "\\bat.");
+    // These meshes are visible from far beyond the normal skeletal LOD radius,
+    // and their sweep is entirely bone-driven. Freezing distant bone matrices
+    // therefore freezes the whole lighthouse beam in its bind pose.
+    r.isLightBeam = has(n, "lighthousebeam") || has(n, "lightbeam")
+                 || has(n, "lightray");
+    r.isTransportDoodad = has(n, "transportship_sails")
+                       || has(n, "icebreaker_paddlewheel");
 
     // ---------------------------------------------------------------
     // Animation / foliage rendering flags
@@ -249,9 +267,15 @@ M2ClassificationResult classifyM2Model(
         "lavabubble",     "lavasplash",        "lavasteam",         "levelup",
         "lightshaft",     "mageportal",        "particleemitter",
         "smokepuff",      "sparkle",           "spotlight",
-        "steam",          "volumetriclight",   "wisps",             "worldtreeportal",
+        "volumetriclight", "wisps",            "worldtreeportal",
     });
-    r.isSpellEffect = hasAny(n, kEffectTokens)
+    // A bare "steam" substring collides with solid models — the Steam Tank
+    // vehicle, Steamwheedle doodads — turning them additive/unlit (glowing
+    // translucent). Genuine steam VFX are particle-driven, low-poly emitters,
+    // so gate the steam match on that geometry rather than the name alone.
+    const bool steamVfx = has(n, "steam")
+                        && emitterCount >= 1 && vertexCount <= 200;
+    r.isSpellEffect = hasAny(n, kEffectTokens) || steamVfx
                     || (emitterCount >= 3 && vertexCount <= 200);
     // Instance portals are spell effects too.
     if (r.isInstancePortal) r.isSpellEffect = true;

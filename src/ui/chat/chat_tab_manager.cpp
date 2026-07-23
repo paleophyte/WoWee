@@ -133,6 +133,7 @@ const char* ChatTabManager::getChatTypeName(game::ChatType type) {
         case game::ChatType::MONSTER_EMOTE: return "Emote";
         case game::ChatType::CHANNEL: return "Channel";
         case game::ChatType::ACHIEVEMENT: return "Achievement";
+        case game::ChatType::GUILD_ACHIEVEMENT: return "Guild Achievement";
         case game::ChatType::DND: return "DND";
         case game::ChatType::AFK: return "AFK";
         case game::ChatType::BG_SYSTEM_NEUTRAL:

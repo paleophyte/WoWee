@@ -544,6 +544,47 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             ImGui::PopStyleColor();
         }
 
+        // Press-and-hold to pick a slot up for reorganizing. Holding the left mouse
+        // button on a filled slot for kActionBarPickupDelay lifts its action onto the
+        // cursor; a normal quick click still casts/uses as before. Once carried, click
+        // another slot to swap (see the drop handling below).
+        if (actionBarDragSlot_ < 0) {
+            const bool held = ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+            if (held && !slot.isEmpty()) {
+                if (actionBarHoldSlot_ != absSlot) {
+                    actionBarHoldSlot_  = absSlot;
+                    actionBarHoldStart_ = ImGui::GetTime();
+                } else {
+                    double heldFor = ImGui::GetTime() - actionBarHoldStart_;
+                    if (heldFor >= kActionBarPickupDelay) {
+                        // Pick up: lift this action onto the cursor and empty its slot
+                        // so it visibly leaves the bar while carried.
+                        actionBarDragSlot_ = absSlot;
+                        actionBarDragIcon_ = iconTex;
+                        actionBarCarryType_ = static_cast<uint8_t>(slot.type);
+                        actionBarCarryId_ = slot.id;
+                        gameHandler.setActionBarSlot(absSlot, game::ActionBarSlot::EMPTY, 0);
+                        actionBarHoldSlot_ = -1;
+                        // The initiating press is still down; swallow its release so it
+                        // doesn't immediately drop the action back into its own slot.
+                        actionBarCarryPressActive_ = true;
+                    } else {
+                        // Draw a rising fill as feedback that a pickup is charging.
+                        float t = static_cast<float>(heldFor / kActionBarPickupDelay);
+                        ImVec2 rMin = ImGui::GetItemRectMin();
+                        ImVec2 rMax = ImGui::GetItemRectMax();
+                        float fillTop = rMax.y - (rMax.y - rMin.y) * t;
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            ImVec2(rMin.x, fillTop), rMax,
+                            IM_COL32(255, 220, 80, 70));
+                    }
+                }
+            } else if (actionBarHoldSlot_ == absSlot) {
+                // Released or dragged off before the delay — cancel this hold.
+                actionBarHoldSlot_ = -1;
+            }
+        }
+
         // Error-flash overlay: red fade on spell cast failure (~0.5 s).
         // Check both spell slots directly and macro slots via their primary spell.
         {
@@ -581,13 +622,27 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
             gameHandler.setActionBarSlot(absSlot, game::ActionBarSlot::ITEM, held.itemId);
             inventoryScreen.returnHeldItem(gameHandler.getInventory());
         } else if (clicked && actionBarDragSlot_ >= 0) {
-            if (absSlot != actionBarDragSlot_) {
-                const auto& dragSrc = bar[actionBarDragSlot_];
-                gameHandler.setActionBarSlot(actionBarDragSlot_, slot.type, slot.id);
-                gameHandler.setActionBarSlot(absSlot, dragSrc.type, dragSrc.id);
+            if (actionBarCarryPressActive_) {
+                // Release of the press that completed the pickup — keep carrying.
+            } else {
+                // Capture whatever is here before overwriting it (the slot is a live
+                // reference, so read the displaced action first).
+                const auto displacedType = slot.type;
+                const uint32_t displacedId = slot.id;
+                gameHandler.setActionBarSlot(
+                    absSlot, static_cast<game::ActionBarSlot::Type>(actionBarCarryType_),
+                    actionBarCarryId_);
+                // A displaced action falls back into the now-empty origin slot (a swap).
+                // Dropping onto the origin itself just restores the carried action.
+                if (absSlot != actionBarDragSlot_ &&
+                    displacedType != game::ActionBarSlot::EMPTY && displacedId != 0) {
+                    gameHandler.setActionBarSlot(actionBarDragSlot_, displacedType, displacedId);
+                }
+                actionBarDragSlot_ = -1;
+                actionBarDragIcon_ = 0;
+                actionBarCarryType_ = 0;
+                actionBarCarryId_ = 0;
             }
-            actionBarDragSlot_ = -1;
-            actionBarDragIcon_ = 0;
         } else if (clicked && !slot.isEmpty()) {
             if (slot.type == game::ActionBarSlot::SPELL && slot.isReady()) {
                 // Check if this spell belongs to an item (e.g., Hearthstone spell 8690).
@@ -1106,16 +1161,43 @@ void ActionBarPanel::renderActionBar(game::GameHandler& gameHandler,
                 IM_COL32(80, 80, 120, 180));
         }
 
-        // On right mouse release, check if outside the action bar area
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        if (actionBarCarryPressActive_) {
+            // Still waiting for the initiating hold-press to be released — swallow it
+            // so it doesn't count as a drop, then the carry is "armed" for real clicks.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                actionBarCarryPressActive_ = false;
+        } else {
             bool insideBar = (mousePos.x >= barX && mousePos.x <= barX + barW &&
                               mousePos.y >= barY && mousePos.y <= barY + barH);
-            if (!insideBar) {
-                // Dropped outside - clear the slot
-                gameHandler.setActionBarSlot(actionBarDragSlot_, game::ActionBarSlot::EMPTY, 0);
+
+            // Helper: put the carried action back where it was lifted from.
+            auto restoreCarried = [&]() {
+                gameHandler.setActionBarSlot(
+                    actionBarDragSlot_,
+                    static_cast<game::ActionBarSlot::Type>(actionBarCarryType_),
+                    actionBarCarryId_);
+            };
+            auto endCarry = [&]() {
+                actionBarDragSlot_ = -1;
+                actionBarDragIcon_ = 0;
+                actionBarCarryType_ = 0;
+                actionBarCarryId_ = 0;
+            };
+
+            // Left-release on empty space cancels the carry, returning the action to its
+            // origin. A left-release on a slot is consumed by the per-slot drop logic
+            // above (this block is then skipped since the carry has already ended).
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !insideBar) {
+                restoreCarried();
+                endCarry();
             }
-            actionBarDragSlot_ = -1;
-            actionBarDragIcon_ = 0;
+
+            // Right-release drops the carried action: off the bar removes it (the origin
+            // slot was already emptied on pickup), over the bar cancels and restores it.
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                if (insideBar) restoreCarried();
+                endCarry();
+            }
         }
     }
 }
@@ -1365,12 +1447,19 @@ bool ActionBarPanel::renderBagBar(game::GameHandler& gameHandler,
                 dl->AddRectFilled(bagSlotMins[i], bagSlotMaxs[i], IM_COL32(0, 0, 0, 150));
             }
 
-            // Tooltip
+            // Tooltip: bag name plus its capacity ("N Slot Bag"). getBagSize is the
+            // authoritative slot count for the equipped bag, independent of whether the
+            // item template query has arrived.
             if (hovered && bagBarPickedSlot_ < 0) {
-                if (bagIcon)
-                    ImGui::SetTooltip("%s", bagItem.item.name.c_str());
-                else
+                if (bagIcon) {
+                    int bagSlots = inv.getBagSize(i);
+                    if (bagSlots > 0)
+                        ImGui::SetTooltip("%s\n%d Slot Bag", bagItem.item.name.c_str(), bagSlots);
+                    else
+                        ImGui::SetTooltip("%s", bagItem.item.name.c_str());
+                } else {
                     ImGui::SetTooltip("Empty Bag Slot");
+                }
             }
 
             // Open bag indicator

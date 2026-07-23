@@ -69,6 +69,12 @@ public:
     const std::string& getCurrentZoneName() const { return currentZoneName_; }
     uint32_t getCurrentZoneId() const { return currentZoneId_; }
 
+    /// Called when the "Enable WoWee Music" setting is turned off. If one of
+    /// the WoWee (file-based) tracks is currently playing, crossfade to a
+    /// stock track so the disable takes effect immediately instead of waiting
+    /// for the track to end.
+    void onOriginalSoundtrackDisabled(game::ZoneManager* zm);
+
     // Accessors for all audio managers (same interface as Renderer had)
     MusicManager* getMusicManager() { return musicManager_.get(); }
     FootstepManager* getFootstepManager() { return footstepManager_.get(); }

@@ -44,6 +44,7 @@ void ZoneManager::initialize() {
     std::string omRollNeedGreed  = om("Roll Need Greed.mp3");
     std::string omRunBackPolka   = om("RunBackPolka.mp3");
     std::string omWhoPulled      = om("WHO PULLED_.mp3");
+    std::string omStormwindInst  = om("stormwindinst.mp3");
 
     // Elwynn Forest (zone 12)
     ZoneInfo elwynn;
@@ -71,6 +72,7 @@ void ZoneManager::initialize() {
         "Sound\\Music\\CityMusic\\Stormwind\\stormwind09-zone.mp3",
         "Sound\\Music\\CityMusic\\Stormwind\\stormwind10-zone.mp3",
     };
+    if (!omStormwindInst.empty()) stormwind.musicPaths.push_back(omStormwindInst);
     zones[1519] = stormwind;
 
     // Dun Morogh (zone 1) - neighboring zone

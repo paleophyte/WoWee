@@ -16,6 +16,8 @@
 #include "rendering/world_map/layers/poi_marker_layer.hpp"
 #include "rendering/world_map/layers/quest_poi_layer.hpp"
 #include "rendering/world_map/layers/corpse_marker_layer.hpp"
+#include "rendering/world_map/layers/rare_tracker_layer.hpp"
+#include "rendering/world_map/layers/chest_tracker_layer.hpp"
 #include "rendering/world_map/layers/zone_highlight_layer.hpp"
 #include "rendering/world_map/layers/coordinate_display.hpp"
 #include "rendering/world_map/layers/subzone_tooltip_layer.hpp"
@@ -104,6 +106,8 @@ struct WorldMapFacade::Impl {
     bool initialized = false;
     bool open = false;
     std::string mapName = "Azeroth";
+    std::string physicalMapName = "Azeroth";
+    bool virtualMapOverride = false;
     std::string pendingMapName;   // stored by external setMapName while in world/cosmic view
     bool userMapOverride = false; // true when user manually navigated to world/cosmic view
 
@@ -117,10 +121,14 @@ struct WorldMapFacade::Impl {
 
     // Typed layer pointers for setters (non-owning references into overlay)
     PartyDotLayer* partyDotLayer = nullptr;
+    std::vector<RareMark> rares;
+    std::vector<ChestMark> chests;
     TaxiNodeLayer* taxiNodeLayer = nullptr;
     POIMarkerLayer* poiMarkerLayer = nullptr;
     QuestPOILayer* questPOILayer = nullptr;
     CorpseMarkerLayer* corpseMarkerLayer = nullptr;
+    RareTrackerLayer* rareTrackerLayer = nullptr;
+    ChestTrackerLayer* chestTrackerLayer = nullptr;
     ZoneHighlightLayer* zoneHighlightLayer = nullptr;
     PlayerMarkerLayer* playerMarkerLayer = nullptr;
 
@@ -128,6 +136,11 @@ struct WorldMapFacade::Impl {
     std::vector<PartyDot> partyDots;
     std::vector<TaxiNode> taxiNodes;
     std::vector<QuestPOI> questPois;
+
+    // Flight-map (taxi selection) mode — locks the view to the continent and
+    // renders only the map, player marker, and interactive flight nodes.
+    bool taxiMode = false;
+    std::function<void()> taxiCloseHandler;
 
     float lastFrameTime = 0.0f;
 
@@ -148,6 +161,13 @@ void WorldMapFacade::Impl::closeMap() {
     if (!pendingMapName.empty()) {
         mapName = pendingMapName;
         pendingMapName.clear();
+    }
+    // A user-dismissed flight map also closes the flight master window.
+    if (taxiMode) {
+        taxiMode = false;
+        if (taxiNodeLayer) taxiNodeLayer->setTaxiMode(false);
+        if (taxiCloseHandler) taxiCloseHandler();
+        taxiCloseHandler = nullptr;
     }
 }
 
@@ -283,6 +303,16 @@ void WorldMapFacade::Impl::initOverlayLayers() {
     corpseMarkerLayer = cmLayer.get();
     overlay.addLayer(std::move(cmLayer));
 
+    // Nearby rare/rare-elite tracker
+    auto rtLayer = std::make_unique<RareTrackerLayer>();
+    rareTrackerLayer = rtLayer.get();
+    overlay.addLayer(std::move(rtLayer));
+
+    // Nearby spawned chest tracker
+    auto ctLayer = std::make_unique<ChestTrackerLayer>();
+    chestTrackerLayer = ctLayer.get();
+    overlay.addLayer(std::move(ctLayer));
+
     // Coordinate display
     overlay.addLayer(std::make_unique<CoordinateDisplay>());
 
@@ -346,9 +376,18 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
     d.lastFrameTime = now;
     d.viewState.updateTransition(dt);
 
+    const int physicalMapId = folderToMapId(d.physicalMapName);
+    auto displayedPlayerPosition = [&]() {
+        return physicalMapId >= 0
+            ? d.data.transformRenderPosition(
+                  static_cast<uint32_t>(physicalMapId), playerRenderPos)
+            : playerRenderPos;
+    };
+    glm::vec3 displayPlayerRenderPos = displayedPlayerPosition();
+
     // Update exploration state
     if (!d.data.zones().empty()) {
-        d.exploration.update(d.data.zones(), playerRenderPos,
+        d.exploration.update(d.data.zones(), displayPlayerRenderPos,
                              d.viewState.currentZoneIdx(),
                              d.data.exploreFlagByAreaId());
         if (d.exploration.overlaysChanged() && d.viewState.currentZoneIdx() >= 0) {
@@ -364,22 +403,78 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
             d.data.loadZones(d.mapName, *d.assetManager);
             d.zoneMetadata.initialize();
             d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+            displayPlayerRenderPos = displayedPlayerPosition();
         }
 
-        int bestContinent = findBestContinentForPlayer(d.data.zones(), playerRenderPos);
+        int playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+
+        // Some zones are stored on a different physical map from the continent
+        // shown by the world-map UI. The draenei islands are the important case:
+        // terrain/minimap data comes from Expansion01 (map 530), while their
+        // WorldMapArea DisplayMapID is Kalimdor (map 1). Follow that metadata
+        // instead of opening Outland merely because the terrain map is 530.
+        if (!d.virtualMapOverride && playerZone >= 0) {
+            const Zone& zone = d.data.zones()[playerZone];
+            if (zone.displayMapID != 0 &&
+                zone.displayMapID != static_cast<uint32_t>(d.data.currentMapId())) {
+                const char* virtualFolder = mapIdToFolder(zone.displayMapID);
+                if (virtualFolder && *virtualFolder) {
+                    d.physicalMapName = d.mapName;
+                    d.virtualMapOverride = true;
+                    d.mapName = virtualFolder;
+                    if (d.zoneHighlightLayer) d.zoneHighlightLayer->clearTextures();
+                    d.compositor.detachZoneTextures();
+                    d.data.clear();
+                    d.compositor.invalidateComposite();
+                    d.data.loadZones(d.mapName, *d.assetManager);
+                    d.zoneMetadata.initialize();
+                    d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+                    d.viewState.setContinentIdx(-1);
+                    d.viewState.setCurrentZoneIdx(-1);
+                    displayPlayerRenderPos = displayedPlayerPosition();
+                    playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+                    LOG_INFO("World map virtual continent: physical='",
+                             d.physicalMapName, "' display='", d.mapName, "'");
+                }
+            }
+        } else if (d.virtualMapOverride) {
+            const bool stillInVirtualArea = playerZone >= 0 &&
+                d.data.zones()[playerZone].mapID !=
+                    static_cast<uint32_t>(d.data.currentMapId()) &&
+                d.data.zones()[playerZone].displayMapID ==
+                    static_cast<uint32_t>(d.data.currentMapId());
+            if (!stillInVirtualArea) {
+                d.virtualMapOverride = false;
+                d.mapName = d.physicalMapName;
+                if (d.zoneHighlightLayer) d.zoneHighlightLayer->clearTextures();
+                d.compositor.detachZoneTextures();
+                d.data.clear();
+                d.compositor.invalidateComposite();
+                d.data.loadZones(d.mapName, *d.assetManager);
+                d.zoneMetadata.initialize();
+                d.viewState.setCosmicEnabled(d.data.cosmicEnabled());
+                d.viewState.setContinentIdx(-1);
+                d.viewState.setCurrentZoneIdx(-1);
+                displayPlayerRenderPos = displayedPlayerPosition();
+                playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
+            }
+        }
+
+        int bestContinent = findBestContinentForPlayer(d.data.zones(), displayPlayerRenderPos);
         if (bestContinent >= 0 && bestContinent != d.viewState.continentIdx()) {
             d.viewState.setContinentIdx(bestContinent);
             d.compositor.invalidateComposite();
         }
 
-        int playerZone = findZoneForPlayer(d.data.zones(), playerRenderPos);
-        if (playerZone >= 0 && d.viewState.continentIdx() >= 0 &&
+        // Flight map is always the continent overview — never open at zone level.
+        if (!d.taxiMode &&
+            playerZone >= 0 && d.viewState.continentIdx() >= 0 &&
             zoneBelongsToContinent(d.data.zones(), playerZone, d.viewState.continentIdx())) {
             d.compositor.loadZoneTextures(playerZone, d.data.zones(), d.mapName);
             d.compositor.loadOverlayTextures(playerZone, d.data.zones());
             d.viewState.setCurrentZoneIdx(playerZone);
             d.viewState.setLevel(ViewLevel::ZONE);
-            d.exploration.update(d.data.zones(), playerRenderPos, playerZone,
+            d.exploration.update(d.data.zones(), displayPlayerRenderPos, playerZone,
                                  d.data.exploreFlagByAreaId());
             d.compositor.requestComposite(playerZone);
         } else if (d.viewState.continentIdx() >= 0) {
@@ -396,13 +491,19 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
                                                hoveredZone,
                                                d.viewState.cosmicEnabled());
 
+    // Flight map is locked to the continent view: node clicks are handled by
+    // the taxi layer, so only closing the map is a valid input action here.
+    if (d.taxiMode && inputResult.action != InputAction::CLOSE) {
+        inputResult.action = InputAction::NONE;
+    }
+
     switch (inputResult.action) {
         case InputAction::CLOSE:
             d.closeMap();
             return;
 
         case InputAction::ZOOM_IN: {
-            int playerZone = findZoneForPlayer(d.data.zones(), playerRenderPos);
+            int playerZone = findZoneForPlayer(d.data.zones(), displayPlayerRenderPos);
             // For continent→zone, verify the zone belongs to the current continent
             int candidateZone = hoveredZone >= 0 ? hoveredZone : playerZone;
             if (d.viewState.currentLevel() == ViewLevel::CONTINENT &&
@@ -498,7 +599,8 @@ void WorldMapFacade::render(const glm::vec3& playerRenderPos,
 
     if (!d.open) return;
     bool rightClickConsumed = (inputResult.action == InputAction::RIGHT_CLICK_BACK);
-    d.renderImGuiOverlay(playerRenderPos, screenWidth, screenHeight, playerYawDeg, rightClickConsumed);
+    d.renderImGuiOverlay(displayPlayerRenderPos, screenWidth, screenHeight,
+                         playerYawDeg, rightClickConsumed);
 }
 
 void WorldMapFacade::setMapName(const std::string& name) {
@@ -509,6 +611,12 @@ void WorldMapFacade::setMapName(const std::string& name) {
         d.pendingMapName = name;
         return;
     }
+    // The terrain/minimap continues reporting the physical map (Expansion01)
+    // while Azuremyst is intentionally displayed under Kalimdor. Do not undo
+    // that virtual-continent selection every frame.
+    if (d.virtualMapOverride && name == d.physicalMapName) return;
+    d.physicalMapName = name;
+    d.virtualMapOverride = false;
     if (d.mapName == name && !d.data.zones().empty()) return;
     d.mapName = name;
 
@@ -531,6 +639,14 @@ void WorldMapFacade::setPartyDots(std::vector<PartyDot> dots) {
     impl_->partyDots = std::move(dots);
 }
 
+void WorldMapFacade::setRares(std::vector<RareMark> rares) {
+    impl_->rares = std::move(rares);
+}
+
+void WorldMapFacade::setChests(std::vector<ChestMark> chests) {
+    impl_->chests = std::move(chests);
+}
+
 void WorldMapFacade::setTaxiNodes(std::vector<TaxiNode> nodes) {
     impl_->taxiNodes = std::move(nodes);
 }
@@ -547,6 +663,35 @@ void WorldMapFacade::setCorpsePos(bool hasCorpse, glm::vec3 renderPos) {
 bool WorldMapFacade::isOpen() const { return impl_->open; }
 void WorldMapFacade::close() {
     impl_->closeMap();
+}
+
+void WorldMapFacade::openTaxiMap(std::function<std::vector<uint32_t>(uint32_t)> routeProvider,
+                                 std::function<void(uint32_t)> onSelect,
+                                 std::function<void()> onClose) {
+    auto& d = *impl_;
+    if (d.taxiNodeLayer) {
+        d.taxiNodeLayer->setTaxiMode(true);
+        d.taxiNodeLayer->setTaxiHandlers(std::move(routeProvider), std::move(onSelect));
+    }
+    d.taxiCloseHandler = std::move(onClose);
+    d.taxiMode = true;
+    d.userMapOverride = false;
+    // Force the first-open flow on the next render so the view snaps to the
+    // player's continent regardless of where the map was last left.
+    d.open = false;
+}
+
+void WorldMapFacade::closeTaxiMap() {
+    auto& d = *impl_;
+    if (!d.taxiMode) return;
+    d.taxiMode = false;
+    d.taxiCloseHandler = nullptr;
+    if (d.taxiNodeLayer) d.taxiNodeLayer->setTaxiMode(false);
+    d.open = false;
+}
+
+bool WorldMapFacade::isTaxiMapOpen() const {
+    return impl_->taxiMode;
 }
 
 // ── ImGui Overlay ────────────────────────────────────────────
@@ -598,8 +743,11 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
 
     // Keep ImGui's close state separate so clicking the title-bar X can use
     // the same cleanup path as Escape instead of mutating open directly.
+    // The ### suffix keeps one window identity across both titles.
     bool windowOpen = open;
-    if (ImGui::Begin("World Map", &windowOpen, flags)) {
+    const char* windowTitle = taxiMode ? "Flight Map###WorldMapWindow"
+                                       : "World Map###WorldMapWindow";
+    if (ImGui::Begin(windowTitle, &windowOpen, flags)) {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
 
         // imgMin/imgMax = the content area (after title bar)
@@ -678,6 +826,8 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
 
         // Update layer data pointers
         if (partyDotLayer) partyDotLayer->setDots(partyDots);
+        if (rareTrackerLayer) rareTrackerLayer->setRares(rares);
+        if (chestTrackerLayer) chestTrackerLayer->setChests(chests);
         if (taxiNodeLayer) taxiNodeLayer->setNodes(taxiNodes);
         if (poiMarkerLayer) poiMarkerLayer->setMarkers(data.poiMarkers());
         if (questPOILayer) questPOILayer->setPois(questPois);
@@ -710,6 +860,41 @@ void WorldMapFacade::Impl::renderImGuiOverlay(const glm::vec3& playerRenderPos,
             };
             layerCtx.zmpRepoPtr = &data;
             layerCtx.zmpZoneBounds = &data.zmpZoneBounds();
+        }
+
+        // Flight-map mode: just the map, the player marker, and the
+        // interactive flight nodes — no zone navigation chrome.
+        if (taxiMode) {
+            if (playerMarkerLayer) playerMarkerLayer->render(layerCtx);
+            if (taxiNodeLayer) taxiNodeLayer->render(layerCtx);
+
+            // Continent name title
+            int curIdx = viewState.currentZoneIdx();
+            if (curIdx >= 0 && curIdx < static_cast<int>(data.zones().size())) {
+                std::string title = data.zones()[curIdx].areaName;
+                if (title == "Azeroth") title = mapDisplayName(0);
+                if (!title.empty()) {
+                    ImVec2 titleSz = ImGui::CalcTextSize(title.c_str());
+                    float tx = imgMin.x + (displayW - titleSz.x) * 0.5f;
+                    float ty = imgMin.y + 8.0f;
+                    drawList->AddText(ImVec2(tx + 1.0f, ty + 1.0f),
+                                      IM_COL32(0, 0, 0, 220), title.c_str());
+                    drawList->AddText(ImVec2(tx, ty),
+                                      IM_COL32(255, 215, 0, 255), title.c_str());
+                }
+            }
+
+            const char* taxiHelp = "Click a destination to fly there | Escape to close";
+            ImVec2 helpSz = ImGui::CalcTextSize(taxiHelp);
+            float hx = imgMin.x + (displayW - helpSz.x) / 2.0f;
+            float hy = imgMax.y - helpSz.y - 4.0f;
+            ImGui::SetCursorScreenPos(ImVec2(hx, hy));
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 0.8f), "%s", taxiHelp);
+
+            ImGui::End();
+            if (!windowOpen) closeMap();
+            ImGui::PopStyleVar(3);
+            return;
         }
 
         // World-level: Azeroth map with clickable continent regions

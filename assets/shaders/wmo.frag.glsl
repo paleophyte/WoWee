@@ -207,10 +207,64 @@ void main() {
         shadow = mix(1.0, shadow, shadowParams.y);
     }
 
-    if (emissive != 0) {
+    if (emissive == 1) {
         // Authored luminous glass must remain bright in direct sun and shadow.
         // A small warm bias keeps low-valued texels from reading as dark glass.
-        result = texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015);
+        vec3 glass = texColor.rgb * 2.0 + vec3(0.16, 0.07, 0.015);
+
+        // Gentle guttering, weaker than the clock's open fire — these are steady
+        // lamps, not flames in the wind.
+        //
+        // Every lamp in a building shares one batch, so a uniform phase would
+        // pulse a whole street in lockstep. The phase is hashed from the lamp's
+        // world position instead, quantised into cells a few units across: large
+        // enough that one lamp's glass falls in a single cell, small enough that
+        // neighbouring lamps land in different ones.
+        vec3 cell = floor(FragPos * 0.2);
+        float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        float phase = h * 6.2831853;
+        float t = fogParams.z;
+        float flicker = 0.93
+                      + 0.05 * sin(t * 1.3 + phase)
+                      + 0.02 * sin(t * 2.9 + phase * 1.7);
+        result = glass * flicker;
+    } else if (emissive == 2) {
+        // Firelit from behind (Darkshire's clock face): the surface is still lit
+        // by the sun so it belongs to the building by day, with a warm glow
+        // seeping through it as if a fire burned in the tower.
+        vec3 ldir = normalize(-lightDir.xyz);
+        float diff = max(dot(norm, ldir), 0.0);
+        vec3 lit = texColor.rgb * (ambientColor.rgb + lightColor.rgb * diff * shadow);
+
+        // Three detuned sines: a slow breathing sway, a quicker wobble, and a
+        // faint fast jitter. Their periods share no common multiple over any
+        // watchable span, so the flame never visibly loops.
+        float t = fogParams.z;
+        float flicker = 0.84
+                      + 0.10 * sin(t * 1.3)
+                      + 0.05 * sin(t * 2.9 + 1.7)
+                      + 0.03 * sin(t * 6.7 + 0.6);
+
+        // Firelight only competes with daylight once the sun is down, so fade the
+        // glow up as the scene darkens. A small floor keeps it faintly visible in
+        // daytime shade rather than switching on at dusk.
+        float daylight = clamp(dot(ambientColor.rgb + lightColor.rgb,
+                                   vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+        float night = mix(1.0, 0.22, daylight);
+
+        const vec3 kFireColor = vec3(1.0, 0.58, 0.22);
+        result = lit + kFireColor * (0.30 * flicker * night);
+
+        // Glass covering the dial: a tight sun highlight plus a Fresnel sheen
+        // that picks up sky colour at grazing angles, which is what sells a pane
+        // in front of the face rather than paint on stone. Both are additive and
+        // unaffected by the fire, since they live on the outer surface.
+        vec3 viewDir = normalize(viewPos.xyz - FragPos);
+        vec3 halfDir = normalize(ldir + viewDir);
+        float gloss  = pow(max(dot(norm, halfDir), 0.0), 96.0);
+        float fresnel = pow(1.0 - clamp(dot(norm, viewDir), 0.0, 1.0), 4.0);
+        result += lightColor.rgb * (gloss * 0.55 * shadow)
+                + ambientColor.rgb * (fresnel * 0.35);
     } else if (isLava != 0) {
         // Lava is self-luminous — bright emissive, no shadows
         result = texColor.rgb * 1.5;

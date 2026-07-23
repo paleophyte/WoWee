@@ -263,6 +263,7 @@ public:
      * @param target Target name (for whispers, empty otherwise)
      */
     void sendChatMessage(ChatType type, const std::string& message, const std::string& target = "");
+    void sendAddonMessage(ChatType type, const std::string& message, const std::string& target = "");
     void sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid = 0);
     void joinChannel(const std::string& channelName, const std::string& password = "");
     void leaveChannel(const std::string& channelName);
@@ -315,6 +316,19 @@ public:
     void setRandomPropertyNameResolver(RandomPropertyNameResolver r) { randomPropertyNameResolver_ = std::move(r); }
     std::string getRandomPropertyName(int32_t id) const {
         return randomPropertyNameResolver_ ? randomPropertyNameResolver_(id) : std::string{};
+    }
+
+    // Random-suffix/property stat bonuses. Given the item's signed randomPropertyId and its
+    // suffixFactor (ITEM_FIELD_PROPERTY_SEED), returns the rolled {statType, value} pairs a
+    // green/blue item gains from "of the Bear" etc. statType uses the ITEM_MOD codes shared
+    // with ItemDef::ExtraStat (4=Str, 7=Sta, 45=SpellPower, ...). Suffix stats scale as
+    // AllocationPct*suffixFactor/10000; positive properties use the enchant's fixed amount.
+    struct RandomStatBonus { uint32_t statType = 0; int32_t value = 0; };
+    using RandomStatResolver = std::function<std::vector<RandomStatBonus>(int32_t, uint32_t)>;
+    void setRandomStatResolver(RandomStatResolver r) { randomStatResolver_ = std::move(r); }
+    std::vector<RandomStatBonus> getRandomStatBonuses(int32_t id, uint32_t suffixFactor) const {
+        return randomStatResolver_ ? randomStatResolver_(id, suffixFactor)
+                                   : std::vector<RandomStatBonus>{};
     }
 
     // Emote animation callback: (entityGuid, animationId)
@@ -969,6 +983,12 @@ public:
     using AppearanceChangedCallback = std::function<void()>;
     void setAppearanceChangedCallback(AppearanceChangedCallback cb) { appearanceChangedCallback_ = std::move(cb); }
 
+    // Player model rebuild callback — fired alongside the appearance change so the
+    // in-world 3D character can be respawned with the new hair/facial hair without
+    // requiring a game restart.
+    using PlayerModelRebuildCallback = std::function<void()>;
+    void setPlayerModelRebuildCallback(PlayerModelRebuildCallback cb) { playerModelRebuildCallback_ = std::move(cb); }
+
     // Ghost state callback — fired when player enters or leaves ghost (spirit) form
     using GhostStateCallback = std::function<void(bool isGhost)>;
     void setGhostStateCallback(GhostStateCallback cb) { ghostStateCallback_ = std::move(cb); }
@@ -977,6 +997,16 @@ public:
     // spellId: 0 = regular auto-attack swing, non-zero = melee ability (special attack)
     using MeleeSwingCallback = std::function<void(uint32_t spellId)>;
     void setMeleeSwingCallback(MeleeSwingCallback cb) { meleeSwingCallback_ = std::move(cb); }
+
+    // Snap the character to face the camera's current look direction and return the
+    // resulting canonical orientation. Used by fishing so the bobber lands in front of
+    // where the player is looking: while standing still the character yaw does not track
+    // the free-look camera, so without this the bobber would drop toward a stale heading.
+    using FaceCameraProvider = std::function<float()>;
+    void setFaceCameraProvider(FaceCameraProvider cb) { faceCameraProvider_ = std::move(cb); }
+    float faceCameraDirection() {
+        return faceCameraProvider_ ? faceCameraProvider_() : getMovementInfo().orientation;
+    }
 
     // Ranged weapon swap callback — show=true: swap to ranged weapon, false: back to melee
     using RangedWeaponSwapCallback = std::function<void(bool show)>;
@@ -1210,9 +1240,8 @@ public:
     glm::vec3 getComposedWorldPosition();  // Compose transport transform * local offset
     TransportManager* getTransportManager() { return transportManager_.get(); }
     const TransportManager* getTransportManager() const { return transportManager_.get(); }
-    // Client-side M2 transport (trams, lifts) board/disembark check by proximity to the
-    // transport's live position. Call once per tick with the player's current canonical
-    // world position; safe to call whether or not any M2 transports are registered.
+    // Client-side transport board/disembark check by proximity to the live deck.
+    // Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
     void updateM2TransportBoarding(const glm::vec3& playerCanonical);
     void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
         // Validate transport is registered before attaching player
@@ -1238,6 +1267,15 @@ public:
         playerTransportOffset_ = glm::vec3(0.0f);
         movementInfo.transportGuid = 0;
     }
+    // Preserve an authoritative on-deck offset while a continent transfer tears
+    // down the origin map's transport and constructs its destination instance.
+    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
+                                           const glm::vec3& localOffset);
+    bool hasPendingPlayerTransportWorldTransfer() const {
+        return pendingPlayerTransportTransfer_;
+    }
+    bool completePlayerTransportWorldTransfer(uint64_t transportGuid,
+                                              glm::vec3& worldPosition);
 
     // Cooldowns
     float getSpellCooldown(uint32_t spellId) const;
@@ -1270,6 +1308,17 @@ public:
     uint8_t getPlayerRace() const {
         const Character* ch = getActiveCharacter();
         return ch ? static_cast<uint8_t>(ch->race) : 0;
+    }
+    // Horde races: Orc, Undead, Tauren, Troll, Goblin, Blood Elf. Everything
+    // else (including an unknown/zero race) defaults to Alliance.
+    bool isPlayerAlliance() const {
+        switch (static_cast<Race>(getPlayerRace())) {
+            case Race::ORC: case Race::UNDEAD: case Race::TAUREN:
+            case Race::TROLL: case Race::GOBLIN: case Race::BLOOD_ELF:
+                return false;
+            default:
+                return true;
+        }
     }
     void setPlayerGuid(uint64_t guid) { playerGuid = guid; }
 
@@ -1383,7 +1432,11 @@ public:
         None = 0, PendingIncoming, Open, Accepted, Complete
     };
 
-    static constexpr int TRADE_SLOT_COUNT = 6;  // WoW has 6 normal trade slots + slot 6 for non-trade item
+    // 7 slots total: 0-5 are transferred, slot 6 (TRADE_SLOT_NONTRADED) is the
+    // "will not be traded" slot used for enchanting/crafting on the partner's item.
+    static constexpr int TRADE_SLOT_COUNT        = 7;
+    static constexpr int TRADE_SLOT_TRADED_COUNT = 6;
+    static constexpr int TRADE_SLOT_NONTRADED    = 6;
 
     struct TradeSlot {
         uint32_t itemId      = 0;
@@ -1436,17 +1489,11 @@ public:
     // Raid target markers (MSG_RAID_TARGET_UPDATE)
     // Icon indices 0-7: Star, Circle, Diamond, Triangle, Moon, Square, Cross, Skull
     static constexpr uint32_t kRaidMarkCount = 8;
+    // Both read SocialHandler's marks — the state MSG_RAID_TARGET_UPDATE writes.
     // Returns the GUID marked with the given icon (0 = no mark)
-    uint64_t getRaidMarkGuid(uint32_t icon) const {
-        return (icon < kRaidMarkCount) ? raidTargetGuids_[icon] : 0;
-    }
+    uint64_t getRaidMarkGuid(uint32_t icon) const;
     // Returns the raid mark icon for a given guid (0xFF = no mark)
-    uint8_t getEntityRaidMark(uint64_t guid) const {
-        if (guid == 0) return 0xFF;
-        for (uint32_t i = 0; i < kRaidMarkCount; ++i)
-            if (raidTargetGuids_[i] == guid) return static_cast<uint8_t>(i);
-        return 0xFF;
-    }
+    uint8_t getEntityRaidMark(uint64_t guid) const;
     // Set or clear a raid mark on a guid (icon 0-7, or 0xFF to clear)
     void setRaidMark(uint64_t guid, uint8_t icon);
 
@@ -1881,6 +1928,7 @@ public:
         static const std::string kEmpty;
         return kEmpty;
     }
+    void ensureAchievementNamesLoaded() { loadAchievementNameCache(); }
     /// Returns the description of an achievement by ID, or empty string if unknown.
     const std::string& getAchievementDescription(uint32_t id) const {
         auto it = achievementDescCache_.find(id);
@@ -1963,6 +2011,10 @@ public:
     // Mount state
     using MountCallback = std::function<void(uint32_t mountDisplayId)>;  // 0 = dismount
     void setMountCallback(MountCallback cb) { mountCallback_ = std::move(cb); }
+
+    // Mount display changes for visible players other than the local character.
+    using OtherPlayerMountCallback = std::function<void(uint64_t guid, uint32_t mountDisplayId)>;
+    void setOtherPlayerMountCallback(OtherPlayerMountCallback cb) { otherPlayerMountCallback_ = std::move(cb); }
 
     // Taxi terrain precaching callback
     using TaxiPrecacheCallback = std::function<void(const std::vector<glm::vec3>&)>;
@@ -2054,6 +2106,8 @@ public:
     const std::vector<TaxiPathEdge>& getTaxiPathEdges() const;
     bool isKnownTaxiNode(uint32_t nodeId) const;
     uint32_t getTaxiCostTo(uint32_t destNodeId) const;
+    bool hasTaxiRouteTo(uint32_t destNodeId) const;
+    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
     bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;
@@ -2112,6 +2166,7 @@ public:
     // Mail
     bool isMailboxOpen() const;
     const std::vector<MailMessage>& getMailInbox() const;
+    std::string getMailDisplaySubject(const MailMessage& mail);
     int getSelectedMailIndex() const;
     void setSelectedMailIndex(int idx);
     bool isMailComposeOpen() const;
@@ -2332,7 +2387,6 @@ public:
     // ── Movement & Transport ─────────────────────────────────────────
     auto& followRenderPosRef() { return followRenderPos_; }
     auto& followTargetGuidRef() { return followTargetGuid_; }
-    auto& serverRunSpeedRef() { return serverRunSpeed_; }
     auto& onTaxiFlightRef() { return onTaxiFlight_; }
     auto& taxiLandingCooldownRef() { return taxiLandingCooldown_; }
     auto& taxiMountActiveRef() { return taxiMountActive_; }
@@ -2523,6 +2577,7 @@ public:
     auto& addonChatCallbackRef() { return addonChatCallback_; }
     auto& addonEventCallbackRef() { return addonEventCallback_; }
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
+    auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
     auto& chargeCallbackRef() { return chargeCallback_; }
     auto& chatBubbleCallbackRef() { return chatBubbleCallback_; }
@@ -2558,6 +2613,7 @@ public:
     auto& npcVendorCallbackRef() { return npcVendorCallback_; }
     auto& openLfgCallbackRef() { return openLfgCallback_; }
     auto& otherPlayerLevelUpCallbackRef() { return otherPlayerLevelUpCallback_; }
+    auto& otherPlayerMountCallbackRef() { return otherPlayerMountCallback_; }
     auto& playerDespawnCallbackRef() { return playerDespawnCallback_; }
     auto& playerEquipmentCallbackRef() { return playerEquipmentCallback_; }
     auto& playerHealthCallbackRef() { return playerHealthCallback_; }
@@ -2589,7 +2645,8 @@ public:
     void sendPing();
     void setTransportAttachment(uint64_t childGuid, ObjectType type,
                                 uint64_t transportGuid, const glm::vec3& localOffset,
-                                bool hasLocalOrientation, float localOrientation);
+                                bool hasLocalOrientation, float localOrientation,
+                                bool offsetNeedsTransportResolution = false);
     void clearTransportAttachment(uint64_t childGuid);
     std::string guidToUnitId(uint64_t guid) const;
     Unit* getUnitByGuid(uint64_t guid);
@@ -2621,6 +2678,7 @@ public:
         glm::vec3 localOffset{0.0f};
         float localOrientation = 0.0f;
         bool hasLocalOrientation = false;
+        bool offsetNeedsTransportResolution = false;
     };
     struct AreaTriggerEntry {
         uint32_t id = 0;
@@ -2668,6 +2726,9 @@ public:
         uint32_t permanentEnchantId = 0;
         uint32_t temporaryEnchantId = 0;
         std::array<uint32_t, 3> socketEnchantIds{};
+        uint32_t flags = 0;              // ITEM_FIELD_FLAGS (bit 0x1 = soulbound)
+        int32_t  randomPropertyId = 0;   // ITEM_FIELD_RANDOM_PROPERTIES_ID (signed)
+        uint32_t suffixFactor = 0;       // ITEM_FIELD_PROPERTY_SEED (random-suffix stat scale)
     };
     bool isHostileFaction(uint32_t factionTemplateId) const {
         auto it = factionHostileMap_.find(factionTemplateId);
@@ -2914,6 +2975,7 @@ private:
     ItemIconPathResolver itemIconPathResolver_;
     SpellDataResolver spellDataResolver_;
     RandomPropertyNameResolver randomPropertyNameResolver_;
+    RandomStatResolver randomStatResolver_;
     EmoteAnimCallback emoteAnimCallback_;
 
     // Targeting
@@ -3077,6 +3139,11 @@ private:
     glm::vec3 playerTransportOffset_ = glm::vec3(0.0f); // Player offset on transport
     uint64_t playerTransportStickyGuid_ = 0;       // Last transport player was on (temporary retention)
     float playerTransportStickyTimer_ = 0.0f;      // Seconds to keep sticky transport alive after transient clears
+    bool pendingPlayerTransportTransfer_ = false;
+    uint64_t pendingPlayerTransportGuid_ = 0;
+    uint32_t pendingPlayerTransportEntry_ = 0;
+    uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
@@ -3138,9 +3205,6 @@ private:
     uint32_t instanceDifficulty_ = 0;
     bool instanceIsHeroic_ = false;
     bool inInstance_ = false;
-
-    // Raid target markers (icon 0-7 -> guid; 0 = empty slot)
-    std::array<uint64_t, kRaidMarkCount> raidTargetGuids_ = {};
 
     // Mirror timers (0=fatigue, 1=breath, 2=feigndeath)
     MirrorTimer mirrorTimers_[3];
@@ -3609,8 +3673,10 @@ private:
     StandStateCallback standStateCallback_;
     LogoutCompleteCallback logoutCompleteCallback_;
     AppearanceChangedCallback appearanceChangedCallback_;
+    PlayerModelRebuildCallback playerModelRebuildCallback_;
     GhostStateCallback ghostStateCallback_;
     MeleeSwingCallback meleeSwingCallback_;
+    FaceCameraProvider faceCameraProvider_;
     RangedWeaponSwapCallback rangedWeaponSwapCallback_;
     bool suppressMeleeSwingAnim_ = false;
     // lastMeleeSwingMs_ moved to CombatHandler
@@ -3632,6 +3698,7 @@ private:
     std::vector<TempEnchantTimer> tempEnchantTimers_;
     std::vector<BookPage> bookPages_;            // pages collected for the current readable item
     OtherPlayerLevelUpCallback otherPlayerLevelUpCallback_;
+    OtherPlayerMountCallback otherPlayerMountCallback_;
     AchievementEarnedCallback achievementEarnedCallback_;
     AreaDiscoveryCallback areaDiscoveryCallback_;
     QuestProgressCallback questProgressCallback_;
@@ -3643,15 +3710,6 @@ private:
     OpenLfgCallback openLfgCallback_;
     uint32_t currentMountDisplayId_ = 0;
     uint32_t mountAuraSpellId_ = 0;       // Spell ID of the aura that caused mounting (for CMSG_CANCEL_AURA fallback)
-    float serverRunSpeed_ = 7.0f;
-    float serverWalkSpeed_ = 2.5f;
-    float serverRunBackSpeed_ = 4.5f;
-    float serverSwimSpeed_ = 4.722f;
-    float serverSwimBackSpeed_ = 2.5f;
-    float serverFlightSpeed_ = 7.0f;
-    float serverFlightBackSpeed_ = 4.5f;
-    float serverTurnRate_ = 3.14159f;
-    float serverPitchRate_ = 3.14159f;
     bool playerDead_ = false;
     bool releasedSpirit_ = false;
     uint32_t corpseMapId_ = 0;

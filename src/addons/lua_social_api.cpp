@@ -54,7 +54,7 @@ static int lua_SendAddonMessage(lua_State* L) {
     // Encode as prefix\ttext (WoW addon message format)
     std::string encoded = std::string(prefix) + "\t" + text;
     std::string targetStr(target && *target ? target : "");
-    gh->sendChatMessage(ct, encoded, targetStr);
+    gh->sendAddonMessage(ct, encoded, targetStr);
     return 0;
 }
 

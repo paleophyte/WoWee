@@ -8,6 +8,7 @@
 #include "game/opcode_table.hpp"
 #include "game/chat_handler.hpp"
 #include "game/transport_manager.hpp"
+#include "game/movement_handler.hpp"
 #include "core/logger.hpp"
 #include "core/coordinates.hpp"
 #include "network/world_socket.hpp"
@@ -528,12 +529,21 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
     if (entityType != ObjectType::UNIT && entityType != ObjectType::GAMEOBJECT) return;
 
     if (block.onTransport && block.transportGuid != 0) {
-        glm::vec3 localOffset = core::coords::serverToCanonical(
-            glm::vec3(block.transportX, block.transportY, block.transportZ));
+        const glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
+        const bool transportResolved = owner_.getTransportManager() &&
+            owner_.getTransportManager()->getTransport(block.transportGuid);
+        // Preserve the raw wire offset if the child arrives before its parent
+        // transport during a map load. Its coordinate convention depends on
+        // whether that parent is an M2 or WMO and can only be decided once the
+        // transport has registered.
+        glm::vec3 localOffset = transportResolved
+            ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
+            : serverOffset;
         const bool hasLocalOrientation = (block.updateFlags & 0x0020) != 0; // UPDATEFLAG_LIVING
         float localOriCanonical = core::coords::normalizeAngleRad(-block.transportO);
         owner_.setTransportAttachment(block.guid, entityType, block.transportGuid,
-                               localOffset, hasLocalOrientation, localOriCanonical);
+                               localOffset, hasLocalOrientation, localOriCanonical,
+                               !transportResolved);
         if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(block.transportGuid)) {
             glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(block.transportGuid, localOffset);
             entity->setPosition(composed.x, composed.y, composed.z, entity->getOrientation());
@@ -632,6 +642,12 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
         return;
     }
     uint32_t old = owner_.currentMountDisplayIdRef();
+    if (old != 0 && newMountDisplayId == 0) {
+        LOG_WARNING("Authoritative mount field cleared: oldDisplay=", old,
+                    " casting=", owner_.isCasting(),
+                    " channeling=", owner_.isChanneling(),
+                    " spell=", owner_.getCurrentCastSpellId());
+    }
     owner_.currentMountDisplayIdRef() = newMountDisplayId;
     if (newMountDisplayId != old && owner_.mountCallbackRef()) owner_.mountCallbackRef()(newMountDisplayId);
     if (newMountDisplayId != old)
@@ -764,7 +780,9 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
     if (block.onTransport) {
         // Convert transport offset from server → canonical coordinates
         glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
-        glm::vec3 canonicalOffset = core::coords::serverToCanonical(serverOffset);
+        glm::vec3 canonicalOffset = owner_.getTransportManager()
+            ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
+            : core::coords::serverToCanonical(serverOffset);
         owner_.setPlayerOnTransport(block.transportGuid, canonicalOffset);
         if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef())) {
             glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.playerTransportGuidRef(), owner_.playerTransportOffsetRef());
@@ -796,14 +814,16 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
                 owner_.movementInfoRef().z = canonicalPos.z;
             }
         }
-        // Don't clear client-side M2 transport boarding (trams) —
-        // the server doesn't know about client-detected transport attachment.
-        bool isClientM2Transport = false;
+        // Don't clear client-detected transport boarding. The server does not know
+        // about locally animated M2 trams or TaxiPathNode WMO ships until our next
+        // movement heartbeat publishes the attachment.
+        bool isClientAnimatedTransport = false;
         if (owner_.playerTransportGuidRef() != 0 && owner_.getTransportManager()) {
             auto* tr = owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef());
-            isClientM2Transport = (tr && tr->isM2);
+            isClientAnimatedTransport = tr &&
+                (tr->isM2 || (tr->worldCoords && tr->useClientAnimation));
         }
-        if (owner_.playerTransportGuidRef() != 0 && !isClientM2Transport) {
+        if (owner_.playerTransportGuidRef() != 0 && !isClientAnimatedTransport) {
             LOG_INFO("Player left transport");
             owner_.clearPlayerTransport();
         }
@@ -883,6 +903,9 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
+            } else if (block.objectType == ObjectType::PLAYER &&
+                       owner_.otherPlayerMountCallbackRef()) {
+                owner_.otherPlayerMountCallbackRef()(block.guid, val);
             }
             unit->setMountDisplayId(val);
         }
@@ -974,6 +997,14 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.flags) {
             uint32_t oldFlags = unit->getUnitFlags();
             unit->setUnitFlags(val);
+            // UNIT_FIELD_FLAGS is the server's authoritative combat state. Spell-only
+            // attackers do not necessarily produce SMSG_ATTACKSTOP, so retaining them
+            // after this bit clears leaves the client permanently "in combat".
+            if (block.guid == owner_.getPlayerGuid() &&
+                (oldFlags & UNIT_FLAG_IN_COMBAT) != 0 &&
+                (val & UNIT_FLAG_IN_COMBAT) == 0 && owner_.getCombatHandler()) {
+                owner_.getCombatHandler()->clearHostileAttackers();
+            }
             // Detect stun state change on local player
             constexpr uint32_t UNIT_FLAG_STUNNED = 0x00040000;
             if (block.guid == owner_.getPlayerGuid() && owner_.stunStateCallbackRef()) {
@@ -1076,6 +1107,10 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         } else if (key == ufi.mountDisplayId) {
             if (block.guid == owner_.getPlayerGuid()) {
                 detectPlayerMountChange(val, block.fields);
+            } else if (entity->getType() == ObjectType::PLAYER &&
+                       val != unit->getMountDisplayId() &&
+                       owner_.otherPlayerMountCallbackRef()) {
+                owner_.otherPlayerMountCallbackRef()(block.guid, val);
             }
             unit->setMountDisplayId(val);
         } else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
@@ -1206,6 +1241,8 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 owner_.isRestingRef() = (restStateByte != 0);
                 if (owner_.appearanceChangedCallbackRef())
                     owner_.appearanceChangedCallbackRef()();
+                if (owner_.playerModelRebuildCallbackRef())
+                    owner_.playerModelRebuildCallbackRef()();
             }
         }
         else if (pfi.chosenTitle != 0xFFFF && key == pfi.chosenTitle) {
@@ -1221,6 +1258,8 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
             }
             if (owner_.appearanceChangedCallbackRef())
                 owner_.appearanceChangedCallbackRef()();
+            if (owner_.playerModelRebuildCallbackRef())
+                owner_.playerModelRebuildCallbackRef()();
         }
         else if (!isCreate && key == pfi.playerFlags) {
             constexpr uint32_t PLAYER_FLAGS_GHOST = 0x00000010;
@@ -1340,6 +1379,22 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
     auto stackIt = block.fields.find(fieldIndex(UF::ITEM_FIELD_STACK_COUNT));
     auto durIt   = block.fields.find(fieldIndex(UF::ITEM_FIELD_DURABILITY));
     auto maxDurIt= block.fields.find(fieldIndex(UF::ITEM_FIELD_MAXDURABILITY));
+    // ITEM_FIELD_FLAGS is 7 fields after STACK_COUNT (DURATION + 5×SPELL_CHARGES = 6, then
+    // FLAGS) across every expansion; the enchant block that follows starts at +8.
+    const uint16_t flagsField = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
+        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 7u) : 0xFFFFu;
+    // ITEM_FIELD_RANDOM_PROPERTIES_ID sits just before ITEM_FIELD_DURABILITY: pre-WotLK an
+    // ITEM_TEXT_ID field separates them (DUR-2), WotLK dropped that field so it is DUR-1.
+    const uint16_t randPropField = (fieldIndex(UF::ITEM_FIELD_DURABILITY) != 0xFFFF)
+        ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_DURABILITY) - (isPreWotlk() ? 2u : 1u))
+        : 0xFFFFu;
+    // ITEM_FIELD_PROPERTY_SEED (the random-suffix stat scale) sits immediately before
+    // RANDOM_PROPERTIES_ID; the client multiplies each suffix allocation % by it.
+    const uint16_t seedField = (randPropField != 0xFFFF && randPropField > 0)
+        ? static_cast<uint16_t>(randPropField - 1u) : 0xFFFFu;
+    auto flagsIt    = (flagsField != 0xFFFF)    ? block.fields.find(flagsField)    : block.fields.end();
+    auto randPropIt = (randPropField != 0xFFFF) ? block.fields.find(randPropField) : block.fields.end();
+    auto seedIt     = (seedField != 0xFFFF)     ? block.fields.find(seedField)     : block.fields.end();
     const uint16_t enchBase = (fieldIndex(UF::ITEM_FIELD_STACK_COUNT) != 0xFFFF)
         ? static_cast<uint16_t>(fieldIndex(UF::ITEM_FIELD_STACK_COUNT) + 8u) : 0xFFFFu;
     auto permEnchIt  = (enchBase != 0xFFFF) ? block.fields.find(enchBase)       : block.fields.end();
@@ -1349,8 +1404,9 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
     auto sock3EnchIt = (enchBase != 0xFFFF) ? block.fields.find(enchBase + 12u) : block.fields.end();
     if (entryIt != block.fields.end() && entryIt->second != 0) {
         // Preserve existing info when doing partial updates
-        GameHandler::OnlineItemInfo info = owner_.onlineItemsRef().count(block.guid)
+        GameHandler::OnlineItemInfo prev = owner_.onlineItemsRef().count(block.guid)
             ? owner_.onlineItemsRef()[block.guid] : GameHandler::OnlineItemInfo{};
+        GameHandler::OnlineItemInfo info = prev;
         info.entry = entryIt->second;
         if (stackIt    != block.fields.end()) info.stackCount            = stackIt->second;
         if (durIt      != block.fields.end()) info.curDurability         = durIt->second;
@@ -1360,8 +1416,27 @@ void EntityController::trackItemOnCreate(const UpdateBlock& block, bool& newItem
         if (sock1EnchIt != block.fields.end()) info.socketEnchantIds[0]  = sock1EnchIt->second;
         if (sock2EnchIt != block.fields.end()) info.socketEnchantIds[1]  = sock2EnchIt->second;
         if (sock3EnchIt != block.fields.end()) info.socketEnchantIds[2]  = sock3EnchIt->second;
+        if (flagsIt    != block.fields.end()) info.flags                 = flagsIt->second;
+        if (randPropIt != block.fields.end()) info.randomPropertyId      = static_cast<int32_t>(randPropIt->second);
+        if (seedIt     != block.fields.end()) info.suffixFactor          = seedIt->second;
         auto [itemIt, isNew] = owner_.onlineItemsRef().insert_or_assign(block.guid, info);
-        if (isNew) newItemCreated = true;
+        // A CREATE_OBJECT that re-sends an already-tracked item with a changed stack
+        // count (AzerothCore does this when crafting consumes a reagent) must still
+        // refresh the built inventory — otherwise bag and crafting-window counts stay
+        // stale until some later rebuild. Flag the batch rebuild on any tracked change,
+        // not just brand-new items.
+        const bool itemChanged = isNew ||
+            info.stackCount        != prev.stackCount ||
+            info.curDurability     != prev.curDurability ||
+            info.maxDurability     != prev.maxDurability ||
+            info.entry             != prev.entry ||
+            info.flags             != prev.flags ||
+            info.randomPropertyId  != prev.randomPropertyId ||
+            info.suffixFactor      != prev.suffixFactor ||
+            info.permanentEnchantId != prev.permanentEnchantId ||
+            info.temporaryEnchantId != prev.temporaryEnchantId ||
+            info.socketEnchantIds  != prev.socketEnchantIds;
+        if (itemChanged) newItemCreated = true;
         owner_.queryItemInfo(info.entry, block.guid);
     }
     // Extract container slot GUIDs for bags
@@ -1388,6 +1463,13 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
     const uint16_t itemSock1EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 6u)  : 0xFFFF;
     const uint16_t itemSock2EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 9u)  : 0xFFFF;
     const uint16_t itemSock3EnchField= (itemEnchBase != 0xFFFF) ? (itemEnchBase + 12u) : 0xFFFF;
+    // ITEM_FIELD_FLAGS (STACK+7) carries the soulbound bit that a BoE item gains on equip;
+    // RANDOM_PROPERTIES_ID sits before DURABILITY (DUR-2 pre-WotLK, DUR-1 on WotLK).
+    const uint16_t itemFlagsField    = (itemStackField != 0xFFFF) ? (itemStackField + 7u) : 0xFFFF;
+    const uint16_t itemRandPropField = (itemDurField != 0xFFFF)
+        ? static_cast<uint16_t>(itemDurField - (isPreWotlk() ? 2u : 1u)) : 0xFFFF;
+    const uint16_t itemSeedField = (itemRandPropField != 0xFFFF && itemRandPropField > 0)
+        ? static_cast<uint16_t>(itemRandPropField - 1u) : 0xFFFF;
 
     auto it = owner_.onlineItemsRef().find(block.guid);
     bool isItemInInventory = (it != owner_.onlineItemsRef().end());
@@ -1455,6 +1537,21 @@ void EntityController::updateItemOnValuesUpdate(const UpdateBlock& block,
         } else if (isItemInInventory && itemSock3EnchField != 0xFFFF && key == itemSock3EnchField) {
             if (it->second.socketEnchantIds[2] != val) {
                 it->second.socketEnchantIds[2] = val;
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemFlagsField != 0xFFFF && key == itemFlagsField) {
+            if (it->second.flags != val) {
+                it->second.flags = val;
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemRandPropField != 0xFFFF && key == itemRandPropField) {
+            if (it->second.randomPropertyId != static_cast<int32_t>(val)) {
+                it->second.randomPropertyId = static_cast<int32_t>(val);
+                inventoryChanged = true;
+            }
+        } else if (isItemInInventory && itemSeedField != 0xFFFF && key == itemSeedField) {
+            if (it->second.suffixFactor != val) {
+                it->second.suffixFactor = val;
                 inventoryChanged = true;
             }
         }
@@ -1721,9 +1818,15 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
         owner_.gameObjectSpawnCallbackRef()(block.guid, go->getEntry(), go->getDisplayId(),
             go->getX(), go->getY(), go->getZ(), go->getOrientation(), goScale);
     }
-    // Fire transport move callback for transports (position update on re-creation)
+    // Fire transport move callback for transports (position update on re-creation).
+    // NOTE: do NOT mark the guid as server-updated here. A CREATE only carries the
+    // spawn position, not evidence that the server is authoritatively streaming this
+    // transport's motion. Marking it here forces preferServerData=true at spawn
+    // resolution, which puts client-animated ships/zeppelins into strict mode and
+    // skips the entry->DBC path remap — WotLK ship GO entries don't match
+    // TransportAnimation.dbc 1:1, so they were left stationary. Only genuine
+    // movement updates (onValuesUpdateGameObject / MOVEMENT blocks) set that flag.
     if (transportGuids_.count(block.guid) && owner_.transportMoveCallbackRef()) {
-        serverUpdatedTransportGuids_.insert(block.guid);
         owner_.transportMoveCallbackRef()(block.guid,
             go->getX(), go->getY(), go->getZ(), go->getOrientation());
     }
@@ -1861,17 +1964,14 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
             oldFieldsSnapshot = owner_.lastPlayerFieldsRef();
         }
         if (block.hasMovement && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            owner_.serverRunSpeedRef() = block.runSpeed;
-            // Some server dismount paths update run speed without updating mount display field.
-            const bool onRealTaxiFlight = owner_.getMovementHandler() && owner_.getMovementHandler()->isOnTaxiFlight();
-            if (!onRealTaxiFlight && !owner_.taxiMountActiveRef() &&
-                owner_.currentMountDisplayIdRef() != 0 && block.runSpeed <= 8.5f) {
-                LOG_INFO("Auto-clearing mount from movement speed update: speed=", block.runSpeed,
-                         " displayId=", owner_.currentMountDisplayIdRef());
-                owner_.currentMountDisplayIdRef() = 0;
-                if (owner_.mountCallbackRef()) {
-                    owner_.mountCallbackRef()(0);
-                }
+            // Speed is independent of mount ownership: slows and ordinary movement
+            // snapshots may report base-speed values while UNIT_FIELD_MOUNTDISPLAYID
+            // still authoritatively says the player is mounted.
+            if (auto* movement = owner_.getMovementHandler()) {
+                movement->applyServerMovementSpeeds(
+                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                    block.flightBackSpeed, block.turnRate, block.pitchRate);
             }
         }
         // Merge block fields into the persistent snapshot. Both are sorted, so
@@ -1942,7 +2042,12 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         entity->setPosition(pos.x, pos.y, pos.z, oCanonical);
         LOG_DEBUG("  Position: (", pos.x, ", ", pos.y, ", ", pos.z, ")");
         if (block.guid == owner_.getPlayerGuid() && block.runSpeed > 0.1f && block.runSpeed < 100.0f) {
-            owner_.serverRunSpeedRef() = block.runSpeed;
+            if (auto* movement = owner_.getMovementHandler()) {
+                movement->applyServerMovementSpeeds(
+                    block.walkSpeed, block.runSpeed, block.runBackSpeed,
+                    block.swimSpeed, block.swimBackSpeed, block.flightSpeed,
+                    block.flightBackSpeed, block.turnRate, block.pitchRate);
+            }
         }
         // 3b: Track player-on-transport state
         if (block.guid == owner_.getPlayerGuid()) {
@@ -2404,16 +2509,18 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
             }
         }
 
-        // MO_TRANSPORT (type 15): assign TaxiPathNode path if available
+        // MO_TRANSPORT (type 15): assign TaxiPathNode path if available.
+        const uint32_t mapId = owner_.getCurrentMapId();
         if (data.type == 15 && data.hasData && data.data[0] != 0 && owner_.getTransportManager()) {
             uint32_t taxiPathId = data.data[0];
-            if (owner_.getTransportManager()->hasTaxiPath(taxiPathId)) {
-                if (owner_.getTransportManager()->assignTaxiPathToTransport(data.entry, taxiPathId)) {
-                    LOG_DEBUG("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ", taxiPathId);
+            if (owner_.getTransportManager()->hasTaxiPathForMap(taxiPathId, mapId)) {
+                if (owner_.getTransportManager()->assignTaxiPathToTransport(data.entry, taxiPathId, mapId)) {
+                    LOG_INFO("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ", taxiPathId,
+                             " on map ", mapId);
                 }
             } else {
-                LOG_DEBUG("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
-                         " not found in TaxiPathNode.dbc");
+                LOG_WARNING("MO_TRANSPORT entry=", data.entry, " taxiPathId=", taxiPathId,
+                         " has no TaxiPathNode segment on map ", mapId);
             }
         }
     }

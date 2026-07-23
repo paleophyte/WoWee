@@ -688,7 +688,28 @@ void GameHandler::registerOpcodeHandlers() {
     };
 
     // Mount/dismount
-    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& /*packet*/) {
+    dispatchTable_[Opcode::SMSG_DISMOUNT] = [this](network::Packet& packet) {
+        // TBC/WotLK identify the dismounting unit with a packed GUID. Applying
+        // every nearby unit's dismount to the local player made an enemy
+        // dismounting to attack knock us off our own mount. Classic variants
+        // may send the legacy empty packet, which is implicitly local.
+        uint64_t dismountGuid = playerGuid;
+        if (packet.hasRemaining(1)) {
+            dismountGuid = packet.readPackedGuid();
+            if (dismountGuid == 0) {
+                LOG_WARNING("Ignoring SMSG_DISMOUNT with an invalid packed GUID");
+                return;
+            }
+        }
+        if (dismountGuid != playerGuid) {
+            LOG_DEBUG("Remote SMSG_DISMOUNT: guid=0x", std::hex,
+                      dismountGuid, std::dec);
+            if (otherPlayerMountCallback_) {
+                otherPlayerMountCallback_(dismountGuid, 0);
+            }
+            return;
+        }
+
         // Live-confirmed: CMaNGOS sends this partway through a taxi flight (its
         // own server-side flight-completion estimate firing early, well before
         // the client-simulated path actually finishes) - obeying it unconditionally
@@ -728,6 +749,30 @@ void GameHandler::registerOpcodeHandlers() {
             // not match where the server actually stopped us.
             movementHandler_->finishClientTaxiFlight(/*snapToFinalWaypoint=*/false);
             return;
+        }
+
+        // UNIT_FIELD_MOUNTDISPLAYID is the authoritative persistent mount
+        // state.  Some realms emit an isolated SMSG_DISMOUNT while processing
+        // damage (notably periodic poison) without actually removing the mount
+        // aura or clearing the update field.  Treating that transient packet as
+        // state made the local model dismount even though the player remained
+        // mounted server-side.  A real dismount also clears the update field;
+        // let that values update drive the visual when the two signals disagree.
+        if (isActiveExpansion("wotlk")) {
+            const uint16_t mountField = fieldIndex(UF::UNIT_FIELD_MOUNTDISPLAYID);
+            auto playerEntity = entityController_->getEntityManager().getEntity(playerGuid);
+            const uint32_t serverMountDisplay =
+                (playerEntity && mountField != 0xFFFF && playerEntity->hasField(mountField))
+                    ? playerEntity->getField(mountField)
+                    : 0;
+            if (serverMountDisplay != 0) {
+                LOG_WARNING("Ignoring transient SMSG_DISMOUNT while authoritative mount field is ",
+                            serverMountDisplay,
+                            " casting=", isCasting(),
+                            " channeling=", isChanneling(),
+                            " spell=", getCurrentCastSpellId());
+                return;
+            }
         }
         currentMountDisplayId_ = 0;
         if (mountCallback_) mountCallback_(0);
@@ -1268,31 +1313,21 @@ void GameHandler::registerOpcodeHandlers() {
 
     // ---- MSG_RAID_TARGET_UPDATE ----
     dispatchTable_[Opcode::MSG_RAID_TARGET_UPDATE] = [this](network::Packet& packet) {
-        // uint8 type: 0 = full update (8 × (uint8 icon + uint64 guid)),
-        //             1 = single update (uint8 icon + uint64 guid)
-        size_t remRTU = packet.getRemainingSize();
-        if (remRTU < 1) return;
-        uint8_t rtuType = packet.readUInt8();
-        if (rtuType == 0) {
-            // Full update: always 8 entries
-            for (uint32_t i = 0; i < kRaidMarkCount; ++i) {
-                if (!packet.hasRemaining(9)) return;
-                uint8_t  icon = packet.readUInt8();
-                uint64_t guid = packet.readUInt64();
-                if (socialHandler_)
-                    socialHandler_->setRaidTargetGuid(icon, guid);
+        RaidTargetUpdateData rtu;
+        if (!RaidTargetUpdateParser::parse(packet, rtu)) return;
+
+        if (socialHandler_) {
+            // The full list is authoritative, so icons absent from it are gone.
+            if (rtu.fullList) {
+                for (uint32_t i = 0; i < kRaidMarkCount; ++i)
+                    socialHandler_->setRaidTargetGuid(static_cast<uint8_t>(i), 0);
             }
-        } else {
-            // Single update
-            if (packet.hasRemaining(9)) {
-                uint8_t  icon = packet.readUInt8();
-                uint64_t guid = packet.readUInt64();
-                if (socialHandler_)
-                    socialHandler_->setRaidTargetGuid(icon, guid);
-            }
+            for (const auto& [icon, guid] : rtu.marks)
+                socialHandler_->setRaidTargetGuid(icon, guid);
         }
-        LOG_DEBUG("MSG_RAID_TARGET_UPDATE: type=", static_cast<int>(rtuType));
-                    fireAddonEvent("RAID_TARGET_UPDATE", {});
+        LOG_DEBUG("MSG_RAID_TARGET_UPDATE: fullList=", rtu.fullList,
+                  " marks=", rtu.marks.size());
+        fireAddonEvent("RAID_TARGET_UPDATE", {});
     };
 
     // ---- SMSG_CRITERIA_UPDATE ----

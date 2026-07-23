@@ -148,9 +148,58 @@ bool shouldDespawnGatherTarget(uint8_t result) {
     return result == kSpellFailedAlreadyOpen || result == kSpellFailedChestInUse;
 }
 
-std::string gatherCastFailureMessage(uint8_t result, const std::string& fallback) {
+bool isMiningGatherSpell(uint32_t spellId) {
+    static constexpr uint32_t kMiningRanks[] = {2575, 2576, 3564, 10248, 29354};
+    for (uint32_t rank : kMiningRanks) {
+        if (spellId == rank) return true;
+    }
+    return false;
+}
+
+uint32_t gatherRequiredSkillRank(GameHandler& owner, uint64_t goGuid) {
+    auto entity = owner.getEntityManager().getEntity(goGuid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return 0;
+    auto go = std::static_pointer_cast<GameObject>(entity);
+    const auto* info = owner.getCachedGameObjectInfo(go->getEntry());
+    if (!info || !info->hasData || info->data[0] == 0) return 0;
+
+    auto* assets = owner.services().assetManager;
+    auto lockDbc = assets ? assets->loadDBC("Lock.dbc") : nullptr;
+    if (!lockDbc || !lockDbc->isLoaded() || lockDbc->getFieldCount() < 33) return 0;
+
+    const uint32_t lockId = info->data[0];
+    for (uint32_t row = 0; row < lockDbc->getRecordCount(); ++row) {
+        if (lockDbc->getUInt32(row, 0) != lockId) continue;
+        // Lock.dbc: Type[8], Index[8], Skill[8], Action[8]. Resource
+        // nodes have a LOCK_KEY_SKILL entry whose Skill value is the exact
+        // Mining/Herbalism rank enforced by the server.
+        for (uint32_t slot = 0; slot < 8; ++slot) {
+            constexpr uint32_t kLockKeySkill = 2;
+            if (lockDbc->getUInt32(row, 1 + slot) != kLockKeySkill) continue;
+            const uint32_t required = lockDbc->getUInt32(row, 17 + slot);
+            if (required != 0) return required;
+        }
+        break;
+    }
+    return 0;
+}
+
+std::string gatherCastFailureMessage(GameHandler& owner, uint64_t goGuid,
+                                     uint32_t spellId, uint8_t result,
+                                     const std::string& fallback) {
     if (result == kSpellFailedTryAgain) return "Failed.";
     if (result == kSpellFailedChestInUse) return "Already in use.";
+    // LOW_CASTLEVEL is the server's generic wording for an insufficient
+    // gathering profession rank. MIN_SKILL_REQUIRED is used by some cores.
+    if (result == 49 || result == 150) {
+        const char* skill = isMiningGatherSpell(spellId) ? "Mining" : "Herbalism";
+        const uint32_t required = gatherRequiredSkillRank(owner, goGuid);
+        if (required != 0) {
+            return std::string("Requires ") + skill + " skill " +
+                   std::to_string(required) + ".";
+        }
+        return std::string("Your ") + skill + " skill is too low for this node.";
+    }
     return fallback;
 }
 
@@ -556,6 +605,22 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // has since superseded. The server drops casts of superseded ranks without
     // sending any error, so swap in the highest rank we actually know.
     spellId = resolveHighestKnownRank(spellId);
+
+    // Fishing places a bobber in front of the caster using the facing the server has
+    // on record. The client only sends MSG_MOVE_SET_FACING when the aim changes by >3°
+    // (throttled to 10 Hz), so a small final aim adjustment before pressing cast may not
+    // have reached the server — leaving it with a slightly stale facing that drops the
+    // bobber off to the side or on land ("Face open water"). Push the exact current
+    // facing right before the cast so the bobber lands where the player is aiming.
+    if (spellclass::isFishingCast(spellId) && owner_.getSocket()) {
+        // Snap the character to face where the camera is looking, then push that facing to
+        // the server, so the bobber lands in front of the player's view. Standing still the
+        // character yaw doesn't follow the free-look camera, so without this the bobber
+        // dropped toward a stale heading (off to the side / on land → "Face open water").
+        const float canonO = owner_.faceCameraDirection();
+        owner_.setOrientation(canonO);
+        owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
+    }
 
     // Profession spells (Cooking, First Aid, Alchemy, ...) open the crafting
     // window client-side instead of being sent as casts — matching the real
@@ -1448,7 +1513,8 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     std::string errMsg = castFailureMessage(owner_, data.spellId, data.result, powerType,
                                             data.miscArg, data.miscArg2);
     if (gatherCast) {
-        errMsg = gatherCastFailureMessage(data.result, errMsg);
+        errMsg = gatherCastFailureMessage(owner_, gatherGoGuid, data.spellId,
+                                          data.result, errMsg);
         if (shouldDespawnGatherTarget(data.result)) {
             owner_.despawnGameObjectLocally(gatherGoGuid);
         }
@@ -2007,11 +2073,31 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     LOG_INFO("Removed spell: ", spellId);
     if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("SPELLS_CHANGED", {});
 
-    const std::string& name = owner_.getSpellName(spellId);
-    if (!name.empty())
-        owner_.addSystemChatMessage("You have unlearned: " + name + ".");
-    else
-        owner_.addSystemChatMessage("A spell has been removed.");
+    // Learning a new talent rank legitimately removes/replaces its internal
+    // talent spell. That is rank bookkeeping, not the player unlearning the
+    // talent, and presenting it as "You have unlearned" is backwards.
+    loadTalentDbc();
+    bool isTalentRankSpell = false;
+    for (const auto& [talentId, talent] : talentCache_) {
+        (void)talentId;
+        for (uint32_t rankSpell : talent.rankSpells) {
+            if (rankSpell == spellId) {
+                isTalentRankSpell = true;
+                break;
+            }
+        }
+        if (isTalentRankSpell) break;
+    }
+
+    if (!isTalentRankSpell) {
+        const std::string& name = owner_.getSpellName(spellId);
+        if (!name.empty())
+            owner_.addSystemChatMessage("You have unlearned: " + name + ".");
+        else
+            owner_.addSystemChatMessage("A spell has been removed.");
+    } else {
+        LOG_DEBUG("Suppressed talent-rank removal chat for spell ", spellId);
+    }
 
     bool barChanged = false;
     for (auto& slot : owner_.actionBarRef()) {
@@ -2149,10 +2235,13 @@ void SpellHandler::handleTalentsInfo(network::Packet& packet) {
 }
 
 void SpellHandler::handleAchievementEarned(network::Packet& packet) {
-    size_t remaining = packet.getRemainingSize();
-    if (remaining < 16) return;
-
-    uint64_t guid          = packet.readUInt64();
+    // WotLK SMSG_ACHIEVEMENT_EARNED: packGUID player + uint32 achievementId + packedTime.
+    // The player GUID is a PACKED guid, not a full uint64 — reading it as uint64 swallowed
+    // 4 bytes of the achievement id (showing the raw guid + a garbage id), so decode the
+    // packed guid and the fixed fields follow at the correct offset.
+    if (!packet.hasFullPackedGuid()) return;
+    uint64_t guid = packet.readPackedGuid();
+    if (!packet.hasRemaining(8)) return;  // achievementId(4) + packedTime(4)
     uint32_t achievementId = packet.readUInt32();
     uint32_t earnDate      = packet.readUInt32();
 
@@ -3133,7 +3222,8 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
                                                      castResult, playerPowerType,
                                                      castResultMiscArg, castResultMiscArg2);
             if (gatherCast) {
-                errMsg = gatherCastFailureMessage(castResult, errMsg);
+                errMsg = gatherCastFailureMessage(owner_, gatherGoGuid,
+                                                  castResultSpellId, castResult, errMsg);
                 if (shouldDespawnGatherTarget(castResult)) {
                     owner_.despawnGameObjectLocally(gatherGoGuid);
                 }
@@ -3630,9 +3720,9 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
-    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint8 powerType + int32 amount
-    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint8 powerType + int32 amount
-    // Classic/Vanilla: packed_guid (same as WotLK)
+    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint32 powerType + int32 amount
+    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint32 powerType + int32 amount
+    // Classic/Vanilla: packed_guid (same as WotLK). PowerType is uint32 in every expansion.
     const bool energizeTbc = isActiveExpansion("tbc");
     auto readEnergizeGuid = [&]() -> uint64_t {
         if (energizeTbc)
@@ -3649,11 +3739,15 @@ void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
         packet.skipAll(); return;
     }
     uint64_t casterGuid = readEnergizeGuid();
-    if (!packet.hasRemaining(9)) {
+    // spellId(4) + powerType(4) + amount(4) = 12. PowerType is a uint32 on the wire in
+    // every expansion (Vanilla/TBC/WotLK); reading it as a uint8 left 3 bytes in front of
+    // amount, turning a small power gain (e.g. 10 = 0x0000000A after powerType 0x00000001)
+    // into 0x0A000000 = 167772160 floating combat text.
+    if (!packet.hasRemaining(12)) {
         packet.skipAll(); return;
     }
     uint32_t spellId       = packet.readUInt32();
-    uint8_t  energizePowerType = packet.readUInt8();
+    uint8_t  energizePowerType = static_cast<uint8_t>(packet.readUInt32());
     int32_t  amount        = static_cast<int32_t>(packet.readUInt32());
     bool isPlayerVictim = (victimGuid == owner_.getPlayerGuid());
     bool isPlayerCaster = (casterGuid == owner_.getPlayerGuid());

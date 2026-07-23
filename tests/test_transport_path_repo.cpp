@@ -173,6 +173,27 @@ TEST_CASE("hasPathForEntry checks fromDBC flag", "[transport_path_repo]") {
     REQUIRE(repo.hasPathForEntry(701) == true);
 }
 
+TEST_CASE("loadPathFromNodes replaces stale runtime paths but preserves DBC paths",
+          "[transport_path_repo][expansion]") {
+    game::TransportPathRepository repo;
+
+    repo.loadPathFromNodes(710, {{0, 0, 0}, {10, 0, 0}}, false, 10.0f);
+    repo.loadPathFromNodes(710, {{0, 0, 0}, {20, 0, 0}, {40, 0, 0}}, false, 10.0f);
+    REQUIRE(repo.findPath(710)->spline.keyCount() == 3);
+
+    std::vector<math::SplineKey> dbcKeys = {
+        {0, {0, 0, 0}}, {1000, {50, 0, 0}}
+    };
+    math::CatmullRomSpline dbcSpline(std::move(dbcKeys), false);
+    repo.storePath(711, game::PathEntry(std::move(dbcSpline), 711, false, true, false));
+
+    repo.loadPathFromNodes(711, {{1, 2, 3}}, false, 10.0f);
+    const auto* preserved = repo.findPath(711);
+    REQUIRE(preserved != nullptr);
+    REQUIRE(preserved->fromDBC);
+    REQUIRE(preserved->spline.keyCount() == 2);
+}
+
 // ── Repository: hasUsableMovingPathForEntry ─────────────────────
 
 TEST_CASE("hasUsableMovingPathForEntry rejects stationary/z-only", "[transport_path_repo]") {
@@ -238,12 +259,26 @@ TEST_CASE("inferMovingPathForSpawn skips z-only paths", "[transport_path_repo]")
     REQUIRE(result == 0);
 }
 
+TEST_CASE("night-elf ships never borrow unrelated TransportAnimation paths",
+          "[transport_path_repo][transport][expansion]") {
+    game::TransportPathRepository repo;
+    std::vector<math::SplineKey> keys = {
+        {0, {0, 0, 0}}, {1000, {100, 0, 0}}
+    };
+    math::CatmullRomSpline spline(std::move(keys), false);
+    repo.storePath(194675, game::PathEntry(std::move(spline), 194675, false, true, false));
+
+    REQUIRE(repo.pickFallbackMovingPath(176244, 7087) == 0); // Moonspray
+    REQUIRE(repo.pickFallbackMovingPath(181646, 7087) == 0); // Elune's Blessing
+    REQUIRE(repo.pickFallbackMovingPath(177233, 7087) == 0); // shared model, other route
+}
+
 // ── Repository: taxi paths ─────────────────────────────────────
 
 TEST_CASE("hasTaxiPath and findTaxiPath", "[transport_path_repo]") {
     game::TransportPathRepository repo;
     REQUIRE(repo.hasTaxiPath(100) == false);
-    REQUIRE(repo.findTaxiPath(100) == nullptr);
+    REQUIRE(repo.findTaxiPath(100, 0) == nullptr);
 
     // loadTaxiPathNodeDBC would populate this, but we can't test it without AssetManager.
     // This just verifies the API works with empty data.
@@ -312,4 +347,95 @@ TEST_CASE("PathEntry findNearestKey finds closest waypoint", "[transport_path_re
     // Point near key 2 (200, 0, 0)
     nearest = entry.spline.findNearestKey({195.0f, 0.0f, 0.0f});
     REQUIRE(nearest == 2);
+}
+
+// ── buildTaxiSegmentSpline: wrap topology per route shape ──────
+
+// Sample a spline densely and return the longest interval (ms) over which its position
+// does not move — used to prove a ferry never parks dead (no stationary offshore hold).
+static uint32_t longestStationaryMs(const math::CatmullRomSpline& s) {
+    const uint32_t dur = s.durationMs();
+    const uint32_t step = std::max<uint32_t>(1u, dur / 400u);
+    uint32_t worst = 0, run = 0;
+    glm::vec3 prev = s.evaluatePosition(0);
+    for (uint32_t t = step; t <= dur; t += step) {
+        const glm::vec3 cur = s.evaluatePosition(t);
+        if (glm::distance(cur, prev) < 1.0f) { run += step; worst = std::max(worst, run); }
+        else run = 0;
+        prev = cur;
+    }
+    return worst;
+}
+
+TEST_CASE("buildTaxiSegmentSpline single-map shuttle sails back (position-closed)",
+          "[transport_path_repo][taxi]") {
+    // Dock at origin, open water 1000 units out. The boat must return under sail, so the
+    // cycle ends where it began.
+    std::vector<glm::vec3> pts = {
+        {0.0f, 0.0f, 0.0f}, {400.0f, 0.0f, 0.0f}, {1000.0f, 0.0f, 0.0f},
+    };
+    std::vector<uint32_t> delays(pts.size(), 0u);
+    auto spline = game::TransportPathRepository::buildTaxiSegmentSpline(pts, delays);
+
+    // Position-closed: no teleport-snap at the modulo wrap.
+    const glm::vec3 atStart = spline.evaluatePosition(0);
+    const glm::vec3 atEnd = spline.evaluatePosition(spline.durationMs());
+    requireVec3Near(atEnd, atStart.x, atStart.y, atStart.z, 0.5f);
+    requireVec3Near(atStart, 0.0f, 0.0f, 0.0f, 0.5f);
+
+    // Mid-cycle the hull is out at the far turnaround, i.e. it actually leaves the dock.
+    const glm::vec3 mid = spline.evaluatePosition(spline.durationMs() / 2);
+    REQUIRE(mid.x > 800.0f);
+}
+
+TEST_CASE("buildTaxiSegmentSpline continent slice ferries without parking offshore",
+          "[transport_path_repo][taxi]") {
+    // One map's slice of a cross-continent route: offshore-in -> dock -> offshore-out.
+    // It must oscillate (there-and-back), reaching the far offshore node so the server's
+    // handoff can fire there, and NEVER hold stationary at sea (the reported bug).
+    std::vector<glm::vec3> pts = {
+        {0.0f, 0.0f, 0.0f}, {500.0f, 0.0f, 0.0f}, {1000.0f, 0.0f, 0.0f},  // dock at 500
+    };
+    std::vector<uint32_t> delays(pts.size(), 0u);
+    auto spline = game::TransportPathRepository::buildTaxiSegmentSpline(pts, delays);
+
+    // Position-closed and reaches the far offshore node mid-cycle.
+    const glm::vec3 atStart = spline.evaluatePosition(0);
+    const glm::vec3 atEnd = spline.evaluatePosition(spline.durationMs());
+    requireVec3Near(atEnd, atStart.x, atStart.y, atStart.z, 0.5f);
+    REQUIRE(spline.evaluatePosition(spline.durationMs() / 2).x > 900.0f);
+
+    // No dead offshore hold: with no authored dwell, the only near-stationary moment is
+    // the brief deceleration as the hull U-turns at a node (a few seconds), nowhere near
+    // the tens of seconds the old offshore hold parked it for.
+    REQUIRE(longestStationaryMs(spline) < 5000u);
+}
+
+TEST_CASE("buildTaxiSegmentSpline honors an authored dock dwell but nothing longer",
+          "[transport_path_repo][taxi]") {
+    // A 60s dwell at the mid dock is the only stationary stretch; there is no offshore
+    // hold anywhere near the ~2s the boat needs to sail each 500u leg.
+    std::vector<glm::vec3> pts = {
+        {0.0f, 0.0f, 0.0f}, {500.0f, 0.0f, 0.0f}, {1000.0f, 0.0f, 0.0f},
+    };
+    std::vector<uint32_t> delays = {0u, 60000u, 0u};
+    auto spline = game::TransportPathRepository::buildTaxiSegmentSpline(pts, delays);
+
+    const uint32_t stationary = longestStationaryMs(spline);
+    REQUIRE(stationary >= 55000u);   // the authored dock dwell is preserved
+    REQUIRE(stationary <= 65000u);   // and nothing parks longer than it
+}
+
+TEST_CASE("buildTaxiSegmentSpline closed loop returns to first node",
+          "[transport_path_repo][taxi]") {
+    // Endpoints coincide (within 60u): a ring that closes back to the start.
+    std::vector<glm::vec3> pts = {
+        {0.0f, 0.0f, 0.0f}, {300.0f, 0.0f, 0.0f}, {300.0f, 300.0f, 0.0f}, {10.0f, 5.0f, 0.0f},
+    };
+    std::vector<uint32_t> delays(pts.size(), 0u);
+    auto spline = game::TransportPathRepository::buildTaxiSegmentSpline(pts, delays);
+
+    const glm::vec3 atStart = spline.evaluatePosition(0);
+    const glm::vec3 atEnd = spline.evaluatePosition(spline.durationMs());
+    requireVec3Near(atEnd, atStart.x, atStart.y, atStart.z, 0.5f);
 }

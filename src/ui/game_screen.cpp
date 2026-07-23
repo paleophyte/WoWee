@@ -59,6 +59,15 @@ namespace {
     constexpr auto& kColorBrightGreen= kBrightGreen;
     constexpr auto& kColorYellow     = kYellow;
 
+    // Upper bound on a game object's cursor-pick sphere. A wide/tall M2 GO (a forge, an
+    // anvil, a large brazier) reports a legitimately big visual radius, but its bounding
+    // sphere is a poor click target: the half-diagonal reaches well past the geometry and
+    // swallows NPCs standing next to it, so those units become unclickable. Clamping the
+    // GO pick radius keeps large objects clickable near their center without stealing the
+    // click from a neighbor. Units are never clamped — this is a GO-only correction, the
+    // same reasoning that already makes WMO GOs fall back to a conservative fixed sphere.
+    constexpr float kMaxGameObjectPickRadius = 3.0f;
+
     bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
         glm::vec3 oc = ray.origin - center;
         float b = glm::dot(oc, ray.direction);
@@ -448,7 +457,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     combatUI_.renderBattlegroundScore(gameHandler);
     combatUI_.renderRaidWarningOverlay(gameHandler);
     combatUI_.renderCombatText(gameHandler);
-    combatUI_.renderDPSMeter(gameHandler, settingsPanel_);
+    combatUI_.renderDPSMeter(gameHandler, settingsPanel_, lastTargetFrameBottom_);
     renderDurabilityWarning(gameHandler);
     renderUIErrors(gameHandler, ImGui::GetIO().DeltaTime);
     toastManager_.renderEarlyToasts(ImGui::GetIO().DeltaTime, gameHandler);
@@ -474,7 +483,15 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         inventoryScreen);
     windowManager_.renderBarberShopWindow(gameHandler);
     windowManager_.renderStableWindow(gameHandler);
-    windowManager_.renderTaxiWindow(gameHandler);
+    // Flight selection is handled by the world map's flight-map mode (see
+    // renderWorldMap); the legacy list window remains as a fallback when the
+    // world map system is unavailable.
+    {
+        auto* mapRenderer = core::Application::getInstance().getRenderer();
+        if (!mapRenderer || !mapRenderer->getWorldMap()) {
+            windowManager_.renderTaxiWindow(gameHandler);
+        }
+    }
     windowManager_.renderMailWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderMailComposeWindow(gameHandler, inventoryScreen);
     windowManager_.renderBankWindow(gameHandler, inventoryScreen, chatPanel_);
@@ -707,6 +724,9 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 } else if (target->getType() == game::ObjectType::PLAYER) {
                     showSelectionCircle = true;
                     circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (player)
+                } else if (target->getType() == game::ObjectType::GAMEOBJECT) {
+                    showSelectionCircle = true;
+                    circleColor = glm::vec3(0.2f, 0.8f, 1.0f); // cyan (game object)
                 }
                 if (showSelectionCircle) {
                     renderer->setSelectionCircle(targetGLPos, circleRadius, circleColor);
@@ -1243,8 +1263,11 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     hitCenter.z += isGo ? 1.2f : 1.0f;
                 } else {
                     // Resource nodes can have very tight render bounds; keep
-                    // their click target close to the no-bounds fallback.
-                    hitRadius = std::max(hitRadius * 1.25f, isGo ? 2.5f : 1.0f);
+                    // their click target close to the no-bounds fallback. Cap GO
+                    // spheres so a wide forge/anvil doesn't swallow nearby NPCs.
+                    hitRadius = isGo
+                        ? std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius)
+                        : std::max(hitRadius * 1.25f, 1.0f);
                 }
 
                 float hitT;
@@ -1310,6 +1333,13 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 uint64_t closestGuid = 0;
                 float closestHostileUnitT = 1e30f;
                 uint64_t closestHostileUnitGuid = 0;
+                // Rank unit-vs-object by distance to the entity CENTER along the ray (not
+                // the inflated hit-sphere entry) so a unit in front is never lost to a big
+                // object sphere behind it.
+                float bestUnitCenterT = 1e30f;
+                uint64_t bestUnitGuid = 0;
+                float bestGoCenterT = 1e30f;
+                uint64_t bestGoGuid = 0;
 
                 const uint64_t myGuid = gameHandler.getPlayerGuid();
                 for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
@@ -1341,20 +1371,37 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                         }
                         hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
                         hitCenter.z += heightOffset;
+                    } else if (t == game::ObjectType::GAMEOBJECT) {
+                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
+                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
                     } else {
-                        hitRadius = std::max(
-                            hitRadius * 1.25f,
-                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
+                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
                     }
 
                     float hitT;
                     if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                            if (hostileUnit && hitT < closestHostileUnitT) {
-                                closestHostileUnitT = hitT;
-                                closestHostileUnitGuid = guid;
+                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
+                            if (centerT < bestUnitCenterT) {
+                                bestUnitCenterT = centerT;
+                                bestUnitGuid = guid;
+                            }
+                            if (t == game::ObjectType::UNIT) {
+                                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
+                                if (hostileUnit && hitT < closestHostileUnitT) {
+                                    closestHostileUnitT = hitT;
+                                    closestHostileUnitGuid = guid;
+                                }
+                            }
+                        } else if (t == game::ObjectType::GAMEOBJECT) {
+                            // Purely-decorative objects (GENERIC, type 5) have no interaction
+                            // and must never steal a click from a unit.
+                            auto go = std::static_pointer_cast<game::GameObject>(entity);
+                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
+                                bestGoCenterT = centerT;
+                                bestGoGuid = guid;
                             }
                         }
                         if (hitT < closestT) {
@@ -1364,9 +1411,17 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     }
                 }
 
-                // Prefer hostile monsters over nearby gameobjects/others when both are hittable.
-                if (closestHostileUnitGuid != 0) {
-                    closestGuid = closestHostileUnitGuid;
+                // A unit wins over a game object unless the object's center is clearly in
+                // front of the unit's, so a creature is never lost to a decorative or
+                // backing object behind it. Hostile units keep their targeting priority.
+                constexpr float kUnitOverGoBias = 2.0f;
+                if (bestUnitGuid != 0 &&
+                    (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
+                    closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
+                } else if (bestGoGuid != 0) {
+                    closestGuid = bestGoGuid;
+                } else {
+                    closestGuid = 0;
                 }
 
                 if (closestGuid != 0) {
@@ -1383,9 +1438,24 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
         }
     }
 
-    // Right-click: select NPC (if needed) then interact / loot / auto-attack
-    // Suppress when left button is held (both-button run)
+    // Right-click: select NPC (if needed) then interact / loot / auto-attack.
+    // Record the press position; the action only fires on release for a tap (below),
+    // never for a right-drag camera rotate — otherwise turning the view toward a nearby
+    // mob would auto-attack it without the player intending to engage.
     if (!io.WantCaptureMouse && input.isMouseButtonJustPressed(SDL_BUTTON_RIGHT) && !input.isMouseButtonPressed(SDL_BUTTON_LEFT)) {
+        rightClickPressPos_ = input.getMousePosition();
+        rightClickWasPress_ = true;
+    }
+
+    // On right mouse-up, act only if it was a click (not a drag / camera rotate).
+    if (rightClickWasPress_ && input.isMouseButtonJustReleased(SDL_BUTTON_RIGHT)) {
+        rightClickWasPress_ = false;
+        glm::vec2 rDragDelta = input.getMousePosition() - rightClickPressPos_;
+        constexpr float RCLICK_THRESHOLD = 5.0f;  // pixels
+        if (glm::dot(rDragDelta, rDragDelta) >= RCLICK_THRESHOLD * RCLICK_THRESHOLD) {
+            // Treated as a camera rotate — do not interact/attack.
+            return;
+        }
         // Fishing bobbers are tiny and partly submerged, so their model bounds can
         // miss a cursor ray that visibly lands on the float. Test the authoritative
         // water position first with a forgiving sphere and reel directly, before
@@ -1473,8 +1543,12 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 uint64_t closestQuestGoGuid = 0;
                 float hookedBobberT = 1e30f;
                 uint64_t hookedBobberGuid = 0;
-                float closestGoT = 1e30f;
-                uint64_t closestGoGuid = 0;
+                // Nearest unit and nearest (non-decorative) object by distance to the
+                // entity CENTER, so a unit in front beats a big object sphere behind it.
+                float bestUnitCenterT = 1e30f;
+                uint64_t bestUnitGuid = 0;
+                float bestGoCenterT = 1e30f;
+                uint64_t bestGoGuid = 0;
                 const uint64_t myGuid = gameHandler.getPlayerGuid();
                 for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
                     auto t = entity->getType();
@@ -1522,33 +1596,43 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                                             ") r=", hitRadius);
                             }
                         }
+                    } else if (t == game::ObjectType::GAMEOBJECT) {
+                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
+                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
                     } else {
-                        hitRadius = std::max(
-                            hitRadius * 1.25f,
-                            t == game::ObjectType::GAMEOBJECT ? 2.5f : 1.0f);
+                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
                     }
 
                     float hitT;
                     if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                            if (hostileUnit && hitT < closestHostileUnitT) {
-                                closestHostileUnitT = hitT;
-                                closestHostileUnitGuid = guid;
+                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
+                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
+                            if (centerT < bestUnitCenterT) {
+                                bestUnitCenterT = centerT;
+                                bestUnitGuid = guid;
+                            }
+                            if (t == game::ObjectType::UNIT) {
+                                auto unit = std::static_pointer_cast<game::Unit>(entity);
+                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
+                                if (hostileUnit && hitT < closestHostileUnitT) {
+                                    closestHostileUnitT = hitT;
+                                    closestHostileUnitGuid = guid;
+                                }
                             }
                         }
                         if (t == game::ObjectType::GAMEOBJECT) {
+                            auto go = std::static_pointer_cast<game::GameObject>(entity);
                             if (guid == gameHandler.getHookedFishingBobberGuid() && hitT < hookedBobberT) {
                                 hookedBobberT = hitT;
                                 hookedBobberGuid = guid;
                             }
-                            if (hitT < closestGoT) {
-                                closestGoT = hitT;
-                                closestGoGuid = guid;
+                            // Skip purely-decorative objects (GENERIC, type 5).
+                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
+                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
+                                bestGoCenterT = centerT;
+                                bestGoGuid = guid;
                             }
                             if (!questObjectiveGoEntries.empty()) {
-                                auto go = std::static_pointer_cast<game::GameObject>(entity);
                                 if (questObjectiveGoEntries.count(go->getEntry())) {
                                     if (hitT < closestQuestGoT) {
                                         closestQuestGoT = hitT;
@@ -1574,21 +1658,21 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 } else if (closestQuestGoGuid != 0) {
                     closestGuid = closestQuestGoGuid;
                     closestType = game::ObjectType::GAMEOBJECT;
-                } else if (closestGoGuid != 0 && closestHostileUnitGuid != 0) {
-                    // Both a GO and hostile unit were hit — prefer whichever is closer.
-                    if (closestGoT <= closestHostileUnitT) {
-                        closestGuid = closestGoGuid;
+                } else {
+                    // A unit wins over a game object unless the object's center is clearly
+                    // in front of the unit's, so a creature is never lost to a decorative
+                    // or backing object behind it. Hostile units keep attack priority.
+                    constexpr float kUnitOverGoBias = 2.0f;
+                    if (bestUnitGuid != 0 &&
+                        (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
+                        closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
+                        closestType = game::ObjectType::UNIT;
+                    } else if (bestGoGuid != 0) {
+                        closestGuid = bestGoGuid;
                         closestType = game::ObjectType::GAMEOBJECT;
                     } else {
-                        closestGuid = closestHostileUnitGuid;
-                        closestType = game::ObjectType::UNIT;
+                        closestGuid = 0;
                     }
-                } else if (closestGoGuid != 0) {
-                    closestGuid = closestGoGuid;
-                    closestType = game::ObjectType::GAMEOBJECT;
-                } else if (closestHostileUnitGuid != 0) {
-                    closestGuid = closestHostileUnitGuid;
-                    closestType = game::ObjectType::UNIT;
                 }
 
                 if (closestGuid != 0) {

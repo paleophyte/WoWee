@@ -86,6 +86,13 @@ struct ItemDef {
     uint32_t itemLevel = 0;
     uint32_t requiredLevel = 0;
     uint32_t bindType = 0;      // 0=none, 1=BoP, 2=BoE, 3=BoU, 4=BoQ
+    // Per-instance bound state from ITEM_FIELD_FLAGS bit 0x1 (ITEM_FLAG_SOULBOUND).
+    // A BoE item is bindType==2 but only prompts on equip while this is false; once the
+    // server sets the soulbound bit (on equip), it is already bound and must not prompt.
+    bool soulbound = false;
+    // Per-instance ITEM_FIELD_RANDOM_PROPERTIES_ID: >0 → ItemRandomProperties.dbc (prefix),
+    // <0 → ItemRandomSuffix.dbc (e.g. "of the Bear"). 0 means no random property rolled.
+    int32_t randomPropertyId = 0;
     std::string description;    // Flavor/lore text shown in tooltip (italic yellow)
     uint32_t pageTextId = 0;     // Non-zero: item opens readable page text
     // Generic stat pairs for non-primary stats (hit, crit, haste, AP, SP, etc.)

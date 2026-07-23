@@ -134,11 +134,16 @@ inline uint32_t resolveHighestKnownRank(
     const SpellRankInfo* info = lookup(spellId);
     if (!info || info->name.empty()) return spellId;
 
+    // Keep the requested name by value. Some DBC adapters reuse one scratch object
+    // for every lookup; retaining its pointer here lets the first candidate overwrite
+    // the requested spell and makes unrelated known spells look like matching ranks.
+    const std::string requestedName = info->name;
+
     uint32_t best = 0;
     int bestRank = -1;
     for (uint32_t known : knownSpells) {
         const SpellRankInfo* candidate = lookup(known);
-        if (!candidate || candidate->name != info->name) continue;
+        if (!candidate || candidate->name != requestedName) continue;
         const int rank = rankValue(candidate->rank);
         if (rank > bestRank) {
             bestRank = rank;

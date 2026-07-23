@@ -130,6 +130,9 @@ private:
     void processDeferredLogoutToLogin();
     void setupUICallbacks();
     void spawnPlayerCharacter();
+    // Re-spawn the in-world player model in place after a live appearance change
+    // (barber shop), so the new hair/facial hair shows without a restart.
+    void refreshPlayerCharacterModel();
     void buildFactionHostilityMap(uint8_t playerRace);
     void setupTestTransport();  // Test transport boat for development
 
@@ -202,6 +205,15 @@ private:
     // transport riding" block for why the latter is a no-op identity).
     glm::vec3 lastM2RideLockedCanonical_ = glm::vec3(0.0f);
     bool hasM2RideLock_ = false;
+    glm::vec3 lastWMORideLockedRender_ = glm::vec3(0.0f);
+    bool hasWMORideLock_ = false;
+    uint64_t lastWMORideTransportGuid_ = 0;
+    uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
+    // Set when a rider boards or transfers onto a WMO ship whose deck collision hasn't
+    // finished loading yet — holds the boarding-time offset (and freezes camera follow)
+    // until this exact transport instance's deck floor exists, instead of letting gravity
+    // fold into the attachment and drop the rider through the hull.
+    bool deckFloorPending_ = false;
 
     bool wasAutoAttacking_ = false;
 

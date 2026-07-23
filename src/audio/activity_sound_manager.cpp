@@ -112,6 +112,32 @@ void ActivitySoundManager::update([[maybe_unused]] float deltaTime) {
     }
 }
 
+// PlayerExertions naming is inconsistent across races: most use
+// {Race}{Gender}Final\{Race}{Gender}Main{Type}{Letter}.wav, but OrcMale's
+// folder drops "Final", TaurenFemale and UndeadFemale name files with a
+// "Final" stem instead of "Main", and Blizzard shipped typo'd stems for
+// HumanFemale ("HumanFeamle") and TrollFemale ("TrollFemal"). Generate every
+// observed folder\stem prefix; preloadCandidates skips paths that don't exist.
+static std::vector<std::string> exertionPrefixes(const std::string& raceBase, bool male) {
+    const std::string gender = male ? "Male" : "Female";
+    // Undead uses "Scourge" in raceBase but "Undead" in PlayerExertions
+    const std::string race = (raceBase == "Scourge") ? "Undead" : raceBase;
+    const std::string stem = race + gender;
+    const std::string base = "Sound\\Character\\PlayerExertions\\";
+
+    std::vector<std::string> prefixes;
+    prefixes.push_back(base + stem + "Final\\" + stem + "Main");   // most races
+    prefixes.push_back(base + stem + "\\" + stem + "Main");        // OrcMale folder
+    prefixes.push_back(base + stem + "Final\\" + stem + "Final");  // TaurenFemale/UndeadFemale stem
+    if (race == "Human" && !male) {
+        prefixes.push_back(base + stem + "Final\\HumanFeamleMain");
+    }
+    if (race == "Troll" && !male) {
+        prefixes.push_back(base + stem + "Final\\TrollFemalMain");
+    }
+    return prefixes;
+}
+
 void ActivitySoundManager::preloadCandidates(std::vector<Sample>& out, const std::vector<std::string>& candidates) {
     if (!assetManager) return;
     for (const auto& path : candidates) {
@@ -133,32 +159,25 @@ void ActivitySoundManager::rebuildJumpClipsForProfile(const std::string& raceFol
     const std::string prefix = "Sound\\Character\\" + raceFolder + "\\";
     const std::string stem = raceBase + gender;
 
-    // Determine PlayerExertions folder/stem (same logic as combat vocals)
-    std::string exertFolder = stem + "Final";
-    std::string exertStem = stem;
-    if (raceBase == "Orc" && male) exertFolder = "OrcMale";
-    if (raceBase == "Human" && !male) exertStem = "HumanFeamle"; // Blizzard typo
-    std::string exertRace = raceBase;
-    if (raceBase == "Scourge") { exertRace = "Undead"; exertFolder = "Undead" + gender + "Final"; exertStem = "Undead" + gender; }
-    const std::string exertPrefix = "Sound\\Character\\PlayerExertions\\" + exertFolder + "\\" + exertStem + "Main";
-
-    preloadCandidates(jumpClips, {
-        // PlayerExertions (verified from MPQ manifest)
-        exertPrefix + "Jump.wav",
-        // movement_sound_manager convention (also verified working)
-        prefix + stem + "Jump1.wav",
-        prefix + stem + "Land1.wav",
-        // Other common variants
-        prefix + stem + "JumpA.wav",
-        prefix + stem + "JumpB.wav",
-        prefix + stem + "Jump.wav",
-        prefix + gender + "\\" + stem + "JumpA.wav",
-        prefix + gender + "\\" + stem + "JumpB.wav",
-        prefix + stem + "\\" + stem + "Jump01.wav",
-        prefix + stem + "\\" + stem + "Jump02.wav",
-    });
+    // PlayerExertions prefixes (same naming quirks as combat vocals)
+    std::vector<std::string> candidates;
+    for (const auto& exert : exertionPrefixes(raceBase, male)) {
+        candidates.push_back(exert + "Jump.wav");
+    }
+    // movement_sound_manager convention (also verified working)
+    candidates.push_back(prefix + stem + "Jump1.wav");
+    candidates.push_back(prefix + stem + "Land1.wav");
+    // Other common variants
+    candidates.push_back(prefix + stem + "JumpA.wav");
+    candidates.push_back(prefix + stem + "JumpB.wav");
+    candidates.push_back(prefix + stem + "Jump.wav");
+    candidates.push_back(prefix + gender + "\\" + stem + "JumpA.wav");
+    candidates.push_back(prefix + gender + "\\" + stem + "JumpB.wav");
+    candidates.push_back(prefix + stem + "\\" + stem + "Jump01.wav");
+    candidates.push_back(prefix + stem + "\\" + stem + "Jump02.wav");
+    preloadCandidates(jumpClips, candidates);
     if (jumpClips.empty()) {
-        LOG_WARNING("No jump clips found for ", stem, " (tried exert prefix: ", exertPrefix, ")");
+        LOG_WARNING("No jump clips found for ", stem);
     } else {
         LOG_INFO("Loaded ", jumpClips.size(), " jump clips for ", stem);
     }
@@ -468,59 +487,61 @@ void ActivitySoundManager::rebuildCombatVocalClipsForProfile(const std::string& 
     //    - OrcMale uses folder "OrcMale" (no "Final" suffix)
     //    - HumanFemale files have Blizzard typo: "HumanFeamle" instead of "HumanFemale"
 
-    // Determine PlayerExertions folder and file stem
-    std::string exertFolder = stem + "Final";
-    std::string exertStem = stem;
-    // OrcMale exception: no "Final" suffix on folder
-    if (raceBase == "Orc" && male) exertFolder = "OrcMale";
-    // HumanFemale exception: Blizzard typo "Feamle"
-    if (raceBase == "Human" && !male) exertStem = "HumanFeamle";
-    // Undead uses "Scourge" in raceBase but "Undead" in PlayerExertions
-    std::string exertRaceBase = raceBase;
-    if (raceBase == "Scourge") {
-        exertRaceBase = "Undead";
-        exertFolder = "Undead" + gender + "Final";
-        exertStem = "Undead" + gender;
-    }
-
-    const std::string exertPrefix = "Sound\\Character\\PlayerExertions\\" + exertFolder + "\\" + exertStem + "Main";
+    const std::vector<std::string> exertPrefixes_ = exertionPrefixes(raceBase, male);
     const std::string voxPrefix = "Sound\\Character\\" + raceFolder + "\\" + gender + "\\m" + stem;
 
     // Attack grunts
     std::vector<std::string> attackPaths;
     for (char c = 'A'; c <= 'F'; ++c) {
         std::string s(1, c);
-        attackPaths.push_back(exertPrefix + "Attack" + s + ".wav");
+        for (const auto& exert : exertPrefixes_) {
+            attackPaths.push_back(exert + "Attack" + s + ".wav");
+        }
         attackPaths.push_back(voxPrefix + "AttackVox" + s + ".wav");
     }
     preloadCandidates(attackGruntClips, attackPaths);
 
-    // Wound sounds
+    // Wound sounds (UndeadFemale ships one variant with no letter suffix)
     std::vector<std::string> woundPaths;
     for (char c = 'A'; c <= 'F'; ++c) {
         std::string s(1, c);
-        woundPaths.push_back(exertPrefix + "Wound" + s + ".wav");
+        for (const auto& exert : exertPrefixes_) {
+            woundPaths.push_back(exert + "Wound" + s + ".wav");
+        }
         woundPaths.push_back(voxPrefix + "WoundVox" + s + ".wav");
+    }
+    for (const auto& exert : exertPrefixes_) {
+        woundPaths.push_back(exert + "Wound.wav");
     }
     preloadCandidates(woundClips, woundPaths);
 
-    // Wound crit sounds
+    // Wound crit sounds. Some races have WoundCrit without a letter suffix,
+    // and UndeadFemale's is typo'd "WoundCriatA".
     std::vector<std::string> woundCritPaths;
     for (char c = 'A'; c <= 'C'; ++c) {
         std::string s(1, c);
-        woundCritPaths.push_back(exertPrefix + "WoundCrit" + s + ".wav");
+        for (const auto& exert : exertPrefixes_) {
+            woundCritPaths.push_back(exert + "WoundCrit" + s + ".wav");
+            woundCritPaths.push_back(exert + "WoundCriat" + s + ".wav");
+        }
         woundCritPaths.push_back(voxPrefix + "WoundCriticalVox" + s + ".wav");
     }
-    // Some races have WoundCrit without letter suffix
-    woundCritPaths.push_back(exertPrefix + "WoundCrit.wav");
+    for (const auto& exert : exertPrefixes_) {
+        woundCritPaths.push_back(exert + "WoundCrit.wav");
+    }
     preloadCandidates(woundCritClips, woundCritPaths);
 
-    // Death sounds
+    // Death sounds (NightElf/Troll/Undead ship "Death" with no letter suffix)
     std::vector<std::string> deathPaths;
     for (char c = 'A'; c <= 'C'; ++c) {
         std::string s(1, c);
-        deathPaths.push_back(exertPrefix + "Death" + s + ".wav");
+        for (const auto& exert : exertPrefixes_) {
+            deathPaths.push_back(exert + "Death" + s + ".wav");
+        }
         deathPaths.push_back(voxPrefix + "DeathVox" + s + ".wav");
+    }
+    for (const auto& exert : exertPrefixes_) {
+        deathPaths.push_back(exert + "Death.wav");
     }
     preloadCandidates(deathClips, deathPaths);
 
@@ -531,7 +552,8 @@ void ActivitySoundManager::rebuildCombatVocalClipsForProfile(const std::string& 
     if (!woundClips.empty()) LOG_INFO("  First wound: ", woundClips[0].path);
     if (attackGruntClips.empty() && woundClips.empty()) {
         LOG_WARNING("No combat vocal sounds found for ", stem);
-        LOG_WARNING("  Tried exert prefix: ", exertPrefix);
+        LOG_WARNING("  Tried ", exertPrefixes_.size(), " exert prefixes, first: ",
+                    exertPrefixes_.empty() ? "(none)" : exertPrefixes_[0]);
         LOG_WARNING("  Tried vox prefix: ", voxPrefix);
     }
 }

@@ -78,6 +78,7 @@ void EntitySpawner::update() {
     processPendingTransportRegistrations();
     processPendingTransportDoodads();
     processPendingMount();
+    processPendingRemotePlayerMounts();
     syncCreatureStealthVisuals();
 }
 
@@ -138,6 +139,8 @@ void EntitySpawner::shutdown() {
     creatureWeaponAttachAttempts_.clear();
     playerInstances_.clear();
     onlinePlayerAppearance_.clear();
+    remotePlayerMounts_.clear();
+    pendingRemotePlayerMounts_.clear();
     gameObjectInstances_.clear();
 }
 
@@ -164,6 +167,8 @@ void EntitySpawner::resetAllState() {
     creatureRenderPosCache_.clear();
     playerInstances_.clear();
     onlinePlayerAppearance_.clear();
+    remotePlayerMounts_.clear();
+    pendingRemotePlayerMounts_.clear();
     gameObjectInstances_.clear();
 
     // Clear animation state maps
@@ -218,6 +223,26 @@ void EntitySpawner::clearMountState() {
     mountInstanceId_ = 0;
     mountModelId_ = 0;
     pendingMountDisplayId_ = 0;
+}
+
+void EntitySpawner::setRemotePlayerMountDisplayId(uint64_t guid, uint32_t displayId) {
+    if (guid == 0) return;
+    pendingRemotePlayerMounts_[guid] = displayId;
+}
+
+void EntitySpawner::removeRemotePlayerMount(uint64_t guid) {
+    auto it = remotePlayerMounts_.find(guid);
+    if (it == remotePlayerMounts_.end()) return;
+    if (renderer_) {
+        if (auto* cr = renderer_->getCharacterRenderer()) {
+            if (it->second.instanceId != 0) cr->removeInstance(it->second.instanceId);
+            auto playerIt = playerInstances_.find(guid);
+            if (playerIt != playerInstances_.end()) {
+                cr->playAnimation(playerIt->second, rendering::anim::STAND, true);
+            }
+        }
+    }
+    remotePlayerMounts_.erase(it);
 }
 
 void EntitySpawner::queueTransportRegistration(uint64_t guid, uint32_t entry, uint32_t displayId,
@@ -863,7 +888,26 @@ std::string EntitySpawner::getGameObjectModelPathForDisplayId(uint32_t displayId
 
 
 bool EntitySpawner::getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const {
-    if (!renderer_ || !renderer_->getCharacterRenderer()) return false;
+    if (!renderer_) return false;
+
+    // M2 game objects (mailboxes, chests, nodes, etc.) render via the M2
+    // renderer, not the character renderer, so their bounds come from a
+    // different instance table. Their true world-space visual sphere makes
+    // cursor picking track the actual model instead of a flat fallback.
+    //
+    // WMO game objects (buildings) are intentionally not resolved here: a
+    // bounding sphere from a building's AABB diagonal is enormous and would
+    // swallow nearby objects in the picker. They keep the conservative
+    // fallback sphere used by the click handlers.
+    auto goIt = gameObjectInstances_.find(guid);
+    if (goIt != gameObjectInstances_.end()) {
+        const auto& go = goIt->second;
+        if (go.isWmo) return false;
+        auto* m2 = renderer_->getM2Renderer();
+        return m2 && m2->getInstanceBounds(go.instanceId, outCenter, outRadius);
+    }
+
+    if (!renderer_->getCharacterRenderer()) return false;
     uint32_t instanceId = 0;
 
     if (gameHandler_ && guid == gameHandler_->getPlayerGuid()) {
@@ -2009,8 +2053,18 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
             if (group == 15) hasGroup15 = true;
         }
 
-        // Only apply to humanoid-like clothing models.
-        if (hasGroup3 || hasGroup4 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15) {
+        // These numeric submesh groups only mean clothing on player-character
+        // models. Creature models reuse the same IDs for unrelated authored
+        // geometry (elementals use them for their built-in wrist pieces), so a
+        // group-number heuristic alone can manufacture a second floating set of
+        // "bracers". CreatureDisplayInfoExtra is the authoritative indication
+        // that this display uses humanoid equipment geosets.
+        const bool hasHumanoidDisplayExtra =
+            itDisplayData != displayDataMap_.end() &&
+            itDisplayData->second.extraDisplayId != 0 &&
+            humanoidExtraMap_.find(itDisplayData->second.extraDisplayId) != humanoidExtraMap_.end();
+        if (hasHumanoidDisplayExtra &&
+            (hasGroup3 || hasGroup4 || hasGroup8 || hasGroup12 || hasGroup13 || hasGroup15)) {
             bool hasRenderableCape = false;
             std::string capeTexturePath;  // first found cape texture for override
             bool hasEquippedTabard = false;

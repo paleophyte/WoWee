@@ -133,6 +133,15 @@ float M2Renderer::getInstanceAnimDuration(uint32_t instanceId) const {
     return seqs[seqIdx].duration; // in milliseconds
 }
 
+bool M2Renderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    const auto& inst = instances[idxIt->second];
+    outCenter = inst.cachedCullCenter;
+    outRadius = inst.cachedVisualRadius;
+    return outRadius > 0.0f;
+}
+
 void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
@@ -256,10 +265,25 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     }
 }
 
+void M2Renderer::setInstanceIsGameObject(uint32_t instanceId, bool isGameObject) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return;
+    instances[idxIt->second].isGameObject = isGameObject;
+}
+
 void M2Renderer::setSkipCollision(uint32_t instanceId, bool skip) {
     for (auto& inst : instances) {
         if (inst.id == instanceId) {
             inst.skipCollision = skip;
+            return;
+        }
+    }
+}
+
+void M2Renderer::setSkipWallCollision(uint32_t instanceId, bool skip) {
+    for (auto& inst : instances) {
+        if (inst.id == instanceId) {
+            inst.skipWallCollision = skip;
             return;
         }
     }
@@ -361,10 +385,13 @@ void M2Renderer::clear() {
         }
     }
     models.clear();
+    pinnedModelIds_.clear();
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
     instanceDedupMap_.clear();
+    for (auto& ids : cullSubmittedIds_) ids.clear();
+    for (auto& ids : cullReadableIds_) ids.clear();
     smokeParticles.clear();
     smokeInstanceIndices_.clear();
     portalInstanceIndices_.clear();
@@ -395,6 +422,8 @@ void M2Renderer::clearInstances() {
     spatialGrid.clear();
     instanceIndexById.clear();
     instanceDedupMap_.clear();
+    for (auto& ids : cullSubmittedIds_) ids.clear();
+    for (auto& ids : cullReadableIds_) ids.clear();
     smokeInstanceIndices_.clear();
     portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
@@ -517,6 +546,15 @@ void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& qu
     }
 }
 
+void M2Renderer::setModelPinned(uint32_t modelId, bool pinned) {
+    if (pinned) {
+        pinnedModelIds_.insert(modelId);
+        modelUnusedSince_.erase(modelId);
+    } else {
+        pinnedModelIds_.erase(modelId);
+    }
+}
+
 void M2Renderer::cleanupUnusedModels() {
     // Build set of model IDs that are still referenced by instances
     std::unordered_set<uint32_t> usedModelIds;
@@ -533,8 +571,9 @@ void M2Renderer::cleanupUnusedModels() {
     // instance-free between despawn and respawn cycles.
     std::vector<uint32_t> toRemove;
     for (const auto& [id, model] : models) {
-        if (usedModelIds.find(id) != usedModelIds.end()) {
-            // Model still in use — clear any pending unused timestamp
+        if (usedModelIds.find(id) != usedModelIds.end() ||
+            pinnedModelIds_.find(id) != pinnedModelIds_.end()) {
+            // Model still in use or pinned — clear any pending unused timestamp
             modelUnusedSince_.erase(id);
             continue;
         }
@@ -593,6 +632,7 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     destroyModelGPU(it->second);
     models.erase(it);
     modelUnusedSince_.erase(modelId);
+    pinnedModelIds_.erase(modelId);
     reapedModelIds_.push_back(modelId);
 }
 
@@ -745,24 +785,34 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
         if (instance.skipCollision) continue;
 
         // --- Mesh-based floor: vertical ray vs collision triangles ---
-        // Does NOT skip the AABB path — both contribute and highest wins.
+        // A successful authored-mesh hit wins; AABB remains the fallback on a miss.
         if (model.collision.valid()) {
-            glm::vec3 localPos = glm::vec3(instance.invModelMatrix * glm::vec4(glX, glY, glZ, 1.0f));
+            // Cast world-down through the instance transform. Using local -Z
+            // only works for yaw-only placements; pitched flat models (notably
+            // Exodarplatform01, placed as the Azuremyst flight-master ramp)
+            // otherwise see a ray that is diagonal relative to world gravity.
+            const glm::vec3 localRayOrigin = glm::vec3(
+                instance.invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
+            const glm::vec3 localRayEnd = glm::vec3(
+                instance.invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
+            glm::vec3 localRayVector = localRayEnd - localRayOrigin;
+            const float localRayLength = glm::length(localRayVector);
+            if (localRayLength <= 1e-5f) continue;
+            const glm::vec3 localRayDir = localRayVector / localRayLength;
 
             model.collision.getFloorTrisInRange(
-                localPos.x - 1.0f, localPos.y - 1.0f,
-                localPos.x + 1.0f, localPos.y + 1.0f,
+                std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+                std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
+                std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
+                std::max(localRayOrigin.y, localRayEnd.y) + 1.0f,
                 tl_m2_collisionTriScratch);
 
-            glm::vec3 rayOrigin(localPos.x, localPos.y, localPos.z + 5.0f);
-            glm::vec3 rayDir(0.0f, 0.0f, -1.0f);
-            float bestHitZ = -std::numeric_limits<float>::max();
+            float bestWorldHitZ = -std::numeric_limits<float>::max();
+            float bestHitNormalZ = 1.0f;
             bool hitAny = false;
 
             for (uint32_t ti : tl_m2_collisionTriScratch) {
                 if (ti >= model.collision.triCount) continue;
-                if (model.collision.triBounds[ti].maxZ < localPos.z - 10.0f ||
-                    model.collision.triBounds[ti].minZ > localPos.z + 5.0f) continue;
 
                 const auto& verts = model.collision.vertices;
                 const auto& idx   = model.collision.indices;
@@ -771,12 +821,14 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                 const auto& v2 = verts[idx[ti * 3 + 2]];
 
                 // Two-sided: try both windings
-                float tHit = rayTriangleIntersect(rayOrigin, rayDir, v0, v1, v2);
+                float tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v1, v2);
                 if (tHit < 0.0f)
-                    tHit = rayTriangleIntersect(rayOrigin, rayDir, v0, v2, v1);
-                if (tHit < 0.0f) continue;
+                    tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v2, v1);
+                if (tHit < 0.0f || tHit > localRayLength) continue;
 
-                float hitZ = rayOrigin.z - tHit;
+                const glm::vec3 localHit = localRayOrigin + localRayDir * tHit;
+                const glm::vec3 worldHit = glm::vec3(
+                    instance.modelMatrix * glm::vec4(localHit, 1.0f));
 
                 // Walkable normal check (world space)
                 glm::vec3 worldN(0.0f, 0.0f, 1.0f);  // Default to flat
@@ -794,19 +846,22 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                     if (std::abs(worldN.z) < 0.35f) continue; // too steep (~70° max slope)
                 }
 
-                if (hitZ <= localPos.z + 3.0f && hitZ > bestHitZ) {
-                    bestHitZ = hitZ;
+                if (worldHit.z <= glZ + 3.0f && worldHit.z > bestWorldHitZ) {
+                    bestWorldHitZ = worldHit.z;
                     hitAny = true;
-                    bestNormalZ = std::abs(worldN.z);  // Store normal for output
+                    bestHitNormalZ = std::abs(worldN.z);
                 }
             }
 
             if (hitAny) {
-                glm::vec3 localHit(localPos.x, localPos.y, bestHitZ);
-                glm::vec3 worldHit = glm::vec3(instance.modelMatrix * glm::vec4(localHit, 1.0f));
-                if (worldHit.z <= glZ + 3.0f && (!bestFloor || worldHit.z > *bestFloor)) {
-                    bestFloor = worldHit.z;
+                if (!bestFloor || bestWorldHitZ > *bestFloor) {
+                    bestFloor = bestWorldHitZ;
+                    bestNormalZ = bestHitNormalZ;
                 }
+                // A successful authored-mesh hit is more accurate than the
+                // model AABB top, especially for pitched ramps where the AABB
+                // projection is not a world-vertical intersection.
+                continue;
             }
             // Fall through to AABB floor — both contribute, highest wins
         }
@@ -900,7 +955,7 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
 
         const M2ModelGPU& model = *instance.cachedModel;
         if (model.collisionNoBlock || model.isInvisibleTrap || model.isSpellEffect) continue;
-        if (instance.skipCollision) continue;
+        if (instance.skipCollision || instance.skipWallCollision) continue;
         if (instance.scale <= 0.001f) continue;
 
         // --- Mesh-based wall collision: closest-point push ---

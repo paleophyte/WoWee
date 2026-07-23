@@ -479,7 +479,15 @@ struct UpdateBlock {
     // Movement data (for MOVEMENT updates)
     bool hasMovement = false;
     float x = 0.0f, y = 0.0f, z = 0.0f, orientation = 0.0f;
+    float walkSpeed = 0.0f;
     float runSpeed = 0.0f;
+    float runBackSpeed = 0.0f;
+    float swimSpeed = 0.0f;
+    float swimBackSpeed = 0.0f;
+    float flightSpeed = 0.0f;
+    float flightBackSpeed = 0.0f;
+    float turnRate = 0.0f;
+    float pitchRate = 0.0f;
 
     // Update flags from movement block (for detecting transports, etc.)
     uint16_t updateFlags = 0;
@@ -678,6 +686,7 @@ struct MessageChatData {
     std::string message;
     std::string channelName;  // For channel messages
     uint8_t chatTag = 0;      // Player flags (AFK, DND, GM, etc.)
+    uint32_t achievementId = 0; // Trailing field for ACHIEVEMENT/GUILD_ACHIEVEMENT
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     // Monotonic id assigned by ChatHandler when the message enters history.
     // Stable cache key for the chat UI's formatted/parsed line cache.
@@ -693,6 +702,14 @@ class MessageChatParser {
 public:
     static bool parse(network::Packet& packet, MessageChatData& data);
 };
+
+// Returns true when a chat packet is addon traffic and extracts the standard
+// prefix<TAB>payload envelope when present. Some legacy clients send the
+// envelope with a spoken language instead of LANG_ADDON, so the envelope itself
+// is also authoritative.
+bool decodeAddonChatPayload(const MessageChatData& data,
+                            std::string& prefix,
+                            std::string& payload);
 
 /**
  * Get human-readable string for chat type
@@ -1359,6 +1376,31 @@ public:
      * @param targetGuid GUID to mark, or 0 to clear
      */
     static network::Packet build(uint8_t targetIndex, uint64_t targetGuid);
+};
+
+/** Decoded MSG_RAID_TARGET_UPDATE broadcast from the server */
+struct RaidTargetUpdateData {
+    /// True for the full list, which is authoritative: icons missing from it
+    /// are unmarked. False for a single mark being set or cleared.
+    bool fullList = false;
+    /// icon index (0-7) -> marked GUID, 0 meaning the icon was cleared
+    std::vector<std::pair<uint8_t, uint64_t>> marks;
+};
+
+/** MSG_RAID_TARGET_UPDATE parser (server -> client) */
+class RaidTargetUpdateParser {
+public:
+    /**
+     * Parse a raid target marker broadcast.
+     *
+     * Two shapes share the opcode, distinguished by a leading type byte:
+     *   type 1 — full list: only the icons that are actually set, so the
+     *            length varies; it is not a fixed 8 entries.
+     *   type 0 — single set: WotLK leads with the GUID of the player who
+     *            placed the mark, classic/TBC/Turtle omit it. Told apart by
+     *            remaining size so both wire layouts decode correctly.
+     */
+    static bool parse(network::Packet& packet, RaidTargetUpdateData& data);
 };
 
 /** CMSG_REQUEST_RAID_INFO packet builder */
@@ -2094,7 +2136,8 @@ class UseItemPacket {
 public:
     static network::Packet build(uint8_t bagIndex, uint8_t slotIndex,
                                  uint64_t itemGuid, uint32_t spellId = 0,
-                                 uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0);
+                                 uint64_t targetGuid = 0, uint64_t itemTargetGuid = 0,
+                                 uint64_t gameObjectGuid = 0);
 };
 
 /** CMSG_OPEN_ITEM packet builder (for locked containers / lockboxes) */
@@ -2616,6 +2659,28 @@ struct MailMessage {
     bool read = false;
     std::vector<MailAttachment> attachments;
 };
+
+struct AuctionMailSubject {
+    uint32_t itemEntry = 0;
+    uint32_t response = 0;
+    uint32_t lotId = 0;
+    uint32_t itemCount = 0;
+};
+
+// Decoded auction-house mail body ("invoice"). The wire body is a colon-
+// separated string the retail client never prints verbatim.
+struct AuctionMailInvoice {
+    uint32_t ownerGuidLow = 0;  // seller/buyer low GUID (hex field)
+    uint32_t bid = 0;           // copper
+    uint32_t buyout = 0;        // copper
+    uint32_t deposit = 0;       // copper (successful-sale mail only)
+    uint32_t consignment = 0;   // copper — auction house cut (successful sale)
+};
+
+bool parseAuctionMailSubject(const std::string& subject, AuctionMailSubject& result);
+std::string formatAuctionMailSubject(const AuctionMailSubject& subject,
+                                     const std::string& itemName);
+bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result);
 
 /** CMSG_GET_MAIL_LIST packet builder */
 class GetMailListPacket {

@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game/spell_classification.hpp"
+#include "game/spell_defines.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -34,6 +35,11 @@ private:
 };
 
 } // namespace
+
+TEST_CASE("DONT_REPORT cast failures remain player-facing", "[spell][failure]") {
+    REQUIRE(std::string(wowee::game::getSpellCastResultString(27)) ==
+            "You can't do that right now");
+}
 
 // ---------------------------------------------------------------------------
 // Range classification
@@ -156,6 +162,27 @@ TEST_CASE("A superseded rank resolves to the highest known rank", "[spell][rank]
     // Rank 4 is not known, so it must not be picked.
     REQUIRE(resolveHighestKnownRank(11549, known, dbc.lookup()) != 11549);
     REQUIRE(resolveHighestKnownRank(11549, known, dbc.lookup()) == 6192);
+}
+
+TEST_CASE("Rank resolution tolerates a lookup adapter with reused storage", "[spell][rank]") {
+    const std::unordered_map<uint32_t, SpellRankInfo> entries{
+        {6673, {"Battle Shout", "Rank 1"}},
+        {5242, {"Battle Shout", "Rank 2"}},
+        {6192, {"Battle Shout", "Rank 3"}},
+        {133,  {"Fireball", "Rank 14"}},
+    };
+    SpellRankInfo scratch;
+    auto reusedLookup = [&entries, &scratch](uint32_t id) -> const SpellRankInfo* {
+        auto it = entries.find(id);
+        if (it == entries.end()) return nullptr;
+        scratch = it->second;
+        return &scratch;
+    };
+
+    // The production Spell.dbc adapter reuses scratch storage. Looking up Fireball
+    // must not overwrite the requested Battle Shout name and win merely by rank.
+    const std::unordered_set<uint32_t> known{5242, 6192, 133};
+    REQUIRE(resolveHighestKnownRank(6673, known, reusedLookup) == 6192);
 }
 
 TEST_CASE("A known spell is left alone", "[spell][rank]") {

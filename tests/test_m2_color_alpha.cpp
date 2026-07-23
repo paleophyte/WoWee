@@ -69,6 +69,41 @@ TEST_CASE("M2 global tracks use their independent wrapped clock", "[m2][track]")
               track, 7, 900.0f, 1250.0f, {1000}, -1.0f) == Catch::Approx(0.25f));
 }
 
+TEST_CASE("Sharpened Blade sparkle preserves authored pulse timing", "[m2][transparency]") {
+    auto data = readFile("Data/spell/enchantments/sparkle_a.m2");
+    if (data.empty()) {
+        SUCCEED("model asset not extracted; optional real-asset coverage skipped");
+        return;
+    }
+    M2Model model = M2Loader::load(data);
+    REQUIRE(model.globalSequenceDurations.size() >= 1);
+    CHECK(model.globalSequenceDurations[0] == 4000);
+    REQUIRE(model.textureWeightLookup.size() == 1);
+    CHECK(model.textureWeightLookup[0] == 0);
+    REQUIRE(model.textureWeightTracks.size() == 1);
+
+    const auto& pulse = model.textureWeightTracks[0];
+    CHECK(pulse.interpolationType == 1);
+    CHECK(pulse.globalSequence == 0);
+    REQUIRE(pulse.sequences.size() == 1);
+    CHECK(pulse.sequences[0].timestamps ==
+          std::vector<uint32_t>{0, 333, 833, 3500, 4000});
+    REQUIRE(pulse.sequences[0].floatValues.size() == 5);
+
+    // The glint is briefly on, fades out, stays absent for most of the cycle,
+    // then fades back in. Sampling this track prevents a permanent saturated
+    // card and restores the original once-per-four-seconds cadence.
+    CHECK(wowee::rendering::m2_track::sampleFloat(
+              pulse, 0, 0.0f, 333.0f, model.globalSequenceDurations, -1.0f)
+          == Catch::Approx(1.0f));
+    CHECK(wowee::rendering::m2_track::sampleFloat(
+              pulse, 0, 0.0f, 833.0f, model.globalSequenceDurations, -1.0f)
+          == Catch::Approx(0.0f));
+    CHECK(wowee::rendering::m2_track::sampleFloat(
+              pulse, 0, 0.0f, 2000.0f, model.globalSequenceDurations, -1.0f)
+          == Catch::Approx(0.0f));
+}
+
 TEST_CASE("WotLK peasant wood model parses per-animation color alpha", "[m2][color]") {
     auto data = readFile("Data/creature/humanmalepeasant/humanmalepeasantwood.m2");
     if (data.empty()) {

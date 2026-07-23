@@ -247,14 +247,12 @@ bool ClassicPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlo
 
         // Speeds (Classic: 6 values — no flight speeds, no pitchRate)
         if (rem() < 24) return false;
-        /*float walkSpeed =*/ packet.readFloat();
-        float runSpeed = packet.readFloat();
-        /*float runBackSpeed =*/ packet.readFloat();
-        /*float swimSpeed =*/ packet.readFloat();
-        /*float swimBackSpeed =*/ packet.readFloat();
-        /*float turnRate =*/ packet.readFloat();
-
-        block.runSpeed = runSpeed;
+        block.walkSpeed     = packet.readFloat();
+        block.runSpeed      = packet.readFloat();
+        block.runBackSpeed  = packet.readFloat();
+        block.swimSpeed     = packet.readFloat();
+        block.swimBackSpeed = packet.readFloat();
+        block.turnRate      = packet.readFloat();
         block.moveFlags = moveFlags;
 
         // Spline data (Classic: SPLINE_ENABLED=0x00400000)
@@ -1959,6 +1957,11 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
         float turnRate = packet.readFloat();
 
         block.runSpeed = runSpeed;
+        block.walkSpeed = walkSpeed;
+        block.runBackSpeed = runBackSpeed;
+        block.swimSpeed = swimSpeed;
+        block.swimBackSpeed = swimBackSpeed;
+        block.turnRate = turnRate;
 
         LOG_DEBUG("  [Turtle] Speeds: walk=", walkSpeed, " run=", runSpeed,
                   " runBack=", runBackSpeed, " swim=", swimSpeed,

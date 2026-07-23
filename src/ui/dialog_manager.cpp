@@ -315,7 +315,16 @@ void DialogManager::renderTradeWindow(game::GameHandler& gameHandler,
 
             for (int i = 0; i < game::GameHandler::TRADE_SLOT_COUNT; ++i) {
                 const auto& slot = slots[i];
+                const bool isNonTraded = (i == game::GameHandler::TRADE_SLOT_NONTRADED);
                 ImGui::PushID(i * (isMine ? 1 : -1) - (isMine ? 0 : 100));
+
+                // The non-traded slot is set apart: it stays with its owner and only exists
+                // so the other party can enchant/craft on the item placed here.
+                if (isNonTraded) {
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Will not be traded:");
+                }
 
                 if (slot.occupied && slot.itemId != 0) {
                     const auto* info = gameHandler.getItemInfo(slot.itemId);
@@ -334,7 +343,8 @@ void DialogManager::renderTradeWindow(game::GameHandler& gameHandler,
                             ImGui::SameLine();
                         }
                     }
-                    ImGui::TextColored(qc, "%d. %s", i + 1, name.c_str());
+                    if (isNonTraded) ImGui::TextColored(qc, "%s", name.c_str());
+                    else             ImGui::TextColored(qc, "%d. %s", i + 1, name.c_str());
                     if (isMine && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         gameHandler.clearTradeItem(static_cast<uint8_t>(i));
                     }
@@ -348,7 +358,8 @@ void DialogManager::renderTradeWindow(game::GameHandler& gameHandler,
                         chatPanel.insertChatLink(link);
                     }
                 } else {
-                    ImGui::TextDisabled("  %d. (empty)", i + 1);
+                    if (isNonTraded) ImGui::TextDisabled("  (empty — place item to enchant/craft)");
+                    else             ImGui::TextDisabled("  %d. (empty)", i + 1);
 
                     // Allow dragging inventory items into trade slots via right-click context menu
                     char addItemId[16]; snprintf(addItemId, sizeof(addItemId), "##additem%d", i);

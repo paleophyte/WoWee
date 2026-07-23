@@ -19,6 +19,7 @@ constexpr uint32_t COPPER_PER_SILVER = 100;
 // 46 in Classic/TBC/Turtle. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
 constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
+constexpr uint32_t UNIT_FLAG_IN_COMBAT   = 0x00080000;
 
 // Unit visibility flags (byte 2 of UNIT_FIELD_BYTES_1).
 // CREEP marks a unit using the client-side stealth presentation. The server
@@ -29,6 +30,7 @@ constexpr uint8_t UNIT_VIS_FLAG_CREEP = 0x02;
 // NPC flags (UNIT_NPC_FLAGS — index 82 in UnitFields for 3.3.5a;
 // 147 in Classic/Turtle. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
+constexpr uint32_t NPC_FLAG_FLIGHT_MASTER = 0x00002000;
 constexpr uint32_t NPC_FLAG_SPIRIT_GUIDE  = 0x00004000;
 constexpr uint32_t NPC_FLAG_SPIRIT_HEALER = 0x00008000;
 

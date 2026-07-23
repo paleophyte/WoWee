@@ -5,6 +5,7 @@
 // who window, inspect window.
 // ============================================================
 #include "ui/social_panel.hpp"
+#include "ui/ui_raid_icons.hpp"
 #include "ui/chat_panel.hpp"
 #include "ui/spellbook_screen.hpp"
 #include "ui/inventory_screen.hpp"
@@ -176,24 +177,16 @@ void SocialPanel::renderPartyFrames(game::GameHandler& gameHandler,
 
                     // Raid mark symbol — small, just to the left of the leader crown
                     {
-                        static constexpr struct { const char* sym; ImU32 col; } kCellMarks[] = {
-                            { "\xe2\x98\x85", IM_COL32(255, 220,  50, 255) },
-                            { "\xe2\x97\x8f", IM_COL32(255, 140,   0, 255) },
-                            { "\xe2\x97\x86", IM_COL32(160,  32, 240, 255) },
-                            { "\xe2\x96\xb2", IM_COL32( 50, 200,  50, 255) },
-                            { "\xe2\x97\x8c", IM_COL32( 80, 160, 255, 255) },
-                            { "\xe2\x96\xa0", IM_COL32( 50, 200, 220, 255) },
-                            { "\xe2\x9c\x9d", IM_COL32(255,  80,  80, 255) },
-                            { "\xe2\x98\xa0", IM_COL32(255, 255, 255, 255) },
-                        };
                         uint8_t rmk = gameHandler.getEntityRaidMark(m.guid);
                         if (rmk < game::GameHandler::kRaidMarkCount) {
-                            ImFont* rmFont = ImGui::GetFont();
-                            ImVec2 rmsz = rmFont->CalcTextSizeA(9.0f, FLT_MAX, 0.0f, kCellMarks[rmk].sym);
-                            float rmX = cellMax.x - 10.0f - 2.0f - rmsz.x;
-                            draw->AddText(rmFont, 9.0f,
+                            VkDescriptorSet markTex = ui::getRaidTargetIcon(rmk, services_.assetManager);
+                            if (markTex) {
+                            constexpr float kMarkSize = 11.0f;
+                            float rmX = cellMax.x - 10.0f - 2.0f - kMarkSize;
+                            draw->AddImage((ImTextureID)(uintptr_t)markTex,
                                 ImVec2(rmX, cellMin.y + 2.0f),
-                                kCellMarks[rmk].col, kCellMarks[rmk].sym);
+                                ImVec2(rmX + kMarkSize, cellMin.y + 2.0f + kMarkSize));
+                            }
                         }
                     }
 
@@ -462,22 +455,12 @@ void SocialPanel::renderPartyFrames(game::GameHandler& gameHandler,
 
             // Raid mark symbol — shown on same line as name when this party member has a mark
             {
-                static constexpr struct { const char* sym; ImU32 col; } kPartyMarks[] = {
-                    { "\xe2\x98\x85", IM_COL32(255, 220,  50, 255) },  // 0 Star
-                    { "\xe2\x97\x8f", IM_COL32(255, 140,   0, 255) },  // 1 Circle
-                    { "\xe2\x97\x86", IM_COL32(160,  32, 240, 255) },  // 2 Diamond
-                    { "\xe2\x96\xb2", IM_COL32( 50, 200,  50, 255) },  // 3 Triangle
-                    { "\xe2\x97\x8c", IM_COL32( 80, 160, 255, 255) },  // 4 Moon
-                    { "\xe2\x96\xa0", IM_COL32( 50, 200, 220, 255) },  // 5 Square
-                    { "\xe2\x9c\x9d", IM_COL32(255,  80,  80, 255) },  // 6 Cross
-                    { "\xe2\x98\xa0", IM_COL32(255, 255, 255, 255) },  // 7 Skull
-                };
                 uint8_t pmk = gameHandler.getEntityRaidMark(member.guid);
                 if (pmk < game::GameHandler::kRaidMarkCount) {
-                    ImGui::SameLine();
-                    ImGui::TextColored(
-                        ImGui::ColorConvertU32ToFloat4(kPartyMarks[pmk].col),
-                        "%s", kPartyMarks[pmk].sym);
+                    if (VkDescriptorSet markTex = ui::getRaidTargetIcon(pmk, services_.assetManager)) {
+                        ImGui::SameLine();
+                        ImGui::Image((ImTextureID)(uintptr_t)markTex, ImVec2(14.0f, 14.0f));
+                    }
                 }
             }
 
@@ -2015,6 +1998,32 @@ void SocialPanel::renderSocialFrame(game::GameHandler& gameHandler,
     ImGui::PopStyleVar();
 }
 
+namespace {
+// LFG role bitmask: 0x02=Tank, 0x04=Healer, 0x08=DPS (0x01=Leader, unused here).
+constexpr uint8_t kLfgRoleTank   = 0x02;
+constexpr uint8_t kLfgRoleHealer = 0x04;
+constexpr uint8_t kLfgRoleDps    = 0x08;
+
+// Which roles a class can actually fill in the Dungeon Finder (WotLK). Every
+// class can DPS. An unknown class (0, not yet received) allows all roles so we
+// never wrongly lock the player out before their character data arrives.
+uint8_t allowedLfgRolesForClass(uint8_t classId) {
+    switch (classId) {
+        case 1:  return kLfgRoleTank | kLfgRoleDps;                    // Warrior
+        case 2:  return kLfgRoleTank | kLfgRoleHealer | kLfgRoleDps;   // Paladin
+        case 3:  return kLfgRoleDps;                                   // Hunter
+        case 4:  return kLfgRoleDps;                                   // Rogue
+        case 5:  return kLfgRoleHealer | kLfgRoleDps;                  // Priest
+        case 6:  return kLfgRoleTank | kLfgRoleDps;                    // Death Knight
+        case 7:  return kLfgRoleHealer | kLfgRoleDps;                  // Shaman
+        case 8:  return kLfgRoleDps;                                   // Mage
+        case 9:  return kLfgRoleDps;                                   // Warlock
+        case 11: return kLfgRoleTank | kLfgRoleHealer | kLfgRoleDps;   // Druid
+        default: return kLfgRoleTank | kLfgRoleHealer | kLfgRoleDps;   // unknown
+    }
+}
+} // namespace
+
 void SocialPanel::renderDungeonFinderWindow(game::GameHandler& gameHandler,
                                                ChatPanel& chatPanel) {
     // Toggle Dungeon Finder (customizable keybind)
@@ -2176,64 +2185,88 @@ void SocialPanel::renderDungeonFinderWindow(game::GameHandler& gameHandler,
     bool canConfigure = (state == LfgState::None || state == LfgState::FinishedDungeon);
 
     if (canConfigure) {
+        // Only offer roles the player's class can perform; drop any stale bits
+        // (e.g. a role picked before the class was known, or a class change).
+        const uint8_t allowedRoles = allowedLfgRolesForClass(gameHandler.getPlayerClass());
+        lfgRoles_ &= allowedRoles;
+
         ImGui::Text("Role:");
         ImGui::SameLine();
-        bool isTank   = (lfgRoles_ & 0x02) != 0;
-        bool isHealer = (lfgRoles_ & 0x04) != 0;
-        bool isDps    = (lfgRoles_ & 0x08) != 0;
-        if (ImGui::Checkbox("Tank",   &isTank))   lfgRoles_ = (lfgRoles_ & ~0x02) | (isTank   ? 0x02 : 0);
+        auto roleCheckbox = [&](const char* label, uint8_t bit) {
+            const bool available = (allowedRoles & bit) != 0;
+            bool checked = (lfgRoles_ & bit) != 0;
+            if (!available) ImGui::BeginDisabled();
+            if (ImGui::Checkbox(label, &checked))
+                lfgRoles_ = (lfgRoles_ & ~bit) | (checked ? bit : 0);
+            if (!available) {
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Your class cannot fill this role.");
+            }
+        };
+        roleCheckbox("Tank", kLfgRoleTank);
         ImGui::SameLine();
-        if (ImGui::Checkbox("Healer", &isHealer)) lfgRoles_ = (lfgRoles_ & ~0x04) | (isHealer ? 0x04 : 0);
+        roleCheckbox("Healer", kLfgRoleHealer);
         ImGui::SameLine();
-        if (ImGui::Checkbox("DPS",    &isDps))    lfgRoles_ = (lfgRoles_ & ~0x08) | (isDps    ? 0x08 : 0);
+        roleCheckbox("DPS", kLfgRoleDps);
 
         ImGui::Spacing();
 
         // ---- Dungeon selection ----
         ImGui::Text("Dungeon:");
 
-        struct DungeonEntry { uint32_t id; const char* name; };
-        // Category 0=Random, 1=Classic, 2=TBC, 3=WotLK
-        struct DungeonEntryEx { uint32_t id; const char* name; uint8_t cat; };
+        // Category 0=Random, 1=Classic, 2=TBC, 3=WotLK. minLvl is the lowest
+        // character level allowed to queue; kept conservative (erring low) so a
+        // valid queue is never blocked — the server remains the authority.
+        struct DungeonEntryEx { uint32_t id; const char* name; uint8_t cat; uint8_t minLvl; };
         static const DungeonEntryEx kDungeons[] = {
-            { 861, "Random Dungeon",               0 },
-            { 862, "Random Heroic",                0 },
-            {  36, "Deadmines",                    1 },
-            {  43, "Ragefire Chasm",               1 },
-            {  47, "Razorfen Kraul",               1 },
-            {  48, "Blackfathom Deeps",            1 },
-            {  52, "Uldaman",                      1 },
-            {  57, "Dire Maul: East",              1 },
-            {  70, "Onyxia's Lair",                1 },
-            { 264, "The Blood Furnace",            2 },
-            { 269, "The Shattered Halls",          2 },
-            { 576, "The Nexus",                    3 },
-            { 578, "The Oculus",                   3 },
-            { 595, "The Culling of Stratholme",    3 },
-            { 599, "Halls of Stone",               3 },
-            { 600, "Drak'Tharon Keep",             3 },
-            { 601, "Azjol-Nerub",                  3 },
-            { 604, "Gundrak",                      3 },
-            { 608, "Violet Hold",                  3 },
-            { 619, "Ahn'kahet: Old Kingdom",       3 },
-            { 623, "Halls of Lightning",           3 },
-            { 632, "The Forge of Souls",           3 },
-            { 650, "Trial of the Champion",        3 },
-            { 658, "Pit of Saron",                 3 },
-            { 668, "Halls of Reflection",          3 },
+            { 861, "Random Dungeon",               0, 15 },
+            { 862, "Random Heroic",                0, 80 },
+            {  36, "Deadmines",                    1, 15 },
+            {  43, "Ragefire Chasm",               1, 15 },
+            {  47, "Razorfen Kraul",               1, 24 },
+            {  48, "Blackfathom Deeps",            1, 21 },
+            {  52, "Uldaman",                      1, 34 },
+            {  57, "Dire Maul: East",              1, 46 },
+            {  70, "Onyxia's Lair",                1, 80 },
+            { 264, "The Blood Furnace",            2, 58 },
+            { 269, "The Shattered Halls",          2, 67 },
+            { 576, "The Nexus",                    3, 68 },
+            { 578, "The Oculus",                   3, 76 },
+            { 595, "The Culling of Stratholme",    3, 77 },
+            { 599, "Halls of Stone",               3, 74 },
+            { 600, "Drak'Tharon Keep",             3, 71 },
+            { 601, "Azjol-Nerub",                  3, 70 },
+            { 604, "Gundrak",                      3, 74 },
+            { 608, "Violet Hold",                  3, 72 },
+            { 619, "Ahn'kahet: Old Kingdom",       3, 71 },
+            { 623, "Halls of Lightning",           3, 77 },
+            { 632, "The Forge of Souls",           3, 79 },
+            { 650, "Trial of the Champion",        3, 79 },
+            { 658, "Pit of Saron",                 3, 79 },
+            { 668, "Halls of Reflection",          3, 79 },
         };
         static constexpr const char* kCatHeaders[] = { nullptr, "-- Classic --", "-- TBC --", "-- WotLK --" };
+        constexpr int kDungeonCount = static_cast<int>(sizeof(kDungeons)/sizeof(kDungeons[0]));
+        const uint32_t playerLvl = gameHandler.getPlayerLevel();
+
+        // Format a dungeon's label with its minimum level, e.g. "Gundrak  (Lv 74+)".
+        auto dungeonLabel = [](const DungeonEntryEx& d, char* buf, size_t n) {
+            snprintf(buf, n, "%s  (Lv %u+)", d.name, static_cast<unsigned>(d.minLvl));
+        };
 
         // Find current index
         int curIdx = 0;
-        for (int i = 0; i < static_cast<int>(sizeof(kDungeons)/sizeof(kDungeons[0])); ++i) {
+        for (int i = 0; i < kDungeonCount; ++i) {
             if (kDungeons[i].id == lfgSelectedDungeon_) { curIdx = i; break; }
         }
 
+        char curLabel[96];
+        dungeonLabel(kDungeons[curIdx], curLabel, sizeof(curLabel));
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::BeginCombo("##dungeon", kDungeons[curIdx].name)) {
+        if (ImGui::BeginCombo("##dungeon", curLabel)) {
             uint8_t lastCat = 255;
-            for (int i = 0; i < static_cast<int>(sizeof(kDungeons)/sizeof(kDungeons[0])); ++i) {
+            for (int i = 0; i < kDungeonCount; ++i) {
                 if (kDungeons[i].cat != lastCat && kCatHeaders[kDungeons[i].cat]) {
                     if (lastCat != 255) ImGui::Separator();
                     ImGui::TextDisabled("%s", kCatHeaders[kDungeons[i].cat]);
@@ -2241,10 +2274,20 @@ void SocialPanel::renderDungeonFinderWindow(game::GameHandler& gameHandler,
                 } else if (kDungeons[i].cat != lastCat) {
                     lastCat = kDungeons[i].cat;
                 }
+                // Grey out dungeons the player is too low to queue for.
+                const bool tooLow = (playerLvl != 0 && playerLvl < kDungeons[i].minLvl);
+                char label[96];
+                dungeonLabel(kDungeons[i], label, sizeof(label));
                 bool selected = (kDungeons[i].id == lfgSelectedDungeon_);
-                if (ImGui::Selectable(kDungeons[i].name, selected))
-                    lfgSelectedDungeon_ = kDungeons[i].id;
-                if (selected) ImGui::SetItemDefaultFocus();
+                if (tooLow) {
+                    ImGui::TextDisabled("%s", label);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Requires level %u.", static_cast<unsigned>(kDungeons[i].minLvl));
+                } else {
+                    if (ImGui::Selectable(label, selected))
+                        lfgSelectedDungeon_ = kDungeons[i].id;
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
             }
             ImGui::EndCombo();
         }
@@ -2252,16 +2295,22 @@ void SocialPanel::renderDungeonFinderWindow(game::GameHandler& gameHandler,
         ImGui::Spacing();
 
         // ---- Join button ----
-        bool rolesOk = (lfgRoles_ != 0);
-        if (!rolesOk) {
+        const bool rolesOk = (lfgRoles_ != 0);
+        const bool levelOk = (playerLvl == 0 || playerLvl >= kDungeons[curIdx].minLvl);
+        const bool canJoin = rolesOk && levelOk;
+        if (!canJoin) {
             ImGui::BeginDisabled();
         }
         if (ImGui::Button("Join Dungeon Finder", ImVec2(-1, 0))) {
             gameHandler.lfgJoin(lfgSelectedDungeon_, lfgRoles_);
         }
-        if (!rolesOk) {
+        if (!canJoin) {
             ImGui::EndDisabled();
-            ImGui::TextColored(colors::kSoftRed, "Select at least one role.");
+            if (!rolesOk)
+                ImGui::TextColored(colors::kSoftRed, "Select at least one role.");
+            else if (!levelOk)
+                ImGui::TextColored(colors::kSoftRed, "Requires level %u for this dungeon.",
+                                   static_cast<unsigned>(kDungeons[curIdx].minLvl));
         }
     }
 

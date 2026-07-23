@@ -6,6 +6,7 @@
 #include "core/logger.hpp"
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -15,6 +16,89 @@
 
 namespace wowee {
 namespace game {
+
+bool parseAuctionMailSubject(const std::string& subject, AuctionMailSubject& result) {
+    std::array<uint32_t, 5> fields{};
+    size_t start = 0;
+    size_t fieldCount = 0;
+    while (start <= subject.size() && fieldCount < fields.size()) {
+        const size_t end = subject.find(':', start);
+        const size_t fieldEnd = end == std::string::npos ? subject.size() : end;
+        if (fieldEnd == start) return false;
+        const char* first = subject.data() + start;
+        const char* last = subject.data() + fieldEnd;
+        auto [parsedEnd, error] = std::from_chars(first, last, fields[fieldCount]);
+        if (error != std::errc{} || parsedEnd != last) return false;
+        ++fieldCount;
+        if (end == std::string::npos) break;
+        start = fieldEnd + 1;
+    }
+
+    // Modern subjects are itemEntry:0:response:lotId:itemCount. Legacy MaNGOS
+    // cores emitted only itemEntry:0:response.
+    if (fieldCount != 3 && fieldCount != 5) return false;
+    if (fields[0] == 0 || fields[1] != 0 || fields[2] > 6) return false;
+    result = {fields[0], fields[2],
+              fieldCount == 5 ? fields[3] : 0,
+              fieldCount == 5 ? fields[4] : 0};
+    return true;
+}
+
+std::string formatAuctionMailSubject(const AuctionMailSubject& subject,
+                                     const std::string& itemName) {
+    static constexpr std::array<const char*, 7> kPrefixes = {
+        "Outbid on ",
+        "Auction won: ",
+        "Auction successful: ",
+        "Auction expired: ",
+        "Auction cancelled: ",
+        "Auction cancelled: ",
+        "Sale Pending: ",
+    };
+    if (subject.response >= kPrefixes.size()) return itemName;
+    return std::string(kPrefixes[subject.response]) + itemName;
+}
+
+// Auction-house mail carries a machine-readable invoice as its body:
+//   "<hex ownerGuidLow>:<bid>:<buyout>[:<deposit>:<consignment>...]"
+// The leading GUID field is right-justified to width 16, so it can arrive with
+// leading spaces (e.g. "           88a79:6000:6000:0:0:0:0"). The retail client
+// parses this into a formatted invoice rather than printing it verbatim.
+bool parseAuctionMailBody(const std::string& body, AuctionMailInvoice& result) {
+    std::array<uint32_t, 5> fields{};
+    size_t fieldCount = 0;
+    size_t start = 0;
+    while (start <= body.size() && fieldCount < fields.size()) {
+        // The GUID field is space-padded to width 16 — skip leading whitespace.
+        while (start < body.size() &&
+               std::isspace(static_cast<unsigned char>(body[start]))) {
+            ++start;
+        }
+        const size_t end = body.find(':', start);
+        const size_t fieldEnd = end == std::string::npos ? body.size() : end;
+        if (fieldEnd == start) return false;
+        const char* first = body.data() + start;
+        const char* last = body.data() + fieldEnd;
+        // Field 0 is the owner GUID in hex; the rest are decimal copper values.
+        const int base = fieldCount == 0 ? 16 : 10;
+        auto [parsedEnd, error] = std::from_chars(first, last, fields[fieldCount], base);
+        if (error != std::errc{} || parsedEnd != last) return false;
+        ++fieldCount;
+        if (end == std::string::npos) break;
+        start = fieldEnd + 1;
+    }
+
+    // Minimum invoice is ownerGuid:bid:buyout (auction-won mail); a successful
+    // sale adds deposit and consignment. Any trailing fields (moneyDelay/eta on
+    // some cores) are ignored.
+    if (fieldCount < 3) return false;
+    result.ownerGuidLow = fields[0];
+    result.bid = fields[1];
+    result.buyout = fields[2];
+    result.deposit = fieldCount > 3 ? fields[3] : 0;
+    result.consignment = fieldCount > 4 ? fields[4] : 0;
+    return true;
+}
 
 bool ShowTaxiNodesParser::parse(network::Packet& packet, ShowTaxiNodesData& data) {
     // Minimum: windowInfo(4) + npcGuid(8) + nearestNode(4) + at least 1 mask uint32(4)
@@ -155,32 +239,40 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
     size_t remaining = packet.getRemainingSize();
     if (remaining < 5) return false;
 
+    const size_t payloadSizeTotal = packet.getSize();
     uint32_t totalCount = packet.readUInt32();
     uint8_t shownCount = packet.readUInt8();
     (void)totalCount;
 
-    LOG_INFO("SMSG_MAIL_LIST_RESULT (WotLK): total=", totalCount, " shown=", static_cast<int>(shownCount));
+    LOG_INFO("SMSG_MAIL_LIST_RESULT (WotLK): total=", totalCount, " shown=", static_cast<int>(shownCount),
+             " payloadBytes=", payloadSizeTotal);
 
     inbox.clear();
     inbox.reserve(shownCount);
 
+    // Each entry: uint16 size + msgId(4) + type(1) + sender(min 4) + 7 fixed
+    // uint32/float(28) + subject NUL(1) + body NUL(1) + attachCount(1) = 42 bytes.
+    constexpr size_t kMinMailEntryBytes = 42;
+    // Per attachment: slot(1) + guidLow(4) + itemId(4) + 7 enchant triplets(84)
+    // + randProp(4) + suffix(4) + stack(4) + charges(4) + maxDur(4) + dur(4)
+    // + trailing(1) = 118 bytes.
+    constexpr size_t kAttachmentBytes = 1 + 4 + 4 + 7 * 12 + 4 + 4 + 4 + 4 + 4 + 4 + 1;
+
     for (uint8_t i = 0; i < shownCount; ++i) {
         remaining = packet.getRemainingSize();
-        if (remaining < 2) break;
+        if (remaining < kMinMailEntryBytes) break;
 
-        uint16_t msgSize = packet.readUInt16();
-        size_t startPos = packet.getReadPos();
+        // The per-entry uint16 size is present on the wire but NOT trusted for
+        // framing: some AzerothCore-derived cores over-declare it (observed a
+        // consistent +4 per mail), so skipping to the declared end overshoots and
+        // desyncs every mail after the first. Instead we advance by the natural
+        // parse position — our field parse reads the complete documented WotLK
+        // entry, so it lands exactly on the next entry on both correct and
+        // over-declaring servers.
+        packet.readUInt16(); // declared size (advisory only)
+        const size_t startPos = packet.getReadPos();
 
         MailMessage msg;
-        // The WotLK wire value includes its own uint16 size field, so only
-        // msgSize - 2 bytes remain after reading it.
-        if (msgSize < 2 || remaining < static_cast<size_t>(msgSize)) {
-            LOG_WARNING("Mail entry ", static_cast<int>(i), " truncated");
-            break;
-        }
-        const size_t payloadSize = static_cast<size_t>(msgSize) - 2;
-        const size_t entryEnd = startPos + payloadSize;
-
         msg.messageId = packet.readUInt32();
         msg.messageType = packet.readUInt8();
 
@@ -205,7 +297,18 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
 
         uint8_t attachCount = packet.readUInt8();
         msg.attachments.reserve(attachCount);
+        bool truncatedAttachment = false;
         for (uint8_t j = 0; j < attachCount; ++j) {
+            if (!packet.hasRemaining(kAttachmentBytes)) {
+                // Genuine buffer shortage mid-attachment (not the size-field quirk).
+                LOG_WARNING("Mail entry ", static_cast<int>(i), " attachment ", static_cast<int>(j),
+                            " truncated: remaining=", packet.getRemainingSize(),
+                            " payloadBytes=", payloadSizeTotal);
+                LOG_WARNING("Mail payload hex: ",
+                            core::toHexString(packet.getData().data(), packet.getSize(), true));
+                truncatedAttachment = true;
+                break;
+            }
             MailAttachment att;
             att.slot = packet.readUInt8();
             att.itemGuidLow = packet.readUInt32();
@@ -229,13 +332,9 @@ bool PacketParsers::parseMailList(network::Packet& packet, std::vector<MailMessa
         msg.read = (msg.flags & 0x01) != 0;
         inbox.push_back(std::move(msg));
 
-        // Skip unread bytes
-        if (packet.getReadPos() < entryEnd) {
-            packet.setReadPos(entryEnd);
-        } else if (packet.getReadPos() > entryEnd) {
-            LOG_WARNING("Mail entry ", static_cast<int>(i),
-                        " exceeded declared size by ", packet.getReadPos() - entryEnd, " bytes");
-        }
+        if (truncatedAttachment) break;
+        // Guard against a corrupt entry that consumed nothing, which would spin.
+        if (packet.getReadPos() <= startPos) break;
     }
 
     LOG_INFO("Parsed ", inbox.size(), " mail messages");

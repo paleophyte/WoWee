@@ -92,6 +92,8 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     instance.cachedIsInvisibleTrap = mdlRef.isInvisibleTrap;
     instance.cachedIsInstancePortal = mdlRef.isInstancePortal;
     instance.cachedIsSkyBird = mdlRef.isSkyBird;
+    instance.cachedIsLightBeam = mdlRef.isLightBeam;
+    instance.cachedIsTransportDoodad = mdlRef.isTransportDoodad;
     instance.cachedIsValid = mdlRef.isValid();
     instance.cachedModel = &mdlRef;
     instance.recomputeCachedCullFactors();
@@ -215,6 +217,8 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
     instance.cachedIsGroundDetail = mdl2.isGroundDetail;
     instance.cachedIsInvisibleTrap = mdl2.isInvisibleTrap;
     instance.cachedIsSkyBird = mdl2.isSkyBird;
+    instance.cachedIsLightBeam = mdl2.isLightBeam;
+    instance.cachedIsTransportDoodad = mdl2.isTransportDoodad;
     instance.cachedIsValid = mdl2.isValid();
     instance.cachedModel = &mdl2;
     instance.recomputeCachedCullFactors();
@@ -476,14 +480,16 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
         // (always valid — seeded on spawn) and avoid the expensive per-bone work.
-        // Sky birds are exempt: their flight path is baked into bone animation,
-        // so freezing bones freezes the whole bird mid-air.
+        // Sky birds, light beams, and ship machinery are exempt: their visible
+        // motion is baked entirely into bone animation.
         constexpr float kLOD3DistSq = rendering::M2_LOD3_DISTANCE * rendering::M2_LOD3_DISTANCE;
-        if (distSq > kLOD3DistSq && !instance.cachedIsSkyBird) continue;
+        const bool needsDistantBones = instance.cachedIsSkyBird || instance.cachedIsLightBeam ||
+                                       instance.cachedIsTransportDoodad;
+        if (distSq > kLOD3DistSq && !needsDistantBones) continue;
 
         // Distance-based frame skipping: update distant bones less frequently
         uint32_t boneInterval = 1;
-        if (!instance.cachedIsSkyBird) {
+        if (!needsDistantBones) {
             if (distSq > rendering::M2_BONE_SKIP_DIST_FAR * rendering::M2_BONE_SKIP_DIST_FAR) boneInterval = 4;
             else if (distSq > rendering::M2_BONE_SKIP_DIST_MID * rendering::M2_BONE_SKIP_DIST_MID) boneInterval = 2;
         }
@@ -640,7 +646,13 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     smoothedRenderDist_ = glm::mix(smoothedRenderDist_, targetRenderDist, blendRate);
     const float maxRenderDistance = smoothedRenderDist_;
     const float maxRenderDistanceSq = maxRenderDistance * maxRenderDistance;
-    const float maxPossibleDistSq = maxRenderDistanceSq * 4.0f; // 2x safety margin
+    // The shader rejects on this bound before it ever reads the per-instance
+    // distance, so it has to clear the game-object floor as well — otherwise
+    // that floor is silently capped at 2x the ambient doodad distance.
+    const float maxPossibleDistSq = std::max(
+        maxRenderDistanceSq * 4.0f,  // 2x safety margin
+        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
+        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
 
     // --- Upload frustum planes + camera (UBO, binding 0) ---
     const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -704,6 +716,19 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         prevVP_ = vp;
     }
 
+    // Rotate this slot's ID log: the dispatch recorded below replaces the one
+    // whose results render() is about to consume, so the IDs it was built from
+    // become the readable set.  Done before the upload loop overwrites them, and
+    // after the early-out above, so "readable" always describes the last dispatch
+    // actually recorded on this slot.
+    if (frameIndex < 2) {
+        cullReadableIds_[frameIndex].swap(cullSubmittedIds_[frameIndex]);
+        cullSubmittedIds_[frameIndex].clear();
+        cullSubmittedIds_[frameIndex].reserve(numInstances);
+        for (uint32_t i = 0; i < numInstances; i++)
+            cullSubmittedIds_[frameIndex].push_back(instances[i].id);
+    }
+
     // --- Upload per-instance cull data (SSBO, binding 1) ---
     // The per-instance radius math used to be recomputed here every frame; it's
     // now precomputed once by recomputeCachedCullFactors() since it depends only
@@ -713,6 +738,11 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         for (uint32_t i = 0; i < numInstances; i++) {
             const auto& inst = instances[i];
             float effectiveMaxDistSq = maxRenderDistanceSq * inst.cachedEffectiveMaxDistSqFactor;
+            if (inst.isGameObject) {
+                effectiveMaxDistSq = std::max(effectiveMaxDistSq,
+                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
+                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+            }
             if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
                 constexpr float kBirdMaxDistSq =
                     rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
@@ -728,7 +758,9 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
             // that were NOT rendered last frame (no reliable depth data).
             // Hysteresis: treat as "previously visible" unless culled for
             // 2+ consecutive frames, preventing single-frame false-cull flicker.
-            if (i < prevFrameVisible_.size() && prevFrameVisible_[i] < 2)
+            // The counter lives on the instance, so streaming churn can never
+            // pair it with a different object's history.
+            if (inst.hizPrevCulledFrames < 2)
                 flags |= 8u;
 
             input[i].sphere = glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius);
@@ -817,27 +849,51 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     const uint32_t* visibility = static_cast<const uint32_t*>(cullOutputMapped_[frameIndex]);
     const bool gpuCullAvailable = (cullPipeline_ != VK_NULL_HANDLE && visibility != nullptr);
 
-    // Snapshot the GPU visibility results into prevFrameVisible_ so the NEXT
-    // frame's compute dispatch can set the per-instance `previouslyVisible`
-    // flag (bit 3).  We use a hysteresis counter instead of a binary flag to
-    // prevent a 1-frame-on / 1-frame-off oscillation: an object must be HiZ-
-    // culled for 2 consecutive frames before we stop considering it
-    // "previously visible".  This eliminates doodad flicker near characters
-    // caused by stale depth data from character movement.
+    // Scatter the GPU visibility results back onto the instances they were
+    // computed for.  The results belong to the dispatch recorded on this slot
+    // ~2 frames ago, so they are keyed by that dispatch's instance IDs, never by
+    // the current array index: createInstance() appends and removeInstance()
+    // swap-removes, so a respawned game object lands at the volatile tail of the
+    // array and would otherwise inherit the verdict of whatever transient object
+    // (spell visual, streamed doodad, creature) held that index two frames back
+    // — leaving it culled for as long as the churn continued.
+    //
+    // Instances with no entry in the readable set were created after that
+    // dispatch and keep their defaults: visible, and exempt from the HiZ test.
+    //
+    // hizPrevCulledFrames is a hysteresis counter rather than a binary flag: an
+    // object must be culled for 2 consecutive frames before it stops counting as
+    // "previously visible", which prevents the 1-frame-on / 1-frame-off
+    // oscillation that showed up as doodad flicker near moving characters.
     if (gpuCullAvailable) {
-        prevFrameVisible_.resize(numInstances, 0);
-        for (uint32_t i = 0; i < numInstances; ++i) {
-            if (visibility[i]) {
-                // Visible this frame — reset cull counter.
-                prevFrameVisible_[i] = 0;
+        const auto& ids = cullReadableIds_[frameIndex < 2 ? frameIndex : 0];
+        for (size_t k = 0; k < ids.size(); ++k) {
+            // Fast path: with no churn since that dispatch the ordering still
+            // matches, so skip the hash lookup.
+            M2Instance* inst = nullptr;
+            if (k < instances.size() && instances[k].id == ids[k]) {
+                inst = &instances[k];
             } else {
-                // Culled this frame — increment counter (cap at 3 to avoid overflow).
-                prevFrameVisible_[i] = std::min<uint8_t>(prevFrameVisible_[i] + 1, 3);
+                auto idxIt = instanceIndexById.find(ids[k]);
+                if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size())
+                    continue;  // instance was removed since the dispatch
+                inst = &instances[idxIt->second];
+            }
+            if (visibility[k]) {
+                inst->lastCullVisible = 1;
+                inst->hizPrevCulledFrames = 0;
+            } else {
+                inst->lastCullVisible = 0;
+                inst->hizPrevCulledFrames =
+                    std::min<uint8_t>(inst->hizPrevCulledFrames + 1, 3);
             }
         }
     } else {
-        // No GPU cull data — conservatively mark all as visible (counter = 0).
-        prevFrameVisible_.assign(static_cast<size_t>(instances.size()), 0);
+        // No GPU cull data — conservatively treat everything as visible.
+        for (auto& inst : instances) {
+            inst.lastCullVisible = 1;
+            inst.hizPrevCulledFrames = 0;
+        }
     }
 
     // If GPU culling was not dispatched, fallback: compute distances on CPU
@@ -875,7 +931,12 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
         frustum.extractFromMatrix(vp);
     }
-    const float maxPossibleDistSq = maxRenderDistanceSq * 4.0f;
+    // Matches the bound uploaded to the cull shader, including the headroom the
+    // game-object floor needs (see dispatchCullCompute).
+    const float maxPossibleDistSq = std::max(
+        maxRenderDistanceSq * 4.0f,
+        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
+        rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
 
     const uint32_t totalInstances = static_cast<uint32_t>(instances.size());
     struct VisibleChunk {
@@ -900,22 +961,37 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             float distSq;
             float effectiveMaxDistSq;
 
+            // Server game objects keep a distance floor instead of following the
+            // ambient doodad distance down; it also feeds the fade curve below,
+            // so a mailbox doesn't fade out at the doodad boundary either.
+            const float instanceMaxDistSq = [&] {
+                float d = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
+                if (instance.isGameObject) {
+                    d = std::max(d, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
+                                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
+                }
+                return d;
+            }();
+
             if (forceNoCull_) {
                 if (!instance.cachedIsValid) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
+                effectiveMaxDistSq = instanceMaxDistSq;
             } else if (gpuCullAvailable && i < numInstances) {
-                if (!visibility[i]) continue;
+                // Per-instance verdict scattered above — indexing visibility[]
+                // directly here would read the slot of whichever instance held
+                // this array position when the dispatch was recorded.
+                if (!instance.lastCullVisible) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
-                effectiveMaxDistSq = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
+                effectiveMaxDistSq = instanceMaxDistSq;
             } else {
                 if (!instance.cachedIsValid || instance.cachedIsSmoke || instance.cachedIsInvisibleTrap) continue;
                 glm::vec3 toCam = instance.position - camPos;
                 distSq = glm::dot(toCam, toCam);
                 if (distSq > maxPossibleDistSq) continue;
-                effectiveMaxDistSq = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
+                effectiveMaxDistSq = instanceMaxDistSq;
                 if (distSq > effectiveMaxDistSq) continue;
                 float paddedRadius = instance.cachedPaddedRadius;
                 if (paddedRadius > 0.0f && !frustum.intersectsSphere(instance.cachedCullCenter, paddedRadius)) continue;
@@ -1195,8 +1271,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                     if (emitterWorld.z < worldPos.z) worldPos = emitterWorld;
                                 }
                             } else {
-                                worldPos = glm::vec3(inst.modelMatrix *
-                                                     glm::vec4(batch.center, 1.0f));
+                                worldPos = animatedBatchWorldCenter(inst, batch);
                             }
                             // Preserved emissive glass writes opaque depth before
                             // this additive point sprite. Move only the visual
@@ -1225,10 +1300,68 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             gs.size = batch.glowSize * inst.scale *
                                 (batch.preserveGlowMesh ? 2.0f : 1.45f);
                             if (batch.preserveGlowMesh) gs.color.a *= 1.25f;
+
+                            // A fixture with real particle flames should read as
+                            // flames with a halo behind them. The sprite is sized
+                            // from its glow card's geometric radius, which on a
+                            // chandelier spans the whole fixture — an additive
+                            // blob about a unit across, against candle flames of
+                            // 0.15, so the glow swallowed them entirely. Cap it
+                            // just above what a small glow card already produces
+                            // (the 0.5 floor times 1.45), so candles, lanterns
+                            // and torches are untouched and only oversized cards
+                            // are clamped.
+                            if (!model.particleEmitters.empty() && model.isLanternLike) {
+                                constexpr float kMaxHaloRadius = 0.75f;
+                                gs.size = std::min(gs.size, kMaxHaloRadius * inst.scale);
+                            }
+
+                            // Fire burning inside a hearth. The sprite is a point
+                            // billboard carrying one depth value for the whole
+                            // quad, so as soon as its centre shows through the
+                            // fireplace opening the entire square draws — brick
+                            // surround included, which reads as the fire glowing
+                            // through the masonry. Sized from the glow card's
+                            // geometric radius these spheres are wider than the
+                            // opening, so keep them inside it.
+                            const bool hearthFire = model.isBrazierOrFire ||
+                                                    model.isGroundFire ||
+                                                    model.isForge;
+                            if (hearthFire) {
+                                constexpr float kMaxFireGlowRadius = 0.5f;
+                                gs.size = std::min(gs.size, kMaxFireGlowRadius * inst.scale);
+                            }
+
+                            // Flame guttering. The phase comes from the lamp's own
+                            // world position, so two lanterns on the same street
+                            // never pulse together — a synchronised row of lamps
+                            // reads as a rendering artifact, not firelight. Two
+                            // detuned sines keep any single lamp from looping
+                            // visibly. Alpha and size move together, since a
+                            // brighter flame also looks slightly larger.
+                            {
+                                // Matches the phase used for this lamp's local
+                                // light, so the sprite and the pool of light it
+                                // casts breathe together.
+                                // Same clock and parameters as the local light in
+                                // gatherLocalLights, so the sprite and the pool of
+                                // light it casts rise and fall together.
+                                const float flicker = lampFlicker(
+                                    inst.position, lampFlickerClockSeconds(),
+                                    0.82f, 0.12f, 0.06f);
+                                gs.color.a *= flicker;
+                                gs.size    *= 0.98f + 0.02f * flicker;
+                            }
                             glowSprites_.push_back(gs);
                             GlowSprite halo = gs;
                             halo.color.a *= batch.preserveGlowMesh ? 0.34f : 0.42f;
                             halo.size *= batch.preserveGlowMesh ? 2.2f : 1.8f;
+                            // The halo is nearly twice the sprite, so capping only
+                            // the sprite would leave the bleed to the halo.
+                            if (hearthFire) {
+                                constexpr float kMaxFireHaloRadius = 0.85f;
+                                halo.size = std::min(halo.size, kMaxFireHaloRadius * inst.scale);
+                            }
                             glowSprites_.push_back(halo);
                         }
                         const bool cardLikeSkipMesh =
@@ -1303,15 +1436,20 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
                     // Pipeline selection (per-model/batch, not per-instance)
                     const bool foliageCutout = foliageLikeModel && !model.isSpellEffect && batch.blendMode <= 3;
+                    // A forge model is nothing but the fire burning inside the
+                    // hearth — an effect overlay on a black background, the same
+                    // shape as a spell visual. Drawn opaque it fills the forge
+                    // opening with a black rectangle instead of flame.
+                    const bool fireEffectModel = model.isForge;
                     const bool forceCutout =
-                        !model.isSpellEffect &&
+                        !model.isSpellEffect && !fireEffectModel &&
                         (model.isGroundDetail || foliageCutout ||
                          batch.blendMode == 1 ||
                          (batch.blendMode >= 2 && !batch.hasAlpha) ||
                          batch.colorKeyBlack);
 
                     uint8_t effectiveBlendMode = batch.blendMode;
-                    if (model.isSpellEffect) {
+                    if (model.isSpellEffect || fireEffectModel) {
                         if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
                         else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
                     }
@@ -1515,7 +1653,8 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
             // Pipeline selection
             uint8_t effectiveBlendMode = batch.blendMode;
-            if (model.isSpellEffect) {
+            if (model.isSpellEffect || model.isForge) {
+                // Matches the opaque pass: forge fire is an additive effect.
                 if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
                 else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
             }

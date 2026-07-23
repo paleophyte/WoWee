@@ -31,6 +31,10 @@ struct ChatSettings {
 
     // Window state
     bool windowLocked = true;
+    // Persisted chat window size (0 = use responsive default). Captured while the
+    // window is unlocked so a resized chat window keeps its size, even after locking.
+    float windowWidth  = 0.0f;
+    float windowHeight = 0.0f;
 
     /** Reset all chat settings to defaults. */
     void restoreDefaults();

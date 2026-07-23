@@ -202,6 +202,9 @@ public:
     int auctionItemClass_ = -1;
     int auctionItemSubClass_ = -1;
     bool auctionUsableOnly_ = false;
+    int auctionSlotFilter_ = 0;        // index into AH equipment-slot combo (0 = All)
+    bool auctionBuyoutOnly_ = false;   // hide bid-only listings (client-side page filter)
+    int auctionMaxPriceGold_ = 0;      // client-side max buyout in gold (0 = no cap)
 
     // Guild bank money input
     int guildBankMoneyInput_[3] = {0, 0, 0};

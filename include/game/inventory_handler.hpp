@@ -41,7 +41,12 @@ public:
         None = 0, PendingIncoming, Open, Accepted, Complete
     };
 
-    static constexpr int TRADE_SLOT_COUNT = 6;
+    // WoW trade window: 7 slots total. Slots 0-5 are transferred to the partner;
+    // slot 6 (TRADE_SLOT_NONTRADED) is the "will not be traded" slot — you place your
+    // own item there so the partner can enchant/craft on it without it changing hands.
+    static constexpr int TRADE_SLOT_COUNT        = 7;
+    static constexpr int TRADE_SLOT_TRADED_COUNT = 6;
+    static constexpr int TRADE_SLOT_NONTRADED    = 6;
 
     struct TradeSlot {
         uint32_t itemId      = 0;
@@ -262,7 +267,8 @@ public:
     void detectInventorySlotBases(const FlatFieldMap& fields);
     bool applyInventoryFields(const FlatFieldMap& fields);
     void extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields);
-    ItemDef buildItemDef(uint32_t entry, uint32_t stackCount, uint32_t curDur, uint32_t maxDur, uint64_t guid);
+    ItemDef buildItemDef(uint32_t entry, uint32_t stackCount, uint32_t curDur, uint32_t maxDur, uint64_t guid,
+                         uint32_t flags = 0, int32_t randomPropertyId = 0, uint32_t suffixFactor = 0);
     void rebuildOnlineInventory();
     void maybeDetectVisibleItemLayout();
     void updateOtherPlayerVisibleItems(uint64_t guid, const FlatFieldMap& fields);

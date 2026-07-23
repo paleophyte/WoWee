@@ -1,4 +1,5 @@
 #include "rendering/m2_renderer.hpp"
+#include <unordered_set>
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -100,7 +101,41 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
         float life = interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
-        if (rate <= 0.0f || life <= 0.0f) continue;
+        // A flame reads as a flame only when enough particles are alive at once.
+        // Authored rates vary wildly for the same visual intent — a candle asks
+        // for 40/s over half a second, CHANDELIER01 for 1/s over six seconds,
+        // which sustains a single speck per candle and looks like a bare glow.
+        // Steady-state population is rate x lifespan, so floor the rate against
+        // the lifespan to hold every fixture at a comparable density. Do not lower
+        // this: at 7 the flames disappear entirely, as they do under any change
+        // that reduces how many particles are alive or how far they travel. The
+        // effect is only visible because a scattering of particles reaches open
+        // air, so thinning it drops the whole thing below the threshold.
+        if (rate > 0.0f && life > 0.0f &&
+            (gpu.isLanternLike || gpu.isTorch || gpu.isBrazierOrFire || gpu.isKoboldFlame)) {
+            constexpr float kMinLiveParticles = 15.0f;
+            rate = std::max(rate, kMinLiveParticles / std::max(life, 0.1f));
+        }
+
+        if (rate <= 0.0f || life <= 0.0f) {
+            // Diagnostic: a lamp or flame whose emitter never fires produces a
+            // fixture that glows but shows no flame. Report each model once so a
+            // default-level log says whether emission is the cause.
+            if (gpu.isLanternLike || gpu.isTorch || gpu.isBrazierOrFire) {
+                static std::unordered_set<std::string> reported;
+                if (reported.insert(gpu.name).second) {
+                    LOG_WARNING("Flame emitter idle: '", gpu.name, "' emitter=", ei,
+                                " rate=", rate, " life=", life,
+                                " animTime=", inst.animTime,
+                                " seqIdx=", inst.currentSequenceIndex,
+                                " gsTime=", inst.globalSequenceTime,
+                                " rateSeqs=", em.emissionRate.sequences.size(),
+                                " lifeSeqs=", em.lifespan.sequences.size(),
+                                " rateGlobalSeq=", em.emissionRate.globalSequence);
+                }
+            }
+            continue;
+        }
 
         inst.emitterAccumulators[ei] += rate * dt;
 
@@ -523,6 +558,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         const auto& gpu = *inst.cachedModel;
         if (gpu.isInstancePortal) continue;
 
+
         // Cache the last emitter's per-emitter state so adjacent particles
         // sharing an emitter (the common case — particles from one source
         // cluster together) skip the texture/key/map-lookup work entirely.
@@ -588,11 +624,38 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 if (rawScale > 2.0f) alpha *= 0.02f;
                 if (cachedBlendType == 3 || cachedBlendType == 4) alpha *= 0.05f;
             }
+            // Flame fixtures: the authored curves can leave a particle with
+            // effectively no colour or alpha for most of its life. CHANDELIER01
+            // ramps scale from zero over a six second life and its candles spend
+            // nearly all of that time contributing nothing — and because these
+            // draw additively, a near-black particle adds literally nothing to
+            // the frame. Floor colour and alpha so a lit fixture always shows
+            // flame. Floors only lift the dim end, leaving torches and candles
+            // that already read correctly untouched.
+            if (gpu.isLanternLike || gpu.isTorch ||
+                gpu.isBrazierOrFire || gpu.isKoboldFlame) {
+                color = glm::max(color, glm::vec3(0.50f, 0.26f, 0.09f));
+                alpha = std::max(alpha, 0.30f);
+            }
+
             float scale = rawScale;
             if (gpu.isSpellEffect) {
                 scale = std::max(rawScale * 1.5f, 0.15f);
             } else if (!gpu.isFireflyEffect) {
                 scale = std::min(rawScale, 1.5f);
+                // Candle flames are authored at a fraction of a unit, which lands
+                // sub-pixel at any normal viewing distance — the fixture glows
+                // with no visible flame. Small effect-heavy models dodge this by
+                // being classified as spell effects (three or more emitters and
+                // few vertices) and picking up that path's floor, but a
+                // chandelier is a real fixture at 370 vertices and misses the
+                // cut, so its five candles rendered as nothing. Give flame
+                // fixtures the same floor without making them spell effects,
+                // which would also change how they blend.
+                if (gpu.isLanternLike || gpu.isTorch ||
+                    gpu.isBrazierOrFire || gpu.isKoboldFlame) {
+                    scale = std::max(scale, 0.15f);
+                }
             }
 
             auto& vd = cachedGroup->vertexData;

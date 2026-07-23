@@ -791,6 +791,7 @@ set(WOWEE_SOURCES
     src/rendering/render_graph.cpp
     src/rendering/hiz_system.cpp
     src/rendering/quest_marker_renderer.cpp
+    src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
     src/rendering/world_map/coordinate_projection.cpp
     src/rendering/world_map/map_resolver.cpp
@@ -808,6 +809,8 @@ set(WOWEE_SOURCES
     src/rendering/world_map/layers/poi_marker_layer.cpp
     src/rendering/world_map/layers/quest_poi_layer.cpp
     src/rendering/world_map/layers/corpse_marker_layer.cpp
+    src/rendering/world_map/layers/rare_tracker_layer.cpp
+    src/rendering/world_map/layers/chest_tracker_layer.cpp
     src/rendering/world_map/layers/zone_highlight_layer.cpp
     src/rendering/world_map/layers/coordinate_display.cpp
     src/rendering/world_map/layers/subzone_tooltip_layer.cpp
@@ -834,6 +837,7 @@ set(WOWEE_SOURCES
 
     # UI
     src/ui/ui_manager.cpp
+    src/ui/ui_raid_icons.cpp
     src/ui/auth_screen.cpp
     src/ui/realm_screen.cpp
     src/ui/character_create_screen.cpp
@@ -996,6 +1000,8 @@ set(WOWEE_HEADERS
     include/rendering/world_map/layers/poi_marker_layer.hpp
     include/rendering/world_map/layers/quest_poi_layer.hpp
     include/rendering/world_map/layers/corpse_marker_layer.hpp
+    include/rendering/world_map/layers/rare_tracker_layer.hpp
+    include/rendering/world_map/layers/chest_tracker_layer.hpp
     include/rendering/world_map/layers/zone_highlight_layer.hpp
     include/rendering/world_map/layers/coordinate_display.hpp
     include/rendering/world_map/layers/subzone_tooltip_layer.hpp

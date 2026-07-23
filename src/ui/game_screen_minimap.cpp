@@ -1,4 +1,5 @@
 #include "ui/game_screen.hpp"
+#include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "rendering/vk_context.hpp"
@@ -257,6 +258,85 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
     }
 
+    // Flight masters are a standard minimap service marker, independent of
+    // the optional generic NPC-dot overlay. Use the live UNIT_NPC_FLAGS value
+    // so an undiscovered flight master is visible before the taxi window has
+    // ever been opened (and therefore before the known-node mask is available).
+    {
+        ImVec2 mouse = ImGui::GetMousePos();
+        for (const auto& entity : minimapUnits) {
+            auto unit = std::static_pointer_cast<game::Unit>(entity);
+            if (!unit || unit->getHealth() == 0 ||
+                (unit->getNpcFlags() & game::NPC_FLAG_FLIGHT_MASTER) == 0) {
+                continue;
+            }
+
+            glm::vec3 flightMasterRender = core::coords::canonicalToRender(
+                glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+            float sx = 0.0f, sy = 0.0f;
+            if (!projectToMinimap(flightMasterRender, sx, sy)) continue;
+
+            constexpr float halfSize = 5.5f;
+            const ImVec2 top(sx, sy - halfSize);
+            const ImVec2 right(sx + halfSize, sy);
+            const ImVec2 bottom(sx, sy + halfSize);
+            const ImVec2 left(sx - halfSize, sy);
+            drawList->AddQuadFilled(top, right, bottom, left,
+                                    IM_COL32(255, 215, 0, 245));
+            drawList->AddQuad(top, right, bottom, left,
+                              IM_COL32(70, 45, 0, 230), 1.5f);
+            drawList->AddCircleFilled(ImVec2(sx, sy), 1.7f,
+                                      IM_COL32(255, 250, 205, 255));
+
+            float mdx = mouse.x - sx, mdy = mouse.y - sy;
+            if (mdx * mdx + mdy * mdy <= 64.0f) {
+                const std::string& name = unit->getName();
+                ImGui::SetTooltip("%s\nFlight Master",
+                                  name.empty() ? "Flight Master" : name.c_str());
+            }
+        }
+    }
+
+    // Rare tracker: use the same live creature-rank classification as the world map.
+    // This is independent of generic NPC dots so enabling rare tracking consistently
+    // shows spawned rares on both maps without adding every nearby creature.
+    if (settingsPanel_.showRareTracker_) {
+        ImVec2 mouse = ImGui::GetMousePos();
+        for (const auto& entity : minimapUnits) {
+            auto unit = std::static_pointer_cast<game::Unit>(entity);
+            if (!unit || unit->getHealth() == 0) continue;
+
+            const int rank = gameHandler.getCreatureRank(unit->getEntry());
+            if (rank != 2 && rank != 4) continue; // 2 = Rare Elite, 4 = Rare
+
+            glm::vec3 rareRender = core::coords::canonicalToRender(
+                glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+            float sx = 0.0f, sy = 0.0f;
+            if (!projectToMinimap(rareRender, sx, sy)) continue;
+
+            // Match the world-map tracker: gold for Rare, silver for Rare Elite.
+            const bool isElite = rank == 2;
+            const ImU32 fill = isElite
+                ? IM_COL32(210, 210, 225, 255)
+                : IM_COL32(255, 190, 60, 255);
+            constexpr float halfSize = 5.0f;
+            const ImVec2 top(sx, sy - halfSize);
+            const ImVec2 right(sx + halfSize, sy);
+            const ImVec2 bottom(sx, sy + halfSize);
+            const ImVec2 left(sx - halfSize, sy);
+            drawList->AddQuadFilled(top, right, bottom, left, fill);
+            drawList->AddQuad(top, right, bottom, left, IM_COL32(0, 0, 0, 220), 1.5f);
+
+            float mdx = mouse.x - sx, mdy = mouse.y - sy;
+            if (mdx * mdx + mdy * mdy <= 49.0f) {
+                const std::string& name = unit->getName();
+                ImGui::SetTooltip("%s\n%s",
+                                  name.empty() ? "Unknown creature" : name.c_str(),
+                                  isElite ? "Rare Elite" : "Rare");
+            }
+        }
+    }
+
     // Nearby other-player dots — shown when NPC dots are enabled.
     // Party members are already drawn as squares above; other players get a small circle.
     if (settingsPanel_.minimapNpcDots_) {
@@ -362,6 +442,44 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
                     ImGui::SetTooltip("%s (quest)", goInfo->name.c_str());
                 else
                     ImGui::SetTooltip("%s", goInfo->name.c_str());
+            }
+        }
+    }
+
+    // Chest tracker: GAMEOBJECT_TYPE_CHEST also covers gathering nodes on WoW
+    // servers, so explicitly exclude the existing mining/herbalism classification.
+    if (settingsPanel_.showChestTracker_) {
+        ImVec2 mouse = ImGui::GetMousePos();
+        for (const auto& entity : minimapGameObjects) {
+            auto chest = std::static_pointer_cast<game::GameObject>(entity);
+            if (!chest) continue;
+            const auto* info = gameHandler.getCachedGameObjectInfo(chest->getEntry());
+            if (!info || !info->isValid() || info->type != 3) continue;
+            if (gameHandler.isGatherGameObject(chest->getGuid())) continue;
+
+            glm::vec3 chestRender = core::coords::canonicalToRender(
+                glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+            float sx = 0.0f, sy = 0.0f;
+            if (!projectToMinimap(chestRender, sx, sy)) continue;
+
+            constexpr float halfW = 5.5f;
+            constexpr float halfH = 4.0f;
+            constexpr ImU32 fill = IM_COL32(205, 125, 35, 255);
+            constexpr ImU32 outline = IM_COL32(45, 25, 5, 230);
+            drawList->AddRectFilled(ImVec2(sx - halfW, sy - halfH),
+                                    ImVec2(sx + halfW, sy + halfH), fill, 1.5f);
+            drawList->AddRect(ImVec2(sx - halfW, sy - halfH),
+                              ImVec2(sx + halfW, sy + halfH), outline, 1.5f, 0, 1.5f);
+            drawList->AddLine(ImVec2(sx - halfW, sy - 0.8f),
+                              ImVec2(sx + halfW, sy - 0.8f), outline, 1.0f);
+            drawList->AddRectFilled(ImVec2(sx - 1.0f, sy - 1.2f),
+                                    ImVec2(sx + 1.0f, sy + 1.3f),
+                                    IM_COL32(255, 220, 80, 255), 0.5f);
+
+            if (mouse.x >= sx - halfW - 2.0f && mouse.x <= sx + halfW + 2.0f &&
+                mouse.y >= sy - halfH - 2.0f && mouse.y <= sy + halfH + 2.0f) {
+                const std::string& name = chest->getName().empty() ? info->name : chest->getName();
+                ImGui::SetTooltip("%s\nChest", name.empty() ? "Chest" : name.c_str());
             }
         }
     }
@@ -620,25 +738,16 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
             drawList->AddCircleFilled(ImVec2(sx, sy), 4.0f, dotColor);
             drawList->AddCircle(ImVec2(sx, sy), 4.0f, IM_COL32(255, 255, 255, 160), 12, 1.0f);
 
-            // Raid mark: tiny symbol drawn above the dot
+            // Raid mark: the marker artwork drawn small above the dot
             {
-                static constexpr struct { const char* sym; ImU32 col; } kMMMarks[] = {
-                    { "\xe2\x98\x85", IM_COL32(255, 220,  50, 255) },
-                    { "\xe2\x97\x8f", IM_COL32(255, 140,   0, 255) },
-                    { "\xe2\x97\x86", IM_COL32(160,  32, 240, 255) },
-                    { "\xe2\x96\xb2", IM_COL32( 50, 200,  50, 255) },
-                    { "\xe2\x97\x8c", IM_COL32( 80, 160, 255, 255) },
-                    { "\xe2\x96\xa0", IM_COL32( 50, 200, 220, 255) },
-                    { "\xe2\x9c\x9d", IM_COL32(255,  80,  80, 255) },
-                    { "\xe2\x98\xa0", IM_COL32(255, 255, 255, 255) },
-                };
                 uint8_t pmk = gameHandler.getEntityRaidMark(member.guid);
                 if (pmk < game::GameHandler::kRaidMarkCount) {
-                    ImFont* mmFont = ImGui::GetFont();
-                    ImVec2 msz = mmFont->CalcTextSizeA(9.0f, FLT_MAX, 0.0f, kMMMarks[pmk].sym);
-                    drawList->AddText(mmFont, 9.0f,
-                        ImVec2(sx - msz.x * 0.5f, sy - 4.0f - msz.y),
-                        kMMMarks[pmk].col, kMMMarks[pmk].sym);
+                    if (VkDescriptorSet markTex = ui::getRaidTargetIcon(pmk, services_.assetManager)) {
+                        constexpr float kMarkSize = 10.0f;
+                        drawList->AddImage((ImTextureID)(uintptr_t)markTex,
+                            ImVec2(sx - kMarkSize * 0.5f, sy - 4.0f - kMarkSize),
+                            ImVec2(sx + kMarkSize * 0.5f, sy - 4.0f));
+                    }
                 }
             }
 
@@ -1453,7 +1562,18 @@ void GameScreen::saveSettings() {
     out << "show_minimap_coordinates=" << (settingsPanel_.pendingShowMinimapCoordinates ? 1 : 0) << "\n";
     out << "show_latency_meter=" << (settingsPanel_.pendingShowLatencyMeter ? 1 : 0) << "\n";
     out << "show_dps_meter=" << (settingsPanel_.showDPSMeter_ ? 1 : 0) << "\n";
+    {
+        // Only written once the user has dragged it; otherwise the meter keeps
+        // following the target frame on the next launch.
+        ImVec2 dpsPos = combatUI_.getDPSMeterPos();
+        if (dpsPos.x >= 0.0f) {
+            out << "dps_meter_x=" << dpsPos.x << "\n";
+            out << "dps_meter_y=" << dpsPos.y << "\n";
+        }
+    }
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
+    out << "show_rare_tracker=" << (settingsPanel_.showRareTracker_ ? 1 : 0) << "\n";
+    out << "show_chest_tracker=" << (settingsPanel_.showChestTracker_ ? 1 : 0) << "\n";
     out << "separate_bags=" << (settingsPanel_.pendingSeparateBags ? 1 : 0) << "\n";
     out << "show_keyring=" << (settingsPanel_.pendingShowKeyring ? 1 : 0) << "\n";
     out << "bag_scale=" << settingsPanel_.pendingBagScale << "\n";
@@ -1542,6 +1662,8 @@ void GameScreen::saveSettings() {
     out << "chat_timestamps=" << (chatPanel_.chatShowTimestamps ? 1 : 0) << "\n";
     out << "chat_font_size=" << chatPanel_.chatFontSize << "\n";
     out << "chat_bg_alpha=" << chatPanel_.settings.backgroundAlpha << "\n";
+    out << "chat_window_w=" << chatPanel_.settings.windowWidth << "\n";
+    out << "chat_window_h=" << chatPanel_.settings.windowHeight << "\n";
     out << "chat_fade_messages=" << (chatPanel_.settings.fadeMessages ? 1 : 0) << "\n";
     out << "chat_fade_time=" << chatPanel_.settings.messageFadeTime << "\n";
     out << "chat_autojoin_general=" << (chatPanel_.chatAutoJoinGeneral ? 1 : 0) << "\n";
@@ -1611,8 +1733,18 @@ void GameScreen::loadSettings() {
                 settingsPanel_.pendingShowLatencyMeter = settingsPanel_.showLatencyMeter_;
             } else if (key == "show_dps_meter") {
                 settingsPanel_.showDPSMeter_ = (std::stoi(val) != 0);
+            } else if (key == "dps_meter_x") {
+                dpsMeterSavedX_ = std::stof(val);
+                if (dpsMeterSavedY_ >= 0.0f) combatUI_.setDPSMeterPos(dpsMeterSavedX_, dpsMeterSavedY_);
+            } else if (key == "dps_meter_y") {
+                dpsMeterSavedY_ = std::stof(val);
+                if (dpsMeterSavedX_ >= 0.0f) combatUI_.setDPSMeterPos(dpsMeterSavedX_, dpsMeterSavedY_);
             } else if (key == "show_cooldown_tracker") {
                 settingsPanel_.showCooldownTracker_ = (std::stoi(val) != 0);
+            } else if (key == "show_rare_tracker") {
+                settingsPanel_.showRareTracker_ = (std::stoi(val) != 0);
+            } else if (key == "show_chest_tracker") {
+                settingsPanel_.showChestTracker_ = (std::stoi(val) != 0);
             } else if (key == "separate_bags") {
                 settingsPanel_.pendingSeparateBags = (std::stoi(val) != 0);
                 inventoryScreen.setSeparateBags(settingsPanel_.pendingSeparateBags);
@@ -1761,7 +1893,7 @@ void GameScreen::loadSettings() {
                 questTrackerSize_.y = std::max(60.0f, std::stof(val));
             }
             else if (key == "quest_tracker_filter") {
-                questTrackerFilter_ = std::clamp(std::stoi(val), 0, 2);
+                questTrackerFilter_ = std::clamp(std::stoi(val), 0, 3);
             }
             else if (key == "quest_tracker_collapsed") {
                 questTrackerCollapsed_ = (std::stoi(val) != 0);
@@ -1771,6 +1903,8 @@ void GameScreen::loadSettings() {
             else if (key == "chat_timestamps") chatPanel_.chatShowTimestamps = (std::stoi(val) != 0);
             else if (key == "chat_font_size") chatPanel_.chatFontSize = std::clamp(std::stoi(val), 0, 2);
             else if (key == "chat_bg_alpha") chatPanel_.settings.backgroundAlpha = std::clamp(std::stof(val), 0.0f, 1.0f);
+            else if (key == "chat_window_w") chatPanel_.settings.windowWidth = std::max(0.0f, std::stof(val));
+            else if (key == "chat_window_h") chatPanel_.settings.windowHeight = std::max(0.0f, std::stof(val));
             else if (key == "chat_fade_messages") chatPanel_.settings.fadeMessages = (std::stoi(val) != 0);
             else if (key == "chat_fade_time") chatPanel_.settings.messageFadeTime = std::clamp(std::stof(val), 5.0f, 120.0f);
             else if (key == "chat_autojoin_general") chatPanel_.chatAutoJoinGeneral = (std::stoi(val) != 0);

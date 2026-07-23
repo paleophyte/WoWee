@@ -2781,7 +2781,8 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                 ImGui::PushID(static_cast<int>(i));
 
                 bool selected = (gameHandler.getSelectedMailIndex() == static_cast<int>(i));
-                std::string label = mail.subject.empty() ? "(No Subject)" : mail.subject;
+                std::string label = gameHandler.getMailDisplaySubject(mail);
+                if (label.empty()) label = "(No Subject)";
 
                 // Unread indicator
                 if (!mail.read) {
@@ -2810,19 +2811,16 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), " [A]");
                 }
-                // Expiry warning if within 3 days
-                if (mail.expirationTime > 0.0f) {
-                    auto nowSec = static_cast<float>(std::time(nullptr));
-                    float secsLeft = mail.expirationTime - nowSec;
-                    if (secsLeft < 3.0f * 86400.0f && secsLeft > 0.0f) {
-                        ImGui::SameLine();
-                        int daysLeft = static_cast<int>(secsLeft / 86400.0f);
-                        if (daysLeft == 0) {
-                            ImGui::TextColored(colors::kBrightRed, " [expires today!]");
-                        } else {
-                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
-                                " [expires in %dd]", daysLeft);
-                        }
+                // Expiry warning if within 3 days. expirationTime is days
+                // remaining (server sends (expire_time - now) / DAY as a float).
+                if (mail.expirationTime > 0.0f && mail.expirationTime < 3.0f) {
+                    ImGui::SameLine();
+                    int daysLeft = static_cast<int>(mail.expirationTime);
+                    if (daysLeft == 0) {
+                        ImGui::TextColored(colors::kBrightRed, " [expires today!]");
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f),
+                            " [expires in %dd]", daysLeft);
                     }
                 }
 
@@ -2837,29 +2835,26 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
             int sel = gameHandler.getSelectedMailIndex();
             if (sel >= 0 && sel < static_cast<int>(inbox.size())) {
                 const auto& mail = inbox[sel];
+                const std::string displaySubject = gameHandler.getMailDisplaySubject(mail);
 
                 ImGui::TextColored(colors::kWarmGold, "%s",
-                    mail.subject.empty() ? "(No Subject)" : mail.subject.c_str());
+                    displaySubject.empty() ? "(No Subject)" : displaySubject.c_str());
                 ImGui::Text("From: %s", mail.senderName.c_str());
 
                 if (mail.messageType == 2) {
                     ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.2f, 1.0f), "[Auction House]");
                 }
 
-                // Show expiry date in the detail panel
+                // Show expiry date in the detail panel. expirationTime is days
+                // remaining, so convert to an absolute date relative to now.
                 if (mail.expirationTime > 0.0f) {
-                    auto nowSec = static_cast<float>(std::time(nullptr));
-                    float secsLeft = mail.expirationTime - nowSec;
-                    // Format absolute expiry as a date using struct tm
-                    time_t expT = static_cast<time_t>(mail.expirationTime);
+                    time_t expT = std::time(nullptr) +
+                        static_cast<time_t>(mail.expirationTime * 86400.0f);
                     struct tm* tmExp = std::localtime(&expT);
                     if (tmExp) {
                         const char* mname = kMonthAbbrev[tmExp->tm_mon];
-                        int daysLeft = static_cast<int>(secsLeft / 86400.0f);
-                        if (secsLeft <= 0.0f) {
-                            ImGui::TextColored(kColorGray,
-                                "Expired: %s %d, %d", mname, tmExp->tm_mday, 1900 + tmExp->tm_year);
-                        } else if (secsLeft < 3.0f * 86400.0f) {
+                        int daysLeft = static_cast<int>(mail.expirationTime);
+                        if (mail.expirationTime < 3.0f) {
                             ImGui::TextColored(kColorRed,
                                 "Expires: %s %d, %d (%d day%s!)",
                                 mname, tmExp->tm_mday, 1900 + tmExp->tm_year,
@@ -2872,8 +2867,30 @@ void WindowManager::renderMailWindow(game::GameHandler& gameHandler,
                 }
                 ImGui::Separator();
 
-                // Body text
-                if (!mail.body.empty()) {
+                // Body text. Auction-house mail carries an encoded invoice
+                // string that the retail client renders as a money breakdown
+                // rather than printing raw.
+                game::AuctionMailInvoice invoice;
+                if (mail.messageType == 2 &&
+                    game::parseAuctionMailBody(mail.body, invoice)) {
+                    if (invoice.bid > 0) {
+                        ImGui::TextDisabled("Bid:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.bid);
+                    }
+                    if (invoice.buyout > 0) {
+                        ImGui::TextDisabled("Buyout:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.buyout);
+                    }
+                    if (invoice.deposit > 0) {
+                        ImGui::TextDisabled("Deposit:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.deposit);
+                    }
+                    if (invoice.consignment > 0) {
+                        ImGui::TextDisabled("Auction House Cut:"); ImGui::SameLine(0, 4);
+                        renderCoinsFromCopper(invoice.consignment);
+                    }
+                    ImGui::Separator();
+                } else if (!mail.body.empty()) {
                     ImGui::TextWrapped("%s", mail.body.c_str());
                     ImGui::Separator();
                 }
@@ -3513,6 +3530,32 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
     int tab = gameHandler.getAuctionActiveTab();
 
+    // Draw a list item icon with the WoW-style stack-count badge in the
+    // bottom-right corner, so stacked auctions read as multiples (e.g. "20")
+    // rather than a bare single-item icon. Leaves the cursor on SameLine for
+    // the name that follows, matching the previous inline layout.
+    auto drawAuctionIcon = [&inventoryScreen](uint32_t displayInfoId, uint32_t stackCount) -> bool {
+        if (displayInfoId == 0) return false;
+        VkDescriptorSet icon = inventoryScreen.getItemIcon(displayInfoId);
+        if (!icon) return false;
+        const float kIconSize = 18.0f;
+        ImGui::Image((void*)(intptr_t)icon, ImVec2(kIconSize, kIconSize));
+        if (stackCount > 1) {
+            char cnt[16];
+            snprintf(cnt, sizeof(cnt), "%u", stackCount);
+            ImVec2 mn = ImGui::GetItemRectMin();
+            ImVec2 mx = ImGui::GetItemRectMax();
+            float cw = ImGui::CalcTextSize(cnt).x;
+            float ch = ImGui::GetFontSize();
+            ImVec2 tp(mx.x - cw - 1.0f, mn.y + (kIconSize - ch));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(tp.x + 1.0f, tp.y + 1.0f), IM_COL32(0, 0, 0, 210), cnt);
+            dl->AddText(tp, IM_COL32(255, 255, 255, 235), cnt);
+        }
+        ImGui::SameLine();
+        return true;
+    };
+
     // Tab buttons
     const char* tabNames[] = {"Browse", "Bids", "Auctions"};
     for (int i = 0; i < 3; i++) {
@@ -3569,6 +3612,18 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         };
         static constexpr int NUM_ARMOR_SUBS = 7;
 
+        // Equipment-slot (inventory type) IDs — a server-side filter carried in
+        // the CMSG_AUCTION_LIST_ITEMS auctionSlotID field.
+        struct AHSlotMapping { const char* label; uint32_t invType; };
+        static const AHSlotMapping slotMappings[] = {
+            {"All Slots", 0xFFFFFFFF}, {"Head", 1}, {"Neck", 2}, {"Shoulder", 3},
+            {"Chest", 5}, {"Waist", 6}, {"Legs", 7}, {"Feet", 8}, {"Wrist", 9},
+            {"Hands", 10}, {"Finger", 11}, {"Trinket", 12}, {"Back", 16},
+            {"One-Hand", 13}, {"Two-Hand", 17}, {"Main Hand", 21}, {"Off Hand", 22},
+            {"Ranged", 26}, {"Shield", 14}, {"Held Off-hand", 23}, {"Relic", 28},
+        };
+        static constexpr int NUM_AH_SLOTS = 21;
+
         auto getSearchClassId = [&]() -> uint32_t {
             if (auctionItemClass_ < 0 || auctionItemClass_ >= NUM_CLASSES) return 0xFFFFFFFF;
             return classMappings[auctionItemClass_].classId;
@@ -3588,6 +3643,12 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
             return 0xFFFFFFFF;
         };
 
+        auto getSearchInvType = [&]() -> uint32_t {
+            if (auctionSlotFilter_ <= 0 || auctionSlotFilter_ >= NUM_AH_SLOTS)
+                return 0xFFFFFFFF;
+            return slotMappings[auctionSlotFilter_].invType;
+        };
+
         auto doSearch = [&](uint32_t offset) {
             auctionBrowseOffset_ = offset;
             if (auctionLevelMin_ < 0) auctionLevelMin_ = 0;
@@ -3596,7 +3657,7 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
             gameHandler.auctionSearch(auctionSearchName_,
                 static_cast<uint8_t>(auctionLevelMin_),
                 static_cast<uint8_t>(auctionLevelMax_),
-                q, getSearchClassId(), getSearchSubClassId(), 0xFFFFFFFFu,
+                q, getSearchClassId(), getSearchSubClassId(), getSearchInvType(),
                 auctionUsableOnly_ ? 1 : 0, offset);
         };
 
@@ -3652,13 +3713,30 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Max Lv", &auctionLevelMax_, 0);
 
-        // Row 2: quality and usability refine the category selected at left.
+        // Row 2: quality, equipment slot, and usability refine the category at left.
         const char* qualities[] = {"All", "Poor", "Common", "Uncommon", "Rare", "Epic", "Legendary"};
         ImGui::SetNextItemWidth(100);
         ImGui::Combo("Quality", &auctionQuality_, qualities, 7);
-
+        ImGui::SameLine();
+        {
+            const char* slotLabels[NUM_AH_SLOTS];
+            for (int i = 0; i < NUM_AH_SLOTS; ++i) slotLabels[i] = slotMappings[i].label;
+            ImGui::SetNextItemWidth(120);
+            ImGui::Combo("Slot", &auctionSlotFilter_, slotLabels, NUM_AH_SLOTS);
+        }
         ImGui::SameLine();
         ImGui::Checkbox("Usable", &auctionUsableOnly_);
+
+        // Row 3: client-side refinements (applied to the current page) + Search.
+        ImGui::Checkbox("Buyout only", &auctionBuyoutOnly_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Hide bid-only listings on this page");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(70);
+        ImGui::InputInt("Max price (g)", &auctionMaxPriceGold_, 0);
+        if (auctionMaxPriceGold_ < 0) auctionMaxPriceGold_ = 0;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Hide items above this buyout on this page (0 = no cap)");
         ImGui::SameLine();
         float delay = gameHandler.getAuctionSearchDelay();
         if (delay > 0.0f) {
@@ -3679,7 +3757,29 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
         // Results table
         const auto& results = gameHandler.getAuctionBrowseResults();
         constexpr uint32_t AH_PAGE_SIZE = 50;
-        ImGui::Text("%zu results (of %u total)", results.auctions.size(), results.totalCount);
+
+        // Client-side page filters (buyout-only / max price). These refine only
+        // the current server page — the server pages by 50, so this cannot see
+        // beyond it. The header reflects that distinction when a filter is on.
+        auto passesClientFilter = [&](const game::AuctionEntry& a) -> bool {
+            if (auctionBuyoutOnly_ && a.buyoutPrice == 0) return false;
+            if (auctionMaxPriceGold_ > 0) {
+                uint64_t maxCopper = static_cast<uint64_t>(auctionMaxPriceGold_) * 10000ull;
+                uint32_t price = a.buyoutPrice > 0 ? a.buyoutPrice
+                    : (a.currentBid > 0 ? a.currentBid : a.startBid);
+                if (static_cast<uint64_t>(price) > maxCopper) return false;
+            }
+            return true;
+        };
+        const bool clientFilterActive = auctionBuyoutOnly_ || auctionMaxPriceGold_ > 0;
+        if (clientFilterActive) {
+            size_t shown = 0;
+            for (const auto& a : results.auctions) if (passesClientFilter(a)) ++shown;
+            ImGui::Text("%zu shown (of %zu on page, %u total)",
+                        shown, results.auctions.size(), results.totalCount);
+        } else {
+            ImGui::Text("%zu results (of %u total)", results.auctions.size(), results.totalCount);
+        }
 
         // Pagination
         if (results.totalCount > AH_PAGE_SIZE) {
@@ -3786,6 +3886,7 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                 for (size_t row = 0; row < rowOrder.size(); row++) {
                     const size_t i = rowOrder[row];
                     const auto& auction = results.auctions[i];
+                    if (!passesClientFilter(auction)) continue;
                     auto* info = gameHandler.getItemInfo(auction.itemEntry);
                     std::string name = info ? info->name : ("Item #" + std::to_string(auction.itemEntry));
                     // Append random suffix name (e.g., "of the Eagle") if present
@@ -3799,18 +3900,14 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
-                    // Item icon
-                    if (info && info->valid && info->displayInfoId != 0) {
-                        VkDescriptorSet iconTex = inventoryScreen.getItemIcon(info->displayInfoId);
-                        if (iconTex) {
-                            ImGui::Image((void*)(intptr_t)iconTex, ImVec2(16, 16));
-                            ImGui::SameLine();
-                        }
-                    }
+                    // Item icon with stack-count badge
+                    if (info && info->valid)
+                        drawAuctionIcon(info->displayInfoId, auction.stackCount);
                     ImGui::TextColored(qc, "%s", name.c_str());
-                    // Item tooltip on hover; shift-click to insert chat link
+                    // Item tooltip on hover; hold Shift to compare against the
+                    // equipped item in the same slot; shift-click inserts a link.
                     if (ImGui::IsItemHovered() && info && info->valid) {
-                        inventoryScreen.renderItemTooltip(*info);
+                        inventoryScreen.renderItemTooltip(*info, &gameHandler.getInventory());
                     }
                     if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
                         ImGui::GetIO().KeyShift && info && info->valid && !info->name.empty()) {
@@ -4015,13 +4112,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                if (info && info->valid && info->displayInfoId != 0) {
-                    VkDescriptorSet bIcon = inventoryScreen.getItemIcon(info->displayInfoId);
-                    if (bIcon) {
-                        ImGui::Image((void*)(intptr_t)bIcon, ImVec2(16, 16));
-                        ImGui::SameLine();
-                    }
-                }
+                if (info && info->valid)
+                    drawAuctionIcon(info->displayInfoId, a.stackCount);
                 // High bidder indicator
                 bool isHighBidder = (a.bidderGuid != 0 && a.bidderGuid == gameHandler.getPlayerGuid());
                 if (isHighBidder) {
@@ -4099,13 +4191,8 @@ void WindowManager::renderAuctionHouseWindow(game::GameHandler& gameHandler,
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImVec4 oqc = InventoryScreen::getQualityColor(quality);
-                if (info && info->valid && info->displayInfoId != 0) {
-                    VkDescriptorSet oIcon = inventoryScreen.getItemIcon(info->displayInfoId);
-                    if (oIcon) {
-                        ImGui::Image((void*)(intptr_t)oIcon, ImVec2(16, 16));
-                        ImGui::SameLine();
-                    }
-                }
+                if (info && info->valid)
+                    drawAuctionIcon(info->displayInfoId, a.stackCount);
                 // Bid activity indicator for seller
                 if (a.bidderGuid != 0) {
                     ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "[Bid]");

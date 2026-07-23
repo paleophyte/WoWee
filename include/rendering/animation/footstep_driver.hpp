@@ -57,6 +57,8 @@ private:
     uint32_t mountFootstepLastAnimId_ = 0;
     float mountFootstepLastNormTime_ = 0.0f;
     bool mountFootstepNormInitialized_ = false;
+    bool nextPlayerFootLeft_ = true;
+    bool nextMountFootLeft_ = true;
 };
 
 } // namespace rendering

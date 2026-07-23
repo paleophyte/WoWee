@@ -80,11 +80,14 @@ struct OverlayEntry {
 
 struct Zone {
     uint32_t wmaID = 0;
+    uint32_t mapID = 0;          // Physical map containing the area
     uint32_t areaID = 0;         // 0 = continent level
     std::string areaName;        // texture folder name (from DBC)
     ZoneBounds bounds;
     uint32_t displayMapID = 0;
     uint32_t parentWorldMapID = 0;
+    float virtualOffsetWowX = 0.0f;
+    float virtualOffsetWowY = 0.0f;
     std::vector<uint32_t> exploreBits;  // all AreaBit indices (zone + subzones)
     std::vector<OverlayEntry> overlays;
 };
@@ -97,6 +100,21 @@ struct PartyDot {
     std::string name;      ///< Member name (shown as tooltip on hover)
 };
 
+// ── Nearby rare/rare-elite creature marker (UI layer → world map overlay) ─
+
+struct RareMark {
+    glm::vec3 renderPos;   ///< Position in render-space coordinates
+    std::string name;      ///< Creature name (shown as tooltip on hover)
+    int rank = 4;          ///< Creature rank: 2 = Rare Elite, 4 = Rare
+};
+
+// ── Nearby spawned chest marker (UI layer → world map overlay) ─
+
+struct ChestMark {
+    glm::vec3 renderPos;   ///< Position in render-space coordinates
+    std::string name;      ///< Chest/container name (shown as tooltip on hover)
+};
+
 // ── Taxi (flight master) node (UI layer → world map overlay) ─
 
 struct TaxiNode {
@@ -105,6 +123,11 @@ struct TaxiNode {
     float     wowX = 0, wowY = 0, wowZ = 0;  ///< Canonical WoW coordinates
     std::string name;      ///< Node name (shown as tooltip)
     bool      known = false; ///< Player has discovered this node
+    // Flight-map (taxi selection mode) data — only meaningful while a flight
+    // master window is open and the cost map is built from the current node.
+    uint32_t  costCopper = 0;   ///< Total flight cost from the current node
+    bool      current = false;  ///< This is the node the player is standing at
+    bool      reachable = false;///< A route exists from the current node
 };
 
 // ── Area Point of Interest from AreaPOI.dbc ──────────────────

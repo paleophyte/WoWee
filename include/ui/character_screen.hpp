@@ -118,6 +118,10 @@ private:
      */
     ImVec4 getFactionColor(game::Race race) const;
 
+    /// AddOns management window (list + enable/disable), opened from the footer.
+    bool showAddonsWindow_ = false;
+    void renderAddonsWindow();
+
     /**
      * Persist / restore last selected character GUID
      */

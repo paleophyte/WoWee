@@ -70,6 +70,28 @@ uint32_t findKnownReturnAreaTrigger(uint32_t triggerId) {
 MovementHandler::MovementHandler(GameHandler& owner)
     : owner_(owner), movementInfo(owner.movementInfoRef()) {}
 
+void MovementHandler::applyServerMovementSpeeds(float walk, float run, float runBack,
+                                                 float swim, float swimBack, float flight,
+                                                 float flightBack, float turn, float pitch) {
+    auto apply = [](float value, float& destination) {
+        if (std::isfinite(value) && value > 0.01f && value < 200.0f) {
+            destination = value;
+        }
+    };
+    apply(walk, serverWalkSpeed_);
+    apply(run, serverRunSpeed_);
+    apply(runBack, serverRunBackSpeed_);
+    apply(swim, serverSwimSpeed_);
+    apply(swimBack, serverSwimBackSpeed_);
+    apply(flight, serverFlightSpeed_);
+    apply(flightBack, serverFlightBackSpeed_);
+    apply(turn, serverTurnRate_);
+    apply(pitch, serverPitchRate_);
+    LOG_INFO("Movement speeds restored from object update: walk=", serverWalkSpeed_,
+             " run=", serverRunSpeed_, " runBack=", serverRunBackSpeed_,
+             " swim=", serverSwimSpeed_, " flight=", serverFlightSpeed_);
+}
+
 void MovementHandler::registerOpcodes(DispatchTable& table) {
     // Creature movement
     table[Opcode::SMSG_MONSTER_MOVE] = [this](network::Packet& packet) { handleMonsterMove(packet); };
@@ -960,16 +982,9 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
 }
 
 void MovementHandler::handleForceRunSpeedChange(network::Packet& packet) {
+    // A speed change is not a dismount signal. Mount ownership is updated by
+    // SMSG_DISMOUNT / UNIT_FIELD_MOUNTDISPLAYID instead.
     handleForceSpeedChange(packet, "RUN_SPEED", Opcode::CMSG_FORCE_RUN_SPEED_CHANGE_ACK, &serverRunSpeed_);
-
-    if (!onTaxiFlight_ && !taxiMountActive_ && owner_.currentMountDisplayIdRef() != 0 && serverRunSpeed_ <= 8.5f) {
-        LOG_INFO("Auto-clearing mount from speed change: speed=", serverRunSpeed_,
-                 " displayId=", owner_.currentMountDisplayIdRef());
-        owner_.currentMountDisplayIdRef() = 0;
-        if (owner_.mountCallbackRef()) {
-            owner_.mountCallbackRef()(0);
-        }
-    }
 }
 
 void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool rooted) {
@@ -1155,7 +1170,8 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     float canYaw = core::coords::serverToCanonicalYaw(info.orientation);
 
     if (onTransport && transportGuid != 0 && owner_.getTransportManager()) {
-        glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(tLocalX, tLocalY, tLocalZ));
+        glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+            transportGuid, glm::vec3(tLocalX, tLocalY, tLocalZ));
         owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, true,
                                core::coords::serverToCanonicalYaw(tLocalO));
         glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
@@ -1640,7 +1656,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 
     if (packet.getReadPos() + 5 > packet.getSize()) {
         if (owner_.getTransportManager()) {
-            glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+            glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+                transportGuid, glm::vec3(localX, localY, localZ));
             owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
@@ -1655,7 +1672,8 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
 
     if (moveType == 1) {
         if (owner_.getTransportManager()) {
-            glm::vec3 localCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+            glm::vec3 localCanonical = owner_.getTransportManager()->serverToTransportLocal(
+                transportGuid, glm::vec3(localX, localY, localZ));
             owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, false, 0.0f);
             glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
             entity->setPosition(worldPos.x, worldPos.y, worldPos.z, entity->getOrientation());
@@ -1718,10 +1736,12 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
         return;
     }
 
-    glm::vec3 startLocalCanonical = core::coords::serverToCanonical(glm::vec3(localX, localY, localZ));
+    glm::vec3 startLocalCanonical = owner_.getTransportManager()->serverToTransportLocal(
+        transportGuid, glm::vec3(localX, localY, localZ));
 
     if (hasDest && duration > 0) {
-        glm::vec3 destLocalCanonical = core::coords::serverToCanonical(glm::vec3(destLocalX, destLocalY, destLocalZ));
+        glm::vec3 destLocalCanonical = owner_.getTransportManager()->serverToTransportLocal(
+            transportGuid, glm::vec3(destLocalX, destLocalY, destLocalZ));
         glm::vec3 destWorld  = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, destLocalCanonical);
 
         if (moveType == 0) {
@@ -1886,6 +1906,16 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
     float orientation = packet.readFloat();
+    const bool crossMapTransportTransfer = owner_.isOnTransport() &&
+        mapId != owner_.getCurrentMapId();
+    if (crossMapTransportTransfer) {
+        // While riding a cross-continent transport, SMSG_NEW_WORLD carries the
+        // player's transport-local coordinates. They are not a world position
+        // near map origin. Hold them until the same ship is registered on the
+        // destination map, then compose them through its new transform.
+        owner_.beginPlayerTransportWorldTransfer(
+            mapId, core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ)));
+    }
     const uint32_t transferAreaTriggerId = lastAreaTriggerId_;
     lastAreaTriggerId_ = 0;
     postTransferReturnAreaTriggerId_ = findKnownReturnAreaTrigger(transferAreaTriggerId);
@@ -2800,6 +2830,7 @@ void MovementHandler::closeTaxi() {
 
 void MovementHandler::buildTaxiCostMap() {
     taxiCostMap_.clear();
+    taxiPrevMap_.clear();
     uint32_t startNode = currentTaxiData_.nearestNode;
     if (startNode == 0) return;
 
@@ -2817,8 +2848,13 @@ void MovementHandler::buildTaxiCostMap() {
         uint32_t cur = queue.front();
         queue.pop_front();
         for (const auto& next : adj[cur]) {
+            // Flights only route through nodes the player has discovered —
+            // the server rejects paths crossing unknown nodes, so a cost map
+            // built over them would show routes/prices the server won't honor.
+            if (!currentTaxiData_.isNodeKnown(next.node)) continue;
             if (taxiCostMap_.find(next.node) == taxiCostMap_.end()) {
                 taxiCostMap_[next.node] = taxiCostMap_[cur] + next.cost;
+                taxiPrevMap_[next.node] = cur;
                 queue.push_back(next.node);
             }
         }
@@ -2828,6 +2864,30 @@ void MovementHandler::buildTaxiCostMap() {
 uint32_t MovementHandler::getTaxiCostTo(uint32_t destNodeId) const {
     auto it = taxiCostMap_.find(destNodeId);
     return (it != taxiCostMap_.end()) ? it->second : 0;
+}
+
+bool MovementHandler::hasTaxiRouteTo(uint32_t destNodeId) const {
+    return destNodeId != currentTaxiData_.nearestNode &&
+           taxiCostMap_.find(destNodeId) != taxiCostMap_.end();
+}
+
+std::vector<uint32_t> MovementHandler::getTaxiRouteTo(uint32_t destNodeId) const {
+    std::vector<uint32_t> route;
+    if (!hasTaxiRouteTo(destNodeId)) return route;
+
+    uint32_t startNode = currentTaxiData_.nearestNode;
+    uint32_t cur = destNodeId;
+    while (cur != startNode) {
+        route.push_back(cur);
+        auto it = taxiPrevMap_.find(cur);
+        if (it == taxiPrevMap_.end() || route.size() > taxiPrevMap_.size()) {
+            return {};  // broken chain — should not happen with a consistent BFS
+        }
+        cur = it->second;
+    }
+    route.push_back(startNode);
+    std::reverse(route.begin(), route.end());
+    return route;
 }
 
 void MovementHandler::activateTaxi(uint32_t destNodeId) {
@@ -3235,7 +3295,8 @@ void MovementHandler::checkAreaTriggers() {
 
 void MovementHandler::setTransportAttachment(uint64_t childGuid, ObjectType type, uint64_t transportGuid,
                                              const glm::vec3& localOffset, bool hasLocalOrientation,
-                                             float localOrientation) {
+                                             float localOrientation,
+                                             bool offsetNeedsTransportResolution) {
     if (childGuid == 0 || transportGuid == 0) {
         return;
     }
@@ -3246,6 +3307,7 @@ void MovementHandler::setTransportAttachment(uint64_t childGuid, ObjectType type
     attachment.localOffset = localOffset;
     attachment.hasLocalOrientation = hasLocalOrientation;
     attachment.localOrientation = localOrientation;
+    attachment.offsetNeedsTransportResolution = offsetNeedsTransportResolution;
 }
 
 void MovementHandler::clearTransportAttachment(uint64_t childGuid) {
@@ -3265,7 +3327,7 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
     std::vector<uint64_t> stale;
     stale.reserve(8);
 
-    for (const auto& [childGuid, attachment] : owner_.transportAttachmentsRef()) {
+    for (auto& [childGuid, attachment] : owner_.transportAttachmentsRef()) {
         auto entity = owner_.getEntityManager().getEntity(childGuid);
         if (!entity) {
             stale.push_back(childGuid);
@@ -3277,12 +3339,22 @@ void MovementHandler::updateAttachedTransportChildren(float /*deltaTime*/) {
             continue;
         }
 
+        if (attachment.offsetNeedsTransportResolution) {
+            attachment.localOffset = owner_.getTransportManager()->serverToTransportLocal(
+                attachment.transportGuid, attachment.localOffset);
+            attachment.offsetNeedsTransportResolution = false;
+        }
+
         glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(
             attachment.transportGuid, attachment.localOffset);
 
         float composedOrientation = entity->getOrientation();
         if (attachment.hasLocalOrientation) {
-            float baseYaw = transport->hasServerYaw ? transport->serverYaw : 0.0f;
+            // Client-owned ship routes do not retain hasServerYaw, but their
+            // live quaternion still carries the tangent/dock rotation. Using
+            // zero made attached NPCs face in a fixed world direction while
+            // their deck turned beneath them.
+            float baseYaw = 2.0f * std::atan2(transport->rotation.z, transport->rotation.w);
             composedOrientation = baseYaw + attachment.localOrientation;
         }
 

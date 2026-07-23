@@ -105,16 +105,36 @@ bool isLootContainerName(const std::string& name) {
                            sizeof(kContainerTerms) / sizeof(kContainerTerms[0]));
 }
 
-uint32_t openLockSpellForGameObject(pipeline::AssetManager* assets,
-                                    const GameObjectQueryResponseData* info,
-                                    const std::unordered_set<uint32_t>& knownSpells) {
-    if (!assets || !info || !info->hasData || info->data[0] == 0) return 0;
+// How the local player should open a game object, decided from its Lock.dbc row.
+enum class LockOpenMethod {
+    UseDirect,  // CMSG_GAMEOBJ_USE. Opens unlocked/quest containers and, crucially,
+                // key-item chests: the server credits the key (from a bag) and opens
+                // it. keyItemId names the key so the caller can ensure it's in a bag.
+    CastSpell,  // cast a KNOWN player OPEN_LOCK spell at the GO (rogue Pick Lock).
+                // Generic Opening spells the player does not know are rejected by
+                // the server (BAD_TARGETS), so we never fabricate a cast.
+};
+
+struct LockOpenPlan {
+    LockOpenMethod method = LockOpenMethod::UseDirect;
+    uint32_t spellId = 0;
+    uint32_t keyItemId = 0;  // required key item (LOCK_KEY_ITEM), 0 if none
+};
+
+// Decide how to open a game object from its Lock.dbc row. Only a known player
+// OPEN_LOCK spell yields CastSpell; every other case (including key-item locks)
+// is UseDirect, with keyItemId set so the caller can move the key into a bag.
+LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
+                                const GameObjectQueryResponseData* info,
+                                const std::unordered_set<uint32_t>& knownSpells) {
+    LockOpenPlan plan;
+    if (!assets || !info || !info->hasData || info->data[0] == 0) return plan;
 
     auto lockDbc = assets->loadDBC("Lock.dbc");
     auto spellDbc = assets->loadDBC("Spell.dbc");
     if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
         lockDbc->getFieldCount() < 33 || spellDbc->getFieldCount() < 234) {
-        return 0;
+        return plan; // Can't inspect the lock — let the server adjudicate a USE.
     }
 
     const uint32_t lockId = info->data[0];
@@ -122,11 +142,21 @@ uint32_t openLockSpellForGameObject(pipeline::AssetManager* assets,
         if (lockDbc->getUInt32(row, 0) != lockId) continue;
 
         for (uint32_t slot = 0; slot < 8; ++slot) {
+            // Lock.dbc: Type[8] at cols 1-8, Index[8] at cols 9-16.
+            constexpr uint32_t kLockKeyItem = 1;   // requires a key item
+            constexpr uint32_t kLockKeySkill = 2;  // requires a skill (LockType id)
             const uint32_t keyType = lockDbc->getUInt32(row, 1 + slot);
             const uint32_t keyIndex = lockDbc->getUInt32(row, 9 + slot);
-            if (keyType == 1 && keyIndex != 0) return keyIndex; // LOCK_KEY_SPELL
-            if (keyType != 2 || keyIndex == 0) continue;       // LOCK_KEY_SKILL
+            if (keyIndex == 0) continue;
 
+            if (keyType == kLockKeyItem) {
+                plan.keyItemId = keyIndex; // remember the key so we can locate it
+                continue;
+            }
+            if (keyType != kLockKeySkill) continue;
+
+            // A known player spell whose OPEN_LOCK effect matches this LockType
+            // lets us open it directly (Lockpicking, etc.).
             for (uint32_t spellRow = 0; spellRow < spellDbc->getRecordCount(); ++spellRow) {
                 const uint32_t spellId = spellDbc->getUInt32(spellRow, 0);
                 if (knownSpells.count(spellId) == 0) continue;
@@ -134,15 +164,18 @@ uint32_t openLockSpellForGameObject(pipeline::AssetManager* assets,
                     constexpr uint32_t kSpellEffectOpenLock = 33;
                     if (spellDbc->getUInt32(spellRow, 71 + effect) == kSpellEffectOpenLock &&
                         spellDbc->getUInt32(spellRow, 110 + effect) == keyIndex) {
-                        return spellId;
+                        plan.method = LockOpenMethod::CastSpell;
+                        plan.spellId = spellId;
+                        return plan;
                     }
                 }
             }
         }
         break;
     }
-    return 0;
+    return plan;
 }
+
 
 uint32_t gatherSpellForGameObject(const GameObjectQueryResponseData* info, const std::string& name) {
     if (info && info->type != 3) return 0; // GAMEOBJECT_TYPE_CHEST
@@ -1011,6 +1044,7 @@ const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHan
             converted[i].displayId = src[i].displayId;
             converted[i].stackCount = src[i].stackCount;
             converted[i].itemGuid = src[i].itemGuid;
+            converted[i].occupied = (src[i].itemId != 0);
         }
         return converted;
     }
@@ -1025,6 +1059,7 @@ const std::array<GameHandler::TradeSlot, GameHandler::TRADE_SLOT_COUNT>& GameHan
             converted[i].displayId = src[i].displayId;
             converted[i].stackCount = src[i].stackCount;
             converted[i].itemGuid = src[i].itemGuid;
+            converted[i].occupied = (src[i].itemId != 0);
         }
         return converted;
     }
@@ -1144,6 +1179,19 @@ bool GameHandler::isMailboxOpen() const {
 const std::vector<MailMessage>& GameHandler::getMailInbox() const {
     if (inventoryHandler_) return inventoryHandler_->getMailInbox();
     return mailInbox_;
+}
+std::string GameHandler::getMailDisplaySubject(const MailMessage& mail) {
+    if (mail.messageType != 2) return mail.subject;
+
+    AuctionMailSubject auction;
+    if (!parseAuctionMailSubject(mail.subject, auction)) return mail.subject;
+
+    ensureItemInfo(auction.itemEntry);
+    const auto* info = getItemInfo(auction.itemEntry);
+    const std::string itemName = info && !info->name.empty()
+        ? info->name
+        : "Item #" + std::to_string(auction.itemEntry);
+    return formatAuctionMailSubject(auction, itemName);
 }
 int GameHandler::getSelectedMailIndex() const {
     return inventoryHandler_ ? inventoryHandler_->getSelectedMailIndex() : selectedMailIndex_;
@@ -1314,6 +1362,10 @@ void GameHandler::setOrientation(float orientation) {
 
 void GameHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
     if (chatHandler_) chatHandler_->sendChatMessage(type, message, target);
+}
+
+void GameHandler::sendAddonMessage(ChatType type, const std::string& message, const std::string& target) {
+    if (chatHandler_) chatHandler_->sendAddonMessage(type, message, target);
 }
 
 void GameHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
@@ -1553,6 +1605,18 @@ void GameHandler::clearMainAssist() {
 
 void GameHandler::setRaidMark(uint64_t guid, uint8_t icon) {
     if (socialHandler_) socialHandler_->setRaidMark(guid, icon);
+}
+
+// The marks live in SocialHandler — MSG_RAID_TARGET_UPDATE writes them there.
+// GameHandler kept a second, identical array that nothing ever wrote, so every
+// caller of these (target frame, nameplates, minimap, social panel) read an
+// array of zeros and no marker icon was ever drawn.
+uint64_t GameHandler::getRaidMarkGuid(uint32_t icon) const {
+    return socialHandler_ ? socialHandler_->getRaidMarkGuid(icon) : 0;
+}
+
+uint8_t GameHandler::getEntityRaidMark(uint64_t guid) const {
+    return socialHandler_ ? socialHandler_->getEntityRaidMark(guid) : 0xFF;
 }
 
 void GameHandler::requestRaidInfo() {
@@ -2356,27 +2420,79 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     }
 
     if (chestLike && isActiveExpansion("wotlk")) {
-        // AzerothCore does not handle type-3 chests in GameObject::Use(), and
-        // HandleLootOpcode rejects non-creature GUIDs. Normal quest containers
-        // are opened through the generic OPEN_LOCK effect spell instead.
-        const uint32_t openLockSpellId = openLockSpellForGameObject(
+        // A locked type-3 chest is opened by casting an OPEN_LOCK spell at it (a
+        // known Pick Lock, or the generic Opening); the server then validates the
+        // lock. A plain CMSG_GAMEOBJ_USE only opens unlocked / server-gated quest
+        // containers (e.g. the Legend of Stalvan Sealed Crate).
+        const LockOpenPlan plan = planGameObjectOpen(
             services_.assetManager, goInfo, spellHandler_->getKnownSpells());
-        if (openLockSpellId == 0) {
-            addSystemChatMessage("This object requires a key or opening skill.");
-            LOG_WARNING("GO chest has no usable open-lock spell: lockId=",
-                        goInfo && goInfo->hasData ? goInfo->data[0] : 0,
-                        " guid=0x", std::hex, guid, std::dec,
-                        " entry=", goEntry, " name='", goName, "'");
+        if (plan.method == LockOpenMethod::CastSpell) {
+            auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
+                plan.spellId, guid, 0);
+            socket->send(castPacket);
+            lastInteractedGoGuid_ = guid;
+            scheduleGameObjectLootOpen(guid, 0.60f, 8);
+            LOG_INFO("GO chest open-lock cast: spell=", plan.spellId,
+                     " guid=0x", std::hex, guid, std::dec,
+                     " entry=", goEntry, " name='", goName, "'");
             return;
         }
-        auto castPacket = getPacketParsers()->buildCastGameObjectSpell(
-            openLockSpellId, guid, 0);
-        socket->send(castPacket);
-        lastInteractedGoGuid_ = guid;
-        LOG_INFO("GO chest open-lock cast: spell=", openLockSpellId,
+        // Key-item lock: a warrior knows no open-lock spell. Open it by USING the
+        // key item on the chest (CMSG_USE_ITEM targeting the GO) — the server casts
+        // the key's on-use OPEN_LOCK spell because the player holds the key. A plain
+        // USE does not open a locked type-3 chest, and casting the item's spell via
+        // CMSG_CAST_SPELL is rejected (the player doesn't "know" it).
+        if (plan.keyItemId != 0) {
+            const ItemQueryResponseData* keyInfo = getItemInfo(plan.keyItemId);
+            uint32_t keyUseSpell = 0;
+            if (keyInfo) {
+                for (const auto& sp : keyInfo->spells)
+                    if (sp.spellTrigger == 0 && sp.spellId != 0 && keyUseSpell == 0)
+                        keyUseSpell = sp.spellId;
+            } else {
+                ensureItemInfo(plan.keyItemId); // not cached yet — request for next click
+            }
+
+            // Locate the key: wire (bag, slot) + item GUID. Keyring wire slots
+            // start at 86; backpack at 23 in bag 0xFF; equipped bags are 19..22.
+            const Inventory& inv = getInventory();
+            uint8_t keyBag = 0xFF, keySlot = 0; uint64_t keyGuid = 0; bool keyFound = false;
+            for (int i = 0; i < inv.getBackpackSize() && !keyFound; ++i)
+                if (inv.getBackpackSlot(i).item.itemId == plan.keyItemId) {
+                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(23 + i);
+                    keyGuid = inv.getBackpackSlot(i).item.guid; keyFound = true;
+                }
+            for (int b = 0; b < Inventory::NUM_BAG_SLOTS && !keyFound; ++b)
+                for (int s = 0; s < inv.getBagSize(b) && !keyFound; ++s)
+                    if (inv.getBagSlot(b, s).item.itemId == plan.keyItemId) {
+                        keyBag = static_cast<uint8_t>(19 + b); keySlot = static_cast<uint8_t>(s);
+                        keyGuid = inv.getBagSlot(b, s).item.guid; keyFound = true;
+                    }
+            for (int i = 0; i < inv.getKeyringSize() && !keyFound; ++i)
+                if (inv.getKeyringSlot(i).item.itemId == plan.keyItemId) {
+                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(86 + i);
+                    keyGuid = inv.getKeyringSlot(i).item.guid; keyFound = true;
+                }
+
+            if (keyFound && keyUseSpell != 0) {
+                auto usePacket = UseItemPacket::build(keyBag, keySlot, keyGuid,
+                                                      keyUseSpell, 0, 0, guid);
+                socket->send(usePacket);
+                lastInteractedGoGuid_ = guid;
+                scheduleGameObjectLootOpen(guid, 0.60f, 8);
+                LOG_INFO("GO chest key-item use: keyItem=", plan.keyItemId,
+                         " spell=", keyUseSpell, " keySlot(bag=", (int)keyBag,
+                         " slot=", (int)keySlot, ") guid=0x", std::hex, guid, std::dec,
+                         " entry=", goEntry, " name='", goName, "'");
+                return;
+            }
+        }
+        // LockOpenMethod::UseDirect — fall through to CMSG_GAMEOBJ_USE.
+        LOG_INFO("GO chest opens via direct USE: lockId=",
+                 goInfo && goInfo->hasData ? goInfo->data[0] : 0,
+                 " keyItem=", plan.keyItemId,
                  " guid=0x", std::hex, guid, std::dec,
                  " entry=", goEntry, " name='", goName, "'");
-        return;
     }
 
     // Every expansion activates game objects through CMSG_GAMEOBJ_USE.

@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <string>
 #include <mutex>
+#include <optional>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -52,6 +53,8 @@ struct ActiveTransport {
     bool clientAnimationReverse;    // Run client animation in reverse along the selected path
     float serverYaw;                // Server-authoritative yaw (radians)
     bool hasServerYaw;              // Whether we've received server yaw
+    float dockYaw;                  // Authored server spawn yaw used during route dwell
+    bool hasDockYaw;                // Whether dockYaw was captured before client route assignment
     bool serverYawFlipped180;       // Auto-correction when server yaw is consistently opposite movement
     int serverYawAlignmentScore;    // Hysteresis score for yaw flip detection
 
@@ -64,6 +67,7 @@ struct ActiveTransport {
     bool hasServerVelocity;
     bool allowBootstrapVelocity;   // Disable DBC bootstrap when spawn/path mismatch is clearly invalid
     bool isM2 = false;             // True if rendered as M2 (not WMO), uses M2Renderer for transforms
+    bool worldCoords = false;       // TaxiPathNode absolute-world route (client-owned WMO ship)
 };
 
 class TransportManager {
@@ -91,6 +95,32 @@ public:
         return transport.displayId == 3831u ||
                (transport.entry >= 176080u && transport.entry <= 176085u) ||
                (transport.pathId >= 176080u && transport.pathId <= 176085u);
+    }
+
+    // Single source of truth for a transport hull's fixed orientation offset.
+    //
+    // A transport's rendered facing is (its direction of travel) + (a constant per-MODEL
+    // bow offset baked into how the art was authored): 0 means the model's bow already
+    // points along route-forward, PI means the bow is modelled pointing aft. This is a
+    // property of the displayId, not of the per-realm GameObject entry, so keying it by
+    // model makes the same correction apply to that hull on every expansion and realm.
+    //
+    // Every orientation path funnels through this one function instead of re-listing
+    // ships: the client-animated TaxiPath ships add it to their spline-tangent yaw, and
+    // it also decides whether a docked ship restores its spawn yaw or holds its heading.
+    // Server-position-driven transports (trams, zeppelins) need no table entry — they
+    // measure the same offset live from heading-vs-velocity in updateYawAlignment(). This
+    // table is only the seed for hulls the client animates itself and can never observe
+    // move under server control, so there is nothing to learn the offset from.
+    static float transportModelBowOffset(uint32_t displayId) {
+        constexpr float kBowReversed = 3.14159265358979323846f;  // PI
+        switch (displayId) {
+            case 7087u:  // Auberdine night-elf ferry (The Moonspray, Elune's Blessing)
+            case 7446u:  // Icebreaker (Kraken-class)
+                return kBowReversed;
+            default:     // Bravery-class (3015) and every other hull: bow already forward
+                return 0.0f;
+        }
     }
 
     // Round a path duration to the nearest 500ms for seed-modulo purposes only. Deeprun
@@ -141,7 +171,15 @@ public:
         return snapshot;
     }
     glm::vec3 getPlayerWorldPosition(uint64_t transportGuid, const glm::vec3& localOffset);
+    glm::vec3 serverToTransportLocal(uint64_t transportGuid,
+                                     const glm::vec3& serverOffset) const;
     glm::mat4 getTransportInvTransform(uint64_t transportGuid);
+    bool isPointOnTransportDeck(uint64_t transportGuid,
+                                const glm::vec3& canonicalPosition,
+                                float maxFloorDelta = 1.25f) const;
+    std::optional<float> getTransportDeckFloorHeight(
+        uint64_t transportGuid,
+        const glm::vec3& canonicalPosition) const;
 
     void loadPathFromNodes(uint32_t pathId, const std::vector<glm::vec3>& waypoints, bool looping = true, float speed = 18.0f);
     void setDeckBounds(uint64_t guid, const glm::vec3& min, const glm::vec3& max);
@@ -152,12 +190,15 @@ public:
     // Load transport paths from TaxiPathNode.dbc (world-coordinate paths for MO_TRANSPORT)
     bool loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr);
 
-    // Check if a TaxiPathNode path exists for a given taxiPathId
+    // Check if a TaxiPathNode path exists for a given taxiPathId (on any map)
     bool hasTaxiPath(uint32_t taxiPathId) const;
+    // Check if a TaxiPathNode segment exists for a taxiPathId on a specific map
+    bool hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const;
 
-    // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives)
-    // Returns true if the transport was updated
-    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId);
+    // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives).
+    // mapId selects the per-map segment (cross-map boat paths only have valid world
+    // geometry on the transport's current map). Returns true if the transport was updated.
+    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId);
 
     // Check if a path exists for a given GameObject entry
     bool hasPathForEntry(uint32_t entry) const;

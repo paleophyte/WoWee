@@ -204,6 +204,27 @@ static float evalBatchColorAlpha(const pipeline::M2Model& model,
                                  model.globalSequenceDurations, 1.0f);
 }
 
+// Evaluate the material transparency track selected through the skin batch's
+// lookup table. Enchant cards depend on this track for their authored duty
+// cycle and strength; treating the first key as a constant makes every pulse
+// both brighter and several times more frequent than intended.
+static float evalBatchTextureWeight(const pipeline::M2Model& model,
+                                    const pipeline::M2Batch& batch,
+                                    int sequenceIndex, float animationTimeMs,
+                                    float globalTimeMs) {
+    if (batch.transparencyIndex == 0xFFFF ||
+        batch.transparencyIndex >= model.textureWeightLookup.size()) {
+        return 1.0f;
+    }
+    const uint16_t trackIndex = model.textureWeightLookup[batch.transparencyIndex];
+    if (trackIndex == 0xFFFF || trackIndex >= model.textureWeightTracks.size()) {
+        return 1.0f;
+    }
+    return m2_track::sampleFloat(model.textureWeightTracks[trackIndex],
+                                 sequenceIndex, animationTimeMs, globalTimeMs,
+                                 model.globalSequenceDurations, 1.0f);
+}
+
 // CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
 struct CharMaterialUBO {
     float opacity;
@@ -1615,6 +1636,16 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 
     M2ModelGPU gpuModel;
     gpuModel.data = model;
+    if (!model.vertices.empty()) {
+        gpuModel.visualBoundMin = glm::vec3(std::numeric_limits<float>::max());
+        gpuModel.visualBoundMax = glm::vec3(-std::numeric_limits<float>::max());
+        for (const auto& vertex : model.vertices) {
+            gpuModel.visualBoundMin = glm::min(gpuModel.visualBoundMin, vertex.position);
+            gpuModel.visualBoundMax = glm::max(gpuModel.visualBoundMax, vertex.position);
+        }
+        gpuModel.visualBoundRadius =
+            glm::length(gpuModel.visualBoundMax - gpuModel.visualBoundMin) * 0.5f;
+    }
     const auto classification = classifyM2Model(
         model.name, model.boundMin, model.boundMax,
         model.vertices.size(), model.particleEmitters.size());
@@ -2625,7 +2656,11 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     evalBatchColorAlpha(gpuModel.data, batch,
                                         instance.currentSequenceIndex,
                                         instance.animationTime,
-                                        instance.globalSequenceTime),
+                                        instance.globalSequenceTime) *
+                    evalBatchTextureWeight(gpuModel.data, batch,
+                                           instance.currentSequenceIndex,
+                                           instance.animationTime,
+                                           instance.globalSequenceTime),
                     0.0f, 1.0f);
                 if (batchColorAlpha <= 0.01f) {
                     continue;
@@ -3719,14 +3754,25 @@ bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCen
     const auto& inst = it->second;
     const auto& model = mIt->second.data;
 
-    glm::vec3 localCenter = (model.boundMin + model.boundMax) * 0.5f;
-    float radius = model.boundRadius;
+    glm::vec3 boundsMin = mIt->second.visualBoundMin;
+    glm::vec3 boundsMax = mIt->second.visualBoundMax;
+    float radius = mIt->second.visualBoundRadius;
     if (radius <= 0.001f) {
-        radius = glm::length(model.boundMax - model.boundMin) * 0.5f;
+        boundsMin = model.boundMin;
+        boundsMax = model.boundMax;
+        radius = model.boundRadius;
+        if (radius <= 0.001f) {
+            radius = glm::length(boundsMax - boundsMin) * 0.5f;
+        }
     }
 
     float scale = std::max(0.001f, inst.scale);
-    outCenter = inst.position + localCenter * scale;
+    const glm::vec3 localCenter = (boundsMin + boundsMax) * 0.5f;
+    glm::mat4 rotation(1.0f);
+    rotation = glm::rotate(rotation, inst.rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
+    rotation = glm::rotate(rotation, inst.rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
+    rotation = glm::rotate(rotation, inst.rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
+    outCenter = inst.position + glm::vec3(rotation * glm::vec4(localCenter * scale, 0.0f));
     outRadius = std::max(0.5f, radius * scale);
     return true;
 }

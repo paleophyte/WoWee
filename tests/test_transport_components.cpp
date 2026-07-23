@@ -44,6 +44,8 @@ static ActiveTransport makeTransport(uint64_t guid = 1, uint32_t pathId = 100) {
     t.clientAnimationReverse = false;
     t.serverYaw = 0.0f;
     t.hasServerYaw = false;
+    t.dockYaw = 0.0f;
+    t.hasDockYaw = false;
     t.serverYawFlipped180 = false;
     t.serverYawAlignmentScore = 0;
     t.lastServerUpdate = 0.0;
@@ -185,6 +187,207 @@ TEST_CASE("Animator: uses server yaw when available", "[transport_animator]") {
     glm::quat expected = glm::angleAxis(expectedYaw, glm::vec3(0.0f, 0.0f, 1.0f));
     REQUIRE(t.rotation.w == Catch::Approx(expected.w).margin(0.01f));
     REQUIRE(t.rotation.z == Catch::Approx(expected.z).margin(0.01f));
+}
+
+TEST_CASE("Animator: world-coordinate WMO faces along the server-space route", "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,    glm::vec3(0.0f, 0.0f, 0.0f)},
+        {1000, glm::vec3(10.0f, 0.0f, 0.0f)},
+        {2000, glm::vec3(20.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 300, false, true, true);
+    auto t = makeTransport();
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+
+    animator.evaluateAndApply(t, path, 500);
+
+    // canonical +X is server +Y; model-local +X is the ship's forward axis.
+    const glm::quat expected = glm::angleAxis(
+        glm::half_pi<float>(), glm::vec3(0.0f, 0.0f, 1.0f));
+    REQUIRE(t.rotation.w == Catch::Approx(expected.w).margin(0.01f));
+    REQUIRE(t.rotation.z == Catch::Approx(expected.z).margin(0.01f));
+}
+
+TEST_CASE("Animator: exact ship dwell restores authored dock facing", "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,    glm::vec3(-10.0f, 0.0f, 0.0f)},
+        {1000, glm::vec3(0.0f, 0.0f, 0.0f)},
+        {61000, glm::vec3(0.0f, 0.0f, 0.0f)},
+        {62000, glm::vec3(10.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 301, false, true, true);
+    auto t = makeTransport();
+    t.basePosition = glm::vec3(0.0f);
+    t.rotation = glm::angleAxis(0.75f, glm::vec3(0.0f, 0.0f, 1.0f));
+    t.dockYaw = -0.4f;
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 30000);
+
+    REQUIRE(t.position == glm::vec3(0.0f));
+    const glm::quat expected = glm::angleAxis(
+        t.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+    REQUIRE(t.rotation.w == Catch::Approx(expected.w));
+    REQUIRE(t.rotation.z == Catch::Approx(expected.z));
+}
+
+TEST_CASE("Animator: Bravery holds side-on at its dock dwell", "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,     glm::vec3(0.0f, 0.0f, 0.0f)},
+        {10000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {70000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {80000, glm::vec3(200.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 176310u, false, true, true);
+    auto t = makeTransport(1, 176310u);
+    t.entry = 176310u;
+    t.displayId = 3015u;     // Bravery-class hull: authored bow-forward, no +PI correction
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+    // Deliberately unrelated live server yaw. Docking must not depend on the
+    // orientation snapshot received when this transport happened to load.
+    t.dockYaw = glm::pi<float>();
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 30000);
+
+    // Keep the authored pier node so the gangway reaches the dock.
+    REQUIRE(t.position.x == Catch::Approx(100.0f));
+    REQUIRE(t.position.y == Catch::Approx(0.0f));
+    // Model 3015 is bow-forward, so route yaw is PI/2 (no hull correction). Bravery's
+    // TaxiPath runs parallel to the pier, so retaining that heading stops it broadside.
+    const glm::quat expectedDock = glm::angleAxis(
+        glm::half_pi<float>(),
+        glm::vec3(0.0f, 0.0f, 1.0f));
+    REQUIRE(t.rotation.w == Catch::Approx(expectedDock.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(expectedDock.z).margin(0.001f));
+
+    t.dockYaw = -0.35f;
+    t.hasDockYaw = false;
+    animator.evaluateAndApply(t, path, 30000);
+    REQUIRE(t.rotation.w == Catch::Approx(expectedDock.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(expectedDock.z).margin(0.001f));
+}
+
+TEST_CASE("Animator: affected ship hulls face their direction of travel",
+          "[transport_animator][transport]") {
+    // The hull bow correction is keyed by MODEL (displayId), not entry. Models 7087 and
+    // 7446 are bow-reversed (+PI); model 3015 (Bravery) is bow-forward (no correction).
+    struct ShipCase { uint32_t entry; uint32_t displayId; bool bowReversed; };
+    for (const ShipCase& sc : {
+             ShipCase{176310u, 3015u, false},  // The Bravery
+             ShipCase{176244u, 7087u, true},   // The Moonspray
+             ShipCase{181646u, 7087u, true},   // Elune's Blessing
+             ShipCase{190536u, 7446u, true},   // Kraken-class icebreaker
+         }) {
+        TransportAnimator animator;
+        CatmullRomSpline spline({
+            {0,    glm::vec3(0.0f, 0.0f, 0.0f)},
+            {1000, glm::vec3(10.0f, 0.0f, 0.0f)},
+            {2000, glm::vec3(20.0f, 0.0f, 0.0f)},
+        });
+        PathEntry path(std::move(spline), sc.entry, false, false, true);
+        auto t = makeTransport(1, sc.entry);
+        t.entry = sc.entry;
+        t.displayId = sc.displayId;
+        t.basePosition = glm::vec3(0.0f);
+        t.isM2 = false;
+
+        animator.evaluateAndApply(t, path, 500);
+
+        const float expectedYaw = glm::half_pi<float>() +
+                                  (sc.bowReversed ? glm::pi<float>() : 0.0f);
+        const glm::quat expected = glm::angleAxis(
+            expectedYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+        INFO("entry=" << sc.entry << " displayId=" << sc.displayId);
+        REQUIRE(t.rotation.w == Catch::Approx(expected.w).margin(0.001f));
+        REQUIRE(t.rotation.z == Catch::Approx(expected.z).margin(0.001f));
+    }
+}
+
+TEST_CASE("Animator: Kraken retains arrival heading throughout dock dwell",
+          "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,     glm::vec3(0.0f, 0.0f, 0.0f)},
+        {10000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {70000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {80000, glm::vec3(200.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 190536u, false, true, true);
+    auto t = makeTransport(1, 190536u);
+    t.entry = 190536u;
+    t.displayId = 7446u;     // Icebreaker hull: excluded from spawn-yaw restore at dwell
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+    t.dockYaw = glm::half_pi<float>();
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 5000);
+    const glm::quat arrivalRotation = t.rotation;
+    animator.evaluateAndApply(t, path, 30000);
+
+    REQUIRE(t.rotation.w == Catch::Approx(arrivalRotation.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(arrivalRotation.z).margin(0.001f));
+}
+
+TEST_CASE("Animator: Moonspray holds side-on at its dock dwell", "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,     glm::vec3(0.0f, 0.0f, 0.0f)},
+        {10000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {70000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {80000, glm::vec3(200.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 176244u, false, true, true);
+    auto t = makeTransport(1, 176244u);
+    t.entry = 176244u;
+    t.displayId = 7087u;
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+    // Deliberately wrong bow-first server yaw: Moonspray keeps the berth-parallel route yaw.
+    t.dockYaw = glm::pi<float>() - 0.1f;
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 30000);
+
+    REQUIRE(t.position.x == Catch::Approx(100.0f));
+    REQUIRE(t.position.y == Catch::Approx(0.0f));
+    const glm::quat expectedDock = glm::angleAxis(
+        glm::half_pi<float>() + glm::pi<float>(),
+        glm::vec3(0.0f, 0.0f, 1.0f));
+    REQUIRE(t.rotation.w == Catch::Approx(expectedDock.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(expectedDock.z).margin(0.001f));
+}
+
+TEST_CASE("Animator: Elune's Blessing holds side-on at its dock dwell", "[transport_animator][transport]") {
+    TransportAnimator animator;
+    CatmullRomSpline spline({
+        {0,     glm::vec3(0.0f, 0.0f, 0.0f)},
+        {10000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {70000, glm::vec3(100.0f, 0.0f, 0.0f)},
+        {80000, glm::vec3(200.0f, 0.0f, 0.0f)},
+    });
+    PathEntry path(std::move(spline), 181646u, false, true, true);
+    auto t = makeTransport(1, 181646u);
+    t.entry = 181646u;       // Elune's Blessing
+    t.displayId = 7087u;     // Same model family as Moonspray
+    t.basePosition = glm::vec3(0.0f);
+    t.isM2 = false;
+    t.dockYaw = glm::pi<float>();
+    t.hasDockYaw = true;
+
+    animator.evaluateAndApply(t, path, 30000);
+
+    const glm::quat expectedDock = glm::angleAxis(
+        glm::half_pi<float>() + glm::pi<float>(),
+        glm::vec3(0.0f, 0.0f, 1.0f));
+    REQUIRE(t.rotation.w == Catch::Approx(expectedDock.w).margin(0.001f));
+    REQUIRE(t.rotation.z == Catch::Approx(expectedDock.z).margin(0.001f));
 }
 
 TEST_CASE("Animator: Z clamping on non-world-coord client anim", "[transport_animator]") {

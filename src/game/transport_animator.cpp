@@ -5,12 +5,28 @@
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
 #include "math/spline.hpp"
+#include "core/logger.hpp"
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 
 namespace wowee::game {
+
+namespace {
+
+// GO entries whose TaxiPath berth runs parallel to the pier: the ship holds a broadside
+// (side-on) heading through its dock dwell instead of its bow-first approach yaw. Kept
+// entry-scoped on purpose — this is route geometry, not a model trait, so an unrelated
+// ship that happens to reuse one of these display ids keeps its own docking orientation.
+bool berthRunsParallel(uint32_t entry) {
+    return entry == 176310u ||  // The Bravery — Stormwind Harbor
+           entry == 176244u ||  // The Moonspray — Auberdine
+           entry == 181646u;    // Elune's Blessing — Auberdine
+}
+
+}  // namespace
 
 void TransportAnimator::evaluateAndApply(
     ActiveTransport& transport,
@@ -80,6 +96,58 @@ void TransportAnimator::evaluateAndApply(
 
     transport.position = transport.basePosition + pathOffset;
 
+    // The affected ship routes need entry-specific berth headings at their
+    // repeated-position TaxiPath dwell nodes. Blend during the final/first five
+    // seconds and hold the exact authored position for the 60-second stop.
+    float shipDockBlend = 0.0f;
+    glm::vec3 shipApproach(0.0f);
+    bool shipAtDockDwell = false;
+    glm::vec3 shipDockPosition(0.0f);
+    const bool needsSideOnDock = berthRunsParallel(transport.entry);
+    if (needsSideOnDock && pathEntry.worldCoords) {
+        constexpr uint32_t kDockTurnMs = 5000u;
+        const auto& keys = spline.keys();
+        for (size_t i = 1; i + 1 < keys.size(); ++i) {
+            const glm::vec3 dwellDelta = keys[i].position - keys[i + 1].position;
+            if (glm::dot(dwellDelta, dwellDelta) > 0.01f) continue;
+            const uint32_t dwellStart = keys[i].timeMs;
+            const uint32_t dwellEnd = keys[i + 1].timeMs;
+            const uint32_t turnStart = dwellStart > kDockTurnMs
+                ? dwellStart - kDockTurnMs : 0u;
+            if (pathTimeMs < turnStart || pathTimeMs > dwellEnd + kDockTurnMs) {
+                continue;
+            }
+
+            shipApproach = keys[i].position - keys[i - 1].position;
+            shipApproach.z = 0.0f;
+            const float approachLen = glm::length(shipApproach);
+            if (approachLen <= 0.001f) break;
+            shipApproach /= approachLen;
+
+            if (pathTimeMs < dwellStart) {
+                shipDockBlend = static_cast<float>(
+                    pathTimeMs - turnStart) / static_cast<float>(kDockTurnMs);
+            } else if (pathTimeMs <= dwellEnd) {
+                shipDockBlend = 1.0f;
+                shipAtDockDwell = true;
+                shipDockPosition = keys[i].position;
+            } else {
+                shipDockBlend = 1.0f - static_cast<float>(
+                    pathTimeMs - dwellEnd) / static_cast<float>(kDockTurnMs);
+            }
+            shipDockBlend = std::clamp(shipDockBlend, 0.0f, 1.0f);
+            shipDockBlend = shipDockBlend * shipDockBlend *
+                            (3.0f - 2.0f * shipDockBlend);
+            break;
+        }
+    }
+    if (shipAtDockDwell) {
+        // Catmull-Rom evaluation can sit slightly off a repeated-position key
+        // even during its authored hold. Pin the actual dwell to the TaxiPath
+        // node so the gangway does not retain a visible one-unit gap.
+        transport.position = transport.basePosition + shipDockPosition;
+    }
+
     // Use server yaw if available (authoritative), otherwise compute from spline tangent
     if (transport.hasServerYaw) {
         float effectiveYaw = transport.serverYaw +
@@ -118,14 +186,67 @@ void TransportAnimator::evaluateAndApply(
         // whether it also reduces clipping. Reverted to a full flatten to match the
         // real client's confirmed behavior; other transports keep full tangent-based
         // orientation.
-        const bool isDeeprunTram =
-            transport.displayId == 3831u ||
-            (transport.entry >= 176080u && transport.entry <= 176085u) ||
-            (transport.pathId >= 176080u && transport.pathId <= 176085u);
-        if (isDeeprunTram) {
+        if (TransportManager::isDeeprunTramTransport(transport)) {
             tangent.z = 0.0f;
         }
-        transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
+        const float tangentLenSq = glm::dot(tangent, tangent);
+        if (tangentLenSq <= 1e-6f && shipDockBlend > 0.0f) {
+            tangent = shipApproach;
+        }
+        const float effectiveTangentLenSq = glm::dot(tangent, tangent);
+        if (effectiveTangentLenSq > 1e-6f) {
+            if (pathEntry.worldCoords && !transport.isM2) {
+                // TaxiPathNode coordinates were converted server -> canonical by
+                // swapping X/Y. WMO transport models face server-space +X, so derive
+                // the same yaw the server would send from the canonical tangent.
+                // The generic spline helper uses a different local-forward convention
+                // and mirrored ship yaw, producing sideways/backwards sailing.
+                // Transport WMO hulls are authored with their bow opposite the
+                // model-space +X axis used by the raw route yaw.
+                // Facing = direction of travel + the hull's fixed bow offset. The offset
+                // is the single per-model constant (0 for a bow-forward hull, PI for one
+                // authored bow-aft); see TransportManager::transportModelBowOffset.
+                float routeYaw = std::atan2(tangent.x, tangent.y) +
+                                 TransportManager::transportModelBowOffset(transport.displayId);
+                // A GO query reports the transport's orientation at the instant it is
+                // received, not a persistent heading for every berth, so using that
+                // snapshot as the dock yaw made the result depend on where the ship
+                // happened to be when the player logged in. berthRunsParallel routes run
+                // parallel to their piers, so the corrected route heading is also the
+                // stable broadside dock heading — the dock dwell holds routeYaw directly.
+                const float effectiveYaw = routeYaw;
+                transport.rotation = glm::angleAxis(
+                    effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+                if (shipDockBlend > 0.999f && needsSideOnDock) {
+                    static std::unordered_set<uint64_t> loggedDockGuids;
+                    if (loggedDockGuids.insert(transport.guid).second) {
+                        LOG_DEBUG("SHIP DOCK DIAG entry=", transport.entry,
+                                    " guid=0x", std::hex, transport.guid, std::dec,
+                                    " pathTime=", pathTimeMs,
+                                    " position=(", transport.position.x, ",",
+                                    transport.position.y, ",", transport.position.z, ")",
+                                    " tangent=(", tangent.x, ",", tangent.y, ")",
+                                    " routeYaw=", routeYaw,
+                                    " hasDockYaw=", transport.hasDockYaw,
+                                    " dockYaw=", transport.dockYaw,
+                                    " effectiveYaw=", effectiveYaw);
+                    }
+                }
+            } else {
+                transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
+            }
+        } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw &&
+                   TransportManager::transportModelBowOffset(transport.displayId) == 0.0f) {
+            // TaxiPathNode route builders encode a dock wait with repeated
+            // positions. With no movement tangent, restore the GO's authored
+            // spawn orientation so the ship lies alongside the dock rather
+            // than retaining its bow-first approach yaw throughout the dwell.
+            // A hull with a nonzero bow offset (e.g. the icebreaker) is excluded: its
+            // spawn yaw is uncorrected, so restoring it made the ship spin around for the
+            // stop and back on departure — it keeps its (corrected) arrival rotation.
+            transport.rotation = glm::angleAxis(
+                transport.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+        }
     }
 }
 

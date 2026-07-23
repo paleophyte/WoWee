@@ -11,6 +11,8 @@ namespace rendering {
 // Backward-compatible type aliases for old consumer code
 // (game_screen_hud.cpp, renderer.cpp, etc.)
 using WorldMapPartyDot = world_map::PartyDot;
+using WorldMapRareMark = world_map::RareMark;
+using WorldMapChestMark = world_map::ChestMark;
 using WorldMapTaxiNode = world_map::TaxiNode;
 using MapPOI           = world_map::POI;
 

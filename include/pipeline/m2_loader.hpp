@@ -238,8 +238,10 @@ struct M2Model {
 
     // Texture weights (per-batch opacity, from M2Track<fixed16>)
     // Each entry is the "at-rest" opacity value (0=transparent, 1=opaque).
-    // batch.transparencyIndex → textureTransformLookup[idx] → textureWeights[trackIdx]
+    // batch.transparencyIndex → textureWeightLookup[idx] → textureWeights[trackIdx]
     std::vector<float> textureWeights;
+    std::vector<M2AnimationTrack> textureWeightTracks;
+    std::vector<uint16_t> textureWeightLookup;
 
     // Color animation alpha values (from M2Color.alpha M2Track<fixed16>)
     // One entry per color animation slot; batch.colorIndex indexes directly into this.
