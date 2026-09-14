@@ -1,15 +1,27 @@
+#include "ui/graphics_choices.hpp"
 #include "ui/game_screen.hpp"
+
+#include <set>
+#include "core/click_drag.hpp"
+#include "addons/lua_api_registrations.hpp"
+#include "ui/escape_action.hpp"
+#include "ui/display_modes.hpp"
+#include "ui/framexml_takeover.hpp"
+#include "ui/scene_pick.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
+#include "ui/ui_texture_load.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
 #include "core/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
+#include "ui/link_hit.hpp"
 #include "core/coordinates.hpp"
 #include "core/input.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
+#include "rendering/lens_flare.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/minimap.hpp"
@@ -36,6 +48,7 @@
 
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
+#include "game/shapeshift_forms.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -64,36 +77,10 @@ namespace {
     // sphere is a poor click target: the half-diagonal reaches well past the geometry and
     // swallows NPCs standing next to it, so those units become unclickable. Clamping the
     // GO pick radius keeps large objects clickable near their center without stealing the
-    // click from a neighbor. Units are never clamped — this is a GO-only correction, the
+    // click from a neighbor. Units are never clamped - this is a GO-only correction, the
     // same reasoning that already makes WMO GOs fall back to a conservative fixed sphere.
-    constexpr float kMaxGameObjectPickRadius = 3.0f;
 
-    bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
-        glm::vec3 oc = ray.origin - center;
-        float b = glm::dot(oc, ray.direction);
-        float c = glm::dot(oc, oc) - radius * radius;
-        float discriminant = b * b - c;
-        if (discriminant < 0.0f) return false;
-        float t = -b - std::sqrt(discriminant);
-        if (t < 0.0f) t = -b + std::sqrt(discriminant);
-        if (t < 0.0f) return false;
-        tOut = t;
-        return true;
-    }
 
-    std::string getEntityName(const std::shared_ptr<wowee::game::Entity>& entity) {
-        if (entity->getType() == wowee::game::ObjectType::PLAYER) {
-            auto player = std::static_pointer_cast<wowee::game::Player>(entity);
-            if (!player->getName().empty()) return player->getName();
-        } else if (entity->getType() == wowee::game::ObjectType::UNIT) {
-            auto unit = std::static_pointer_cast<wowee::game::Unit>(entity);
-            if (!unit->getName().empty()) return unit->getName();
-        } else if (entity->getType() == wowee::game::ObjectType::GAMEOBJECT) {
-            auto go = std::static_pointer_cast<wowee::game::GameObject>(entity);
-            if (!go->getName().empty()) return go->getName();
-        }
-        return "Unknown";
-    }
 
     // Draw a four-edge screen vignette (gradient overlay along each edge).
     // Used for damage flash, low-health pulse, and level-up golden burst.
@@ -128,7 +115,84 @@ GameScreen::GameScreen() {
     loadSettings();
 }
 
+void GameScreen::openInspectWindow(game::GameHandler& gameHandler) {
+    // Loads Blizzard_InspectUI and shows it. The inspect request itself is
+    // already on its way from the caller; this only puts a window up.
+    gameHandler.runInterfaceCommand("InspectUnit(\"target\")");
+}
+
+void GameScreen::applySavedAntiAliasing(rendering::Renderer* renderer) {
+    if (!renderer) return;
+    settingsPanel_.msaaSettingsApplied_ = true;
+    if (settingsPanel_.pendingAntiAliasing <= 0) return;
+    renderer->setMsaaSamples(msaaSamplesForChoice(settingsPanel_.pendingAntiAliasing));
+}
+
+void GameScreen::applySavedDisplayMode(core::Window* window) {
+    if (!window) return;
+    // Saved on every change and read back by the panel, and applied by nobody
+    // at startup: the window is built from a WindowConfig with the field left
+    // at its default, so every session began windowed however it was left.
+    //
+    // Resolution is deliberately not set with it. This is a desktop
+    // fullscreen - Window::applyResolution keeps the desktop mode for one -
+    // and the panel's width and height are not saved at all, so they still
+    // hold their 1920x1080 defaults this early and would be a guess rather
+    // than a setting.
+    //
+    // Vsync goes the same way for the same reason: saved, and the config it
+    // would be read into is written by hand above the window.
+    window->setFullscreen(settingsPanel_.pendingFullscreen);
+    window->setVsync(settingsPanel_.pendingVsync);
+}
+
 // Set UI services and propagate to child components
+
+namespace {
+using core::clickDragThreshold;
+}
+
+bool GameScreen::getFullscreen() const {
+    return services_.window ? services_.window->isFullscreen()
+                            : settingsPanel_.pendingFullscreen;
+}
+
+void GameScreen::setFullscreen(bool enabled) {
+    settingsPanel_.pendingFullscreen = enabled;
+    if (services_.window) services_.window->setFullscreen(enabled);
+}
+
+int GameScreen::getResolutionIndex() const {
+    if (!services_.window) return settingsPanel_.pendingResIndex;
+    return displayResolutionIndexFor(services_.window->getWidth(),
+                                     services_.window->getHeight());
+}
+
+void GameScreen::setResolutionIndex(int index) {
+    if (index < 0 || index >= kNumDisplayResolutions) return;
+    settingsPanel_.pendingResIndex = index;
+    settingsPanel_.pendingResolutionWidth  = kDisplayResolutions[index][0];
+    settingsPanel_.pendingResolutionHeight = kDisplayResolutions[index][1];
+    if (services_.window)
+        services_.window->applyResolution(settingsPanel_.pendingResolutionWidth,
+                                          settingsPanel_.pendingResolutionHeight);
+}
+
+/// Anti-aliasing, shared with the interface's own Multisampling dropdown.
+///
+/// Through applySettingSideEffects rather than by writing the field, so the
+/// renderer is told: the field alone is the value with nothing applying it,
+/// which is the shape [[state_without_an_event]] describes.
+int GameScreen::getAntiAliasingIndex() const {
+    return settingsPanel_.pendingAntiAliasing;
+}
+
+void GameScreen::setAntiAliasingIndex(int index) {
+    if (index < 0 || index > 3) return;
+    settingsPanel_.pendingAntiAliasing = index;
+    settingsPanel_.applySettingSideEffects("antialiasing");
+}
+
 void GameScreen::setServices(const UIServices& services) {
     services_ = services;
     // Settings are loaded by the constructor before services are injected.
@@ -137,6 +201,24 @@ void GameScreen::setServices(const UIServices& services) {
         services_.window->isVsyncEnabled() != settingsPanel_.pendingVsync) {
         services_.window->setVsync(settingsPanel_.pendingVsync);
     }
+    // The chat channels the player wants joined, pushed as soon as the handler
+    // exists rather than only from the in-game frame loop.
+    //
+    // The handler joins its default channels once, on first world entry, and
+    // that happens during the world load - before the first in-game frame and
+    // so before the per-frame sync had ever run. The handler was therefore reading
+    // its own defaults, which are all true, and a channel the player had turned
+    // off was joined anyway. Being the only entry that joins, there was no
+    // second chance to get it right.
+    if (services_.gameHandler) {
+        auto& caj = services_.gameHandler->chatAutoJoin;
+        caj.general      = chatPanel_.chatAutoJoinGeneral;
+        caj.trade        = chatPanel_.chatAutoJoinTrade;
+        caj.localDefense = chatPanel_.chatAutoJoinLocalDefense;
+        caj.lfg          = chatPanel_.chatAutoJoinLFG;
+        caj.local        = chatPanel_.chatAutoJoinLocal;
+    }
+
     if (services_.window && settingsPanel_.displaySettingsLoaded_) {
         services_.window->setFullscreen(settingsPanel_.pendingFullscreen);
         services_.window->applyResolution(settingsPanel_.pendingResolutionWidth,
@@ -149,27 +231,68 @@ void GameScreen::setServices(const UIServices& services) {
     toastManager_.setServices(services);
     dialogManager_.setServices(services);
     settingsPanel_.setServices(services);
+    // The chat settings are the chat panel's, and the options panels ask the
+    // settings panel for every setting by name. Handing it the chat's own
+    // struct is what lets those keys be answered from the same place as the
+    // rest rather than through a second bridge with its own list of names.
+    settingsPanel_.setChatSettings(&chatPanel_.settings);
     combatUI_.setServices(services);
-    socialPanel_.setServices(services);
-    actionBarPanel_.setServices(services);
     windowManager_.setServices(services);
     applyCameraControlSettings();
+    // The settings file is read in the constructor, before there is a renderer
+    // to hand the graphics values to. This is where one arrives.
+    settingsPanel_.applyLoadedSettings();
 }
 
 void GameScreen::applyCameraControlSettings() {
     auto* renderer = services_.renderer;
     if (!renderer) return;
 
+    // Field of view is on the camera rather than its controller, and the
+    // camera is built asking for 60 - so a saved fov, and the 70 the schema
+    // defaults to, only ever reached it when the slider was moved.
+    if (auto* cam = renderer->getCamera()) cam->setFov(settingsPanel_.pendingFov);
+
     if (auto* cam = renderer->getCameraController()) {
         cam->setMouseSensitivity(settingsPanel_.pendingMouseSensitivity);
         cam->setInvertMouse(settingsPanel_.pendingInvertMouse);
-        cam->setExtendedZoom(settingsPanel_.pendingExtendedZoom);
         cam->setCameraSmoothSpeed(settingsPanel_.pendingCameraStiffness);
         cam->setPivotHeight(settingsPanel_.pendingPivotHeight);
         cam->setIdleOrbitEnabled(settingsPanel_.pendingIdleCameraOrbit);
         cam->setSmoothCameraFollow(settingsPanel_.pendingSmoothCameraFollow);
+        cam->setShakeScale(settingsPanel_.pendingCameraShake);
+        cam->setMaxDistanceFactor(cameraDistanceFactor(settingsPanel_.pendingCameraMaxDistance));
     }
 }
+
+namespace {
+
+/// Put the bags up, for a vendor or the guild bank.
+///
+/// Not OpenAllBags: that one toggles, and its reopen path hides every open bag
+/// before showing them all again. ContainerFrame_GenerateFrame indexes its bag
+/// list by a counter ContainerFrame_OnHide maintains, and this client runs
+/// OnHide at the end of the frame rather than from Hide, so the count is stale
+/// for the whole sequence and the reopened bags write themselves over one
+/// index. The anchor pass then had one name where three belonged, and every
+/// bag but the first kept the position its XML gave it - the same one. Walking
+/// up to a vendor with bags already open stacked them.
+///
+/// OpenBackpack and OpenBag are the interface's own openers and no-op on a bag
+/// that is already showing, so nothing is hidden and the list stays whole.
+/// This is what FrameXML's own merchant frame does with the backpack.
+///
+/// The bag *keybind* still goes through OpenAllBags, deliberately: that one is
+/// a toggle and the player is asking it to toggle. It is still exposed to the
+/// same fault, which goes away when OnHide runs from Hide.
+constexpr const char* kOpenBagsCommand =
+    "OpenBackpack() for i = 1, 4 do OpenBag(i) end";
+
+void openBagsForTrading(game::GameHandler& gameHandler) {
+    gameHandler.runInterfaceCommand(kOpenBagsCommand);
+}
+
+}  // namespace
 
 void GameScreen::render(game::GameHandler& gameHandler) {
     // Apply before any Begin() calls so a scale change cannot alter style
@@ -191,25 +314,23 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Set up UI error frame callback (once)
     if (!uiErrorCallbackSet_) {
         gameHandler.setUIErrorCallback([this](const std::string& msg) {
-            uiErrors_.push_back({msg, 0.0f});
-            if (uiErrors_.size() > 5) uiErrors_.erase(uiErrors_.begin());
-            // Play error sound for each new error (rate-limited by deque cap of 5)
+            // The sound first, and outside the gate. It belongs to no
+            // element - the error is the same error whoever draws the text -
+            // and it sat after the return, so handing the errors over would
+            // have taken the sound with them.
             if (auto* ac = services_.audioCoordinator) {
                 if (auto* sfx = ac->getUiSoundManager()) sfx->playError();
             }
+            // UIErrorsFrame draws the text now. The sound above is still
+            // ours: FrameXML plays none for these, so it would go silent.
+            (void)msg;
         });
         uiErrorCallbackSet_ = true;
     }
 
-    // Flash the action bar button whose spell just failed (0.5 s red overlay).
-    if (!castFailedCallbackSet_) {
-        gameHandler.setSpellCastFailedCallback([this](uint32_t spellId) {
-            if (spellId == 0) return;
-            float now = static_cast<float>(ImGui::GetTime());
-            actionBarPanel_.actionFlashEndTimes_[spellId] = now + actionBarPanel_.kActionFlashDuration;
-        });
-        castFailedCallbackSet_ = true;
-    }
+    // No flash callback here. The red overlay on a failed cast belonged to
+    // this client's own action bar; FrameXML draws the bars and flashes its
+    // own button from UI_ERROR_MESSAGE.
 
     // Apply UI transparency setting
     float prevAlpha = ImGui::GetStyle().Alpha;
@@ -226,21 +347,61 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     }
 
     // Apply initial settings when renderer becomes available
-    if (!settingsPanel_.minimapSettingsApplied_) {
+    if (!settingsPanel_.minimapSettingsApplied_ || !settingsPanel_.zoneSettingsApplied_ ||
+        !settingsPanel_.terrainSettingsApplied_) {
         auto* renderer = services_.renderer;
         if (renderer) {
-            if (auto* minimap = renderer->getMinimap()) {
-                settingsPanel_.minimapRotate_ = false;
-                settingsPanel_.pendingMinimapRotate = false;
-                minimap->setRotateWithCamera(false);
-                minimap->setSquareShape(settingsPanel_.minimapSquare_);
-                settingsPanel_.minimapSettingsApplied_ = true;
+            // Re-read from disk once. This screen is constructed by UIManager's
+            // constructor, which runs before the login screen exists, so
+            // loadSettings() in the constructor saw the file as it was at
+            // startup; the login screen's graphics page writes the same file.
+            // Once, not every frame: the subsystems below arrive at different
+            // moments, and re-reading until the slowest one turned up threw
+            // away anything the player changed while waiting.
+            if (!settingsPanel_.settingsRereadFromDisk_) {
+                settingsPanel_.settingsRereadFromDisk_ = true;
+                loadSettings();
             }
+
+            // Each subsystem latches when it has been given its settings. One
+            // latch for all three meant the first to exist marked the whole
+            // apply done and the others never got theirs, which is how a saved
+            // soundtrack setting could be ignored for a whole run.
+            if (!settingsPanel_.minimapSettingsApplied_) {
+                if (auto* minimap = renderer->getMinimap()) {
+                    settingsPanel_.minimapRotate_ = false;
+                    settingsPanel_.pendingMinimapRotate = false;
+                    minimap->setRotateWithCamera(false);
+                    minimap->setSquareShape(settingsPanel_.minimapSquare_);
+                    settingsPanel_.minimapSettingsApplied_ = true;
+                }
+            }
+            if (!settingsPanel_.zoneSettingsApplied_) {
             if (auto* zm = renderer->getZoneManager()) {
                 zm->setUseOriginalSoundtrack(settingsPanel_.pendingUseOriginalSoundtrack);
+                // Setting the flag alone is not the whole apply: music that
+                // already started during the loading screen keeps playing
+                // through a disabled setting.
+                if (!settingsPanel_.pendingUseOriginalSoundtrack) {
+                    if (auto* ac = renderer->getAudioCoordinator()) {
+                        ac->onOriginalSoundtrackDisabled(zm);
+                    }
+                }
+                settingsPanel_.zoneSettingsApplied_ = true;
             }
+            }
+            if (!settingsPanel_.terrainSettingsApplied_) {
             if (auto* tm = renderer->getTerrainManager()) {
-                tm->setGroundClutterDensityScale(static_cast<float>(settingsPanel_.pendingGroundClutterDensity) / 100.0f);
+                tm->setGroundClutterDensityScale(
+                    static_cast<float>(settingsPanel_.pendingGroundClutterDensity) / 100.0f);
+                renderer->setGrassEnabled(settingsPanel_.pendingGrassEnabled);
+                renderer->setGrassScales(
+                    static_cast<float>(settingsPanel_.pendingGrassDensity) / 100.0f,
+                    static_cast<float>(settingsPanel_.pendingGrassHeight) / 100.0f);
+                renderer->setGrassDistance(
+                    static_cast<float>(settingsPanel_.pendingGrassDistance));
+                settingsPanel_.terrainSettingsApplied_ = true;
+            }
             }
             // Restore mute state: save actual master volume first, then apply mute
             if (settingsPanel_.soundMuted_) {
@@ -260,10 +421,20 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             renderer->setShadowsEnabled(settingsPanel_.pendingShadows);
             renderer->setShadowDistance(settingsPanel_.pendingShadowDistance);
             renderer->setViewDistance(settingsPanel_.pendingViewDistance);
-            if (auto* post = renderer->getPostProcessPipeline()) {
+            // The latch waits for the pipeline, not just the renderer.
+            //
+            // Settings are loaded in the constructor, before the renderer is
+            // injected, so the apply that happens while reading the file does
+            // nothing and this is the only place brightness ever reaches the
+            // pipeline. Marking the work done while the pipeline was still null
+            // meant it never did: the value was read from the file, held
+            // correctly in the settings panel, and never handed to anything
+            // that draws - which reads as gamma not being saved at all.
+            auto* post = renderer->getPostProcessPipeline();
+            if (post) {
                 post->setBrightness(static_cast<float>(settingsPanel_.pendingBrightness) / 50.0f);
+                settingsPanel_.lightingSettingsApplied_ = true;
             }
-            settingsPanel_.lightingSettingsApplied_ = true;
         }
     }
 
@@ -276,26 +447,29 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Apply saved MSAA setting once when renderer is available
+    // Normally already done at startup - see applySavedAntiAliasing, which the
+    // application calls before the first frame. This is the fallback for a
+    // renderer that was not there yet, and it latches either way.
     if (!settingsPanel_.msaaSettingsApplied_ && settingsPanel_.pendingAntiAliasing > 0) {
-        auto* renderer = services_.renderer;
-        if (renderer) {
-            static const VkSampleCountFlagBits aaSamples[] = {
-                VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_2_BIT,
-                VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_8_BIT
-            };
-            renderer->setMsaaSamples(aaSamples[settingsPanel_.pendingAntiAliasing]);
-            settingsPanel_.msaaSettingsApplied_ = true;
+        if (auto* renderer = services_.renderer) {
+            applySavedAntiAliasing(renderer);
         }
     } else {
         settingsPanel_.msaaSettingsApplied_ = true;
     }
 
-    // Apply saved FXAA setting once when renderer is available
+    // Apply saved FXAA setting once the post-process pipeline is available.
+    //
+    // The pipeline, not the renderer. It is built after the renderer is, and
+    // the same shape of mistake next door - latching as soon as the renderer
+    // existed - is why gamma was read from the file and never reached anything
+    // that draws. Dereferencing it unchecked was the other half: on the frames
+    // where it is genuinely absent this was a null call, not a missed setting.
     if (!settingsPanel_.fxaaSettingsApplied_) {
         auto* renderer = services_.renderer;
-        if (renderer) {
-            renderer->getPostProcessPipeline()->setFXAAEnabled(settingsPanel_.pendingFXAA);
+        auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
+        if (post) {
+            post->setFXAAEnabled(settingsPanel_.pendingFXAA);
             settingsPanel_.fxaaSettingsApplied_ = true;
         }
     }
@@ -306,6 +480,29 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         if (renderer) {
             renderer->setWaterRefractionEnabled(settingsPanel_.pendingWaterRefraction);
             settingsPanel_.waterRefractionApplied_ = true;
+        }
+    }
+
+    // The saved frame limit, once the window exists to take it.
+    if (!settingsPanel_.frameCapApplied_) {
+        if (services_.window) {
+            services_.window->setFrameCap(frameCapFpsForChoice(settingsPanel_.pendingFrameCap));
+            settingsPanel_.frameCapApplied_ = true;
+        }
+    }
+
+    // The saved sun flare strength, once the sky exists to take it.
+    //
+    // Its own latch, and it waits for the flare rather than the renderer: the
+    // sky is built later than the renderer is, and marking the work done while
+    // it was still absent is how brightness came to be read from the file and
+    // never handed to anything.
+    if (!settingsPanel_.lensFlareApplied_) {
+        if (auto* renderer = services_.renderer) {
+            if (auto* lf = renderer->getLensFlare()) {
+                lf->setIntensity(settingsPanel_.pendingLensFlare);
+                settingsPanel_.lensFlareApplied_ = true;
+            }
         }
     }
 
@@ -323,8 +520,15 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     cr->setNormalMapStrength(settingsPanel_.pendingNormalMapStrength);
                     cr->setPOMEnabled(settingsPanel_.pendingPOM);
                     cr->setPOMQuality(settingsPanel_.pendingPOMQuality);
+                    // Both told before this is done with. The two renderers are
+                    // built one after the other in the same function today, so
+                    // the character one is never missing while the WMO one is
+                    // here - but marking it applied from inside the outer guard
+                    // meant that if it ever were, characters would keep the
+                    // defaults and nothing would try again. Re-telling the WMO
+                    // renderer on a later frame costs four setters.
+                    settingsPanel_.normalMapSettingsApplied_ = true;
                 }
-                settingsPanel_.normalMapSettingsApplied_ = true;
             }
         }
     }
@@ -332,22 +536,27 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Apply saved upscaling setting once when renderer is available
     if (!settingsPanel_.fsrSettingsApplied_) {
         auto* renderer = services_.renderer;
-        if (renderer) {
+        // Every branch below reaches through getPostProcessPipeline(), so the
+        // pipeline is what this waits for - see the FXAA block above.
+        auto* fsrPost = renderer ? renderer->getPostProcessPipeline() : nullptr;
+        if (renderer && fsrPost) {
 #ifdef __APPLE__
-            // FidelityFX and AMD frame generation are unsupported through the
-            // macOS MoltenVK path. Old settings files must not silently retain
-            // either feature after the controls are hidden.
-            settingsPanel_.pendingUpscalingMode = 0;
-            settingsPanel_.pendingFSR = false;
+            // Frame generation only. It is AMD's runtime and there is none on
+            // this platform, so the saved flag must not survive into a session
+            // that cannot honour it.
+            //
+            // Upscaling itself is no longer turned off here. This used to force
+            // the whole mode to Off on every start, which left the control
+            // working for the session and back at Off at the next one - and the
+            // next save wrote that Off over what the player had chosen. Neither
+            // upscaler needs the FidelityFX SDK: FSR 1 is a shader of this
+            // client's own and FSR 3 falls back to its own compute path, which
+            // is what a macOS log shows initialising. Where the device really
+            // cannot carry FSR 3, setFSR2Enabled refuses it by name and says so.
             settingsPanel_.pendingAMDFramegen = false;
-            renderer->getPostProcessPipeline()->setAmdFsr3FramegenEnabled(false);
-            renderer->setFSREnabled(false);
-            renderer->setFSR2Enabled(false);
-            settingsPanel_.fsrSettingsApplied_ = true;
-#else
-            static constexpr float fsrScales[] = { 0.77f, 0.67f, 0.59f, 1.00f };
-            settingsPanel_.pendingFSRQuality = std::clamp(settingsPanel_.pendingFSRQuality, 0, 3);
-            renderer->getPostProcessPipeline()->setFSRQuality(fsrScales[settingsPanel_.pendingFSRQuality]);
+#endif
+            renderer->getPostProcessPipeline()->setFSRQuality(
+                fsrScaleForChoice(settingsPanel_.pendingFSRQuality));
             renderer->getPostProcessPipeline()->setFSRSharpness(settingsPanel_.pendingFSRSharpness);
             renderer->getPostProcessPipeline()->setFSR2DebugTuning(settingsPanel_.pendingFSR2JitterSign, settingsPanel_.pendingFSR2MotionVecScaleX, settingsPanel_.pendingFSR2MotionVecScaleY);
             renderer->getPostProcessPipeline()->setAmdFsr3FramegenEnabled(settingsPanel_.pendingAMDFramegen);
@@ -363,7 +572,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 renderer->setFSR2Enabled(effectiveMode == 2);
                 settingsPanel_.fsrSettingsApplied_ = true;
             }
-#endif
         }
     }
 
@@ -382,33 +590,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Process targeting input before UI windows
     processTargetInput(gameHandler);
 
-    renderPlayerFrame(gameHandler);
-
-    // Pet frame (below player frame, only when player has an active pet)
-    if (gameHandler.hasPet()) {
-        renderPetFrame(gameHandler);
-    }
-
-    // Auto-open pet rename modal when server signals the pet is renameable (first tame)
-    if (gameHandler.consumePetRenameablePending()) {
-        petRenameOpen_ = true;
-        petRenameBuf_[0] = '\0';
-    }
-
-    // Totem frame (Shaman only, when any totem is active)
-    if (gameHandler.getPlayerClass() == 7) {
-        renderTotemFrame(gameHandler);
-    }
-
-    // Target frame (only when we have a target)
-    if (gameHandler.hasTarget()) {
-        renderTargetFrame(gameHandler);
-    }
-
-    // Focus target frame (only when we have a focus)
-    if (gameHandler.hasFocus()) {
-        renderFocusFrame(gameHandler);
-    }
 
     // Render windows
     if (showPlayerInfo) {
@@ -419,115 +600,103 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         renderEntityList(gameHandler);
     }
 
-    if (showChatWindow) {
-        chatPanel_.getSpellIcon = [this](uint32_t id, pipeline::AssetManager* am) {
-            return getSpellIcon(id, am);
-        };
-        if (!chatPanel_.saveSettingsFn)
-            chatPanel_.saveSettingsFn = [this]() { saveSettings(); };
-        chatPanel_.render(gameHandler, inventoryScreen, spellbookScreen, questLogScreen);
-        // Process slash commands that affect GameScreen state
+    // The chat window is FrameXML's and this client no longer draws one, but
+    // the slash commands still belong here: FrameXML's edit box hands an
+    // unknown command to runClientChatCommand, which is this client's own
+    // registry, and the handlers set the flags read below.
+    //
+    // These used to sit inside the same gate as the window that is gone, so
+    // every one of them ran, set its flag, and had it read by nobody:
+    // /inspect, /threat, /bgscore, /gm and /who all did nothing at all.
+    {
         auto cmds = chatPanel_.consumeSlashCommands();
-        if (cmds.showInspect) socialPanel_.showInspectWindow_ = true;
+        if (cmds.showInspect) openInspectWindow(gameHandler);
         if (cmds.toggleThreat) combatUI_.showThreatWindow_ = !combatUI_.showThreatWindow_;
-        if (cmds.showBgScore) combatUI_.showBgScoreboard_ = !combatUI_.showBgScoreboard_;
-        if (cmds.showGmTicket) windowManager_.showGmTicketWindow_ = true;
-        if (cmds.showWho) socialPanel_.showWhoWindow_ = true;
+        // Both windows are gated on their element, so with either handed over
+        // the slash command set a flag whose only reader is switched off.
+        if (cmds.showBgScore) {
+            gameHandler.runInterfaceCommand("ToggleWorldStateScoreFrame()");
+        }
+        if (cmds.showGmTicket) {
+            gameHandler.runInterfaceCommand("ToggleHelpFrame()");
+        }
+        // Tab two is the who list. The client's own who window is gated on
+        // the social element like the rest of that panel's windows.
+        if (cmds.showWho) {
+            gameHandler.runInterfaceCommand("ToggleFriendsFrame(2)");
+        }
         if (cmds.toggleCombatLog) combatUI_.showCombatLog_ = !combatUI_.showCombatLog_;
-        if (cmds.takeScreenshot) takeScreenshot(gameHandler);
+        if (cmds.takeScreenshot) takeScreenshot();
     }
 
     // ---- New UI elements ----
-    actionBarPanel_.renderActionBar(gameHandler, settingsPanel_, chatPanel_,
-        inventoryScreen, spellbookScreen, questLogScreen,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
-    actionBarPanel_.renderStanceBar(gameHandler, settingsPanel_, spellbookScreen,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
-    if (actionBarPanel_.renderBagBar(gameHandler, settingsPanel_, inventoryScreen))
-        saveSettings();
-    renderMicroMenu(gameHandler);
-    actionBarPanel_.renderXpBar(gameHandler, settingsPanel_);
-    actionBarPanel_.renderRepBar(gameHandler, settingsPanel_);
     auto spellIconFn = [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); };
-    combatUI_.renderCastBar(gameHandler, spellIconFn);
-    renderMirrorTimers(gameHandler);
     combatUI_.renderCooldownTracker(gameHandler, settingsPanel_, spellIconFn);
-    renderQuestObjectiveTracker(gameHandler);
-    renderNameplates(gameHandler);  // player names always shown; NPC plates gated by showNameplates_
-    combatUI_.renderBattlegroundScore(gameHandler);
-    combatUI_.renderRaidWarningOverlay(gameHandler);
-    combatUI_.renderCombatText(gameHandler);
-    combatUI_.renderDPSMeter(gameHandler, settingsPanel_, lastTargetFrameBottom_);
-    renderDurabilityWarning(gameHandler);
-    renderUIErrors(gameHandler, ImGui::GetIO().DeltaTime);
+    renderNameplates(gameHandler);  // player names always shown; NPC plates gated by the enemyplates row
+    combatUI_.playSoundsForNewChat(gameHandler);
+    // Blizzard_CombatText draws its own once it is loaded, which happens the
+    // moment the player touches the float-mode dropdown in the interface
+    // options. Not an element gate: the addon arrives mid-run, so this has to
+    // keep drawing until it does and then stand down.
+    offerPendingTradeItem(gameHandler);
+    // The master switch for the damage and healing numbers, which the panel
+    // offers and nothing read: the numbers were drawn whatever it said. Its own
+    // eighteen filters - fctDamage, fctHealing and the rest - are still
+    // unread; this is the one that turns the whole thing off, which is what
+    // somebody who does not want numbers over the world actually reaches for.
+    if (!frameXmlDrawsCombatText() &&
+        addons::storedCVarValue("enableCombatText", "1") != "0") {
+        combatUI_.renderCombatText(gameHandler);
+    }
+    // No target frame of ours to park under any more, so the meter takes its
+    // own position. FrameXML's TargetFrame has one, and could be measured the
+    // way the minimap measures MinimapCluster, but nothing reads it yet.
+    combatUI_.renderDPSMeter(gameHandler, settingsPanel_, -1.0f);
     toastManager_.renderEarlyToasts(ImGui::GetIO().DeltaTime, gameHandler);
-    if (socialPanel_.showRaidFrames_) {
-        socialPanel_.renderPartyFrames(gameHandler, chatPanel_, spellIconFn);
-    }
-    socialPanel_.renderBossFrames(gameHandler, spellbookScreen, spellIconFn);
-    dialogManager_.renderDialogs(gameHandler, inventoryScreen, chatPanel_);
-    socialPanel_.renderGuildRoster(gameHandler, chatPanel_);
-    socialPanel_.renderSocialFrame(gameHandler, chatPanel_);
-    combatUI_.renderBuffBar(gameHandler, spellbookScreen, inventoryScreen, settingsPanel_, spellIconFn);
-    windowManager_.renderLootWindow(gameHandler, inventoryScreen, chatPanel_);
-    windowManager_.renderGossipWindow(gameHandler, chatPanel_);
-    windowManager_.renderQuestDetailsWindow(gameHandler, chatPanel_, inventoryScreen);
-    windowManager_.renderQuestRequestItemsWindow(gameHandler, chatPanel_, inventoryScreen);
-    windowManager_.renderQuestOfferRewardWindow(gameHandler, chatPanel_, inventoryScreen);
-    windowManager_.renderVendorWindow(gameHandler, inventoryScreen, chatPanel_);
-    windowManager_.renderTrainerWindow(gameHandler,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
-        inventoryScreen);
-    windowManager_.renderCraftingWindow(gameHandler,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); },
-        inventoryScreen);
-    windowManager_.renderBarberShopWindow(gameHandler);
-    windowManager_.renderStableWindow(gameHandler);
-    // Flight selection is handled by the world map's flight-map mode (see
-    // renderWorldMap); the legacy list window remains as a fallback when the
-    // world map system is unavailable.
-    {
-        auto* mapRenderer = core::Application::getInstance().getRenderer();
-        if (!mapRenderer || !mapRenderer->getWorldMap()) {
-            windowManager_.renderTaxiWindow(gameHandler);
-        }
-    }
-    windowManager_.renderMailWindow(gameHandler, inventoryScreen, chatPanel_);
-    windowManager_.renderMailComposeWindow(gameHandler, inventoryScreen);
-    windowManager_.renderBankWindow(gameHandler, inventoryScreen, chatPanel_);
-    windowManager_.renderGuildBankWindow(gameHandler, inventoryScreen, chatPanel_);
-    windowManager_.renderAuctionHouseWindow(gameHandler, inventoryScreen, chatPanel_);
-    socialPanel_.renderDungeonFinderWindow(gameHandler, chatPanel_);
+    dialogManager_.renderDialogs(gameHandler);
+    // FriendsFrame is what "social" suppresses, and its tabs are the friends
+    // list, the who list and the guild roster. Only the friends list was gated
+    // on this side, so handing social over left two of this client's three
+    // windows drawing beside FrameXML's tabs.
     windowManager_.renderInstanceLockouts(gameHandler);
-    socialPanel_.renderWhoWindow(gameHandler, chatPanel_);
     combatUI_.renderCombatLog(gameHandler, spellbookScreen);
-    windowManager_.renderAchievementWindow(gameHandler);
     windowManager_.renderSkillsWindow(gameHandler);
-    windowManager_.renderTitlesWindow(gameHandler);
     windowManager_.renderEquipSetWindow(gameHandler);
-    windowManager_.renderGmTicketWindow(gameHandler);
-    socialPanel_.renderInspectWindow(gameHandler, inventoryScreen);
-    windowManager_.renderBookWindow(gameHandler);
     combatUI_.renderThreatWindow(gameHandler);
-    combatUI_.renderBgScoreboard(gameHandler);
+    // The blips, whoever draws the ring around them.
+    //
+    // This was gated on the element the way every other pass is, and the
+    // minimap is the one place that is wrong: WoW's minimap blips come from
+    // the C client, not from the interface. minimap.xml declares the border,
+    // the buttons, the mail and battlefield icons and the north tag, and not
+    // one frame for a party member, a flight master or a corpse - so handing
+    // the minimap over and standing this down left the ring drawn, the map
+    // inside it drawn, and nothing on it at all.
+    //
+    // The pass stands down where FrameXML genuinely does own the work: its
+    // input, and the mail and battlefield indicators. Both gates are inside
+    // it now.
     if (showMinimap_) {
         renderMinimapMarkers(gameHandler);
     }
-    windowManager_.renderLogoutCountdown(gameHandler);
-    windowManager_.renderDeathScreen(gameHandler);
-    windowManager_.renderReclaimCorpseButton(gameHandler);
     dialogManager_.renderLateDialogs(gameHandler);
     chatPanel_.renderBubbles(gameHandler);
-    windowManager_.renderEscapeMenu(settingsPanel_);
-    settingsPanel_.renderSettingsWindow(inventoryScreen, chatPanel_, [this]() { saveSettings(); });
+    // Not gated on GameMenu ownership. FrameXML's own options frames are shells
+    // - its menu buttons are routed here through ShowUIPanel - and this window
+    // draws nothing unless something opened it, so leaving it out cost every
+    // setting in it the moment the menu was handed over.
+    settingsPanel_.renderSettingsWindow(chatPanel_, [this]() { saveSettings(); });
     toastManager_.renderLateToasts(gameHandler);
     renderWeatherOverlay(gameHandler);
 
+    // Always, because this is the only thing that feeds the map its data and
+    // the only thing that draws it. Skipping it when FrameXML owns the map
+    // left the panel FrameXML drew with nothing in it - the half of that
+    // handover that positions the map inside WorldMapDetailFrame was built and
+    // the half that renders it was not. renderWorldMap decides for itself
+    // whether the map is wanted; under FrameXML that is FrameXML's frame being
+    // on screen rather than this client's own flag.
     renderWorldMap(gameHandler);
-
-    questLogScreen.render(gameHandler, inventoryScreen);
-
-    spellbookScreen.render(gameHandler, services_.assetManager);
 
     // Insert spell link into chat if player shift-clicked a spellbook entry
     {
@@ -537,8 +706,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Talents (N key toggle handled inside)
-    talentScreen.render(gameHandler);
 
     // Set up inventory screen asset manager + player appearance (re-init on character switch)
     {
@@ -547,44 +714,36 @@ void GameScreen::render(game::GameHandler& gameHandler) {
             auto* am = services_.assetManager;
             if (am) {
                 inventoryScreen.setAssetManager(am);
-                const auto* ch = gameHandler.getActiveCharacter();
-                if (ch) {
-                    uint8_t skin = ch->appearanceBytes & 0xFF;
-                    uint8_t face = (ch->appearanceBytes >> 8) & 0xFF;
-                    uint8_t hairStyle = (ch->appearanceBytes >> 16) & 0xFF;
-                    uint8_t hairColor = (ch->appearanceBytes >> 24) & 0xFF;
-                    inventoryScreen.setPlayerAppearance(
-                        ch->race, ch->gender, skin, face,
-                        hairStyle, hairColor, ch->facialFeatures);
-                    inventoryScreenCharGuid_ = activeGuid;
-                }
+                inventoryScreenCharGuid_ = activeGuid;
             }
         }
     }
 
     // Set vendor mode before rendering inventory
-    inventoryScreen.setVendorMode(gameHandler.isVendorWindowOpen(), &gameHandler);
+    inventoryScreen.setGameHandler(&gameHandler);
 
     // Auto-open bags once when vendor window first opens
     if (gameHandler.isVendorWindowOpen()) {
         if (!windowManager_.vendorBagsOpened_) {
             windowManager_.vendorBagsOpened_ = true;
-            if (inventoryScreen.isSeparateBags()) {
-                inventoryScreen.openAllBags();
-            } else if (!inventoryScreen.isOpen()) {
-                inventoryScreen.setOpen(true);
-            }
+            openBagsForTrading(gameHandler);
         }
     } else {
         windowManager_.vendorBagsOpened_ = false;
     }
 
+    // Auto-open bags once when the guild bank first opens, so items can be
+    // right-clicked to deposit into the vault.
+    if (gameHandler.isGuildBankOpen()) {
+        if (!windowManager_.guildBankBagsOpened_) {
+            windowManager_.guildBankBagsOpened_ = true;
+            openBagsForTrading(gameHandler);
+        }
+    } else {
+        windowManager_.guildBankBagsOpened_ = false;
+    }
+
     inventoryScreen.setGameHandler(&gameHandler);
-    inventoryScreen.render(gameHandler.getInventory(), gameHandler.getMoneyCopper());
-
-    // Character screen (C key toggle handled inside render())
-    inventoryScreen.renderCharacterScreen(gameHandler);
-
     // Item-target cursor (sharpening stone / oil awaiting the item it applies to)
     inventoryScreen.renderItemTargetCursor();
 
@@ -600,7 +759,6 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         updateCharacterGeosets(gameHandler.getInventory());
         updateCharacterTextures(gameHandler.getInventory());
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
-        inventoryScreen.markPreviewDirty();
         // Update renderer weapon type for animation selection
         auto* r = services_.renderer;
         if (r) {
@@ -614,10 +772,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 bool isFist = (mh.item.subclassName == "Fist Weapon");
                 bool isDagger = (mh.item.subclassName == "Dagger");
                 bool hasOffHand = !oh.empty() &&
-                    (oh.item.inventoryType == game::InvType::ONE_HAND ||
-                     oh.item.subclassName == "Fist Weapon");
+                    game::isOffHandWeaponInventoryType(oh.item.inventoryType);
                 bool hasShield = !oh.empty() && oh.item.inventoryType == game::InvType::SHIELD;
-                if (auto* ac = r->getAnimationController()) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield);
+                bool offHandIsFist = hasOffHand && oh.item.subclassName == "Fist Weapon";
+                bool offHandIsDagger = hasOffHand && oh.item.subclassName == "Dagger";
+                if (auto* ac = r->getAnimationController()) ac->setEquippedWeaponType(mh.item.inventoryType, is2HLoose, isFist, isDagger, hasOffHand, hasShield, offHandIsFist, offHandIsDagger);
             }
             // Detect ranged weapon type from RANGED slot
             const auto& rangedSlot = gameHandler.getInventory().getEquipSlot(game::EquipSlot::RANGED);
@@ -631,7 +790,15 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::BOW);
                 }
             } else if (rangedSlot.item.inventoryType == game::InvType::RANGED_GUN) {
-                if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::GUN);
+                // That inventory type is guns, crossbows and wands together, so
+                // the subclass is what tells them apart - as it already does for
+                // a crossbow above. Without this a wand was shouldered and fired
+                // like a rifle.
+                if (rangedSlot.item.subclassName == "Wand") {
+                    if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::WAND);
+                } else if (auto* ac = r->getAnimationController()) {
+                    ac->setEquippedRangedType(rendering::RangedWeaponType::GUN);
+                }
             } else if (rangedSlot.item.inventoryType == game::InvType::THROWN) {
                 if (auto* ac = r->getAnimationController()) ac->setEquippedRangedType(rendering::RangedWeaponType::THROWN);
             } else {
@@ -704,30 +871,20 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                     if (unit->getHealth() == 0 && unit->getMaxHealth() > 0) {
                         circleColor = glm::vec3(0.5f, 0.5f, 0.5f); // gray (dead)
                     } else if (unit->isHostile() || gameHandler.isAggressiveTowardPlayer(target->getGuid())) {
-                        uint32_t playerLv = gameHandler.getPlayerLevel();
-                        uint32_t mobLv = unit->getLevel();
-                        int32_t diff = static_cast<int32_t>(mobLv) - static_cast<int32_t>(playerLv);
-                        if (game::GameHandler::killXp(playerLv, mobLv) == 0) {
-                            circleColor = glm::vec3(0.6f, 0.6f, 0.6f); // grey
-                        } else if (diff >= 10) {
-                            circleColor = glm::vec3(1.0f, 0.1f, 0.1f); // red
-                        } else if (diff >= 5) {
-                            circleColor = glm::vec3(1.0f, 0.5f, 0.1f); // orange
-                        } else if (diff >= -2) {
-                            circleColor = glm::vec3(1.0f, 1.0f, 0.1f); // yellow
-                        } else {
-                            circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green
-                        }
+                        const ImVec4 c = ui::helpers::levelDifficultyColor(
+                            gameHandler.getPlayerLevel(), unit->getLevel());
+                        circleColor = glm::vec3(c.x, c.y, c.z);
                     } else {
                         circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (friendly)
                     }
                 } else if (target->getType() == game::ObjectType::PLAYER) {
                     showSelectionCircle = true;
                     circleColor = glm::vec3(0.3f, 1.0f, 0.3f); // green (player)
-                } else if (target->getType() == game::ObjectType::GAMEOBJECT) {
-                    showSelectionCircle = true;
-                    circleColor = glm::vec3(0.2f, 0.8f, 1.0f); // cyan (game object)
                 }
+                // Nothing else gets one. WoW draws a selection circle under a
+                // unit and a player and under nothing else - a door, a mailbox,
+                // a bank vault is used rather than selected, and a ring on the
+                // floor around one reads as a creature being fought.
                 if (showSelectionCircle) {
                     renderer->setSelectionCircle(targetGLPos, circleRadius, circleColor);
                 } else {
@@ -743,7 +900,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Screen edge damage flash — red vignette that fires on HP decrease
+    // Screen edge damage flash - red vignette that fires on HP decrease
     {
         const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
@@ -755,7 +912,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                 currentHp = unit->getHealth();
         }
 
-        // Detect HP drop (ignore transitions from 0 — entity just spawned or uninitialized)
+        // Detect HP drop (ignore transitions from 0 - entity just spawned or uninitialized)
         if (!deadOrGhost && settingsPanel_.damageFlashEnabled_ &&
             lastPlayerHp_ > 0 && currentHp < lastPlayerHp_ && currentHp > 0) {
             damageFlashAlpha_ = 1.0f;
@@ -777,7 +934,7 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    // Persistent low-health vignette — pulsing red edges when HP < 20%
+    // Persistent low-health vignette - pulsing red edges when HP < 20%
     {
         auto playerEntity = gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid());
         const bool deadOrGhost = gameHandler.isPlayerDead() || gameHandler.isPlayerGhost();
@@ -829,87 +986,22 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     ImGui::GetStyle().Alpha = prevAlpha;
 }
 
-void GameScreen::renderMicroMenu(game::GameHandler& gameHandler) {
-    if (!settingsPanel_.pendingShowMicroMenu) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    constexpr float buttonSize = 28.0f;
-    constexpr float margin = 10.0f;
-    const float y = std::max(8.0f, io.DisplaySize.y - buttonSize - 18.0f);
-
-    ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
-    ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_AlwaysAutoResize;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 4.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(8, 8, 12, 145));
-    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(120, 130, 165, 90));
-
-    if (ImGui::Begin("##MicroMenu", nullptr, flags)) {
-        auto button = [&](const char* label, const char* tooltip, bool active) {
-            if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(64, 82, 132, 210));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(82, 102, 160, 230));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(98, 120, 180, 245));
-            }
-            const bool clicked = ImGui::Button(label, ImVec2(buttonSize, buttonSize));
-            if (active) ImGui::PopStyleColor(3);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
-            return clicked;
-        };
-
-        if (button("C##MicroCharacter", "Character", inventoryScreen.isCharacterOpen())) {
-            const bool wasOpen = inventoryScreen.isCharacterOpen();
-            inventoryScreen.toggleCharacter();
-            if (!wasOpen && gameHandler.isConnected()) gameHandler.requestPlayedTime();
-        }
-        ImGui::SameLine();
-        if (button("B##MicroBags", "Backpack", inventoryScreen.isBackpackOpen())) {
-            inventoryScreen.toggleBackpack();
-        }
-        ImGui::SameLine();
-        if (button("P##MicroSpellbook", "Spellbook", spellbookScreen.isOpen())) {
-            spellbookScreen.toggle();
-        }
-        ImGui::SameLine();
-        if (button("N##MicroTalents", "Talents", talentScreen.isOpen())) {
-            talentScreen.toggle();
-        }
-        ImGui::SameLine();
-        if (button("L##MicroQuests", "Quest Log", questLogScreen.isOpen())) {
-            questLogScreen.toggle();
-        }
-        ImGui::SameLine();
-        if (button("K##MicroSkills", "Skills", windowManager_.showSkillsWindow_)) {
-            windowManager_.showSkillsWindow_ = !windowManager_.showSkillsWindow_;
-        }
-        ImGui::SameLine();
-        if (button("O##MicroSocial", "Social", socialPanel_.showSocialFrame_)) {
-            socialPanel_.showSocialFrame_ = !socialPanel_.showSocialFrame_;
-        }
-        ImGui::SameLine();
-        if (button("G##MicroGroup", "Party/Raid Frames", socialPanel_.showRaidFrames_)) {
-            socialPanel_.showRaidFrames_ = !socialPanel_.showRaidFrames_;
-        }
-        ImGui::SameLine();
-        if (button("M##MicroMap", "World Map", showWorldMap_)) {
-            showWorldMap_ = !showWorldMap_;
-        }
-        ImGui::SameLine();
-        if (button("*##MicroSettings", "Settings", settingsPanel_.showSettingsWindow)) {
-            settingsPanel_.showSettingsWindow = !settingsPanel_.showSettingsWindow;
-        }
+/// Put the item dropped on a player into the trade it opened.
+///
+/// CMSG_INITIATE_TRADE is a request and the window is the server's answer, so
+/// the item cannot be offered at the moment of the drop. It waits here until
+/// the trade is up, and is dropped if the trade never opens - a refusal, or a
+/// player who walked away - rather than being offered into the next one.
+void GameScreen::offerPendingTradeItem(game::GameHandler& gameHandler) {
+    if (!pendingTradeItem_.active) return;
+    if (!gameHandler.isTradeOpen()) {
+        // Only while the request could still be answered. Leaving the world
+        // ends that, and so does putting the item somewhere else.
+        if (!gameHandler.isInWorld()) pendingTradeItem_ = PendingTradeItem{};
+        return;
     }
-
-    ImGui::End();
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(2);
+    gameHandler.setTradeItem(0, pendingTradeItem_.bag, pendingTradeItem_.slot);
+    pendingTradeItem_ = PendingTradeItem{};
 }
 
 void GameScreen::renderPlayerInfo(game::GameHandler& gameHandler) {
@@ -929,7 +1021,7 @@ void GameScreen::renderPlayerInfo(game::GameHandler& gameHandler) {
     ImGui::Text("X: %.2f", movement.x);
     ImGui::Text("Y: %.2f", movement.y);
     ImGui::Text("Z: %.2f", movement.z);
-    ImGui::Text("Orientation: %.2f rad (%.1f deg)", movement.orientation, movement.orientation * 180.0f / 3.14159f);
+    ImGui::Text("Orientation: %.2f rad (%.1f deg)", movement.orientation, movement.orientation * 180.0f / core::coords::PI);
     ImGui::Unindent();
 
     ImGui::Spacing();
@@ -963,6 +1055,162 @@ void GameScreen::renderPlayerInfo(game::GameHandler& gameHandler) {
     ImGui::Unindent();
 
     ImGui::End();
+}
+
+/// A cursor picture, uploaded once and kept.
+///
+/// Only a successful upload is cached, so a transient descriptor-pool failure
+/// is retried rather than leaving the cursor plain for good, and a file that
+/// will not load says so once - a cursor that fails and a thing that has no
+/// cursor of its own both end as the plain hand, and from the chair they look
+/// the same.
+VkDescriptorSet cursorTexture(pipeline::AssetManager* assets, core::Window* window,
+                              const char* path) {
+    static std::unordered_map<std::string, VkDescriptorSet> loaded;
+    auto it = loaded.find(path);
+    if (it != loaded.end() && it->second != VK_NULL_HANDLE) return it->second;
+
+    ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
+    VkDescriptorSet tex = ui::uploadUiTextureFromBlp(assets, path, window, &why);
+    if (tex) {
+        loaded[path] = tex;
+        return tex;
+    }
+    static std::set<std::string> said;
+    if (said.insert(path).second) {
+        LOG_WARNING("Cursor art ", path, " did not load (", static_cast<int>(why),
+                    ") - the pointer stays the plain hand there");
+    }
+    return VK_NULL_HANDLE;
+}
+
+/// Draw one in place of the pointer. The tip sits at the mouse position, the
+/// way the art is authored.
+void drawCursorTexture(VkDescriptorSet tex) {
+    ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+    const ImVec2 at = ImGui::GetIO().MousePos;
+    constexpr float kSize = 32.0f;
+    ImGui::GetForegroundDrawList()->AddImage(
+        (ImTextureID)(uintptr_t)tex, at, ImVec2(at.x + kSize, at.y + kSize));
+}
+
+/// Which cursor a game object wears, by its GameObjectType.
+///
+/// The numbers are 3.3.5's own: 0 door, 1 button, 2 questgiver, 3 chest,
+/// 7 chair, 17 fishing node, 19 mailbox, 20 auction house. Anything else is
+/// something to interact with, which is what the hand with the gear says.
+const char* objectCursorPath(uint32_t goType) {
+    switch (goType) {
+        case 2:  return "Interface\\Cursor\\Quest.blp";
+        case 3:  return "Interface\\Cursor\\LootAll.blp";
+        case 17: return "Interface\\Cursor\\Fishing.blp";
+        case 19: return "Interface\\Cursor\\Mail.blp";
+        default: return "Interface\\Cursor\\Interact.blp";
+    }
+}
+
+/// Interface\\Cursor\\Buy.blp under the pointer while it is over a vendor.
+///
+/// Every interactable answered the same hand cursor, so a merchant looked like
+/// a door: what a unit is for is known before it is clicked, and the real
+/// client says so with the art. The bag is the one WoW uses for a vendor.
+///
+/// False when the unit is not a vendor to trade with, and the caller falls back
+/// to the hand. A hostile is not one - it is the attack cursor's business - and
+/// neither is a corpse, which is loot.
+bool GameScreen::drawVendorCursor(game::GameHandler& gameHandler,
+                                  const ui::ScenePick& pick) {
+    // resolve(), not closestGuid. closestGuid is whatever the ray touched
+    // nearest of anything pickable - and a game object's fallback sphere is 2.5
+    // yards against a unit's 1.8, so the rug, the stall or the chair a merchant
+    // stands on was usually nearer than the merchant. resolve() is what a click
+    // acts on, which is the whole reason the hover uses the click's picker:
+    // asking it a different question put the two back into disagreement, and
+    // the vendor cursor lost every argument to the scenery around the vendor.
+    const uint64_t guid = pick.resolve();
+    if (guid == 0 || guid == pick.hostileUnitGuid || guid == pick.deadUnitGuid) {
+        return false;
+    }
+    auto entity = gameHandler.getEntityManager().getEntity(guid);
+    if (!entity || entity->getType() != game::ObjectType::UNIT) return false;
+    auto unit = std::static_pointer_cast<game::Unit>(entity);
+    if ((unit->getNpcFlags() & game::NPC_FLAG_ANY_VENDOR) == 0) return false;
+
+    // Only a successful upload is cached, so a transient descriptor-pool
+    // failure is retried rather than leaving the cursor plain for good.
+    static VkDescriptorSet cursorTex = VK_NULL_HANDLE;
+    if (!cursorTex) {
+        ui::UiTextureLoad why = ui::UiTextureLoad::Ok;
+        cursorTex = ui::uploadUiTextureFromBlp(
+            services_.assetManager, "Interface\\Cursor\\Buy.blp", services_.window, &why);
+        // Said once. A cursor that will not load and a unit that is not a
+        // vendor both end as the plain hand, and from the chair they are the
+        // same thing - so the one that is a fault has to name itself.
+        if (!cursorTex) {
+            static bool said = false;
+            if (!said) {
+                said = true;
+                LOG_WARNING("Vendor cursor: Interface\\Cursor\\Buy.blp did not load (",
+                            static_cast<int>(why),
+                            ") - the pointer stays the plain hand over merchants");
+            }
+        }
+    }
+    if (!cursorTex) return false;
+
+    // Drawn in place of the pointer rather than beside it, which is what a
+    // cursor is - so the arrow goes for as long as the bag is up. The tip sits
+    // at the mouse position, the way the art is authored.
+    ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+    const ImVec2 at = ImGui::GetIO().MousePos;
+    constexpr float kSize = 32.0f;
+    ImGui::GetForegroundDrawList()->AddImage(
+        (ImTextureID)(uintptr_t)cursorTex, at,
+        ImVec2(at.x + kSize, at.y + kSize));
+    return true;
+}
+
+bool GameScreen::drawWorldObjectCursor(game::GameHandler& gameHandler,
+                                       const ui::ScenePick& pick) {
+    // resolve(), for the reason the vendor cursor gives: it is what a click
+    // would act on, and asking the hover a different question puts the two
+    // back into disagreement.
+    //
+    // ...and where a click would act on nothing, the object the pointer is on
+    // anyway. A signpost, a banner, a shop's board are generic scenery: WoW
+    // uses none of them either, and all three carry the name that is the whole
+    // point of them - "Mage Quarter", "Everyday Merchandise". Named, with no
+    // cursor of its own, since nothing will happen if it is clicked.
+    uint64_t guid = pick.resolve();
+    const bool usable = guid != 0;
+    if (guid == 0) guid = pick.namedObjectGuid;
+    if (guid == 0) return false;
+    auto entity = gameHandler.getEntityManager().getEntity(guid);
+    if (!entity || entity->getType() != game::ObjectType::GAMEOBJECT) return false;
+
+    auto go = std::static_pointer_cast<game::GameObject>(entity);
+    const auto* info = gameHandler.getCachedGameObjectInfo(go->getEntry());
+    if (usable) {
+        VkDescriptorSet tex = cursorTexture(services_.assetManager, services_.window,
+                                            objectCursorPath(info ? info->type : 0u));
+        if (!tex) return false;
+        drawCursorTexture(tex);
+    }
+
+    // ...and what it is, beside the pointer, which is the whole of what the
+    // real client shows for an object: a cursor saying what it is for and a
+    // name saying what it is. An object whose name has not come back yet is
+    // left silent rather than labelled "Unknown".
+    const std::string name = game::entityDisplayName(entity);
+    if (!name.empty() && name != "Unknown") {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(name.c_str());
+        ImGui::EndTooltip();
+    } else if (!usable) {
+        // Scenery with nothing to say is not worth taking the pointer for.
+        return false;
+    }
+    return true;
 }
 
 void GameScreen::renderEntityList(game::GameHandler& gameHandler) {
@@ -1062,116 +1310,406 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
 
     // If the user is typing (or about to focus chat this frame), do not allow
     // A-Z or 1-0 shortcuts to fire.
-    if (!io.WantTextInput && !chatPanel_.isChatInputActive() && input.isKeyJustPressed(SDL_SCANCODE_SLASH)) {
-        chatPanel_.activateSlashInput();
+    // Enter and slash open the chat box. Which chat box depends on who owns it.
+    //
+    // These reached this client's panel unconditionally, and its render is
+    // gated on the same ownership - so with the chat handed over they set a
+    // focus flag on a panel that is never drawn, and the interface's own edit
+    // box stayed shut. There was no other way in: FrameXML's OPENCHAT and
+    // OPENCHATSLASH bindings are not in this client's route table, so with the
+    // chat owned there was no key at all that opened it.
+    //
+    // The keystrokes that follow do need a guard, and the reason they were
+    // thought not to is worth keeping: the application's key loop does hand
+    // FrameXML's focused box every press and stop there - but only on the
+    // event path. What is below reads the key state directly, once a frame,
+    // and a poll never went through that loop to be stopped by it. So typing
+    // did walk the character and did fire bindings, and the one question both
+    // paths now ask is interfaceTakingTypedInput.
+    if (!io.WantTextInput && !interfaceTakingTypedInput() &&
+        input.isKeyJustPressed(SDL_SCANCODE_SLASH)) {
+        gameHandler.runInterfaceCommand("ChatFrame_OpenChat(\"/\")");
+        // The box now holds the slash; the keypress that put it there is still
+        // on its way as a text event.
+        noteChatOpenedBySlash();
     }
-    if (!io.WantTextInput && !chatPanel_.isChatInputActive() &&
-        KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_CHAT, false)) {
-        chatPanel_.activateInput();
+    // The same one line as Escape, for the same reason: the chain reads sound
+    // and the key does nothing, so what is wanted is which branch ran. The
+    // guards are reported too, because being refused before the branch is the
+    // likeliest answer and is the one that leaves no other trace.
+    if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_CHAT, false)) {
+        if (io.WantTextInput || interfaceTakingTypedInput() ||
+            interfaceConsumedKey(ImGuiKey_Enter)) {
+            LOG_WARNING("Chat key: refused - ImGui wants text: ",
+                     io.WantTextInput ? "yes" : "no",
+                     ", the interface's box has focus: ",
+                     interfaceTakingTypedInput() ? "yes" : "no",
+                     ", the interface's box already took this press: ",
+                     interfaceConsumedKey(ImGuiKey_Enter) ? "yes" : "no");
+        } else {
+            LOG_WARNING("Chat key: opening the interface's box");
+        }
+    }
+    // The interface's box gets this press first when it has focus, and Enter
+    // is where it says it is done: ChatEdit_OnEnterPressed sends the line and
+    // ends in ChatEdit_OnEscapePressed, which hides the box. That is also what
+    // clears the focus this poll's guard reads - so the press that sent the
+    // message opened the box again behind it.
+    //
+    // Read both ways round, because the binding alone was not opening it.
+    //
+    // Slash has always come from this client's own input layer and has always
+    // worked; Enter came only from the keybinding, which ends in
+    // ImGui::IsKeyPressed - and in the world that never answered true, so there
+    // was no key that opened the box and typing began at a slash. The binding
+    // stays first so a rebound key still works; the direct read is what makes
+    // the default one work at all.
+    const bool enterPressed = input.isKeyJustPressed(SDL_SCANCODE_RETURN) ||
+                              input.isKeyJustPressed(SDL_SCANCODE_KP_ENTER);
+    // Said once, because the two disagreeing is the fault above and it is
+    // otherwise invisible: the binding refuses silently and the log's existing
+    // line is inside the branch that never runs.
+    if (enterPressed &&
+        !KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_CHAT, false)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            LOG_WARNING("Enter reached this client's input but not the "
+                        "TOGGLE_CHAT binding - ImGui wants text: ",
+                        io.WantTextInput ? "yes" : "no",
+                        ", the interface's box has focus: ",
+                        interfaceTakingTypedInput() ? "yes" : "no",
+                        ", it already took this press: ",
+                        interfaceConsumedKey(ImGuiKey_Enter) ? "yes" : "no");
+        }
+    }
+    if (!io.WantTextInput &&
+        !interfaceConsumedKey(ImGuiKey_Enter) &&
+        (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_CHAT, false) ||
+         (enterPressed && !interfaceTakingTypedInput()))) {
+        gameHandler.runInterfaceCommand("ChatFrame_OpenChat(\"\")");
     }
 
-    const bool textFocus = chatPanel_.isChatInputActive() || io.WantTextInput;
+    // Anything at all is taking typed input: this client's chat box, an ImGui
+    // field, or one of the interface's own edit boxes.
+    //
+    // That third one was left out, and the block of game hotkeys further down
+    // asks only this. So every one of them fired while the player was typing
+    // into a FrameXML box - H opened the titles window from the middle of a
+    // mail recipient, C opened the character sheet, I the bags, and the digits
+    // fired action bar slots. The two places that had noticed named the
+    // interface's box separately, which is how the third came to be missing
+    // from the rest.
+    const bool textFocus = io.WantTextInput || interfaceTakingTypedInput();
 
-    // Game hotkeys — gate on textFocus (chat/text-input active) rather than
+    // Game hotkeys - gate on textFocus (chat/text-input active) rather than
     // WantCaptureKeyboard so that toggle keys like M, C, I still work when an
     // ImGui window (character panel, map, etc.) happens to have focus.
     {
-        if (!textFocus && input.isKeyJustPressed(SDL_SCANCODE_TAB)) {
+        // Two guards, because Tab reaches a focused box two ways. While one
+        // holds focus the probe answers; when the box's own OnTabPressed moves
+        // to the next field, the box that had it has let go by the time this
+        // is asked - and cycling between two fields of a form would have
+        // changed the player's target on every press.
+        if (!textFocus &&
+            !interfaceConsumedKey(ImGuiKey_Tab) &&
+            input.isKeyJustPressed(SDL_SCANCODE_TAB)) {
             const auto& movement = gameHandler.getMovementInfo();
             gameHandler.tabTarget(movement.x, movement.y, movement.z);
         }
 
-        // Escape (TOGGLE_SETTINGS) must not fire while chat input is active —
+        // Escape (TOGGLE_SETTINGS) must not fire while chat input is active -
         // otherwise pressing Escape to close chat also closes any open window or
         // opens the escape menu, since ImGui deactivates InputText on Escape but
         // the same press still propagates here. KeybindingManager only blocks
         // A-Z/0-9 during text input, not Escape.
+        // Said out loud, at info, because this chain has now been read end to
+        // end five times without the fault appearing in it. Every link checks
+        // out on paper and the key still does nothing, which means the answer
+        // is which branch actually runs - and that is the one thing reading
+        // cannot tell you. One line per press, invisible unless someone asks
+        // for info, and it names the branch rather than the key.
+        //
+        // Asked of the key rather than of the binding, deliberately. The
+        // binding declines to fire while either interface is taking typed
+        // input, so routing this through it means a press that was swallowed
+        // for that reason produces no line - which reads exactly like a press
+        // that never arrived, and those are the two remaining explanations.
+        // Every press of the bound key now says something.
+        const ImGuiKey escapeKey = KeybindingManager::getInstance().getKeyForAction(
+            KeybindingManager::Action::TOGGLE_SETTINGS);
+        const bool escapePressed =
+            escapeKey != ImGuiKey_None && ImGui::IsKeyPressed(escapeKey, true);
+        // Nothing bound is its own explanation and looks identical to every
+        // other one from a log: no line at all. The keybindings are read from a
+        // config file that can rebind or clear this, and setKeyForAction turns
+        // a movement key into ImGuiKey_None outright - so "the action has no
+        // key" is a state the client can genuinely be in, and it would make
+        // Escape do nothing while every branch below remains correct.
+        //
+        // Said once rather than per frame, since it is a fact about the
+        // configuration and not about a press.
+        if (escapeKey == ImGuiKey_None) {
+            static bool saidUnbound = false;
+            if (!saidUnbound) {
+                saidUnbound = true;
+                LOG_WARNING("Escape: nothing is bound to the game-menu action, "
+                            "so no press can reach the chain");
+            }
+        }
+        if (escapePressed && textFocus) {
+            LOG_WARNING("Escape: swallowed before the chain - ",
+                     "ImGui wants text: ", io.WantTextInput ? "yes" : "no",
+                     ", the interface's box has focus: ",
+                     interfaceTakingTypedInput() ? "yes" : "no");
+        }
         if (!textFocus &&
             KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_SETTINGS, true)) {
-            if (settingsPanel_.showSettingsWindow) {
-                settingsPanel_.showSettingsWindow = false;
-            } else if (windowManager_.showEscapeMenu) {
-                windowManager_.showEscapeMenu = false;
-                settingsPanel_.showEscapeSettingsNotice = false;
-            } else if (gameHandler.isCasting()) {
-                gameHandler.cancelCast();
-            } else if (gameHandler.isLootWindowOpen()) {
-                gameHandler.closeLoot();
-            } else if (gameHandler.isGossipWindowOpen()) {
-                gameHandler.closeGossip();
-            } else if (gameHandler.isVendorWindowOpen()) {
-                gameHandler.closeVendor();
-            } else if (gameHandler.isBarberShopOpen()) {
-                gameHandler.closeBarberShop();
-            } else if (gameHandler.isBankOpen()) {
-                gameHandler.closeBank();
-            } else if (gameHandler.isTrainerWindowOpen()) {
-                gameHandler.closeTrainer();
-            } else if (gameHandler.isMailboxOpen()) {
-                gameHandler.closeMailbox();
-            } else if (gameHandler.isAuctionHouseOpen()) {
-                gameHandler.closeAuctionHouse();
-            } else if (gameHandler.isQuestDetailsOpen()) {
-                gameHandler.declineQuest();
-            } else if (gameHandler.isQuestOfferRewardOpen()) {
-                gameHandler.closeQuestOfferReward();
-            } else if (gameHandler.isQuestRequestItemsOpen()) {
-                gameHandler.closeQuestRequestItems();
-            } else if (gameHandler.isTradeOpen()) {
-                gameHandler.cancelTrade();
-            } else {
-                windowManager_.showEscapeMenu = true;
+            // Gathered, then decided, then done - rather than decided while
+            // being done. The order of these branches is the whole of what
+            // Escape means, and as a chain of else-if inside a draw there was
+            // no way to ask what the key would do without being in the
+            // situation. resolveEscape is that question on its own, and its
+            // test states each situation directly.
+            EscapeState st;
+            st.interfaceConsumedKey  = interfaceConsumedKey(ImGuiKey_Escape);
+            st.settingsWindowShown   = settingsPanel_.showSettingsWindow;
+            // Either cursor. With the bags handed over an item is picked up
+            // through FrameXML's, and Escape has to put that one down too -
+            // this read only the bag window's, so Escape opened the menu with
+            // an item still stuck to the pointer.
+            st.holdingItem           = inventoryScreen.isHoldingItem() ||
+                                       !frameXmlCursorItem().empty();
+            st.casting               = gameHandler.isCasting();
+            st.lootOpen              = gameHandler.isLootWindowOpen();
+            st.gossipOpen            = gameHandler.isGossipWindowOpen();
+            st.vendorOpen            = gameHandler.isVendorWindowOpen();
+            st.barberShopOpen        = gameHandler.isBarberShopOpen();
+            st.bankOpen              = gameHandler.isBankOpen();
+            st.guildBankOpen         = gameHandler.isGuildBankOpen();
+            st.trainerOpen           = gameHandler.isTrainerWindowOpen();
+            st.mailboxOpen           = gameHandler.isMailboxOpen();
+            st.auctionHouseOpen      = gameHandler.isAuctionHouseOpen();
+            st.questDetailsOpen      = gameHandler.isQuestDetailsOpen();
+            st.questOfferRewardOpen  = gameHandler.isQuestOfferRewardOpen();
+            st.questRequestItemsOpen = gameHandler.isQuestRequestItemsOpen();
+            st.tradeOpen             = gameHandler.isTradeOpen();
+
+            const EscapeAction action = resolveEscape(st);
+            // At warning, like the three in the pump it pairs with.
+            //
+            // This chain has been read end to end more times than any other in
+            // the client and every link checks out on paper; what is missing is
+            // which branch actually runs, and that is the one thing reading
+            // cannot tell you. It was said at info, and the log a report
+            // arrives with is warnings only - so a session that reproduced
+            // "Escape does nothing" came back with no Escape line in it at all,
+            // and silence there meant nothing, because it is also exactly what
+            // a working press sounds like.
+            //
+            // One line per press, and Escape is not a key anyone holds down.
+            LOG_WARNING("Escape: ", escapeActionName(action));
+            switch (action) {
+                case EscapeAction::CloseSettingsWindow:
+                    settingsPanel_.showSettingsWindow = false;
+                    break;
+                case EscapeAction::CancelCast:             gameHandler.cancelCast(); break;
+                case EscapeAction::CloseLoot:              gameHandler.closeLoot(); break;
+                case EscapeAction::CloseGossip:            gameHandler.closeGossip(); break;
+                case EscapeAction::ReturnHeldItem:
+                    if (inventoryScreen.isHoldingItem())
+                        inventoryScreen.returnHeldItem(gameHandler.getInventory());
+                    else
+                        frameXmlPutCursorDown();
+                    break;
+                case EscapeAction::CloseVendor:            gameHandler.closeVendor(); break;
+                case EscapeAction::CloseBarberShop:        gameHandler.closeBarberShop(); break;
+                case EscapeAction::CloseBank:              gameHandler.closeBank(); break;
+                case EscapeAction::CloseGuildBank:         gameHandler.closeGuildBank(); break;
+                case EscapeAction::CloseTrainer:           gameHandler.closeTrainer(); break;
+                case EscapeAction::CloseMailbox:           gameHandler.closeMailbox(); break;
+                case EscapeAction::CloseAuctionHouse:      gameHandler.closeAuctionHouse(); break;
+                case EscapeAction::DeclineQuest:           gameHandler.declineQuest(); break;
+                case EscapeAction::CloseQuestOfferReward:  gameHandler.closeQuestOfferReward(); break;
+                case EscapeAction::CloseQuestRequestItems: gameHandler.closeQuestRequestItems(); break;
+                case EscapeAction::CancelTrade:            gameHandler.cancelTrade(); break;
+                case EscapeAction::None: break;
+                case EscapeAction::AskTheInterface: {
+                    // Asked only here, because asking closes things. Everything
+                    // above is a window the *server* knows about and each has
+                    // to go through the client so the closing packet is sent -
+                    // CloseAllWindows would hide the frame and leave the server
+                    // believing the vendor was still open.
+                    //
+                    // Ask ToggleGameMenu and nothing else, when the
+                    // interface owns the menu.
+                    //
+                    // This used to close menus, special windows and all
+                    // windows itself first, and skip ToggleGameMenu whenever
+                    // one of them answered - which is a fragment of the very
+                    // cascade ToggleGameMenu already runs, in the same order,
+                    // and ending differently. Blizzard's version tries static
+                    // popups, the option frames, dropdowns, casting, targeting
+                    // and CloseAllWindows in turn and then, if none of them
+                    // wanted the key, opens the game menu. Ours consumed the
+                    // press before it could reach that last step, so Escape
+                    // could shut the menu and never raise it.
+                    //
+                    // The order the old comment cared about - a dropdown over
+                    // a panel closing before the panel - is ToggleGameMenu's
+                    // own order, and it keeps it.
+                    // Nothing is asked of the interface first. ToggleGameMenu
+                    // closes menus, special windows and all windows in that
+                    // order before it opens anything, and it is the interface
+                    // that draws the menu now - so asking here would only be
+                    // this client doing the first half of ToggleGameMenu's own
+                    // work, in ToggleGameMenu's own order, ahead of it.
+                    const EscapeOutcome outcome = resolveAfterInterface(
+                        /*interfaceClosedAPanel=*/false, /*frameXmlOwnsMenu=*/true);
+                    // At warning, because this is the press the report is
+                    // about and the default log is warnings only.
+                    //
+                    // Every other branch of this chain speaks at info, so a
+                    // session that reproduces "Escape does nothing" came back
+                    // with no Escape line in it at all - and silence there
+                    // meant nothing, since it is also what a working press
+                    // sounds like. One line per press that gets this far, and
+                    // it names which of the two menus was chosen. If that line
+                    // is absent from a log where Escape was pressed with
+                    // nothing open, the key never reached this chain and the
+                    // fault is in the input path rather than here.
+                    if (outcome == EscapeOutcome::InterfaceClosedAPanel) {
+                        LOG_INFO("Escape: ", escapeOutcomeName(outcome));
+                    } else {
+                        LOG_WARNING("Escape: ", escapeOutcomeName(outcome));
+                    }
+                    switch (outcome) {
+                        case EscapeOutcome::InterfaceClosedAPanel:
+                            break;
+                        case EscapeOutcome::ToggleInterfaceMenu:
+                            // The interface's own way in, and the same function
+                            // its own Escape binding calls. This branch used to
+                            // set the flag behind *this* client's menu, and
+                            // that menu is only drawn while the element is not
+                            // handed over - so with it handed over, Escape set
+                            // a flag nobody read and nothing appeared.
+                            gameHandler.runInterfaceCommand("ToggleGameMenu()");
+                            // And whether it worked, which the line above
+                            // cannot say. Asked straight afterwards so the two
+                            // faults separate: shown but not on screen is a
+                            // drawing problem, not shown is a problem in
+                            // ToggleGameMenu - which runs clean headlessly.
+                            //
+                            // At warning when it did not work, because that is
+                            // the one outcome nobody would think to look for.
+                            // The whole of this chain has been read seven
+                            // times and every link checks out; the interface
+                            // side is settled too - headlessly ToggleGameMenu
+                            // shows GameMenuFrame at 195x240, visible, alpha
+                            // one, parented to UIParent. So the answer is in
+                            // the running client, and a line only the info
+                            // level shows is a line nobody has. This says it
+                            // where the default log will keep it.
+                            // rawget, not truth: a missing GameMenuFrame is
+                            // answered by the no-op object, whose IsShown
+                            // returns another one, so this reported the menu
+                            // shown whether or not the frame existed.
+                            if (gameHandler.askInterface(
+                                    "type(rawget(_G, 'GameMenuFrame')) == 'table' "
+                                    "and GameMenuFrame:IsShown()")) {
+                                LOG_INFO("Escape: the interface's menu is now shown");
+                            } else {
+                                LOG_WARNING(
+                                    "Escape: asked the interface for its game "
+                                    "menu and GameMenuFrame is still not shown "
+                                    "- ToggleGameMenu ran and left it hidden");
+                            }
+                            break;
+                    }
+                    break;
+                }
             }
         }
 
         if (!textFocus) {
             // Toggle character screen (C) and inventory/bags (I)
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_CHARACTER_SCREEN)) {
-                const bool wasOpen = inventoryScreen.isCharacterOpen();
-                inventoryScreen.toggleCharacter();
-                if (!wasOpen && gameHandler.isConnected()) {
-                    gameHandler.requestPlayedTime();
-                }
+                // The route table in application.cpp calls ToggleCharacter for
+                // this key. Calling it here as well was the whole of a bug
+                // reported three times: IsKeyPressed does not consume, so both
+                // sites saw the same press and toggled in the same frame -
+                // open, then shut, and nothing on screen.
+                if (gameHandler.isConnected()) gameHandler.requestPlayedTime();
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_INVENTORY)) {
-                inventoryScreen.toggle();
+                // ToggleAllBags is a later addition and is not in this
+                // FrameXML, so this key did nothing at all once the bags were
+                // handed over. OpenAllBags is 3.3.5's own name for it, and it
+                // toggles rather than only opening.
+                gameHandler.runInterfaceCommand("OpenAllBags()");
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_NAMEPLATES)) {
                 if (ImGui::GetIO().KeyShift)
                     settingsPanel_.showFriendlyNameplates_ = !settingsPanel_.showFriendlyNameplates_;
                 else
-                    showNameplates_ = !showNameplates_;
+                    settingsPanel_.showEnemyNameplates_ = !settingsPanel_.showEnemyNameplates_;
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_WORLD_MAP)) {
-                showWorldMap_ = !showWorldMap_;
+                if (frameXmlOwns(UiElement::WorldMap)) {
+                    // Nothing: the route table owns this key too. The call
+                    // written here named ToggleWorldMap, which 3.3.5 does not
+                    // have, so it silently did nothing and left the map
+                    // working on the route table's single toggle.
+                } else {
+                    showWorldMap_ = !showWorldMap_;
+                }
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_MINIMAP)) {
                 showMinimap_ = !showMinimap_;
-            }
-
-            if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_RAID_FRAMES)) {
-                socialPanel_.showRaidFrames_ = !socialPanel_.showRaidFrames_;
+                // This flag gates this client's marker pass, which is drawn
+                // over FrameXML's minimap on purpose rather than instead of it
+                // - so on its own the key hid the markers and left the minimap
+                // underneath them up. ToggleMinimap is what the interface's own
+                // TOGGLEMINIMAP binding calls, and it hides the frame the
+                // markers sit on, which is what makes the two agree.
+                if (frameXmlOwns(UiElement::Minimap)) {
+                    gameHandler.runInterfaceCommand("ToggleMinimap()");
+                }
             }
 
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_ACHIEVEMENTS)) {
-                windowManager_.showAchievementWindow_ = !windowManager_.showAchievementWindow_;
+                gameHandler.runInterfaceCommand("ToggleAchievementFrame()");
             }
             if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_SKILLS)) {
-                windowManager_.showSkillsWindow_ = !windowManager_.showSkillsWindow_;
+                // The skills list is a tab of the character sheet in FrameXML
+                // rather than a window of its own.
+                if (frameXmlOwns(UiElement::CharacterFrame)) {
+                    gameHandler.runInterfaceCommand("ToggleCharacter(\"SkillFrame\")");
+                } else {
+                    windowManager_.showSkillsWindow_ = !windowManager_.showSkillsWindow_;
+                }
             }
 
-            // Toggle Titles window with H (hero/title screen — no conflicting keybinding)
-            if (input.isKeyJustPressed(SDL_SCANCODE_H)) {
-                windowManager_.showTitlesWindow_ = !windowManager_.showTitlesWindow_;
+            // H, which in WoW is TOGGLECHARACTER4: the Player vs Player panel,
+            // where battlegrounds and arenas are queued for.
+            //
+            // It was toggling a titles window this client drew, under a comment
+            // saying H had no keybinding to conflict with - it has had one since
+            // the game shipped. The titles window went with it: the character
+            // sheet has a title picker of its own, on the panel FrameXML draws
+            // in every run, so keeping a second one on a key that belongs to
+            // something else was two faults holding each other up.
+            if (KeybindingManager::getInstance().isActionPressed(KeybindingManager::Action::TOGGLE_PVP)) {
+                gameHandler.runInterfaceCommand("TogglePVPFrame()");
             }
 
             // Screenshot (PrintScreen key)
             if (input.isKeyJustPressed(SDL_SCANCODE_PRINTSCREEN)) {
-                takeScreenshot(gameHandler);
+                takeScreenshot();
             }
 
             // Action bar keys (1-9, 0, -, =)
@@ -1188,26 +1726,15 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             // Only fires for classes that use a stance bar; same slot ordering as
             // renderStanceBar: Warrior, DK, Druid, Rogue, Priest.
             if (ctrlDown) {
-                static constexpr uint32_t warriorStances[]  = { 2457, 71, 2458 };
-                static constexpr uint32_t dkPresences[]     = { 48266, 48263, 48265 };
-                static constexpr uint32_t druidForms[]      = { 5487, 9634, 768, 783, 1066, 24858, 33891, 33943, 40120 };
-                static constexpr uint32_t rogueForms[]      = { 1784 };
-                static constexpr uint32_t priestForms[]     = { 15473 };
-                const uint32_t* stArr = nullptr; int stCnt = 0;
-                switch (gameHandler.getPlayerClass()) {
-                    case 1:  stArr = warriorStances; stCnt = 3; break;
-                    case 6:  stArr = dkPresences;    stCnt = 3; break;
-                    case 11: stArr = druidForms;     stCnt = 9; break;
-                    case 4:  stArr = rogueForms;     stCnt = 1; break;
-                    case 5:  stArr = priestForms;    stCnt = 1; break;
-                }
-                if (stArr) {
-                    const auto& known = gameHandler.getKnownSpells();
-                    // Build available list (same order as UI)
+                // The list the bar is drawn from, so key N presses the form
+                // in position N rather than the Nth of a differently ordered
+                // table - which is what a second copy of these forms caused.
+                const auto forms = game::knownShapeshiftForms(
+                    gameHandler.getPlayerClass(), gameHandler.getKnownSpells());
+                if (!forms.empty()) {
                     std::vector<uint32_t> avail;
-                    avail.reserve(stCnt);
-                    for (int i = 0; i < stCnt; ++i)
-                        if (known.count(stArr[i])) avail.push_back(stArr[i]);
+                    avail.reserve(forms.size());
+                    for (const auto& form : forms) avail.push_back(form.spellId);
                     // Ctrl+1 = first stance, Ctrl+2 = second, …
                     for (int i = 0; i < static_cast<int>(avail.size()) && i < 8; ++i) {
                         if (input.isKeyJustPressed(actionBarKeys[i]))
@@ -1235,8 +1762,32 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
 
     }
 
+    // A link says it can be clicked.
+    //
+    // The chat window takes no clicks at all - it is click-through by design -
+    // so nothing about hovering an item link in it looked any different from
+    // hovering the text beside it, and the only way to find out a link was
+    // there was to click and see.
+    //
+    // Tested against the rects the last draw filed, which is the same list the
+    // click itself is resolved against, so the pointer cannot promise a link
+    // that clicking would miss.
+    if (services_.addonManager) {
+        if (auto* engine = services_.addonManager->getLuaEngine()) {
+            auto& widgets = engine->widgets();
+            const glm::vec2 mouse = input.getMousePosition();
+            float lx = mouse.x, ly = mouse.y;
+            const float screenH = services_.window
+                ? static_cast<float>(services_.window->getHeight()) : 0.0f;
+            ui::mouseToTreeSpace(lx, ly, screenH, widgets.uiScale());
+            if (widgets.linkAt(lx, ly)) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+    }
+
     // Cursor affordance: show hand cursor over interactable entities.
-    if (!io.WantCaptureMouse) {
+    // Not while the cursor is over a frame FrameXML owns: ImGui has never heard
+    // of those, so its own answer is no wherever they are.
+    if (!io.WantCaptureMouse && !frameXmlOwnsMouse()) {
         auto* renderer = services_.renderer;
         auto* camera = renderer ? renderer->getCamera() : nullptr;
         auto* window = services_.window;
@@ -1245,57 +1796,64 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
             float screenW = static_cast<float>(window->getWidth());
             float screenH = static_cast<float>(window->getHeight());
             rendering::Ray ray = camera->screenToWorldRay(mousePos.x, mousePos.y, screenW, screenH);
-            float closestT = 1e30f;
-            bool hoverInteractable = false;
-            for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-                bool isGo   = (entity->getType() == game::ObjectType::GAMEOBJECT);
-                bool isUnit = (entity->getType() == game::ObjectType::UNIT);
-                bool isPlayer = (entity->getType() == game::ObjectType::PLAYER);
-                if (!isGo && !isUnit && !isPlayer) continue;
-                if (guid == gameHandler.getPlayerGuid()) continue; // skip self
-
-                glm::vec3 hitCenter;
-                float hitRadius = 0.0f;
-                bool hasBounds = core::Application::getInstance().getRenderBoundsForGuid(guid, hitCenter, hitRadius);
-                if (!hasBounds) {
-                    hitRadius = isGo ? 2.5f : 1.8f;
-                    hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
-                    hitCenter.z += isGo ? 1.2f : 1.0f;
-                } else {
-                    // Resource nodes can have very tight render bounds; keep
-                    // their click target close to the no-bounds fallback. Cap GO
-                    // spheres so a wide forge/anvil doesn't swallow nearby NPCs.
-                    hitRadius = isGo
-                        ? std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius)
-                        : std::max(hitRadius * 1.25f, 1.0f);
+            // The same picker the click uses, so the cursor affordance cannot
+            // disagree with what clicking would actually select - including the
+            // tighter sphere critters get, which this copy did not have.
+            const ui::ScenePick hoverPick =
+                ui::pickScene(gameHandler, ray, ui::ScenePickParams{});
+            if (hoverPick.closestGuid != 0) {
+                if (!drawVendorCursor(gameHandler, hoverPick) &&
+                    !drawWorldObjectCursor(gameHandler, hoverPick)) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 }
-
-                float hitT;
-                if (raySphereIntersect(ray, hitCenter, hitRadius, hitT) && hitT < closestT) {
-                    closestT = hitT;
-                    hoverInteractable = true;
-                }
-            }
-            if (hoverInteractable) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             }
         }
     }
 
     // Left-click targeting: only on mouse-up if the mouse didn't drag (camera rotate)
     // Record press position on mouse-down
-    if (!io.WantCaptureMouse && input.isMouseButtonJustPressed(SDL_BUTTON_LEFT) && !input.isMouseButtonPressed(SDL_BUTTON_RIGHT)) {
+    if (!io.WantCaptureMouse && !frameXmlOwnsMouse() &&
+        input.isMouseButtonJustPressed(SDL_BUTTON_LEFT) && !input.isMouseButtonPressed(SDL_BUTTON_RIGHT)) {
         leftClickPressPos_ = input.getMousePosition();
         leftClickWasPress_ = true;
+
+        // Light the object being pressed on.
+        //
+        // A game object is used rather than selected, so nothing else says the
+        // press landed on it - a unit has its circle and its frame, and an
+        // object had only the cursor, which does not change when the button
+        // goes down. Lit on the press and dark again on the release, which is
+        // where the real client puts it too.
+        if (auto* camera = services_.renderer ? services_.renderer->getCamera() : nullptr) {
+            if (auto* window = services_.window) {
+                const rendering::Ray pressRay = camera->screenToWorldRay(
+                    leftClickPressPos_.x, leftClickPressPos_.y,
+                    static_cast<float>(window->getWidth()),
+                    static_cast<float>(window->getHeight()));
+                const uint64_t pressed =
+                    ui::pickScene(gameHandler, pressRay, ui::ScenePickParams{}).resolve();
+                auto entity = pressed ? gameHandler.getEntityManager().getEntity(pressed)
+                                      : nullptr;
+                core::Application::getInstance().setPressedGameObject(
+                    entity && entity->getType() == game::ObjectType::GAMEOBJECT ? pressed : 0);
+            }
+        }
     }
 
     // On mouse-up, check if it was a click (not a drag)
+    if (input.isMouseButtonJustReleased(SDL_BUTTON_LEFT)) {
+        // Dark again the moment the button comes up, whatever the release
+        // turns out to mean - a click, a drag that turned the camera, or a
+        // press that ended somewhere else entirely.
+        core::Application::getInstance().setPressedGameObject(0);
+    }
+
     if (leftClickWasPress_ && input.isMouseButtonJustReleased(SDL_BUTTON_LEFT)) {
         leftClickWasPress_ = false;
         glm::vec2 releasePos = input.getMousePosition();
         glm::vec2 dragDelta = releasePos - leftClickPressPos_;
         float dragDistSq = glm::dot(dragDelta, dragDelta);
-        constexpr float CLICK_THRESHOLD = 5.0f;  // pixels
+        const float CLICK_THRESHOLD = clickDragThreshold();
 
         if (dragDistSq < CLICK_THRESHOLD * CLICK_THRESHOLD) {
             auto* renderer = services_.renderer;
@@ -1329,109 +1887,72 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     }
                 }
 
-                float closestT = 1e30f;
-                uint64_t closestGuid = 0;
-                float closestHostileUnitT = 1e30f;
-                uint64_t closestHostileUnitGuid = 0;
-                // Rank unit-vs-object by distance to the entity CENTER along the ray (not
-                // the inflated hit-sphere entry) so a unit in front is never lost to a big
-                // object sphere behind it.
-                float bestUnitCenterT = 1e30f;
-                uint64_t bestUnitGuid = 0;
-                float bestGoCenterT = 1e30f;
-                uint64_t bestGoGuid = 0;
+                const ui::ScenePick pick = ui::pickScene(
+                    gameHandler, ray, ui::ScenePickParams{});
+                uint64_t closestGuid = pick.resolve();
 
-                const uint64_t myGuid = gameHandler.getPlayerGuid();
-                for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-                    auto t = entity->getType();
-                    if (t != game::ObjectType::UNIT &&
-                        t != game::ObjectType::PLAYER &&
-                        t != game::ObjectType::GAMEOBJECT) continue;
-                    if (guid == myGuid) continue;  // Don't target self
-
-                    glm::vec3 hitCenter;
-                    float hitRadius = 0.0f;
-                    bool hasBounds = core::Application::getInstance().getRenderBoundsForGuid(guid, hitCenter, hitRadius);
-                    if (!hasBounds) {
-                        // Fallback hitbox based on entity type. Match the hover-cursor sizes
-                        // (game_screen.cpp ~line 1100) so the targeting reticle agrees with
-                        // the cursor affordance — otherwise NPCs feel "hard to click".
-                        float heightOffset = 1.0f;
-                        hitRadius = 1.8f;
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            // Critters have very low max health (< 100)
-                            if (unit->getMaxHealth() > 0 && unit->getMaxHealth() < 100) {
-                                hitRadius = 0.5f;
-                                heightOffset = 0.3f;
-                            }
-                        } else if (t == game::ObjectType::GAMEOBJECT) {
-                            hitRadius = 2.5f;
-                            heightOffset = 1.2f;
-                        }
-                        hitCenter = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
-                        hitCenter.z += heightOffset;
-                    } else if (t == game::ObjectType::GAMEOBJECT) {
-                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
-                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
-                    } else {
-                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
-                    }
-
-                    float hitT;
-                    if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
-                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
-                            if (centerT < bestUnitCenterT) {
-                                bestUnitCenterT = centerT;
-                                bestUnitGuid = guid;
-                            }
-                            if (t == game::ObjectType::UNIT) {
-                                auto unit = std::static_pointer_cast<game::Unit>(entity);
-                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                                if (hostileUnit && hitT < closestHostileUnitT) {
-                                    closestHostileUnitT = hitT;
-                                    closestHostileUnitGuid = guid;
-                                }
-                            }
-                        } else if (t == game::ObjectType::GAMEOBJECT) {
-                            // Purely-decorative objects (GENERIC, type 5) have no interaction
-                            // and must never steal a click from a unit.
-                            auto go = std::static_pointer_cast<game::GameObject>(entity);
-                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
-                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
-                                bestGoCenterT = centerT;
-                                bestGoGuid = guid;
-                            }
-                        }
-                        if (hitT < closestT) {
-                            closestT = hitT;
-                            closestGuid = guid;
+                // Dropping what the cursor is carrying onto another player
+                // opens a trade with them, which is how a trade begins in WoW
+                // and was reachable here only by typing /trade.
+                // Either cursor again: the item being offered usually comes
+                // from FrameXML's bags now, and asking only the bag window's
+                // meant a drag onto a player did nothing.
+                const bool carrying = inventoryScreen.isHoldingItem() ||
+                                      !frameXmlCursorItem().empty();
+                if (closestGuid != 0 && carrying) {
+                    auto entity = gameHandler.getEntityManager().getEntity(closestGuid);
+                    if (entity && entity->getType() == game::ObjectType::PLAYER) {
+                        uint8_t srcBag = 0xFF, srcSlot = 0;
+                        const bool haveSource =
+                            inventoryScreen.isHoldingItem()
+                                ? inventoryScreen.heldItemSource(srcBag, srcSlot)
+                                : frameXmlCursorWireSlot(srcBag, srcSlot);
+                        if (haveSource) {
+                            pendingTradeItem_ = PendingTradeItem{.active = true, .bag = srcBag, .slot = srcSlot};
+                            gameHandler.initiateTrade(closestGuid);
+                            // Whichever cursor was carrying it.
+                            if (inventoryScreen.isHoldingItem())
+                                inventoryScreen.releaseHeldItem();
+                            else
+                                frameXmlPutCursorDown();
+                            return;
                         }
                     }
                 }
 
-                // A unit wins over a game object unless the object's center is clearly in
-                // front of the unit's, so a creature is never lost to a decorative or
-                // backing object behind it. Hostile units keep their targeting priority.
-                constexpr float kUnitOverGoBias = 2.0f;
-                if (bestUnitGuid != 0 &&
-                    (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
-                    closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
-                } else if (bestGoGuid != 0) {
-                    closestGuid = bestGoGuid;
-                } else {
-                    closestGuid = 0;
-                }
-
-                if (closestGuid != 0) {
-                    if (closestGuid == gameHandler.getHookedFishingBobberGuid()) {
+                // An item waiting for a unit takes this click instead of it
+                // selecting anyone: "right-click the treat, then click the dog"
+                // is the whole of what the cursor is asking for.
+                if (closestGuid != 0 && gameHandler.isAwaitingUnitTarget()) {
+                    gameHandler.completeItemUseOnUnit(closestGuid);
+                } else if (closestGuid != 0) {
+                    // A game object is used, not targeted.
+                    //
+                    // The client set every click's subject as the target, so
+                    // clicking a door made the door the target: a selection
+                    // circle on the floor around it, a name where a creature's
+                    // belongs, and CMSG_SET_SELECTION sent for a guid that is
+                    // not a unit. WoW targets units and players; a left click
+                    // on an object is a use, which is what the hand cursor over
+                    // one has been promising. The hooked fishing bobber was the
+                    // one object this already did, as a special case.
+                    auto picked = gameHandler.getEntityManager().getEntity(closestGuid);
+                    if (picked && picked->getType() == game::ObjectType::GAMEOBJECT) {
                         gameHandler.interactWithGameObject(closestGuid);
                     } else {
                         gameHandler.setTarget(closestGuid);
                     }
-                } else {
-                    // Clicked empty space — deselect current target
+                } else if (addons::storedCVarValue("deselectOnClick", "1") != "0") {
+                    // Clicked empty space - deselect current target, unless the
+                    // player asked otherwise. The panel calls this Sticky
+                    // Targeting and ticks it to mean "do not", which is why the
+                    // sense reads backwards here: self.invert on the checkbox
+                    // turns the tick into a zero.
+                    //
+                    // Clearing was unconditional, so the setting moved and the
+                    // target went anyway. The default is the clearing this
+                    // client already did, so nobody's targeting changes by the
+                    // switch beginning to work.
                     gameHandler.clearTarget();
                 }
             }
@@ -1440,9 +1961,10 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
 
     // Right-click: select NPC (if needed) then interact / loot / auto-attack.
     // Record the press position; the action only fires on release for a tap (below),
-    // never for a right-drag camera rotate — otherwise turning the view toward a nearby
+    // never for a right-drag camera rotate - otherwise turning the view toward a nearby
     // mob would auto-attack it without the player intending to engage.
-    if (!io.WantCaptureMouse && input.isMouseButtonJustPressed(SDL_BUTTON_RIGHT) && !input.isMouseButtonPressed(SDL_BUTTON_LEFT)) {
+    if (!io.WantCaptureMouse && !frameXmlOwnsMouse() &&
+        input.isMouseButtonJustPressed(SDL_BUTTON_RIGHT) && !input.isMouseButtonPressed(SDL_BUTTON_LEFT)) {
         rightClickPressPos_ = input.getMousePosition();
         rightClickWasPress_ = true;
     }
@@ -1451,9 +1973,9 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
     if (rightClickWasPress_ && input.isMouseButtonJustReleased(SDL_BUTTON_RIGHT)) {
         rightClickWasPress_ = false;
         glm::vec2 rDragDelta = input.getMousePosition() - rightClickPressPos_;
-        constexpr float RCLICK_THRESHOLD = 5.0f;  // pixels
+        const float RCLICK_THRESHOLD = clickDragThreshold();
         if (glm::dot(rDragDelta, rDragDelta) >= RCLICK_THRESHOLD * RCLICK_THRESHOLD) {
-            // Treated as a camera rotate — do not interact/attack.
+            // Treated as a camera rotate - do not interact/attack.
             return;
         }
         // Fishing bobbers are tiny and partly submerged, so their model bounds can
@@ -1534,120 +2056,40 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                 float screenW = static_cast<float>(window->getWidth());
                 float screenH = static_cast<float>(window->getHeight());
                 rendering::Ray ray = camera->screenToWorldRay(mousePos.x, mousePos.y, screenW, screenH);
-                float closestT = 1e30f;
-                uint64_t closestGuid = 0;
-                game::ObjectType closestType = game::ObjectType::OBJECT;
-                float closestHostileUnitT = 1e30f;
-                uint64_t closestHostileUnitGuid = 0;
+                // The right-click picker wants a slightly taller, tighter fallback
+                // sphere than the target picker, and must ignore chairs: their wide
+                // sphere is easy to catch while right-drag-rotating the camera, which
+                // sits the player down.
+                ui::ScenePickParams params;
+                params.unitHitRadius = 1.5f;
+                params.unitHeightOffset = 1.5f;
+                params.skipChairs = true;
+
                 float closestQuestGoT = 1e30f;
                 uint64_t closestQuestGoGuid = 0;
                 float hookedBobberT = 1e30f;
                 uint64_t hookedBobberGuid = 0;
-                // Nearest unit and nearest (non-decorative) object by distance to the
-                // entity CENTER, so a unit in front beats a big object sphere behind it.
-                float bestUnitCenterT = 1e30f;
-                uint64_t bestUnitGuid = 0;
-                float bestGoCenterT = 1e30f;
-                uint64_t bestGoGuid = 0;
-                const uint64_t myGuid = gameHandler.getPlayerGuid();
-                for (const auto& [guid, entity] : gameHandler.getEntityManager().getEntities()) {
-                    auto t = entity->getType();
-                    if (t != game::ObjectType::UNIT &&
-                        t != game::ObjectType::PLAYER &&
-                        t != game::ObjectType::GAMEOBJECT)
-                        continue;
-                    if (guid == myGuid) continue;
+                const ui::ScenePick pick = ui::pickScene(
+                    gameHandler, ray, params,
+                    [&](uint64_t guid, const std::shared_ptr<game::Entity>& entity,
+                        float hitT, float /*centerT*/) {
+                        if (entity->getType() != game::ObjectType::GAMEOBJECT) return;
+                        if (guid == gameHandler.getHookedFishingBobberGuid() &&
+                            hitT < hookedBobberT) {
+                            hookedBobberT = hitT;
+                            hookedBobberGuid = guid;
+                        }
+                        if (questObjectiveGoEntries.empty()) return;
+                        auto go = std::static_pointer_cast<game::GameObject>(entity);
+                        if (questObjectiveGoEntries.count(go->getEntry()) &&
+                            hitT < closestQuestGoT) {
+                            closestQuestGoT = hitT;
+                            closestQuestGoGuid = guid;
+                        }
+                    });
 
-                    glm::vec3 hitCenter;
-                    float hitRadius = 0.0f;
-                    bool hasBounds = core::Application::getInstance().getRenderBoundsForGuid(guid, hitCenter, hitRadius);
-                    if (!hasBounds) {
-                        float heightOffset = 1.5f;
-                        hitRadius = 1.5f;
-                        if (t == game::ObjectType::UNIT) {
-                            auto unit = std::static_pointer_cast<game::Unit>(entity);
-                            if (unit->getMaxHealth() > 0 && unit->getMaxHealth() < 100) {
-                                hitRadius = 0.5f;
-                                heightOffset = 0.3f;
-                            }
-                        } else if (t == game::ObjectType::GAMEOBJECT) {
-                            // Skip chair-type GOs (type 7) from the right-click world picker.
-                            // Their 2.5m fallback sphere gets hit when right-click-rotating
-                            // the camera near a chair, causing the player to auto-sit. Users
-                            // can still left-click a chair to target it, then right-click to sit.
-                            auto go = std::static_pointer_cast<game::GameObject>(entity);
-                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
-                            if (goInfo && goInfo->type == 7) continue;
-                            hitRadius = 2.5f;
-                            heightOffset = 1.2f;
-                        }
-                        hitCenter = core::coords::canonicalToRender(
-                            glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
-                        hitCenter.z += heightOffset;
-                        // Log each unique GO's raypick position once
-                        if (t == game::ObjectType::GAMEOBJECT) {
-                            static std::unordered_set<uint64_t> goPickLog;
-                            if (goPickLog.insert(guid).second) {
-                                auto go = std::static_pointer_cast<game::GameObject>(entity);
-                                LOG_DEBUG("[GO-DIAG] Raypick GO: guid=0x", std::hex, guid, std::dec,
-                                            " entry=", go->getEntry(), " name='", go->getName(),
-                                            "' pos=(", entity->getX(), ",", entity->getY(), ",", entity->getZ(),
-                                            ") center=(", hitCenter.x, ",", hitCenter.y, ",", hitCenter.z,
-                                            ") r=", hitRadius);
-                            }
-                        }
-                    } else if (t == game::ObjectType::GAMEOBJECT) {
-                        // Cap the sphere so a wide forge/anvil doesn't swallow nearby NPCs.
-                        hitRadius = std::clamp(hitRadius * 1.25f, 2.5f, kMaxGameObjectPickRadius);
-                    } else {
-                        hitRadius = std::max(hitRadius * 1.25f, 1.0f);
-                    }
-
-                    float hitT;
-                    if (raySphereIntersect(ray, hitCenter, hitRadius, hitT)) {
-                        const float centerT = glm::dot(hitCenter - ray.origin, ray.direction);
-                        if (t == game::ObjectType::UNIT || t == game::ObjectType::PLAYER) {
-                            if (centerT < bestUnitCenterT) {
-                                bestUnitCenterT = centerT;
-                                bestUnitGuid = guid;
-                            }
-                            if (t == game::ObjectType::UNIT) {
-                                auto unit = std::static_pointer_cast<game::Unit>(entity);
-                                bool hostileUnit = unit->isHostile() || gameHandler.isAggressiveTowardPlayer(guid);
-                                if (hostileUnit && hitT < closestHostileUnitT) {
-                                    closestHostileUnitT = hitT;
-                                    closestHostileUnitGuid = guid;
-                                }
-                            }
-                        }
-                        if (t == game::ObjectType::GAMEOBJECT) {
-                            auto go = std::static_pointer_cast<game::GameObject>(entity);
-                            if (guid == gameHandler.getHookedFishingBobberGuid() && hitT < hookedBobberT) {
-                                hookedBobberT = hitT;
-                                hookedBobberGuid = guid;
-                            }
-                            // Skip purely-decorative objects (GENERIC, type 5).
-                            auto* goInfo = gameHandler.getCachedGameObjectInfo(go->getEntry());
-                            if ((!goInfo || goInfo->type != 5) && centerT < bestGoCenterT) {
-                                bestGoCenterT = centerT;
-                                bestGoGuid = guid;
-                            }
-                            if (!questObjectiveGoEntries.empty()) {
-                                if (questObjectiveGoEntries.count(go->getEntry())) {
-                                    if (hitT < closestQuestGoT) {
-                                        closestQuestGoT = hitT;
-                                        closestQuestGoGuid = guid;
-                                    }
-                                }
-                            }
-                        }
-                        if (hitT < closestT) {
-                            closestT = hitT;
-                            closestGuid = guid;
-                            closestType = t;
-                        }
-                    }
-                }
+                uint64_t closestGuid = 0;
+                game::ObjectType closestType = game::ObjectType::OBJECT;
 
                 // A hooked fishing bobber is time-sensitive and intentionally small:
                 // if its click sphere was hit, reel it rather than selecting an
@@ -1659,20 +2101,10 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                     closestGuid = closestQuestGoGuid;
                     closestType = game::ObjectType::GAMEOBJECT;
                 } else {
-                    // A unit wins over a game object unless the object's center is clearly
-                    // in front of the unit's, so a creature is never lost to a decorative
-                    // or backing object behind it. Hostile units keep attack priority.
-                    constexpr float kUnitOverGoBias = 2.0f;
-                    if (bestUnitGuid != 0 &&
-                        (bestGoGuid == 0 || bestUnitCenterT <= bestGoCenterT + kUnitOverGoBias)) {
-                        closestGuid = (closestHostileUnitGuid != 0) ? closestHostileUnitGuid : bestUnitGuid;
-                        closestType = game::ObjectType::UNIT;
-                    } else if (bestGoGuid != 0) {
-                        closestGuid = bestGoGuid;
-                        closestType = game::ObjectType::GAMEOBJECT;
-                    } else {
-                        closestGuid = 0;
-                    }
+                    closestGuid = pick.resolve();
+                    closestType = (closestGuid != 0 && closestGuid == pick.objectGuid)
+                                      ? game::ObjectType::GAMEOBJECT
+                                      : game::ObjectType::UNIT;
                 }
 
                 if (closestGuid != 0) {

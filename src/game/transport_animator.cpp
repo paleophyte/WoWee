@@ -18,12 +18,12 @@ namespace {
 
 // GO entries whose TaxiPath berth runs parallel to the pier: the ship holds a broadside
 // (side-on) heading through its dock dwell instead of its bow-first approach yaw. Kept
-// entry-scoped on purpose — this is route geometry, not a model trait, so an unrelated
+// entry-scoped on purpose - this is route geometry, not a model trait, so an unrelated
 // ship that happens to reuse one of these display ids keeps its own docking orientation.
 bool berthRunsParallel(uint32_t entry) {
-    return entry == 176310u ||  // The Bravery — Stormwind Harbor
-           entry == 176244u ||  // The Moonspray — Auberdine
-           entry == 181646u;    // Elune's Blessing — Auberdine
+    return entry == 176310u ||  // The Bravery - Stormwind Harbor
+           entry == 176244u ||  // The Moonspray - Auberdine
+           entry == 181646u;    // Elune's Blessing - Auberdine
 }
 
 }  // namespace
@@ -96,15 +96,24 @@ void TransportAnimator::evaluateAndApply(
 
     transport.position = transport.basePosition + pathOffset;
 
-    // The affected ship routes need entry-specific berth headings at their
-    // repeated-position TaxiPath dwell nodes. Blend during the final/first five
-    // seconds and hold the exact authored position for the 60-second stop.
+    // A TaxiPath route encodes a dock wait as two keys at the same position with
+    // time between them. Hold the authored position for that stop and blend the
+    // heading over the five seconds either side of it.
+    //
+    // This used to run only for the three entries in berthRunsParallel, because
+    // it was written for their broadside berths. But the position hold is not a
+    // berth-specific nicety: a Catmull-Rom spline is not constrained to the hull
+    // of its control points, so evaluating through a repeated key overshoots and
+    // recovers - the ship sails past its dock and comes back, repeatedly, for
+    // the whole length of the wait. That is the same overshoot already
+    // documented and clamped for the tram, and it applies to every ship.
+    // berthRunsParallel now decides only what it is about: the heading.
     float shipDockBlend = 0.0f;
     glm::vec3 shipApproach(0.0f);
     bool shipAtDockDwell = false;
     glm::vec3 shipDockPosition(0.0f);
     const bool needsSideOnDock = berthRunsParallel(transport.entry);
-    if (needsSideOnDock && pathEntry.worldCoords) {
+    if (pathEntry.worldCoords && !transport.isM2) {
         constexpr uint32_t kDockTurnMs = 5000u;
         const auto& keys = spline.keys();
         for (size_t i = 1; i + 1 < keys.size(); ++i) {
@@ -118,9 +127,26 @@ void TransportAnimator::evaluateAndApply(
                 continue;
             }
 
-            shipApproach = keys[i].position - keys[i - 1].position;
+            // A berth heading is the direction the hull lies while alongside, and
+            // a route generally turns as it passes through its dock: the Maiden's
+            // Fancy comes into Menethil on a bearing 26 degrees off the one it
+            // leaves on. Taking the arrival leg alone therefore parked the hull
+            // half that turn out - 13 degrees, which over a hundred-unit hull is
+            // enough to walk the gangway off the plank. Use the chord through the
+            // berth, from the node before the stop to the node after it, which is
+            // the line the boat is lying on rather than either end of the turn.
+            const glm::vec3 berthFrom = keys[i - 1].position;
+            const glm::vec3 berthTo =
+                (i + 2 < keys.size()) ? keys[i + 2].position : keys[i].position;
+            shipApproach = berthTo - berthFrom;
             shipApproach.z = 0.0f;
-            const float approachLen = glm::length(shipApproach);
+            float approachLen = glm::length(shipApproach);
+            if (approachLen <= 0.001f) {
+                // Nothing after the stop (route ends here): fall back to arrival.
+                shipApproach = keys[i].position - keys[i - 1].position;
+                shipApproach.z = 0.0f;
+                approachLen = glm::length(shipApproach);
+            }
             if (approachLen <= 0.001f) break;
             shipApproach /= approachLen;
 
@@ -141,6 +167,9 @@ void TransportAnimator::evaluateAndApply(
             break;
         }
     }
+    // Record the stop so the hull's machinery can follow it. A paddlewheel
+    // turning while the ship sits at the pier is what happens otherwise.
+    transport.atDockDwell = shipAtDockDwell;
     if (shipAtDockDwell) {
         // Catmull-Rom evaluation can sit slightly off a repeated-position key
         // even during its authored hold. Pin the actual dwell to the TaxiPath
@@ -148,8 +177,30 @@ void TransportAnimator::evaluateAndApply(
         transport.position = transport.basePosition + shipDockPosition;
     }
 
-    // Use server yaw if available (authoritative), otherwise compute from spline tangent
-    if (transport.hasServerYaw) {
+    // Server yaw is authoritative only while the server is also driving position.
+    //
+    // hasServerYaw is set by every server update, including the ones that arrive
+    // for a ship the client animates itself. Taking it here pinned such a ship's
+    // facing to whichever orientation the server last reported - its berth
+    // heading - and held it there for the whole voyage while the position ran
+    // along the route underneath. That is a ship sailing sideways or stern-first
+    // and lying across its pier on arrival, and it also made everything below
+    // (route yaw, the bow offset, the broadside dock hold) unreachable for any
+    // transport the server had ever mentioned.
+    //
+    // When the client owns the animation the route tangent is what facing has to
+    // follow, because the client owns the phase the server's snapshot knows
+    // nothing about.
+    if (pathEntry.zOnly) {
+        // A lift travels straight up and down, so its tangent is vertical and
+        // carries no heading at all: atan2 of nothing is zero, and
+        // orientationFromTangent falls into its near-vertical branch and picks
+        // an arbitrary basis. Both were being used, which is why an elevator
+        // stood at right angles to the shaft it runs in. It keeps the yaw it
+        // was placed at, which is the only heading it ever has.
+        transport.rotation =
+            glm::angleAxis(transport.spawnYaw, glm::vec3(0.0f, 0.0f, 1.0f));
+    } else if (transport.hasServerYaw && !transport.useClientAnimation) {
         float effectiveYaw = transport.serverYaw +
             (transport.serverYawFlipped180 ? glm::pi<float>() : 0.0f);
         transport.rotation = glm::angleAxis(effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
@@ -201,11 +252,10 @@ void TransportAnimator::evaluateAndApply(
                 // the same yaw the server would send from the canonical tangent.
                 // The generic spline helper uses a different local-forward convention
                 // and mirrored ship yaw, producing sideways/backwards sailing.
-                // Transport WMO hulls are authored with their bow opposite the
-                // model-space +X axis used by the raw route yaw.
-                // Facing = direction of travel + the hull's fixed bow offset. The offset
-                // is the single per-model constant (0 for a bow-forward hull, PI for one
-                // authored bow-aft); see TransportManager::transportModelBowOffset.
+                // Facing = direction of travel + the hull's bow offset. Every
+                // transport hull in the data is authored bow-at--X, so that
+                // offset is PI for all of them; see
+                // TransportManager::transportModelBowOffset for the measurements.
                 float routeYaw = std::atan2(tangent.x, tangent.y) +
                                  TransportManager::transportModelBowOffset(transport.displayId);
                 // A GO query reports the transport's orientation at the instant it is
@@ -213,7 +263,7 @@ void TransportAnimator::evaluateAndApply(
                 // snapshot as the dock yaw made the result depend on where the ship
                 // happened to be when the player logged in. berthRunsParallel routes run
                 // parallel to their piers, so the corrected route heading is also the
-                // stable broadside dock heading — the dock dwell holds routeYaw directly.
+                // stable broadside dock heading - the dock dwell holds routeYaw directly.
                 const float effectiveYaw = routeYaw;
                 transport.rotation = glm::angleAxis(
                     effectiveYaw, glm::vec3(0.0f, 0.0f, 1.0f));
@@ -235,18 +285,18 @@ void TransportAnimator::evaluateAndApply(
             } else {
                 transport.rotation = math::CatmullRomSpline::orientationFromTangent(tangent);
             }
-        } else if (pathEntry.worldCoords && !transport.isM2 && transport.hasDockYaw &&
-                   TransportManager::transportModelBowOffset(transport.displayId) == 0.0f) {
-            // TaxiPathNode route builders encode a dock wait with repeated
-            // positions. With no movement tangent, restore the GO's authored
-            // spawn orientation so the ship lies alongside the dock rather
-            // than retaining its bow-first approach yaw throughout the dwell.
-            // A hull with a nonzero bow offset (e.g. the icebreaker) is excluded: its
-            // spawn yaw is uncorrected, so restoring it made the ship spin around for the
-            // stop and back on departure — it keeps its (corrected) arrival rotation.
-            transport.rotation = glm::angleAxis(
-                transport.dockYaw, glm::vec3(0.0f, 0.0f, 1.0f));
         }
+        // A TaxiPathNode route encodes a dock wait as repeated positions, so the
+        // tangent vanishes and there is no heading to derive. The ship keeps its
+        // corrected arrival rotation through the dwell.
+        //
+        // This used to restore the GO's authored spawn orientation instead, for
+        // hulls whose bow offset was zero. That spawn yaw is a snapshot from
+        // whenever the GO query happened to answer rather than a heading for the
+        // berth, and restoring it made a ship swing round for the stop and back
+        // again on departure. Now that the offset is PI for every hull the
+        // condition could not fire at all, so the branch is gone rather than
+        // left sitting there looking live.
     }
 }
 

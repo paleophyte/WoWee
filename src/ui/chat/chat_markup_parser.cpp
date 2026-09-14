@@ -1,4 +1,4 @@
-// ChatMarkupParser — parse WoW markup into typed segments.
+// ChatMarkupParser - parse WoW markup into typed segments.
 // Moved from inline lambdas in ChatPanel::render() (Phase 2.1).
 #include "ui/chat/chat_markup_parser.hpp"
 #include <algorithm>
@@ -41,17 +41,17 @@ std::vector<ChatSegment> ChatMarkupParser::parse(const std::string& text) const 
         size_t nextSpecial = std::min({urlStart, linkStart, bareLinkStart});
 
         if (nextSpecial == std::string::npos) {
-            // No more special elements — remainder is plain text
+            // No more special elements - remainder is plain text
             std::string remaining = text.substr(pos);
             if (!remaining.empty()) {
-                segments.push_back({SegmentType::Text, std::move(remaining)});
+                segments.push_back({.type = SegmentType::Text, .text = std::move(remaining)});
             }
             break;
         }
 
         // Emit plain text before the special element
         if (nextSpecial > pos) {
-            segments.push_back({SegmentType::Text, text.substr(pos, nextSpecial - pos)});
+            segments.push_back({.type = SegmentType::Text, .text = text.substr(pos, nextSpecial - pos)});
         }
 
         // Handle WoW link (|c... or bare |H...)
@@ -141,7 +141,7 @@ std::vector<ChatSegment> ChatMarkupParser::parse(const std::string& text) const 
                 continue;
             }
 
-            // Not an item link — treat as colored text: |cAARRGGBB...text...|r
+            // Not an item link - treat as colored text: |cAARRGGBB...text...|r
             if (nextSpecial == linkStart && text.size() > linkStart + 10) {
                 ImVec4 cColor = parseWowColor(text, linkStart);
                 size_t textStart = linkStart + 10; // after |cAARRGGBB
@@ -180,8 +180,8 @@ std::vector<ChatSegment> ChatMarkupParser::parse(const std::string& text) const 
                     segments.push_back(std::move(seg));
                 }
             } else {
-                // Bare |c without enough chars for color — render literally
-                segments.push_back({SegmentType::Text, "|c"});
+                // Bare |c without enough chars for color - render literally
+                segments.push_back({.type = SegmentType::Text, .text = "|c"});
                 pos = nextSpecial + 2;
             }
             continue;
@@ -193,7 +193,7 @@ std::vector<ChatSegment> ChatMarkupParser::parse(const std::string& text) const 
             if (urlEnd == std::string::npos) urlEnd = text.size();
             std::string url = text.substr(urlStart, urlEnd - urlStart);
 
-            segments.push_back({SegmentType::Url, std::move(url)});
+            segments.push_back({.type = SegmentType::Url, .text = std::move(url)});
             pos = urlEnd;
             continue;
         }

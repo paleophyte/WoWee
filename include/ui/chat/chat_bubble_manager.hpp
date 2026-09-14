@@ -26,7 +26,14 @@ public:
     /** Register the chat-bubble callback on GameHandler (call once per session). */
     void setupCallback(game::GameHandler& gameHandler);
 
-    bool empty() const { return bubbles_.empty(); }
+    [[nodiscard]] bool empty() const { return bubbles_.empty(); }
+
+    /// The chatBubbles CVar. The interface options put a checkbox on it and
+    /// nothing here read it, so turning bubbles off left them on the screen.
+    /// Turning it off drops what is queued too, rather than leaving the last
+    /// few to fade.
+    [[nodiscard]] bool bubblesShown() const { return show_; }
+    void setBubblesShown(bool shown) { show_ = shown; }
 
 private:
     struct ChatBubble {
@@ -38,6 +45,7 @@ private:
     };
     std::vector<ChatBubble> bubbles_;
     bool callbackSet_ = false;
+    bool show_ = true;
 
     static constexpr size_t kMaxBubbles = 10;
 };

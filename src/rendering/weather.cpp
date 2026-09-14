@@ -34,6 +34,42 @@ Weather::~Weather() {
     shutdown();
 }
 
+/// Builds the one pipeline this effect draws with, vertex layout and all.
+///
+/// initialize() and recreatePipelines() described it identically, which is two
+/// statements of what a weather particle vertex is in one file.
+void Weather::buildPipelines(VkDevice device,
+                             const VkPipelineShaderStageCreateInfo& vertStage,
+                             const VkPipelineShaderStageCreateInfo& fragStage) {
+    // Vertex input: position only (vec3), stride = 3 * sizeof(float)
+    VkVertexInputBindingDescription binding{};
+    binding.binding = 0;
+    binding.stride = 3 * sizeof(float);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription posAttr{};
+    posAttr.location = 0;
+    posAttr.binding = 0;
+    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+    posAttr.offset = 0;
+
+    // Dynamic viewport and scissor
+    std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
+
+    pipeline = PipelineBuilder()
+        .setShaders(vertStage, fragStage)
+        .setVertexInput({binding}, {posAttr})
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS)  // depth test on, write off (transparent particles)
+        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
+        .setMultisample(vkCtx->getMsaaSamples())
+        .setLayout(pipelineLayout)
+        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setDynamicStates(dynamicStates)
+        .build(device, vkCtx->getPipelineCache());
+}
+
 bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     LOG_INFO("Initializing weather system");
 
@@ -41,20 +77,10 @@ bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     VkDevice device = vkCtx->getDevice();
 
     // Load SPIR-V shaders
-    VkShaderModule vertModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/weather.vert.spv")) {
-        LOG_ERROR("Failed to load weather vertex shader");
-        return false;
-    }
-
-    VkShaderModule fragModule;
-    if (!fragModule.loadFromFile(device, "assets/shaders/weather.frag.spv")) {
-        LOG_ERROR("Failed to load weather fragment shader");
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv", "assets/shaders/weather.frag.spv", "weather");
+    if (!shaders) return false;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
     // Push constant range: { float particleSize; float pad0; float pad1; float pad2; vec4 particleColor; } = 32 bytes
     VkPushConstantRange pushRange{};
@@ -69,39 +95,8 @@ bool Weather::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
         return false;
     }
 
-    // Vertex input: position only (vec3), stride = 3 * sizeof(float)
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = 3 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    buildPipelines(device, vertStage, fragStage);
 
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset = 0;
-
-    // Dynamic viewport and scissor
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    pipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS)  // depth test on, write off (transparent particles)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
-
-    vertModule.destroy();
-    fragModule.destroy();
 
     if (pipeline == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create weather pipeline");
@@ -133,55 +128,15 @@ void Weather::recreatePipelines() {
     if (!vkCtx) return;
     VkDevice device = vkCtx->getDevice();
 
-    if (pipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, pipeline, nullptr); pipeline = VK_NULL_HANDLE; }
+    destroy(device, pipeline);
 
-    VkShaderModule vertModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/weather.vert.spv")) {
-        LOG_ERROR("Weather::recreatePipelines: failed to load vertex shader");
-        return;
-    }
-    VkShaderModule fragModule;
-    if (!fragModule.loadFromFile(device, "assets/shaders/weather.frag.spv")) {
-        LOG_ERROR("Weather::recreatePipelines: failed to load fragment shader");
-        vertModule.destroy();
-        return;
-    }
+    auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv", "assets/shaders/weather.frag.spv", "weather");
+    if (!shaders) return;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    buildPipelines(device, vertStage, fragStage);
 
-    // Vertex input (same as initialize)
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = 3 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset = 0;
-
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    pipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS)
-        .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
-
-    vertModule.destroy();
-    fragModule.destroy();
 
     if (pipeline == VK_NULL_HANDLE) {
         LOG_ERROR("Weather::recreatePipelines: failed to create pipeline");
@@ -199,7 +154,8 @@ void Weather::update(const Camera& camera, float deltaTime) {
     }
 
     // Calculate active particle count based on intensity
-    int targetParticleCount = static_cast<int>(MAX_PARTICLES * intensity);
+    int targetParticleCount =
+        static_cast<int>(MAX_PARTICLES * intensity * densityScale_);
 
     // Adjust particle count
     while (static_cast<int>(particles.size()) < targetParticleCount) {
@@ -330,7 +286,7 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
 void Weather::resetParticles(const Camera& camera) {
     particles.clear();
 
-    int particleCount = static_cast<int>(MAX_PARTICLES * intensity);
+    int particleCount = static_cast<int>(MAX_PARTICLES * intensity * densityScale_);
     glm::vec3 cameraPos = camera.getPosition();
 
     for (int i = 0; i < particleCount; ++i) {
@@ -372,22 +328,9 @@ int Weather::getParticleCount() const {
 
 void Weather::shutdown() {
     if (vkCtx) {
-        VkDevice device = vkCtx->getDevice();
-        VmaAllocator allocator = vkCtx->getAllocator();
-
-        if (pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, pipeline, nullptr);
-            pipeline = VK_NULL_HANDLE;
-        }
-        if (pipelineLayout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            pipelineLayout = VK_NULL_HANDLE;
-        }
-        if (dynamicVB != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(allocator, dynamicVB, dynamicVBAlloc);
-            dynamicVB = VK_NULL_HANDLE;
-            dynamicVBAlloc = VK_NULL_HANDLE;
-        }
+        destroyParticleResources(vkCtx->getDevice(), vkCtx->getAllocator(),
+                                 pipeline, pipelineLayout, dynamicVB,
+                                 dynamicVBAlloc);
     }
 
     vkCtx = nullptr;
@@ -400,7 +343,7 @@ void Weather::shutdown() {
 // ---------------------------------------------------------------------------
 
 void Weather::setZoneWeather(uint32_t zoneId, Type type, float minIntensity, float maxIntensity, float probability) {
-    zoneWeatherTable_[zoneId] = {type, minIntensity, maxIntensity, probability};
+    zoneWeatherTable_[zoneId] = {.type = type, .minIntensity = minIntensity, .maxIntensity = maxIntensity, .probability = probability};
 }
 
 void Weather::initializeZoneWeatherDefaults() {
@@ -411,14 +354,14 @@ void Weather::initializeZoneWeatherDefaults() {
     // Duskwood's persistent atmosphere is supplied by its lighting fog profile.
     // Do not synthesize rain here: the streak particles read as wind-blown fog.
     // Renderer also suppresses server rain in Duskwood so its fog stays legible.
-    setZoneWeather(11,   Type::RAIN, 0.1f, 0.4f, 0.15f);  // Wetlands — moderate rain
+    setZoneWeather(11,   Type::RAIN, 0.1f, 0.4f, 0.15f);  // Wetlands - moderate rain
     setZoneWeather(8,    Type::RAIN, 0.1f, 0.5f, 0.2f);   // Swamp of Sorrows
     setZoneWeather(33,   Type::RAIN, 0.2f, 0.7f, 0.25f);  // Stranglethorn Vale
-    setZoneWeather(44,   Type::RAIN, 0.1f, 0.3f, 0.1f);   // Redridge Mountains — light rain
+    setZoneWeather(44,   Type::RAIN, 0.1f, 0.3f, 0.1f);   // Redridge Mountains - light rain
     setZoneWeather(36,   Type::RAIN, 0.1f, 0.4f, 0.15f);  // Alterac Mountains
     setZoneWeather(45,   Type::RAIN, 0.1f, 0.3f, 0.1f);   // Arathi Highlands
     setZoneWeather(267,  Type::RAIN, 0.2f, 0.5f, 0.2f);   // Hillsbrad Foothills
-    setZoneWeather(28,   Type::RAIN, 0.1f, 0.3f, 0.1f);   // Western Plaguelands — occasional rain
+    setZoneWeather(28,   Type::RAIN, 0.1f, 0.3f, 0.1f);   // Western Plaguelands - occasional rain
     setZoneWeather(139,  Type::RAIN, 0.1f, 0.3f, 0.1f);   // Eastern Plaguelands
 
     // Snowy zones
@@ -457,14 +400,14 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
         initializeZoneWeatherDefaults();
     }
 
-    // Zone changed — reset weather cycle
+    // Zone changed - reset weather cycle
     if (zoneId != currentWeatherZone_) {
         currentWeatherZone_ = zoneId;
         zoneWeatherTimer_ = 0.0f;
 
         auto it = zoneWeatherTable_.find(zoneId);
         if (it == zoneWeatherTable_.end()) {
-            // Zone has no configured weather — clear gradually
+            // Zone has no configured weather - clear gradually
             targetIntensity_ = 0.0f;
         } else {
             // Roll whether weather is active based on probability
@@ -501,7 +444,7 @@ void Weather::updateZoneWeather(uint32_t zoneId, float deltaTime) {
         }
     }
 
-    // Weather cycling — periodically re-roll weather
+    // Weather cycling - periodically re-roll weather
     zoneWeatherTimer_ += deltaTime;
     if (zoneWeatherTimer_ >= zoneWeatherCycleDuration_ && zoneWeatherCycleDuration_ > 0.0f) {
         zoneWeatherTimer_ = 0.0f;

@@ -23,7 +23,7 @@ public:
 
     // Volume control
     void setVolumeScale(float scale);
-    float getVolumeScale() const { return volumeScale_; }
+    [[nodiscard]] float getVolumeScale() const { return volumeScale_; }
 
     // Magic school types
     enum class MagicSchool {
@@ -49,12 +49,6 @@ public:
     void playCast(MagicSchool school);                        // When spell fires
     void playImpact(MagicSchool school, SpellPower power);    // When spell hits target
 
-    // Specific spell sounds
-    void playFireball();
-    void playFrostbolt();
-    void playLightningBolt();
-    void playHeal();
-    void playShadowBolt();
 
 private:
     struct SpellSample {

@@ -35,42 +35,48 @@ public:
      * Lookup an entry by normalized WoW path (lowercase, backslash)
      * @return Pointer to entry or nullptr if not found
      */
-    const Entry* lookup(const std::string& normalizedWowPath) const;
+    [[nodiscard]] const Entry* lookup(const std::string& normalizedWowPath) const;
 
     /**
      * Resolve full filesystem path for a WoW virtual path
      * @return Full filesystem path or empty string if not found
      */
-    std::string resolveFilesystemPath(const std::string& normalizedWowPath) const;
+    [[nodiscard]] std::string resolveFilesystemPath(const std::string& normalizedWowPath) const;
 
     /**
      * Check if an entry exists
      */
-    bool hasEntry(const std::string& normalizedWowPath) const;
+    [[nodiscard]] bool hasEntry(const std::string& normalizedWowPath) const;
 
     /**
      * Get base path (directory containing extracted assets)
      */
-    const std::string& getBasePath() const { return basePath_; }
+    [[nodiscard]] const std::string& getBasePath() const { return basePath_; }
+
+    /// Which client this tree was extracted from, e.g. "wotlk". Empty when the
+    /// manifest predates the field, which is not the same as "no expansion":
+    /// it means the answer is unknown and nothing may be concluded from it.
+    [[nodiscard]] const std::string& getExpansion() const { return expansion_; }
 
     /**
      * Get total number of entries
      */
-    size_t getEntryCount() const { return entries_.size(); }
+    [[nodiscard]] size_t getEntryCount() const { return entries_.size(); }
 
     /**
      * Access entries map (read-only) for iteration
      */
-    const std::unordered_map<std::string, Entry>& getEntries() const { return entries_; }
+    [[nodiscard]] const std::unordered_map<std::string, Entry>& getEntries() const { return entries_; }
 
     /**
      * Check if manifest is loaded
      */
-    bool isLoaded() const { return loaded_; }
+    [[nodiscard]] bool isLoaded() const { return loaded_; }
 
 private:
     bool loaded_ = false;
     std::string basePath_;           // Root directory for extracted assets
+    std::string expansion_;          // Expansion this tree came from, empty if unrecorded
     std::string manifestDir_;        // Directory containing manifest.json
     std::unordered_map<std::string, Entry> entries_;
 };

@@ -1,4 +1,8 @@
 #include "core/entity_spawner.hpp"
+
+#include <set>
+#include "rendering/m2_model_classifier.hpp"
+#include "game/transport_path_repository.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
@@ -11,10 +15,14 @@
 #include "audio/npc_voice_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/wmo_group_path.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
+#include "pipeline/char_sections.hpp"
+#include "pipeline/m2_asset_loader.hpp"
+#include "pipeline/item_textures.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
 #include "game/game_utils.hpp"
@@ -66,12 +74,12 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             // The replacement request is already queued; never instantiate stale
             // geometry (notably the lumberjack's log-carrying model while chopping).
             // Release the pending marker unless a replacement queue entry still
-            // holds it — a stranded marker blocks the resync sweep forever.
+            // holds it - a stranded marker blocks the resync sweep forever.
             erasePendingGuidIfUnqueued(result.guid);
             continue;
         }
 
-        // Failures and cache hits need no GPU work — process them even when the
+        // Failures and cache hits need no GPU work - process them even when the
         // upload budget is exhausted. Previously the budget check was above this
         // point, blocking ALL ready futures (including zero-cost ones) after a
         // single upload, which throttled creature spawn throughput during world load.
@@ -111,7 +119,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
 
         // Only actual GPU uploads count toward the per-tick budget.
         if (modelUploads >= maxUploadsThisTick) {
-            // Re-queue this result — it needs a GPU upload but we're at budget.
+            // Re-queue this result - it needs a GPU upload but we're at budget.
             // Push a new pending spawn so it's retried next frame.
             pendingCreatureSpawnGuids_.erase(result.guid);
             creatureSpawnRetryDeadlines_.erase(result.guid);
@@ -126,7 +134,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             continue;
         }
 
-        // Model parsed on background thread — upload to GPU on main thread.
+        // Model parsed on background thread - upload to GPU on main thread.
         auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
         if (!charRenderer) {
             pendingCreatureSpawnGuids_.erase(result.guid);
@@ -166,7 +174,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
         pendingCreatureSpawnGuids_.erase(result.guid);
         creatureSpawnRetryDeadlines_.erase(result.guid);
 
-        // Re-queue as a normal pending spawn — model is now cached, so sync spawn is fast
+        // Re-queue as a normal pending spawn - model is now cached, so sync spawn is fast
         // (only creates instance + applies textures, no file I/O).
         if (!creatureInstances_.count(result.guid) &&
             !creaturePermanentFailureGuids_.count(result.guid)) {
@@ -185,6 +193,23 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
 }
 
 void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
+    // Every texture this loop loads or composites goes through immediateSubmit,
+    // which submits and then blocks on a fence - unless a batch is open, in
+    // which case it records and returns. loadModel and processPendingNormalMaps
+    // already open one; this path did not, so each texture was a full GPU
+    // round-trip and one NPC's skin was dozens of them back to back.
+    //
+    // That is what the 2 ms budget could not catch: it gates whether a new item
+    // starts and cannot interrupt one already running. The stage was measured at
+    // 406-675 ms against a 2 ms budget, and the device was lost inside one of
+    // these waits.
+    auto* batchCtx = renderer_ ? renderer_->getVkContext() : nullptr;
+    if (batchCtx) batchCtx->beginUploadBatch();
+    struct BatchGuard {
+        rendering::VkContext* ctx;
+        ~BatchGuard() { if (ctx) ctx->endUploadBatchSync(); }
+    } batchGuard{batchCtx};
+
     auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (!charRenderer) return;
 
@@ -293,7 +318,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
     while (!pendingCreatureSpawns_.empty() &&
            (unlimited || processed < MAX_SPAWNS_PER_FRAME) &&
            rotationsLeft > 0) {
-        // Check time budget every iteration (including first — async results may
+        // Check time budget every iteration (including first - async results may
         // have already consumed the budget via GPU model uploads).
         if (!unlimited) {
             auto now = std::chrono::steady_clock::now();
@@ -334,7 +359,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
 
             const int maxAsync = unlimited ? (MAX_ASYNC_CREATURE_LOADS * 4) : MAX_ASYNC_CREATURE_LOADS;
             if (static_cast<int>(asyncCreatureLoads_.size()) + asyncLaunched >= maxAsync) {
-                // Too many in-flight — defer to next frame
+                // Too many in-flight - defer to next frame
                 pendingCreatureSpawns_.push_back(s);
                 rotationsLeft--;
                 continue;
@@ -356,8 +381,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 std::string lowerPath = m2Path;
                 std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (lowerPath.find("invisiblestalker") != std::string::npos ||
-                    lowerPath.find("invisible_stalker") != std::string::npos) {
+                if (rendering::isHelperCreatureModel(lowerPath)) {
                     nonRenderableCreatureDisplayIds_.insert(s.displayId);
                     creaturePermanentFailureGuids_.insert(s.guid);
                     pendingCreatureSpawnGuids_.erase(s.guid);
@@ -367,7 +391,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 }
             }
 
-            // Launch async M2 load — file I/O and parsing happen off the main thread.
+            // Launch async M2 load - file I/O and parsing happen off the main thread.
             uint32_t modelId = nextCreatureModelId_++;
             auto* am = assetManager_;
 
@@ -416,80 +440,62 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                             if (!he.bakeName.empty()) {
                                 displaySkinPaths.push_back("Textures\\BakedNpcTextures\\" + he.bakeName);
                             }
-                            // CharSections: skin, face, underwear
+                            // CharSections, through the one reader in
+                            // pipeline/char_sections.hpp. This was a fifth
+                            // hand-written copy of that scan, and a prefetch
+                            // that names different paths than the spawn will
+                            // ask for is a prefetch that does nothing - it
+                            // never collected the skin row's second texture,
+                            // so the head detail sheet was always decoded on
+                            // the main thread at spawn time.
                             auto csDbc = am->loadDBC("CharSections.dbc");
                             if (csDbc) {
                                 const auto* csL = pipeline::getActiveDBCLayout()
                                     ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-                                auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
-                                uint32_t nRace = static_cast<uint32_t>(he.raceId);
-                                uint32_t nSex = static_cast<uint32_t>(he.sexId);
-                                uint32_t nSkin = static_cast<uint32_t>(he.skinId);
-                                uint32_t nFace = static_cast<uint32_t>(he.faceId);
-                                for (uint32_t r = 0; r < csDbc->getRecordCount(); r++) {
-                                    uint32_t rId = csDbc->getUInt32(r, csF.raceId);
-                                    uint32_t sId = csDbc->getUInt32(r, csF.sexId);
-                                    if (rId != nRace || sId != nSex) continue;
-                                    uint32_t section = csDbc->getUInt32(r, csF.baseSection);
-                                    uint32_t variation = csDbc->getUInt32(r, csF.variationIndex);
-                                    uint32_t color = csDbc->getUInt32(r, csF.colorIndex);
-                                    if (section == 0 && color == nSkin) {
-                                        std::string t = csDbc->getString(r, csF.texture1);
-                                        if (!t.empty()) displaySkinPaths.push_back(t);
-                                    } else if (section == 1 && variation == nFace && color == nSkin) {
-                                        std::string t1 = csDbc->getString(r, csF.texture1);
-                                        std::string t2 = csDbc->getString(r, csF.texture2);
-                                        if (!t1.empty()) displaySkinPaths.push_back(t1);
-                                        if (!t2.empty()) displaySkinPaths.push_back(t2);
-                                    } else if (section == 3 && variation == static_cast<uint32_t>(he.hairStyleId)
-                                               && color == static_cast<uint32_t>(he.hairColorId)) {
-                                        std::string t = csDbc->getString(r, csF.texture1);
-                                        if (!t.empty()) displaySkinPaths.push_back(t);
-                                    } else if (section == 4 && color == nSkin) {
-                                        for (uint32_t f = csF.texture1; f <= csF.texture1 + 2; f++) {
-                                            std::string t = csDbc->getString(r, f);
-                                            if (!t.empty()) displaySkinPaths.push_back(t);
-                                        }
-                                    }
+                                const auto csF = pipeline::detectCharSectionsFields(csDbc.get(), csL);
+                                pipeline::CharacterAppearance who;
+                                who.raceId = he.raceId;
+                                who.sexId = he.sexId;
+                                who.skinId = he.skinId;
+                                who.faceId = he.faceId;
+                                who.hairStyleId = he.hairStyleId;
+                                who.hairColorId = he.hairColorId;
+                                const auto sections =
+                                    pipeline::resolveCharacterSections(csDbc.get(), csF, who);
+                                for (const std::string* path : {&sections.bodySkin, &sections.skinExtra,
+                                                                &sections.faceLower, &sections.faceUpper,
+                                                                &sections.hair}) {
+                                    if (!path->empty()) displaySkinPaths.push_back(*path);
                                 }
+                                for (const auto& uw : sections.underwear) displaySkinPaths.push_back(uw);
                             }
                             // Equipment region textures
                             auto idiDbc = am->loadDBC("ItemDisplayInfo.dbc");
                             if (idiDbc) {
-                                static constexpr const char* compDirs[] = {
-                                    "ArmUpperTexture", "ArmLowerTexture", "HandTexture",
-                                    "TorsoUpperTexture", "TorsoLowerTexture",
-                                    "LegUpperTexture", "LegLowerTexture", "FootTexture",
-                                };
                                 const auto* idiL = pipeline::getActiveDBCLayout()
                                     ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-                                const uint32_t trf[8] = {
-                                    idiL ? (*idiL)["TextureArmUpper"]  : 14u,
-                                    idiL ? (*idiL)["TextureArmLower"]  : 15u,
-                                    idiL ? (*idiL)["TextureHand"]      : 16u,
-                                    idiL ? (*idiL)["TextureTorsoUpper"]: 17u,
-                                    idiL ? (*idiL)["TextureTorsoLower"]: 18u,
-                                    idiL ? (*idiL)["TextureLegUpper"]  : 19u,
-                                    idiL ? (*idiL)["TextureLegLower"]  : 20u,
-                                    idiL ? (*idiL)["TextureFoot"]      : 21u,
-                                };
+                                // Through the shared resolver, which reconciles
+                                // the layout against the file's own field count.
+                                // Written out here instead, this path read the
+                                // eight names one column to the left of where
+                                // the 25-field file keeps them - the chest
+                                // texture on the legs, the sleeves on the
+                                // hands, and nothing on the upper arm - while
+                                // the other reader of the same eight columns
+                                // went through the resolver and was right.
+                                uint32_t trf[8];
+                                pipeline::getItemDisplayInfoTextureFields(*idiDbc, idiL, trf);
                                 const bool isFem = (he.sexId == 1);
-                                for (int eq = 0; eq < 11; eq++) {
-                                    uint32_t did = he.equipDisplayId[eq];
+                                for (uint32_t did : he.equipDisplayId) {
                                     if (did == 0) continue;
                                     int32_t recIdx = idiDbc->findRecordById(did);
                                     if (recIdx < 0) continue;
                                     for (int region = 0; region < 8; region++) {
                                         std::string texName = idiDbc->getString(static_cast<uint32_t>(recIdx), trf[region]);
                                         if (texName.empty()) continue;
-                                        std::string base = "Item\\TextureComponents\\" +
-                                            std::string(compDirs[region]) + "\\" + texName;
-                                        std::string gp = base + (isFem ? "_F.blp" : "_M.blp");
-                                        std::string up = base + "_U.blp";
-                                        std::string bp = base + ".blp";
-                                        if (am->fileExists(gp)) displaySkinPaths.push_back(gp);
-                                        else if (am->fileExists(up)) displaySkinPaths.push_back(up);
-                                        else if (am->fileExists(bp)) displaySkinPaths.push_back(bp);
+                                        std::string path = pipeline::resolveItemRegionTexture(
+                                            *am, region, texName, isFem);
+                                        if (!path.empty()) displaySkinPaths.push_back(path);
                                     }
                                 }
                             }
@@ -520,32 +526,44 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                     auto model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
                     if (model->name.empty()) model->name = m2Path;
                     if (model->vertices.empty()) {
+                        LOG_WARNING("Creature model parsed to nothing: displayId=",
+                                    s.displayId, " ", m2Path, " (", m2Data.size(), " bytes)");
                         result.permanent_failure = true;
                         return result;
+                    }
+                    // What was actually read off disk for this display, and how
+                    // big it is. A path that resolves to the model wanted and a
+                    // model that is drawn are two different claims, and only the
+                    // second one is what is on screen.
+                    {
+                        std::string lower = m2Path;
+                        std::transform(lower.begin(), lower.end(), lower.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        // Every humanoid NPC in the world announced itself
+                        // here, which is thirty-nine lines a session saying a
+                        // model loaded correctly. At debug: the log carries
+                        // warnings and above, and what belongs there is what
+                        // went wrong.
+                        if (lower.rfind("character\\", 0) == 0) {
+                            LOG_DEBUG("Humanoid NPC model loaded: displayId=", s.displayId,
+                                      " ", m2Path, " vertices=", model->vertices.size(),
+                                      " bones=", model->bones.size(),
+                                      " submeshes=", model->batches.size());
+                        }
                     }
 
                     // Load skin file
                     if (model->version >= 264) {
-                        std::string skinPath = m2Path.substr(0, m2Path.size() - 3) + "00.skin";
+                        std::string skinPath = pipeline::skinPathForM2(m2Path);
                         auto skinData = am->readFile(skinPath);
                         if (!skinData.empty()) {
                             pipeline::M2Loader::loadSkin(skinData, *model);
                         }
                     }
 
-                    // Load external .anim files
-                    std::string basePath = m2Path.substr(0, m2Path.size() - 3);
-                    for (uint32_t si = 0; si < model->sequences.size(); si++) {
-                        if (!(model->sequences[si].flags & 0x20)) {
-                            char animFileName[256];
-                            snprintf(animFileName, sizeof(animFileName), "%s%04u-%02u.anim",
-                                basePath.c_str(), model->sequences[si].id, model->sequences[si].variationIndex);
-                            auto animData = am->readFileOptional(animFileName);
-                            if (!animData.empty()) {
-                                pipeline::M2Loader::loadAnimFile(m2Data, animData, si, *model);
-                            }
-                        }
-                    }
+                    // This runs on a background thread, so every external
+                    // sequence can be loaded.
+                    pipeline::loadExternalAnimations(*am, m2Path, m2Data, *model);
 
                     // Pre-decode model textures on background thread
                     for (const auto& tex : model->textures) {
@@ -581,7 +599,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             asyncCreatureLoads_.push_back(std::move(load));
             asyncCreatureDisplayLoads_.insert(s.displayId);
             asyncLaunched++;
-            // Don't erase from pendingCreatureSpawnGuids_ — the async result handler will do it
+            // Don't erase from pendingCreatureSpawnGuids_ - the async result handler will do it
             rotationsLeft = pendingCreatureSpawns_.size();
             processed++;
             continue;
@@ -596,7 +614,7 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
             continue;
         }
 
-        // Cached model — spawn is fast (no file I/O, just instance creation + texture setup)
+        // Cached model - spawn is fast (no file I/O, just instance creation + texture setup)
         {
             auto spawnStart = std::chrono::steady_clock::now();
             spawnOnlineCreature(s.guid, s.displayId, s.x, s.y, s.z, s.orientation, s.scale);
@@ -624,12 +642,30 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited) {
                 pendingCreatureSpawnGuids_.insert(s.guid);
             } else {
                 creatureSpawnRetryDeadlines_.erase(s.guid);
-                LOG_WARNING("Dropping creature spawn after retry window: guid=0x",
-                            std::hex, s.guid, std::dec,
-                            " displayId=", s.displayId);
+                const int used = ++creatureSpawnRetryWindowsUsed_[s.guid];
+                if (used < MAX_CREATURE_SPAWN_RETRY_WINDOWS) {
+                    // Another window rather than an abandonment. Nothing asks
+                    // again once this queue lets go: the server does not
+                    // re-send an object already in range, so the creature was
+                    // simply missing from then on.
+                    LOG_WARNING("Creature spawn still failing after retry window ",
+                                used, " of ", MAX_CREATURE_SPAWN_RETRY_WINDOWS,
+                                ": guid=0x", std::hex, s.guid, std::dec,
+                                " displayId=", s.displayId, " - retrying");
+                    pendingCreatureSpawns_.push_back(s);
+                    pendingCreatureSpawnGuids_.insert(s.guid);
+                } else {
+                    creatureSpawnRetryWindowsUsed_.erase(s.guid);
+                    LOG_WARNING("Dropping creature spawn after ",
+                                MAX_CREATURE_SPAWN_RETRY_WINDOWS,
+                                " retry windows: guid=0x",
+                                std::hex, s.guid, std::dec,
+                                " displayId=", s.displayId);
+                }
             }
         } else {
             creatureSpawnRetryDeadlines_.erase(s.guid);
+            creatureSpawnRetryWindowsUsed_.erase(s.guid);
         }
         rotationsLeft = pendingCreatureSpawns_.size();
         processed++;
@@ -656,7 +692,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
         // Apply any equipment updates that arrived before the player was spawned.
         auto pit = pendingOnlinePlayerEquipment_.find(s.guid);
         if (pit != pendingOnlinePlayerEquipment_.end()) {
-            deferredEquipmentQueue_.push_back({s.guid, pit->second});
+            deferredEquipmentQueue_.emplace_back(s.guid, pit->second);
             pendingOnlinePlayerEquipment_.erase(pit);
         }
         processed++;
@@ -684,11 +720,6 @@ std::vector<std::string> EntitySpawner::resolveEquipmentTexturePaths(uint64_t gu
     const auto* idiL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
 
-    static constexpr const char* componentDirs[] = {
-        "ArmUpperTexture", "ArmLowerTexture", "HandTexture",
-        "TorsoUpperTexture", "TorsoLowerTexture",
-        "LegUpperTexture", "LegLowerTexture", "FootTexture",
-    };
     uint32_t texRegionFields[8];
     pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
     const bool isFemale = (st.genderId == 1);
@@ -702,14 +733,9 @@ std::vector<std::string> EntitySpawner::resolveEquipmentTexturePaths(uint64_t gu
             std::string texName = displayInfoDbc->getString(
                 static_cast<uint32_t>(recIdx), texRegionFields[region]);
             if (texName.empty()) continue;
-            std::string base = "Item\\TextureComponents\\" +
-                std::string(componentDirs[region]) + "\\" + texName;
-            std::string genderPath = base + (isFemale ? "_F.blp" : "_M.blp");
-            std::string unisexPath = base + "_U.blp";
-            std::string basePath = base + ".blp";
-            if (assetManager_->fileExists(genderPath)) paths.push_back(genderPath);
-            else if (assetManager_->fileExists(unisexPath)) paths.push_back(unisexPath);
-            else if (assetManager_->fileExists(basePath)) paths.push_back(basePath);
+            std::string path = pipeline::resolveItemRegionTexture(
+                *assetManager_, region, texName, isFemale);
+            if (!path.empty()) paths.push_back(path);
         }
     }
     return paths;
@@ -750,7 +776,7 @@ void EntitySpawner::processDeferredEquipmentQueue() {
     auto texturePaths = resolveEquipmentTexturePaths(guid, equipData.first, equipData.second);
 
     if (texturePaths.empty()) {
-        // No textures to pre-decode — just apply directly (fast path)
+        // No textures to pre-decode - just apply directly (fast path)
         LOG_WARNING("Equipment fast path for guid=0x", std::hex, guid, std::dec,
                     " (no textures to pre-decode)");
         setOnlinePlayerEquipment(guid, equipData.first, equipData.second);
@@ -804,69 +830,106 @@ void EntitySpawner::processAsyncGameObjectResults() {
             continue;
         }
 
-        // WMO parsed on background thread — do GPU upload + instance creation on main thread
+        // WMO parsed on background thread - do GPU upload + instance creation on main thread
         auto* wmoRenderer = renderer_ ? renderer_->getWMORenderer() : nullptr;
         if (!wmoRenderer) continue;
 
         uint32_t modelId = 0;
         auto itCache = gameObjectDisplayIdWmoCache_.find(result.displayId);
-        if (itCache != gameObjectDisplayIdWmoCache_.end()) {
-            modelId = itCache->second;
-        } else {
-            modelId = nextGameObjectWmoModelId_++;
-            wmoRenderer->setPredecodedBLPCache(&result.predecodedTextures);
-            if (!wmoRenderer->loadModel(*result.wmoModel, modelId)) {
-                wmoRenderer->setPredecodedBLPCache(nullptr);
-                LOG_WARNING("Failed to load async gameobject WMO: ", result.modelPath);
-                continue;
-            }
-            wmoRenderer->setPredecodedBLPCache(nullptr);
-            gameObjectDisplayIdWmoCache_[result.displayId] = modelId;
+        if (itCache == gameObjectDisplayIdWmoCache_.end()) {
+            // Not uploaded yet: hand it to the incremental uploader rather than
+            // pushing the whole model through here, which stalled the frame for
+            // as long as 40ms on a transport. The spawn finishes in
+            // finishWmoSpawn once every texture and group is up.
+            PendingWmoUpload pending;
+            pending.result = std::move(result);
+            pending.modelId = nextGameObjectWmoModelId_++;
+            pendingWmoUploads_.push_back(std::move(pending));
+            continue;
         }
+        modelId = itCache->second;
 
-        glm::vec3 renderPos = core::coords::canonicalToRender(
-            glm::vec3(result.x, result.y, result.z));
-        uint32_t instanceId = wmoRenderer->createInstance(
-            modelId, renderPos, glm::vec3(0.0f, 0.0f, result.orientation), result.scale);
-        if (instanceId == 0) continue;
+    finishWmoSpawn(result, modelId);
+    }
+}
 
-        gameObjectInstances_[result.guid] = {modelId, instanceId, true};
+// Creates the render instance and the transport/doodad follow-ups once a model
+// is fully uploaded. Split out so both the cached path and the incremental
+// uploader end the same way.
+void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t modelId) {
+    auto* wmoRenderer = renderer_ ? renderer_->getWMORenderer() : nullptr;
+    if (!wmoRenderer) return;
 
-        // The synchronous WMO path notifies TransportManager after creating the
-        // render instance. Do the same here: unique/uncached transport WMOs (notably
-        // the Kraken icebreaker) otherwise become visible but remain unregistered
-        // and stationary forever.
-        if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
-            gameHandler_->notifyTransportSpawned(
-                result.guid, result.entry, result.displayId,
-                result.x, result.y, result.z, result.orientation);
-        }
+    glm::vec3 renderPos = core::coords::canonicalToRender(
+        glm::vec3(result.x, result.y, result.z));
+    uint32_t instanceId = wmoRenderer->createInstance(
+        modelId, renderPos, glm::vec3(0.0f, 0.0f, result.orientation), result.scale);
+    if (instanceId == 0) return;
 
-        // Queue transport doodad loading if applicable
-        std::string lowerPath = result.modelPath;
-        std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (lowerPath.find("transport") != std::string::npos) {
-            const auto* doodadTemplates = wmoRenderer->getDoodadTemplates(modelId);
-            if (doodadTemplates && !doodadTemplates->empty()) {
-                PendingTransportDoodadBatch batch;
-                batch.guid = result.guid;
-                batch.modelId = modelId;
-                batch.instanceId = instanceId;
-                batch.x = result.x;
-                batch.y = result.y;
-                batch.z = result.z;
-                batch.orientation = result.orientation;
-                batch.doodadBudget = doodadTemplates->size();
-                pendingTransportDoodadBatches_.push_back(batch);
-            }
+    gameObjectInstances_[result.guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = true};
+
+    // The synchronous WMO path notifies TransportManager after creating the
+    // render instance. Do the same here: unique/uncached transport WMOs (notably
+    // the Kraken icebreaker) otherwise become visible but remain unregistered
+    // and stationary forever.
+    if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
+        gameHandler_->notifyTransportSpawned(
+            result.guid, result.entry, result.displayId,
+            result.x, result.y, result.z, result.orientation);
+    }
+
+    // Queue transport doodad loading if applicable
+    std::string lowerPath = result.modelPath;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowerPath.find("transport") != std::string::npos) {
+        const auto* doodadTemplates = wmoRenderer->getDoodadTemplates(modelId);
+        if (doodadTemplates && !doodadTemplates->empty()) {
+            PendingTransportDoodadBatch batch;
+            batch.guid = result.guid;
+            batch.modelId = modelId;
+            batch.instanceId = instanceId;
+            batch.x = result.x;
+            batch.y = result.y;
+            batch.z = result.z;
+            batch.orientation = result.orientation;
+            batch.doodadBudget = doodadTemplates->size();
+            pendingTransportDoodadBatches_.push_back(batch);
         }
     }
+}
+
+// Uploads one pending model per frame under a budget, finishing its spawn when
+// the last texture and group are in.
+void EntitySpawner::processPendingWmoUploads() {
+    if (pendingWmoUploads_.empty()) return;
+    auto* wmoRenderer = renderer_ ? renderer_->getWMORenderer() : nullptr;
+    if (!wmoRenderer) { pendingWmoUploads_.clear(); return; }
+
+    constexpr float kUploadBudgetMs = 6.0f;
+    auto& pending = pendingWmoUploads_.front();
+
+    wmoRenderer->setPredecodedBLPCache(&pending.result.predecodedTextures);
+    const auto status = wmoRenderer->loadModelIncremental(
+        *pending.result.wmoModel, pending.modelId, kUploadBudgetMs);
+    wmoRenderer->setPredecodedBLPCache(nullptr);
+
+    if (status == rendering::WMORenderer::ModelLoadResult::InProgress) return;
+
+    if (status == rendering::WMORenderer::ModelLoadResult::Complete) {
+        gameObjectDisplayIdWmoCache_[pending.result.displayId] = pending.modelId;
+        finishWmoSpawn(pending.result, pending.modelId);
+    } else {
+        LOG_WARNING("Failed to load async gameobject WMO: ", pending.result.modelPath);
+    }
+    pendingWmoUploads_.erase(pendingWmoUploads_.begin());
 }
 
 void EntitySpawner::processGameObjectSpawnQueue() {
     // Finalize any completed async WMO loads first
     processAsyncGameObjectResults();
+    // Then advance one in-progress upload, which may finish a spawn.
+    processPendingWmoUploads();
 
     if (pendingGameObjectSpawns_.empty()) return;
 
@@ -893,16 +956,8 @@ void EntitySpawner::processGameObjectSpawnQueue() {
         std::string modelPath;
         if (gameObjectLookupsBuilt_) {
             // Check transport overrides first
-            bool isTransport = gameHandler_ && gameHandler_->isTransportGuid(s.guid);
-            if (isTransport) {
-                if (s.entry == 20808 || s.entry == 176231 || s.entry == 176310)
-                    modelPath = "World\\wmo\\transports\\transport_ship\\transportship.wmo";
-                else if (s.displayId == 807 || s.displayId == 808 || s.displayId == 175080 || s.displayId == 176495 || s.displayId == 164871)
-                    modelPath = "World\\wmo\\transports\\transport_zeppelin\\transport_zeppelin.wmo";
-                else if (s.displayId == 1587)
-                    modelPath = "World\\wmo\\transports\\transport_horde_zeppelin\\Transport_Horde_Zeppelin.wmo";
-                else if (s.displayId == 2454 || s.displayId == 181688 || s.displayId == 190536)
-                    modelPath = "World\\wmo\\transports\\icebreaker\\Transport_Icebreaker_ship.wmo";
+            if (gameHandler_ && gameHandler_->isTransportGuid(s.guid)) {
+                modelPath = transportModelPath(s.entry, s.displayId);
             }
             if (modelPath.empty())
                 modelPath = getGameObjectModelPathForDisplayId(s.displayId);
@@ -916,7 +971,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
 
         if (isWmo && !isCached && !modelPath.empty() &&
             static_cast<int>(asyncGameObjectLoads_.size()) < kMaxAsyncLoads) {
-            // Launch async WMO load — file I/O + parse on background thread
+            // Launch async WMO load - file I/O + parse on background thread
             auto* am = assetManager_;
             PendingGameObjectSpawn capture = s;
             std::string capturePath = modelPath;
@@ -943,22 +998,13 @@ void EntitySpawner::processGameObjectSpawnQueue() {
 
                     // Load groups
                     if (wmo->nGroups > 0) {
-                        std::string basePath = capturePath;
-                        std::string ext;
-                        if (basePath.size() > 4) {
-                            ext = basePath.substr(basePath.size() - 4);
-                            basePath = basePath.substr(0, basePath.size() - 4);
-                        }
                         for (uint32_t gi = 0; gi < wmo->nGroups; gi++) {
-                            char suffix[16];
-                            snprintf(suffix, sizeof(suffix), "_%03u%s", gi, ext.c_str());
-                            auto groupData = am->readFile(basePath + suffix);
-                            if (groupData.empty()) {
-                                snprintf(suffix, sizeof(suffix), "_%03u.wmo", gi);
-                                groupData = am->readFile(basePath + suffix);
-                            }
-                            if (!groupData.empty()) {
+                            for (const std::string& groupPath :
+                                 pipeline::wmoGroupCandidates(capturePath, gi)) {
+                                auto groupData = am->readFile(groupPath);
+                                if (groupData.empty()) continue;
                                 pipeline::WMOLoader::loadGroup(groupData, *wmo, gi);
+                                break;
                             }
                         }
                     }
@@ -996,7 +1042,18 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             continue;
         }
 
-        // Cached WMO or M2 — spawn synchronously (cheap)
+        // An uncached WMO that could not get an async slot must wait for one.
+        // Falling through to the synchronous path here meant decoding its
+        // textures on the main thread: measured at 35-51ms for a transport,
+        // against this loop's 2ms budget. The async path pre-decodes them on a
+        // worker, so waiting a frame for a free slot is far cheaper than doing
+        // the work here. Only reachable when several uncached WMOs arrive at
+        // once - a zone with a few ships in view does exactly that.
+        if (isWmo && !isCached && !modelPath.empty()) {
+            break;  // retry next frame, keeping queue order
+        }
+
+        // Cached WMO or M2 - spawn synchronously (cheap)
         spawnOnlineGameObject(s.guid, s.entry, s.displayId, s.x, s.y, s.z, s.orientation, s.scale);
         pendingGameObjectSpawns_.erase(pendingGameObjectSpawns_.begin());
     }
@@ -1064,10 +1121,12 @@ void EntitySpawner::processPendingTransportRegistrations() {
                  " preferServer=", preferServerData);
 
         glm::vec3 canonicalSpawnPos(pending.x, pending.y, pending.z);
+        // Elevators were in this list too - 807 and 808 are Gnomeregan's
+        // lifts, 2454 the Searing Gorge scaffold cars, 1587 a GO named
+        // "Elevator" - and being taken for a ship means the stricter
+        // "must travel 25 units" check rejects their short vertical path.
         const bool shipOrZeppelinDisplay =
-            (pending.displayId == 3015 || pending.displayId == 3031 || pending.displayId == 7546 ||
-             pending.displayId == 7446 || pending.displayId == 1587 || pending.displayId == 2454 ||
-             pending.displayId == 7087 || pending.displayId == 807 || pending.displayId == 808);
+            game::isVehicleTransportDisplay(pending.displayId);
         bool hasUsablePath = transportManager->hasPathForEntry(pending.entry);
         if (shipOrZeppelinDisplay) {
             hasUsablePath = transportManager->hasUsableMovingPathForEntry(pending.entry, 25.0f);
@@ -1103,7 +1162,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
                     // DEBUG, not WARNING: TaxiPath-driven ships (Auberdine/Stormwind boats,
                     // etc.) legitimately have no TransportAnimation.dbc entry and hit this
                     // spawn-time fallback, then receive their real route via
-                    // assignTaxiPathToTransport and sail normally — so this fired for boats
+                    // assignTaxiPathToTransport and sail normally - so this fired for boats
                     // that move fine and was misleading noise when scanning the log.
                     LOG_DEBUG("No TransportAnimation.dbc path for entry ", pending.entry,
                               " - transport will be stationary until a route is assigned");
@@ -1123,7 +1182,8 @@ void EntitySpawner::processPendingTransportRegistrations() {
                                             canonicalSpawnPos,
                                             pending.entry,
                                             pending.displayId,
-                                            isM2Transport);
+                                            isM2Transport,
+                                            pending.orientation);
 
         transportManager->updateServerTransport(
             pending.guid, glm::vec3(pending.x, pending.y, pending.z), pending.orientation);
@@ -1142,7 +1202,7 @@ void EntitySpawner::processPendingTransportRegistrations() {
         // MO_TRANSPORT (type 15) boats route via their taxi path (data[0] ->
         // TaxiPathNode.dbc), which is a world-coordinate path and thus independent of
         // where the boat spawned. Assign it whenever the GO template is already cached
-        // — not only for origin-spawned transports. Boats spawn at their dock (a
+        // - not only for origin-spawned transports. Boats spawn at their dock (a
         // non-origin position), so the old origin gate here meant the cached path was
         // never applied and the boat fell back to an unrelated route. If the template
         // isn't cached yet, the GO-query response hook assigns it when it arrives.
@@ -1155,6 +1215,18 @@ void EntitySpawner::processPendingTransportRegistrations() {
                     transportManager->assignTaxiPathToTransport(pending.entry, taxiPathId, mapId);
                     LOG_DEBUG("Assigned cached TaxiPathNode path for MO_TRANSPORT entry=", pending.entry,
                              " taxiPathId=", taxiPathId, " map=", mapId);
+                }
+            } else if (shipOrZeppelinDisplay && !goData) {
+                // A zeppelin and a continent ship have no TransportAnimation.dbc
+                // route; the GO template's taxiPathId is the only one there is.
+                // Spawning before the query answers is normal and the hook picks
+                // it up - but if the answer never comes, the transport is left
+                // docked with nothing anywhere saying why. Said once per entry.
+                static std::set<uint32_t> saidNoTemplate;
+                if (saidNoTemplate.insert(pending.entry).second) {
+                    LOG_WARNING("Transport entry=", pending.entry, " displayId=", pending.displayId,
+                                " spawned before its GameObject template arrived - it stays docked"
+                                " until the query answers with a taxiPathId");
                 }
             }
         }
@@ -1251,22 +1323,54 @@ void EntitySpawner::processPendingTransportDoodads() {
             it->nextIndex++;
             budgetLeft--;
 
+            // Every failure below used to be a silent continue, so a transport
+            // that lost a doodad lost it without a trace - the ship rendered,
+            // minus its sails or its paddlewheel, and nothing said why. A v264
+            // model carries no indices of its own, so a .skin that does not
+            // resolve leaves isValid() false and drops the piece; that is the
+            // one worth naming loudly.
             uint32_t doodadModelId = static_cast<uint32_t>(std::hash<std::string>{}(doodadTemplate.m2Path));
             auto m2Data = assetManager_->readFile(doodadTemplate.m2Path);
-            if (m2Data.empty()) continue;
+            if (m2Data.empty()) {
+                LOG_WARNING("Transport doodad missing: ", doodadTemplate.m2Path);
+                continue;
+            }
 
             pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
             if (m2Model.name.empty()) m2Model.name = doodadTemplate.m2Path;
-            std::string skinPath = doodadTemplate.m2Path.substr(0, doodadTemplate.m2Path.size() - 3) + "00.skin";
+            std::string skinPath = pipeline::skinPathForM2(doodadTemplate.m2Path);
             std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
             if (!skinData.empty() && m2Model.version >= 264) {
                 pipeline::M2Loader::loadSkin(skinData, m2Model);
+            } else if (skinData.empty() && m2Model.version >= 264) {
+                LOG_WARNING("Transport doodad ", doodadTemplate.m2Path, " is version ",
+                            m2Model.version, " and its skin '", skinPath,
+                            "' did not resolve - it has no indices and will be skipped");
             }
-            if (!m2Model.isValid()) continue;
+            if (!m2Model.isValid()) {
+                LOG_WARNING("Transport doodad unusable: ", doodadTemplate.m2Path,
+                            " version=", m2Model.version,
+                            " verts=", m2Model.vertices.size(),
+                            " indices=", m2Model.indices.size());
+                continue;
+            }
 
-            if (!m2Renderer->loadModel(m2Model, doodadModelId)) continue;
-            uint32_t m2InstanceId = m2Renderer->createInstance(doodadModelId, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f);
-            if (m2InstanceId == 0) continue;
+            if (!m2Renderer->loadModel(m2Model, doodadModelId)) {
+                LOG_WARNING("Transport doodad failed to upload: ", doodadTemplate.m2Path);
+                continue;
+            }
+            // Created at the origin and moved into place by the parent WMO's
+            // transform, so its position here is a placeholder and must not be
+            // deduplicated against - otherwise the second ship of a class is
+            // handed the first ship's sails rather than getting its own, and
+            // the thirteen barrels in a hold collapse into one barrel.
+            uint32_t m2InstanceId = m2Renderer->createInstance(
+                doodadModelId, glm::vec3(0.0f), glm::vec3(0.0f), 1.0f,
+                /*allowPositionDedup=*/false);
+            if (m2InstanceId == 0) {
+                LOG_WARNING("Transport doodad got no instance: ", doodadTemplate.m2Path);
+                continue;
+            }
             m2Renderer->setSkipCollision(m2InstanceId, true);
             // Ship WMO children use the dedicated transport animation states:
             // 162=ShipStart, 163=ShipMoving, 164=ShipStop. Leaving them on the
@@ -1276,14 +1380,28 @@ void EntitySpawner::processPendingTransportDoodads() {
             std::string doodadPathLower = doodadTemplate.m2Path;
             std::transform(doodadPathLower.begin(), doodadPathLower.end(), doodadPathLower.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            bool logMachinery = false;
             if (doodadPathLower.find("transportship_sails") != std::string::npos ||
                 doodadPathLower.find("icebreaker_paddlewheel") != std::string::npos) {
-                LOG_WARNING("Transport machinery spawned: ", doodadTemplate.m2Path,
-                            " instance=", m2InstanceId,
-                            " hasShipMoving=", m2Renderer->hasAnimation(m2InstanceId, 163u));
+                logMachinery = true;
             }
 
             wmoRenderer->addDoodadToInstance(it->instanceId, m2InstanceId, doodadTemplate.localTransform);
+            if (logMachinery) {
+                // Report where it actually ended up. "Spawned" only ever meant the
+                // model parsed; it said nothing about whether the thing landed on
+                // the ship or at the world origin.
+                glm::vec3 where(0.0f);
+                float radius = 0.0f;
+                const bool haveBounds = m2Renderer->getInstanceBounds(m2InstanceId, where, radius);
+                LOG_WARNING("Transport machinery spawned: ", doodadTemplate.m2Path,
+                            " instance=", m2InstanceId,
+                            " wmoInstance=", it->instanceId,
+                            " hasShipMoving=", m2Renderer->hasAnimation(m2InstanceId, 163u),
+                            " bounds=", haveBounds,
+                            " worldPos=(", where.x, ",", where.y, ",", where.z, ")",
+                            " radius=", radius);
+            }
             it->spawnedDoodads++;
         }
 
@@ -1303,7 +1421,7 @@ void EntitySpawner::processPendingTransportDoodads() {
         }
     }
 
-    // Finalize the upload batch — submit all GPU copies in one shot (async, no wait).
+    // Finalize the upload batch - submit all GPU copies in one shot (async, no wait).
     if (vkCtx) vkCtx->endUploadBatch();
 }
 
@@ -1345,7 +1463,7 @@ void EntitySpawner::processPendingMount() {
 
         // Load skin file (only for WotLK M2s - vanilla has embedded skin)
         if (model.version >= 264) {
-            std::string skinPath = m2Path.substr(0, m2Path.size() - 3) + "00.skin";
+            std::string skinPath = pipeline::skinPathForM2(m2Path);
             auto skinData = assetManager_->readFile(skinPath);
             if (!skinData.empty()) {
                 pipeline::M2Loader::loadSkin(skinData, model);
@@ -1355,21 +1473,10 @@ void EntitySpawner::processPendingMount() {
         }
 
         // Load external .anim files (only idle + run needed for mounts)
-        std::string basePath = m2Path.substr(0, m2Path.size() - 3);
-        for (uint32_t si = 0; si < model.sequences.size(); si++) {
-            if (!(model.sequences[si].flags & 0x20)) {
-                uint32_t animId = model.sequences[si].id;
-                // Only load stand, walk, run anims to avoid hang
-                if (animId != rendering::anim::STAND && animId != rendering::anim::WALK && animId != rendering::anim::RUN) continue;
-                char animFileName[256];
-                snprintf(animFileName, sizeof(animFileName), "%s%04u-%02u.anim",
-                    basePath.c_str(), animId, model.sequences[si].variationIndex);
-                auto animData = assetManager_->readFileOptional(animFileName);
-                if (!animData.empty()) {
-                    pipeline::M2Loader::loadAnimFile(m2Data, animData, si, model);
-                }
-            }
-        }
+        // Only what a mount does while standing still; the rest would stall.
+        pipeline::loadExternalAnimations(
+            *assetManager_, m2Path, m2Data, model,
+            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
 
         if (!charRenderer->loadModel(model, modelId)) {
             LOG_WARNING("Failed to load mount model: ", m2Path);
@@ -1497,7 +1604,7 @@ void EntitySpawner::processPendingMount() {
                 for (size_t ti = 0; ti < md->textures.size(); ti++) {
                     const auto& tex = md->textures[ti];
                     if (tex.type == 0 && tex.filename.empty()) {
-                        // Empty hardcoded slot — try skin1 then skin2
+                        // Empty hardcoded slot - try skin1 then skin2
                         std::string texPath;
                         if (!dispData.skin1.empty() && replaced == 0) {
                             texPath = modelDir + dispData.skin1 + ".blp";
@@ -1587,11 +1694,39 @@ void EntitySpawner::processPendingMount() {
 
     mountInstanceId_ = instanceId;
 
-    // Compute height offset — place player above mount's back
-    // Use tight bounds from actual vertices (M2 header bounds can be inaccurate)
+    // Compute height offset - place player above mount's back.
+    //
+    // The seat is not something to derive: the artist placed it, as attachment
+    // 0 ("MountMain"), and every rideable model carries one. Take it when it is
+    // there. This is also what the camera is offset by, so a mount whose seat
+    // is nowhere near its silhouette gets a sane camera too.
     const auto* modelData = charRenderer->getModelData(modelId);
     float heightOffset = 1.8f;
-    if (modelData && !modelData->vertices.empty()) {
+    bool haveSeatPoint = false;
+    if (modelData) {
+        for (const auto& att : modelData->attachments) {
+            if (att.id == 0) {
+                heightOffset = att.position.z;
+                haveSeatPoint = (heightOffset > 0.1f);
+                if (haveSeatPoint) {
+                    LOG_INFO("Mount seat attachment: z=", heightOffset);
+                } else {
+                    heightOffset = 1.8f;
+                }
+                break;
+            }
+        }
+    }
+
+    // No attachment: fall back to a guess from tight bounds of the actual
+    // vertices (M2 header bounds can be inaccurate).
+    //
+    // The guess is a fraction of the tallest vertex, which assumes the tallest
+    // part of the model is roughly over the seat - true of a horse, false of
+    // anything with a mast, a stack or handlebars. The motorcycle's tallest
+    // vertex is 5.11 against a seat at 0.76, so the rider sat four yards over
+    // the bike. It is only ever reached now when the model names no seat.
+    if (!haveSeatPoint && modelData && !modelData->vertices.empty()) {
         float minZ =  std::numeric_limits<float>::max();
         float maxZ = -std::numeric_limits<float>::max();
         for (const auto& v : modelData->vertices) {
@@ -1654,25 +1789,16 @@ bool EntitySpawner::loadRemoteMountModel(uint32_t displayId, uint32_t& modelId,
         if (model.vertices.empty()) return false;
 
         if (model.version >= 264 && modelPath.size() >= 3) {
-            std::string skinPath = modelPath.substr(0, modelPath.size() - 3) + "00.skin";
+            std::string skinPath = pipeline::skinPathForM2(modelPath);
             auto skinData = assetManager_->readFile(skinPath);
             if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, model);
         }
         if (!model.isValid()) return false;
 
-        const std::string basePath = modelPath.substr(0, modelPath.size() - 3);
-        for (uint32_t si = 0; si < model.sequences.size(); ++si) {
-            if (model.sequences[si].flags & 0x20) continue;
-            const uint32_t animId = model.sequences[si].id;
-            if (animId != rendering::anim::STAND && animId != rendering::anim::WALK &&
-                animId != rendering::anim::RUN && animId != rendering::anim::FLY_IDLE &&
-                animId != rendering::anim::FLY_FORWARD) continue;
-            char animFile[256];
-            snprintf(animFile, sizeof(animFile), "%s%04u-%02u.anim", basePath.c_str(),
-                     animId, model.sequences[si].variationIndex);
-            auto animData = assetManager_->readFileOptional(animFile);
-            if (!animData.empty()) pipeline::M2Loader::loadAnimFile(m2Data, animData, si, model);
-        }
+        pipeline::loadExternalAnimations(
+            *assetManager_, modelPath, m2Data, model,
+            {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
+             rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
 
         modelId = nextCreatureModelId_++;
         if (!cr->loadModel(model, modelId)) return false;
@@ -1783,7 +1909,8 @@ void EntitySpawner::processPendingRemotePlayerMounts() {
             }
             cr->playAnimation(mountInstance, mountAnim, true);
             cr->playAnimation(playerIt->second, rendering::anim::MOUNT, true);
-            remotePlayerMounts_[guid] = {displayId, modelId, mountInstance, riderHeight};
+            remotePlayerMounts_[guid] = {.displayId = displayId, .modelId = modelId,
+                                         .instanceId = mountInstance, .riderHeight = riderHeight};
             LOG_INFO("Remote player mounted: guid=0x", std::hex, guid, std::dec,
                      " displayId=", displayId, " riderHeight=", riderHeight,
                      " model=", modelPath);
@@ -1812,6 +1939,9 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     requestedCreatureDisplayIds_.erase(guid);
     creatureActiveEmotes_.erase(guid);
     creatureSpawnRetryDeadlines_.erase(guid);
+    // Cleared with the rest, so the map does not grow and a creature that
+    // comes back into range starts with its full allowance again.
+    creatureSpawnRetryWindowsUsed_.erase(guid);
     creaturePermanentFailureGuids_.erase(guid);
     deadCreatureGuids_.erase(guid);
 
@@ -1838,6 +1968,147 @@ void EntitySpawner::despawnCreature(uint64_t guid) {
     creatureWasStealthed_.erase(guid);
 
     LOG_DEBUG("Despawned creature: guid=0x", std::hex, guid, std::dec);
+}
+
+namespace {
+
+// Game object types whose pose is server state rather than a looping idle: they
+// hold one frame until the server says otherwise (a door stands open or shut, a
+// chest sits closed until it is opened), so playing their sequence on a loop
+// would animate them open over and over. Every other type plays its idle
+// continuously, which is what retail does - fishing pools circle their fish,
+// braziers gutter, banners wave.
+bool gameObjectPoseIsStateDriven(uint32_t goType) {
+    switch (goType) {
+        case 0:   // DOOR
+        case 1:   // BUTTON
+        case 3:   // CHEST
+        case 6:   // TRAP
+        case 10:  // GOOBER
+        case 33:  // DESTRUCTIBLE_BUILDING
+        case 35:  // TRAPDOOR
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
+void EntitySpawner::applyGameObjectAnimationPolicy(uint64_t guid, uint32_t entry,
+                                                   uint32_t instanceId) {
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2Renderer) return;
+
+    const game::GameObjectQueryResponseData* info =
+        (gameHandler_ && entry != 0) ? gameHandler_->getCachedGameObjectInfo(entry) : nullptr;
+    if (!info) {
+        // The type has not arrived yet. Freeze for now - a door caught mid-swing
+        // is worse than a pool of still fish - and revisit in
+        // onGameObjectInfoReceived once the query response lands.
+        m2Renderer->setInstanceAnimationFrozen(instanceId, true);
+        if (entry != 0) gameObjectPendingAnimPolicy_[entry].push_back(instanceId);
+        return;
+    }
+
+    const bool freeze = gameObjectPoseIsStateDriven(info->type);
+    m2Renderer->setInstanceAnimationFrozen(instanceId, freeze);
+    LOG_DEBUG("GO animation policy: guid=0x", std::hex, guid, std::dec,
+              " entry=", entry, " type=", info->type, " frozen=", freeze);
+}
+
+void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
+    auto it = gameObjectInstances_.find(guid);
+    if (it == gameObjectInstances_.end()) {
+        // The model is built after the create block is read, and a door that
+        // is already open when it comes into view has its state in that block.
+        gameObjectPendingState_[guid] = goState;
+        return;
+    }
+    // A WMO has no animation sequences to hold a pose with.
+    if (it->second.isWmo) return;
+    auto* m2 = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    if (!m2) return;
+
+    const uint32_t instanceId = it->second.instanceId;
+    // Canonical GOState: 0 ACTIVE (open), 1 READY (closed), 2 ACTIVE_ALTERNATIVE
+    // (destroyed). The animation ids are the game's own: OPEN, CLOSE, DESTROY.
+    const uint32_t anim = goState == 0 ? 148u : (goState == 2 ? 149u : 146u);
+    // Straight to the end when the state arrived before the model: the swing
+    // belongs to the moment a door opens, not to the moment it is first seen.
+    const bool skipToEnd = gameObjectPendingState_.erase(guid) > 0;
+
+    // Whether an open pose should also stop blocking.
+    //
+    // An M2's collision is a static list of triangles and does not follow the
+    // bones, so a door that swings open keeps its collision in the shut
+    // position and the doorway stays as solid as it ever was. That is what
+    // "the lift door did not open" was from the player's side: the log has
+    // them blocked by UNDEADELEVATORDOOR with nothing else in the way. Only
+    // for the types that are actually a way through - a chest with its lid up
+    // is still a chest to walk into.
+    uint32_t goType = 0xFFFFFFFFu;
+    if (gameHandler_) {
+        if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
+            if (entity->getType() == game::ObjectType::GAMEOBJECT) {
+                const uint32_t entry =
+                    std::static_pointer_cast<game::GameObject>(entity)->getEntry();
+                if (const auto* info = gameHandler_->getCachedGameObjectInfo(entry)) {
+                    goType = info->type;
+                }
+            }
+        }
+    }
+    if (goType == 0u || goType == 35u) {   // DOOR, TRAPDOOR
+        m2->setSkipCollision(instanceId, goState == 0);
+        // Said for the first few, because a door that never opens and a door
+        // the server never tells us to open look identical from in front of
+        // it. A lift door is meant to cycle at each level; if these lines
+        // never appear while the car arrives, nothing is driving them and the
+        // client would have to derive it from the car's own route phase.
+        static int saidDoor = 0;
+        if (saidDoor < 16) {
+            ++saidDoor;
+            LOG_WARNING("Door state: guid=0x", std::hex, guid, std::dec,
+                        " type=", goType, " state=", static_cast<int>(goState),
+                        (goState == 0 ? " (open)" : " (shut)"));
+        }
+    }
+
+    if (m2->hasAnimation(instanceId, anim)) {
+        m2->setInstanceAnimationHeld(instanceId, anim, skipToEnd);
+        return;
+    }
+    // No OPEN or CLOSE sequence of its own, but one animation that is the
+    // opening: Undercity's lift doors are one bone and one sequence, id 0,
+    // 3333ms. Held at its end the door stands open. Simply letting it run -
+    // which is what this did - swung it open and shut on a loop forever,
+    // and freezing it put it back to shut, so the door never opened at all.
+    if (goState == 0) {
+        if (const auto only = m2->soleSequenceId(instanceId)) {
+            m2->setInstanceAnimationHeld(instanceId, *only, skipToEnd);
+            return;
+        }
+    }
+    // The closed pose is the bind pose.
+    m2->setInstanceAnimationFrozen(instanceId, goState != 0);
+}
+
+void EntitySpawner::onGameObjectInfoReceived(uint32_t entry) {
+    auto it = gameObjectPendingAnimPolicy_.find(entry);
+    if (it == gameObjectPendingAnimPolicy_.end()) return;
+    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
+    const game::GameObjectQueryResponseData* info =
+        (gameHandler_ && m2Renderer) ? gameHandler_->getCachedGameObjectInfo(entry) : nullptr;
+    if (info && !gameObjectPoseIsStateDriven(info->type)) {
+        for (uint32_t instanceId : it->second) {
+            // No-op for instances that despawned while the query was in flight.
+            m2Renderer->setInstanceAnimationFrozen(instanceId, false);
+        }
+        LOG_DEBUG("GO animation policy resolved: entry=", entry,
+                  " type=", info->type, " unfroze ", it->second.size(), " instance(s)");
+    }
+    gameObjectPendingAnimPolicy_.erase(it);
 }
 
 void EntitySpawner::despawnGameObject(uint64_t guid) {
@@ -1885,18 +2156,10 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
 }
 
 bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel) {
-    auto m2Data = assetManager_->readFile(m2Path);
-    if (m2Data.empty()) return false;
-    outModel = pipeline::M2Loader::load(m2Data);
-    // Load skin (WotLK+ M2 format): strip .m2, append 00.skin
-    std::string skinPath = m2Path;
-    size_t dotPos = skinPath.rfind('.');
-    if (dotPos != std::string::npos) skinPath = skinPath.substr(0, dotPos);
-    skinPath += "00.skin";
-    auto skinData = assetManager_->readFile(skinPath);
-    if (!skinData.empty() && outModel.version >= 264)
-        pipeline::M2Loader::loadSkin(skinData, outModel);
-    return outModel.isValid();
+    // pipeline/m2_asset_loader.hpp. This copy did not name the model after its
+    // path, so a weapon loaded here was a model nothing downstream could
+    // identify.
+    return pipeline::loadM2WithSkin(*assetManager_, m2Path, outModel);
 }
 
 

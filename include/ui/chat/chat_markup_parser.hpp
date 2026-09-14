@@ -40,12 +40,12 @@ struct ChatSegment {
  * Parses raw WoW-markup text into a flat list of typed segments.
  *
  * Extracted from ChatPanel::render() inline lambdas (Phase 2.1 of chat_panel_ref.md).
- * Pure logic — no ImGui calls, no game-state access. Fully unit-testable.
+ * Pure logic - no ImGui calls, no game-state access. Fully unit-testable.
  */
 class ChatMarkupParser {
 public:
     /** Parse a raw chat message string into ordered segments. */
-    std::vector<ChatSegment> parse(const std::string& rawMessage) const;
+    [[nodiscard]] std::vector<ChatSegment> parse(const std::string& rawMessage) const;
 
     /** Parse |cAARRGGBB color code at given position. */
     static ImVec4 parseWowColor(const std::string& text, size_t pos);

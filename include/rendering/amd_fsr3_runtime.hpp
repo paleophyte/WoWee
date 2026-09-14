@@ -61,11 +61,11 @@ public:
     bool dispatchFrameGeneration(const AmdFsr3RuntimeDispatchDesc& desc);
     void shutdown();
 
-    bool isReady() const { return ready_; }
-    bool isFrameGenerationReady() const { return frameGenerationReady_; }
-    const std::string& loadedLibraryPath() const { return loadedLibraryPath_; }
-    LoadPathKind loadPathKind() const { return loadPathKind_; }
-    const std::string& lastError() const { return lastError_; }
+    [[nodiscard]] bool isReady() const { return ready_; }
+    [[nodiscard]] bool isFrameGenerationReady() const { return frameGenerationReady_; }
+    [[nodiscard]] const std::string& loadedLibraryPath() const { return loadedLibraryPath_; }
+    [[nodiscard]] LoadPathKind loadPathKind() const { return loadPathKind_; }
+    [[nodiscard]] const std::string& lastError() const { return lastError_; }
 
 private:
     enum class ApiMode {
@@ -86,8 +86,14 @@ private:
     RuntimeFns* fns_ = nullptr;
     void* contextStorage_ = nullptr;
     ApiMode apiMode_ = ApiMode::LegacyFsr3;
+    // Guarded to match their uses: every read and write of these is inside a
+    // WOWEE_HAS_AMD_FSR3_FRAMEGEN block, so with the backend off they are
+    // fields nothing touches, which clang rejects under -Werror.
+#if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     void* genericUpscaleContext_ = nullptr;
     void* genericFramegenContext_ = nullptr;
+#endif
+    // Not guarded: this one is read outside the block, unlike the two above.
     uint64_t genericFrameId_ = 1;
 };
 

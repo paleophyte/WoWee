@@ -235,7 +235,7 @@ void AuthHandler::handleLogonChallengeResponse(network::Packet& packet) {
             fail(ss.str(), /*protocolRelated=*/true);
         } else {
             // Account-level rejections (unknown account, wrong password, banned,
-            // suspended, in use) are NOT protocol problems — never retry those.
+            // suspended, in use) are NOT protocol problems - never retry those.
             fail(std::string("LOGON_CHALLENGE failed: ") + getAuthResultString(response.result));
         }
         return;
@@ -308,21 +308,21 @@ void AuthHandler::sendLogonProof() {
     {
         std::vector<std::string> candidateDirs;
         if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR")) {
-            if (env && *env) candidateDirs.push_back(env);
+            if (env && *env) candidateDirs.emplace_back(env);
         }
         // Expansion-isolated extraction layouts. Select narrowly so a Wrath or
         // stock Classic executable can never be used for a Turtle integrity hash.
         if (clientInfo.majorVersion == 1 && clientInfo.minorVersion == 18) {
-            candidateDirs.push_back("Data/expansions/turtle/misc");
+            candidateDirs.emplace_back("Data/expansions/turtle/misc");
         } else if (clientInfo.build <= 6005) {
-            candidateDirs.push_back("Data/expansions/classic/misc");
+            candidateDirs.emplace_back("Data/expansions/classic/misc");
         } else if (clientInfo.build <= 8606) {
-            candidateDirs.push_back("Data/expansions/tbc/misc");
+            candidateDirs.emplace_back("Data/expansions/tbc/misc");
         } else {
-            candidateDirs.push_back("Data/expansions/wotlk/misc");
+            candidateDirs.emplace_back("Data/expansions/wotlk/misc");
         }
         // Legacy flat extraction layout.
-        candidateDirs.push_back("Data/misc");
+        candidateDirs.emplace_back("Data/misc");
         // Common turtle repack location used in this workspace
         if (const char* home = std::getenv("HOME")) {
             if (home && *home) {
@@ -376,11 +376,6 @@ void AuthHandler::sendLogonProof() {
 
     setState(AuthState::PROOF_SENT);
 }
-
-void AuthHandler::submitPin(const std::string& pin) {
-    submitSecurityCode(pin);
-}
-
 void AuthHandler::submitSecurityCode(const std::string& code) {
     pendingSecurityCode_ = code;
     // If we're waiting on a security code, continue immediately.
@@ -400,7 +395,7 @@ void AuthHandler::handleLogonProofResponse(network::Packet& packet) {
     }
 
     if (!response.isSuccess()) {
-        // Credential/account rejection — a different protocol won't help, and
+        // Credential/account rejection - a different protocol won't help, and
         // retrying can trip the server's failed-login lockout.
         std::string reason = "Login failed: ";
         if (response.status == static_cast<uint8_t>(AuthResult::ACCOUNT_INVALID) &&
@@ -414,7 +409,7 @@ void AuthHandler::handleLogonProofResponse(network::Packet& packet) {
     }
 
     // Verify server proof. A mismatch here means our SRP inputs differ from the
-    // server's — a wrong password is rejected above, so this points at the
+    // server's - a wrong password is rejected above, so this points at the
     // handshake shape (i.e. protocol) instead.
     if (!srp->verifyServerProof(response.M2)) {
         fail("Server identity verification failed - the server may be running an incompatible version",
@@ -426,7 +421,7 @@ void AuthHandler::handleLogonProofResponse(network::Packet& packet) {
     sessionKey = srp->getSessionKey();
     setState(AuthState::AUTHENTICATED);
 
-    // Plaintext password is no longer needed — zero-fill and release it so it
+    // Plaintext password is no longer needed - zero-fill and release it so it
     // doesn't sit in process memory for the rest of the session.
     if (!password.empty()) {
         volatile char* p = const_cast<volatile char*>(password.data());

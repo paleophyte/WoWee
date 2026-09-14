@@ -1,12 +1,14 @@
 #pragma once
 
 #include "game/world_packets.hpp"
+#include "core/coordinates.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include <glm/glm.hpp>
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -59,18 +61,18 @@ public:
     void updateAttachedTransportChildren(float deltaTime);
 
     // Movement info accessors
-    const MovementInfo& getMovementInfo() const { return movementInfo; }
+    [[nodiscard]] const MovementInfo& getMovementInfo() const { return movementInfo; }
     MovementInfo& getMovementInfoMut() { return movementInfo; }
 
     // Speed accessors
-    float getServerRunSpeed() const { return serverRunSpeed_; }
-    float getServerWalkSpeed() const { return serverWalkSpeed_; }
-    float getServerSwimSpeed() const { return serverSwimSpeed_; }
-    float getServerSwimBackSpeed() const { return serverSwimBackSpeed_; }
-    float getServerFlightSpeed() const { return serverFlightSpeed_; }
-    float getServerFlightBackSpeed() const { return serverFlightBackSpeed_; }
-    float getServerRunBackSpeed() const { return serverRunBackSpeed_; }
-    float getServerTurnRate() const { return serverTurnRate_; }
+    [[nodiscard]] float getServerRunSpeed() const { return serverRunSpeed_; }
+    [[nodiscard]] float getServerWalkSpeed() const { return serverWalkSpeed_; }
+    [[nodiscard]] float getServerSwimSpeed() const { return serverSwimSpeed_; }
+    [[nodiscard]] float getServerSwimBackSpeed() const { return serverSwimBackSpeed_; }
+    [[nodiscard]] float getServerFlightSpeed() const { return serverFlightSpeed_; }
+    [[nodiscard]] float getServerFlightBackSpeed() const { return serverFlightBackSpeed_; }
+    [[nodiscard]] float getServerRunBackSpeed() const { return serverRunBackSpeed_; }
+    [[nodiscard]] float getServerTurnRate() const { return serverTurnRate_; }
 
     // CREATE_OBJECT/LIVING carries the authoritative speed table on login.
     // Apply it to the same cache used by camera movement and later force-speed
@@ -80,41 +82,31 @@ public:
                                    float flightBack, float turn, float pitch);
 
     // Movement flag queries
-    bool isPlayerRooted() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::ROOT)) != 0;
-    }
-    bool isGravityDisabled() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::LEVITATING)) != 0;
-    }
-    bool isFeatherFalling() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::FEATHER_FALL)) != 0;
-    }
-    bool isWaterWalking() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::WATER_WALK)) != 0;
-    }
-    bool isPlayerFlying() const {
-        const uint32_t flyMask = static_cast<uint32_t>(MovementFlags::CAN_FLY) |
-                                 static_cast<uint32_t>(MovementFlags::FLYING);
-        return (movementInfo.flags & flyMask) == flyMask;
-    }
-    bool isHovering() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::HOVER)) != 0;
-    }
-    bool isSwimming() const {
-        return (movementInfo.flags & static_cast<uint32_t>(MovementFlags::SWIMMING)) != 0;
-    }
+    [[nodiscard]] bool isPlayerRooted() const { return movementInfo.isPlayerRooted(); }
+    [[nodiscard]] bool isGravityDisabled() const { return movementInfo.isGravityDisabled(); }
+    [[nodiscard]] bool isFeatherFalling() const { return movementInfo.isFeatherFalling(); }
+    [[nodiscard]] bool isWaterWalking() const { return movementInfo.isWaterWalking(); }
+    [[nodiscard]] bool isPlayerFlying() const { return movementInfo.isPlayerFlying(); }
+    [[nodiscard]] bool isHovering() const { return movementInfo.isHovering(); }
+    [[nodiscard]] bool isSwimming() const { return movementInfo.isSwimming(); }
 
     // Taxi / Flight Paths
-    bool isTaxiWindowOpen() const { return taxiWindowOpen_; }
+    [[nodiscard]] bool isTaxiWindowOpen() const { return taxiWindowOpen_; }
     void closeTaxi();
     void activateTaxi(uint32_t destNodeId);
-    bool isOnTaxiFlight() const { return onTaxiFlight_; }
-    bool isTaxiMountActive() const { return taxiMountActive_; }
-    bool isTaxiActivationPending() const { return taxiActivatePending_; }
+    [[nodiscard]] bool isOnTaxiFlight() const { return onTaxiFlight_; }
+
+    /// True while a locally-initiated dismount is waiting on the server to
+    /// agree. The player's mount field keeps its old value for a few frames
+    /// after the request, and taking that at face value re-mounts them.
+    [[nodiscard]] bool isDismountPending() const { return dismountGraceRemaining_ > 0.0f; }
+    void clearDismountPending() { dismountGraceRemaining_ = 0.0f; }
+    [[nodiscard]] bool isTaxiMountActive() const { return taxiMountActive_; }
+    [[nodiscard]] bool isTaxiActivationPending() const { return taxiActivatePending_; }
     void forceClearTaxiAndMovementState();
-    const std::string& getTaxiDestName() const { return taxiDestName_; }
-    const ShowTaxiNodesData& getTaxiData() const { return currentTaxiData_; }
-    uint32_t getTaxiCurrentNode() const { return currentTaxiData_.nearestNode; }
+    [[nodiscard]] const std::string& getTaxiDestName() const { return taxiDestName_; }
+    [[nodiscard]] const ShowTaxiNodesData& getTaxiData() const { return currentTaxiData_; }
+    [[nodiscard]] uint32_t getTaxiCurrentNode() const { return currentTaxiData_.nearestNode; }
 
     struct TaxiNode {
         uint32_t id = 0;
@@ -137,22 +129,35 @@ public:
         float x = 0, y = 0, z = 0;
     };
 
-    const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const { return taxiNodes_; }
-    const std::vector<TaxiPathEdge>& getTaxiPathEdges() const { return taxiPathEdges_; }
+    [[nodiscard]] const std::unordered_map<uint32_t, TaxiNode>& getTaxiNodes() const { return taxiNodes_; }
+    [[nodiscard]] const std::vector<TaxiPathEdge>& getTaxiPathEdges() const { return taxiPathEdges_; }
+
+    /// Drops what was read out of the taxi DBCs, so the next ask reloads them.
+    ///
+    /// Called when the active expansion changes. GameHandler::resetDbcCaches
+    /// cleared copies of its own for this, and getTaxiNodes forwards here - so
+    /// switching expansion left the previous one's flight points in place and
+    /// nothing said so.
+    void resetTaxiDbcCache() {
+        taxiNodes_.clear();
+        taxiPathEdges_.clear();
+        taxiPathNodes_.clear();
+        taxiDbcLoaded_ = false;
+    }
     // WotLK 3.3.5a TaxiNodes.dbc has 384 entries; the known-taxi bitmask
     // is 12 × uint32 = 384 bits. Node IDs outside this range are invalid.
     static constexpr uint32_t kMaxTaxiNodeId = 384;
-    bool isKnownTaxiNode(uint32_t nodeId) const {
+    [[nodiscard]] bool isKnownTaxiNode(uint32_t nodeId) const {
         if (nodeId == 0 || nodeId > kMaxTaxiNodeId) return false;
         uint32_t idx = nodeId - 1;
         return (knownTaxiMask_[idx / 32] & (1u << (idx % 32))) != 0;
     }
-    uint32_t getTaxiCostTo(uint32_t destNodeId) const;
+    [[nodiscard]] uint32_t getTaxiCostTo(uint32_t destNodeId) const;
     /// True when the taxi cost map has a route from the current node to dest.
-    bool hasTaxiRouteTo(uint32_t destNodeId) const;
+    [[nodiscard]] bool hasTaxiRouteTo(uint32_t destNodeId) const;
     /// Node-id hop chain current → dest (inclusive); empty if unreachable.
-    std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
-    bool taxiNpcHasRoutes(uint64_t guid) const {
+    [[nodiscard]] std::vector<uint32_t> getTaxiRouteTo(uint32_t destNodeId) const;
+    [[nodiscard]] bool taxiNpcHasRoutes(uint64_t guid) const {
         auto it = taxiNpcHasRoutes_.find(guid);
         return it != taxiNpcHasRoutes_.end() && it->second;
     }
@@ -170,14 +175,14 @@ public:
     void deferServerTaxiCompletion();
     // Server cores can clear taxi flags/dismount before the client spline reaches
     // its final waypoint. Only treat those signals as authoritative near arrival.
-    bool isNearTaxiDestination(float maxDistance = 24.0f) const;
+    [[nodiscard]] bool isNearTaxiDestination(float maxDistance = 24.0f) const;
     uint32_t nextMovementTimestampMs();
     void sanitizeMovementForTaxi();
 
     // Heartbeat / movement timing (for GameHandler::update())
     float& timeSinceLastMoveHeartbeatRef() { return timeSinceLastMoveHeartbeat_; }
-    float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
-    bool isServerMovementAllowed() const { return serverMovementAllowed_; }
+    [[nodiscard]] float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
+    [[nodiscard]] bool isServerMovementAllowed() const { return serverMovementAllowed_; }
     void setServerMovementAllowed(bool v) { serverMovementAllowed_ = v; }
     uint32_t& monsterMovePacketsThisTickRef() { return monsterMovePacketsThisTick_; }
     uint32_t& monsterMovePacketsDroppedThisTickRef() { return monsterMovePacketsDroppedThisTick_; }
@@ -190,7 +195,6 @@ public:
     // Taxi state references for GameHandler update/processing
     bool& onTaxiFlightRef() { return onTaxiFlight_; }
     bool& taxiMountActiveRef() { return taxiMountActive_; }
-    uint32_t& taxiMountDisplayIdRef() { return taxiMountDisplayId_; }
     bool& taxiActivatePendingRef() { return taxiActivatePending_; }
     float& taxiActivateTimerRef() { return taxiActivateTimer_; }
     bool& taxiClientActiveRef() { return taxiClientActive_; }
@@ -203,6 +207,7 @@ public:
     uint32_t* knownTaxiMaskPtr() { return knownTaxiMask_; }
     bool& taxiMaskInitializedRef() { return taxiMaskInitialized_; }
     uint64_t& taxiNpcGuidRef() { return taxiNpcGuid_; }
+    [[nodiscard]] uint64_t getTaxiNpcGuid() const { return taxiNpcGuid_; }
 
     // Other-player movement timing (for cleanup on despawn etc.)
     std::unordered_map<uint64_t, uint32_t>& otherPlayerMoveTimeMsRef() { return otherPlayerMoveTimeMs_; }
@@ -282,6 +287,10 @@ private:
     glm::vec3 worldTransferFallbackCanonicalPos_{0.0f};
     float worldTransferFallbackCanonicalO_ = 0.0f;
     float timeSinceLastMoveHeartbeat_ = 0.0f;
+    // Seconds left in which a stale non-zero mount field is not to be believed.
+    // Bounded so a dismount the server refuses recovers on its own rather than
+    // leaving the player permanently unable to look mounted.
+    float dismountGraceRemaining_ = 0.0f;
     float moveHeartbeatInterval_ = 0.5f;
     uint32_t lastHeartbeatSendTimeMs_ = 0;
     float lastHeartbeatX_ = 0.0f;
@@ -301,8 +310,8 @@ private:
     float serverSwimBackSpeed_ = 2.5f;
     float serverFlightSpeed_ = 7.0f;
     float serverFlightBackSpeed_ = 4.5f;
-    float serverTurnRate_ = 3.14159f;
-    float serverPitchRate_ = 3.14159f;
+    float serverTurnRate_ = core::coords::PI;
+    float serverPitchRate_ = core::coords::PI;
 
     // Other-player movement smoothing
     std::unordered_map<uint64_t, uint32_t> otherPlayerMoveTimeMs_;
@@ -317,6 +326,8 @@ private:
     bool taxiWindowOpen_ = false;
     ShowTaxiNodesData currentTaxiData_;
     uint64_t taxiNpcGuid_ = 0;
+    /// Triggers already reported as a near miss, so the log says it once.
+    std::set<uint32_t> nearMissLogged_;
     bool onTaxiFlight_ = false;
     std::string taxiDestName_;
     // Set in activateTaxi(); used by finishClientTaxiFlight() to snap to the
@@ -327,7 +338,6 @@ private:
     // the node's registered coordinate the way GM teleports/.gps do.
     uint32_t taxiDestNodeId_ = 0;
     bool taxiMountActive_ = false;
-    uint32_t taxiMountDisplayId_ = 0;
     bool taxiActivatePending_ = false;
     float taxiActivateTimer_ = 0.0f;
     // How long to wait for SMSG_ACTIVATETAXIREPLY before giving up - see

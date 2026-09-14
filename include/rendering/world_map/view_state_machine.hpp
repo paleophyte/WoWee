@@ -1,6 +1,6 @@
-// view_state_machine.hpp — Navigation state and transitions for the world map.
+// view_state_machine.hpp - Navigation state and transitions for the world map.
 // Extracted from WorldMap zoom/enter methods (Phase 6 of refactoring plan).
-// SRP — pure state machine, no rendering or input code.
+// SRP - pure state machine, no rendering or input code.
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
@@ -12,12 +12,12 @@ namespace world_map {
 /// Manages the current view level and transitions between views.
 class ViewStateMachine {
 public:
-    ViewLevel currentLevel() const { return level_; }
-    const TransitionState& transition() const { return transition_; }
+    [[nodiscard]] ViewLevel currentLevel() const { return level_; }
+    [[nodiscard]] const TransitionState& transition() const { return transition_; }
 
-    int continentIdx() const { return continentIdx_; }
-    int currentZoneIdx() const { return currentIdx_; }
-    bool cosmicEnabled() const { return cosmicEnabled_; }
+    [[nodiscard]] int continentIdx() const { return continentIdx_; }
+    [[nodiscard]] int currentZoneIdx() const { return currentIdx_; }
+    [[nodiscard]] bool cosmicEnabled() const { return cosmicEnabled_; }
 
     void setContinentIdx(int idx) { continentIdx_ = idx; }
     void setCurrentZoneIdx(int idx) { currentIdx_ = idx; }

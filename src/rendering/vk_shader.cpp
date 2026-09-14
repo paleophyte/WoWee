@@ -1,6 +1,10 @@
 #include "rendering/vk_shader.hpp"
+#include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
 #include <fstream>
+#include <filesystem>
+#include <cstring>
+#include <cerrno>
 
 namespace wowee {
 namespace rendering {
@@ -27,12 +31,18 @@ VkShaderModule& VkShaderModule::operator=(VkShaderModule&& other) noexcept {
 bool VkShaderModule::loadFromFile(VkDevice device, const std::string& path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        LOG_ERROR("Failed to open shader file: ", path);
+        // A relative shader path resolves against the working directory, which
+        // is the process's and not this file's to assume. Naming it, and what
+        // the system said, turns "failed to open" into something actionable.
+        std::error_code ec;
+        const std::string cwd = std::filesystem::current_path(ec).string();
+        LOG_ERROR("Failed to open shader file: ", path, " (", std::strerror(errno),
+                  "; working directory ", ec ? "unknown" : cwd, ")");
         return false;
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
-    // SPIR-V is a stream of 32-bit words — file size must be a multiple of 4
+    // SPIR-V is a stream of 32-bit words - file size must be a multiple of 4
     if (fileSize == 0 || fileSize % 4 != 0) {
         LOG_ERROR("Invalid SPIR-V file size (", fileSize, "): ", path);
         return false;
@@ -43,7 +53,28 @@ bool VkShaderModule::loadFromFile(VkDevice device, const std::string& path) {
     file.read(reinterpret_cast<char*>(code.data()), fileSize);
     file.close();
 
-    return loadFromMemory(device, code.data(), fileSize);
+    if (!loadFromMemory(device, code.data(), fileSize)) return false;
+
+    // Named with the file it came from, so a shader module in the
+    // vkDestroyDevice leak report identifies its subsystem rather than being
+    // a bare handle. Nothing without validation: the naming call is a no-op
+    // when VK_EXT_debug_utils is absent.
+    {
+        std::string leaf = path;
+        if (const size_t slash = leaf.find_last_of("/\\"); slash != std::string::npos) {
+            leaf = leaf.substr(slash + 1);
+        }
+        setObjectName(device, VK_OBJECT_TYPE_SHADER_MODULE,
+                      reinterpret_cast<uint64_t>(module_), leaf.c_str());
+        // And said in our own log, because the validation layer's leak report
+        // prints bare handles whether or not the object carries a name - which
+        // is what two rounds of naming just established. Matching a handle from
+        // that report against these lines is what actually identifies it.
+        if (isObjectNamingActive()) {
+            LOG_INFO("shader module ", reinterpret_cast<const void*>(module_), " = ", leaf);
+        }
+    }
+    return true;
 }
 
 bool VkShaderModule::loadFromMemory(VkDevice device, const uint32_t* code, size_t sizeBytes) {
@@ -81,34 +112,22 @@ VkPipelineShaderStageCreateInfo VkShaderModule::stageInfo(
     return info;
 }
 
-VkPipelineShaderStageCreateInfo loadShaderStage(VkDevice device,
-    const std::string& path, VkShaderStageFlagBits stage)
-{
-    // This creates a temporary module — caller must keep it alive while pipeline is created.
-    // Prefer using VkShaderModule directly for proper lifetime management.
-    VkShaderModuleCreateInfo moduleInfo{};
-    moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 
-    std::ifstream file(path, std::ios::ate | std::ios::binary);
-    std::vector<uint32_t> code;
-    if (file.is_open()) {
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        code.resize(fileSize / sizeof(uint32_t));
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), fileSize);
-        moduleInfo.codeSize = fileSize;
-        moduleInfo.pCode = code.data();
+
+ShaderPair loadShaderPair(VkDevice device, const std::string& vertPath,
+                          const std::string& fragPath, const char* what) {
+    ShaderPair pair;
+    if (!pair.vert.loadFromFile(device, vertPath)) {
+        LOG_ERROR("Failed to load ", what, " vertex shader: ", vertPath);
+        return pair;
     }
-
-    ::VkShaderModule module = VK_NULL_HANDLE;
-    vkCreateShaderModule(device, &moduleInfo, nullptr, &module);
-
-    VkPipelineShaderStageCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    info.stage = stage;
-    info.module = module;
-    info.pName = "main";
-    return info;
+    if (!pair.frag.loadFromFile(device, fragPath)) {
+        LOG_ERROR("Failed to load ", what, " fragment shader: ", fragPath);
+        return pair;
+    }
+    pair.vertStage = pair.vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
+    pair.fragStage = pair.frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    return pair;
 }
 
 } // namespace rendering

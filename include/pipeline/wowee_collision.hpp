@@ -10,7 +10,7 @@ namespace pipeline {
 
 struct ADTTerrain;
 
-// Wowee Open Collision format (.woc) — walkability mesh for custom zones
+// Wowee Open Collision format (.woc) - walkability mesh for custom zones
 struct WoweeCollision {
     struct Triangle {
         glm::vec3 v0, v1, v2;
@@ -29,9 +29,9 @@ struct WoweeCollision {
     BoundingBox bounds;
     uint32_t tileX = 0, tileY = 0;
 
-    bool isValid() const { return !triangles.empty(); }
-    size_t walkableCount() const;
-    size_t steepCount() const;
+    [[nodiscard]] bool isValid() const { return !triangles.empty(); }
+    [[nodiscard]] size_t walkableCount() const;
+    [[nodiscard]] size_t steepCount() const;
 };
 
 class WoweeCollisionBuilder {

@@ -1,6 +1,9 @@
 #include "cli_readmes.hpp"
+#include "zone_manifest.hpp"
 
 #include "pipeline/wowee_model.hpp"
+
+#include "cli_paths.hpp"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -109,15 +112,11 @@ int handleZoneReadme(int& i, int argc, char** argv) {
     std::vector<MeshRow> meshList;
     fs::path meshDir = fs::path(zoneDir) / "meshes";
     if (fs::exists(meshDir)) {
-        for (const auto& e : fs::recursive_directory_iterator(meshDir, ec)) {
-            if (!e.is_regular_file()) continue;
-            if (e.path().extension() != ".wom") continue;
-            std::string base = e.path().string();
-            base = base.substr(0, base.size() - 4);
-            auto wom = wowee::pipeline::WoweeModelLoader::load(base);
+        for (const auto& womFile : findFilesByExtension(meshDir, ".wom")) {
+            auto wom = wowee::pipeline::WoweeModelLoader::load(womFile.base);
             meshList.push_back({
-                fs::relative(e.path(), zoneDir).string(),
-                e.file_size(),
+                fs::relative(womFile.path, zoneDir).string(),
+                womFile.bytes,
                 wom.vertices.size(),
                 wom.indices.size() / 3,
                 wom.bones.size(),
@@ -207,7 +206,7 @@ int handleProjectReadme(int& i, int argc, char** argv) {
     // Auto-generate PROJECT.md for a project. Walks every zone,
     // classifies each (BOOTSTRAPPED/PARTIAL/EMPTY), and writes a
     // Markdown table with per-zone counts and a project-level
-    // rollup. Pairs with --gen-zone-readme — running both gives
+    // rollup. Pairs with --gen-zone-readme - running both gives
     // self-documenting content at every level.
     std::string projectDir = argv[++i];
     std::string outPath;
@@ -220,13 +219,9 @@ int handleProjectReadme(int& i, int argc, char** argv) {
         return 1;
     }
     if (outPath.empty()) outPath = projectDir + "/PROJECT.md";
-    std::vector<std::string> zones;
-    for (const auto& entry : fs::directory_iterator(projectDir)) {
-        if (!entry.is_directory()) continue;
-        if (!fs::exists(entry.path() / "zone.json")) continue;
-        zones.push_back(entry.path().string());
-    }
-    std::sort(zones.begin(), zones.end());
+    // What counts as a zone, and the order they are reported in,
+    // from one place.
+    std::vector<std::string> zones = wowee::editor::projectZoneDirs(projectDir);
     auto scan = [](const std::string& base, const std::string& sub,
                    const std::string& ext) -> std::pair<int, uint64_t> {
         int n = 0;

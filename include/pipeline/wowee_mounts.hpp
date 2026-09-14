@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Mount catalog (.wmou) — novel replacement for
+// Wowee Open Mount catalog (.wmou) - novel replacement for
 // Blizzard's Mount.dbc + MountCapability.dbc + MountType.dbc
 // + the mount-related subsets of Spell.dbc / Item.dbc. The
 // 32nd open format added to the editor.
@@ -90,9 +90,9 @@ struct WoweeMount {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t mountId) const;
+    [[nodiscard]] const Entry* findById(uint32_t mountId) const;
 
     static const char* kindName(uint8_t k);
     static const char* factionName(uint8_t f);
@@ -108,12 +108,12 @@ public:
 
     // Preset emitters used by --gen-mounts* variants.
     //
-    //   makeStarter — 3 mounts: 1 ground / 1 flying / 1
+    //   makeStarter - 3 mounts: 1 ground / 1 flying / 1
     //                  swimming with appropriate speed +
     //                  riding skill requirements.
-    //   makeRacial  — 6 racial mounts (one per Alliance + 2
+    //   makeRacial  - 6 racial mounts (one per Alliance + 2
     //                  Horde races) all with raceMask gating.
-    //   makeFlying  — 4 flying mounts spanning common / epic /
+    //   makeFlying  - 4 flying mounts spanning common / epic /
     //                  achievement / pvp tiers (60% / 100% /
     //                  280% / 310% speed).
     static WoweeMount makeStarter(const std::string& catalogName);

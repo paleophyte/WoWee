@@ -57,26 +57,26 @@ public:
 
     // ── Configuration ───────────────────────────────────────────────────
     void setCapabilities(const AnimCapabilitySet& caps) { caps_ = caps; }
-    const AnimCapabilitySet& getCapabilities() const { return caps_; }
+    [[nodiscard]] const AnimCapabilitySet& getCapabilities() const { return caps_; }
     void setWeaponLoadout(const WeaponLoadout& loadout) { loadout_ = loadout; }
-    const WeaponLoadout& getWeaponLoadout() const { return loadout_; }
+    [[nodiscard]] const WeaponLoadout& getWeaponLoadout() const { return loadout_; }
 
     // ── Mount ───────────────────────────────────────────────────────────
     void configureMountFSM(const MountFSM::MountAnimSet& anims, bool taxiFlight);
     void clearMountFSM();
-    bool isMountActive() const { return mount_.isActive(); }
+    [[nodiscard]] bool isMountActive() const { return mount_.isActive(); }
     MountFSM& getMountFSM() { return mount_; }
 
     // ── Sub-FSM access (for transition queries) ─────────────────────────
     LocomotionFSM& getLocomotion() { return locomotion_; }
-    const LocomotionFSM& getLocomotion() const { return locomotion_; }
+    [[nodiscard]] const LocomotionFSM& getLocomotion() const { return locomotion_; }
     CombatFSM& getCombat() { return combat_; }
-    const CombatFSM& getCombat() const { return combat_; }
+    [[nodiscard]] const CombatFSM& getCombat() const { return combat_; }
     ActivityFSM& getActivity() { return activity_; }
-    const ActivityFSM& getActivity() const { return activity_; }
+    [[nodiscard]] const ActivityFSM& getActivity() const { return activity_; }
 
     // ── Last resolved output ────────────────────────────────────────────
-    AnimOutput getLastOutput() const { return lastOutput_; }
+    [[nodiscard]] AnimOutput getLastOutput() const { return lastOutput_; }
 
     // ── Input injection (set per-frame from AnimationController) ────────
     struct FrameInput {
@@ -85,14 +85,18 @@ public:
         bool sprinting = false;
         bool movingForward = false;
         bool movingBackward = false;
-        bool autoRunning = false;
         bool strafeLeft = false;
         bool strafeRight = false;
         bool grounded = true;
         bool jumping = false;
         bool swimming = false;
         bool sitting = false;
-        bool flyingActive = false;
+        // No flyingActive. The mount path asks the camera controller directly,
+        // and an unmounted flying character has no animation path at all -
+        // ActivityFSM branches on swimming, jumping, moving and sitting, and
+        // there is no flight among them. That is a gap rather than something
+        // this field was covering: it was filled in every frame and read
+        // nowhere, which is a harder thing to notice than a missing branch.
         bool ascending = false;
         bool descending = false;
         bool jumpKeyPressed = false;
@@ -140,7 +144,7 @@ private:
     AnimOutput resolveAnimation();
 
     /// Apply stealth/sprint overlays to the resolved animation.
-    AnimOutput applyOverlays(AnimOutput base) const;
+    [[nodiscard]] AnimOutput applyOverlays(AnimOutput base) const;
 };
 
 } // namespace rendering

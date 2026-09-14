@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <functional>
+#include <vector>
 #include "ui/keybinding_manager.hpp"
 #include "core/logger.hpp"
 #include <fstream>
@@ -34,9 +37,12 @@ void KeybindingManager::initializeDefaults() {
     bindings_[static_cast<int>(Action::TOGGLE_DUNGEON_FINDER)] = ImGuiKey_J;  // Originally I, reassigned to avoid conflict
     bindings_[static_cast<int>(Action::TOGGLE_WORLD_MAP)] = ImGuiKey_M;  // WoW standard: M opens world map
     bindings_[static_cast<int>(Action::TOGGLE_NAMEPLATES)] = ImGuiKey_V;
-    bindings_[static_cast<int>(Action::TOGGLE_RAID_FRAMES)] = ImGuiKey_F;  // Reassigned from R (now camera reset)
     bindings_[static_cast<int>(Action::TOGGLE_ACHIEVEMENTS)] = ImGuiKey_Y;  // WoW standard key (Shift+Y in retail)
     bindings_[static_cast<int>(Action::TOGGLE_SKILLS)]      = ImGuiKey_K;  // WoW standard: K opens Skills/Professions
+    // WoW standard: H is TOGGLECHARACTER4, which is TogglePVPFrame() - the
+    // panel battlegrounds are queued for. This client had H on a titles
+    // window of its own, under a comment saying nothing was bound to it.
+    bindings_[static_cast<int>(Action::TOGGLE_PVP)]         = ImGuiKey_H;
 }
 
 bool KeybindingManager::isActionPressed(Action action, bool repeat) {
@@ -44,6 +50,13 @@ bool KeybindingManager::isActionPressed(Action action, bool repeat) {
     if (it == bindings_.end()) return false;
     ImGuiKey key = it->second;
     if (key == ImGuiKey_None) return false;
+
+    // Someone typing into a FrameXML edit box gets no bindings at all, which is
+    // what the real client does and what the event path here already did - it
+    // hands the key to the box and stops. This is the other way in: every panel
+    // polls its key from inside its own draw, and a poll never passed through
+    // that path, so the key arrived twice.
+    if (interfaceTakingTypedInput()) return false;
 
     // When typing in a text field (e.g. chat input), never treat A-Z or 0-9 as shortcuts.
     const ImGuiIO& io = ImGui::GetIO();
@@ -55,6 +68,64 @@ bool KeybindingManager::isActionPressed(Action action, bool repeat) {
     }
 
     return ImGui::IsKeyPressed(key, repeat);
+}
+
+namespace {
+/// One probe for the whole client, set while the interface is built and read
+/// from every path that has to know whether someone is typing.
+std::function<bool()>& typedInputProbe() {
+    static std::function<bool()> probe;
+    return probe;
+}
+}  // namespace
+
+bool interfaceTakingTypedInput() {
+    const auto& probe = typedInputProbe();
+    return probe && probe();
+}
+
+void setTypedInputProbe(std::function<bool()> probe) {
+    typedInputProbe() = std::move(probe);
+}
+
+namespace {
+/// Set by the pump, read by the poll, cleared between iterations. A handful of
+/// keys at most - only the ones whose handling lets go of the box.
+std::vector<ImGuiKey>& consumedKeys() {
+    static std::vector<ImGuiKey> keys;
+    return keys;
+}
+}  // namespace
+
+bool interfaceConsumedKey(ImGuiKey key) {
+    const auto& keys = consumedKeys();
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+void noteInterfaceConsumedKey(ImGuiKey key) {
+    if (!interfaceConsumedKey(key)) consumedKeys().push_back(key);
+}
+
+void clearInterfaceConsumedKeys() { consumedKeys().clear(); }
+
+namespace {
+/// Pumps left in which a '/' text event still counts as the echo of the key
+/// that opened the box. Two, because the event arrives in the same pump or the
+/// next one and never later.
+int& slashEchoPumps() { static int pumps = 0; return pumps; }
+}  // namespace
+
+void noteChatOpenedBySlash() { slashEchoPumps() = 2; }
+
+bool consumeChatSlashEcho(const char* text) {
+    if (slashEchoPumps() <= 0) return false;
+    if (!text || text[0] != '/' || text[1] != '\0') return false;
+    slashEchoPumps() = 0;
+    return true;
+}
+
+void ageChatSlashEcho() {
+    if (slashEchoPumps() > 0) --slashEchoPumps();
 }
 
 ImGuiKey KeybindingManager::getKeyForAction(Action action) const {
@@ -92,9 +163,9 @@ const char* KeybindingManager::getActionName(Action action) {
         case Action::TOGGLE_DUNGEON_FINDER: return "Dungeon Finder";
         case Action::TOGGLE_WORLD_MAP: return "World Map";
         case Action::TOGGLE_NAMEPLATES: return "Nameplates";
-        case Action::TOGGLE_RAID_FRAMES: return "Raid Frames";
         case Action::TOGGLE_ACHIEVEMENTS: return "Achievements";
         case Action::TOGGLE_SKILLS: return "Skills / Professions";
+        case Action::TOGGLE_PVP: return "Player vs Player";
         case Action::ACTION_COUNT: break;
     }
     return "Unknown";
@@ -121,7 +192,7 @@ void KeybindingManager::loadFromConfigFile(const std::string& filePath) {
         if (line == "[Keybindings]") {
             inKeybindingsSection = true;
             continue;
-        } else if (line[0] == '[') {
+        } if (line[0] == '[') {
             inKeybindingsSection = false;
             continue;
         }
@@ -157,10 +228,10 @@ void KeybindingManager::loadFromConfigFile(const std::string& filePath) {
         else if (action == "toggle_dungeon_finder") actionIdx = static_cast<int>(Action::TOGGLE_DUNGEON_FINDER);
         else if (action == "toggle_world_map") actionIdx = static_cast<int>(Action::TOGGLE_WORLD_MAP);
         else if (action == "toggle_nameplates") actionIdx = static_cast<int>(Action::TOGGLE_NAMEPLATES);
-        else if (action == "toggle_raid_frames") actionIdx = static_cast<int>(Action::TOGGLE_RAID_FRAMES);
         else if (action == "toggle_quest_log") actionIdx = static_cast<int>(Action::TOGGLE_QUESTS);  // legacy alias
         else if (action == "toggle_achievements") actionIdx = static_cast<int>(Action::TOGGLE_ACHIEVEMENTS);
         else if (action == "toggle_skills") actionIdx = static_cast<int>(Action::TOGGLE_SKILLS);
+        else if (action == "toggle_pvp") actionIdx = static_cast<int>(Action::TOGGLE_PVP);
 
         if (actionIdx < 0) continue;
 
@@ -190,7 +261,7 @@ void KeybindingManager::loadFromConfigFile(const std::string& filePath) {
             key = ImGuiKey_Home;
         } else if (keyStr == "End") {
             key = ImGuiKey_End;
-        } else if (keyStr.find("F") == 0 && keyStr.length() <= 3) {
+        } else if (keyStr.find('F') == 0 && keyStr.length() <= 3) {
             // F1-F12 keys
             try {
                 int fNum = std::stoi(keyStr.substr(1));
@@ -226,7 +297,7 @@ void KeybindingManager::saveToConfigFile(const std::string& filePath) const {
             if (line == "[Keybindings]") {
                 inKeybindingsSection = true;
                 continue;
-            } else if (line[0] == '[') {
+            } if (line[0] == '[') {
                 inKeybindingsSection = false;
             }
 
@@ -244,22 +315,22 @@ void KeybindingManager::saveToConfigFile(const std::string& filePath) const {
         Action action;
         const char* name;
     } actionMap[] = {
-        {Action::TOGGLE_CHARACTER_SCREEN, "toggle_character_screen"},
-        {Action::TOGGLE_INVENTORY, "toggle_inventory"},
-        {Action::TOGGLE_BAGS, "toggle_bags"},
-        {Action::TOGGLE_SPELLBOOK, "toggle_spellbook"},
-        {Action::TOGGLE_TALENTS, "toggle_talents"},
-        {Action::TOGGLE_QUESTS, "toggle_quests"},
-        {Action::TOGGLE_MINIMAP, "toggle_minimap"},
-        {Action::TOGGLE_SETTINGS, "toggle_settings"},
-        {Action::TOGGLE_CHAT, "toggle_chat"},
-        {Action::TOGGLE_GUILD_ROSTER, "toggle_guild_roster"},
-        {Action::TOGGLE_DUNGEON_FINDER, "toggle_dungeon_finder"},
-        {Action::TOGGLE_WORLD_MAP, "toggle_world_map"},
-        {Action::TOGGLE_NAMEPLATES, "toggle_nameplates"},
-        {Action::TOGGLE_RAID_FRAMES, "toggle_raid_frames"},
-        {Action::TOGGLE_ACHIEVEMENTS, "toggle_achievements"},
-        {Action::TOGGLE_SKILLS, "toggle_skills"},
+        {.action = Action::TOGGLE_CHARACTER_SCREEN, .name = "toggle_character_screen"},
+        {.action = Action::TOGGLE_INVENTORY, .name = "toggle_inventory"},
+        {.action = Action::TOGGLE_BAGS, .name = "toggle_bags"},
+        {.action = Action::TOGGLE_SPELLBOOK, .name = "toggle_spellbook"},
+        {.action = Action::TOGGLE_TALENTS, .name = "toggle_talents"},
+        {.action = Action::TOGGLE_QUESTS, .name = "toggle_quests"},
+        {.action = Action::TOGGLE_MINIMAP, .name = "toggle_minimap"},
+        {.action = Action::TOGGLE_SETTINGS, .name = "toggle_settings"},
+        {.action = Action::TOGGLE_CHAT, .name = "toggle_chat"},
+        {.action = Action::TOGGLE_GUILD_ROSTER, .name = "toggle_guild_roster"},
+        {.action = Action::TOGGLE_DUNGEON_FINDER, .name = "toggle_dungeon_finder"},
+        {.action = Action::TOGGLE_WORLD_MAP, .name = "toggle_world_map"},
+        {.action = Action::TOGGLE_NAMEPLATES, .name = "toggle_nameplates"},
+        {.action = Action::TOGGLE_ACHIEVEMENTS, .name = "toggle_achievements"},
+        {.action = Action::TOGGLE_SKILLS, .name = "toggle_skills"},
+        {.action = Action::TOGGLE_PVP, .name = "toggle_pvp"},
     };
 
     for (const auto& [action, nameStr] : actionMap) {

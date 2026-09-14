@@ -87,7 +87,10 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
         uint32_t chunkId = read<uint32_t>(wmoData, offset);
         uint32_t chunkSize = read<uint32_t>(wmoData, offset);
 
-        if (offset + chunkSize > wmoData.size()) {
+        // 64-bit, for the reason readArray gives above: offset and chunkSize
+        // are both uint32 and both come from the file, so the sum wraps and a
+        // crafted chunkSize walks the loop past the end of the buffer.
+        if (static_cast<uint64_t>(offset) + chunkSize > wmoData.size()) {
             core::Logger::getInstance().warning("Chunk extends beyond file");
             break;
         }
@@ -168,8 +171,8 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                 for (uint32_t i = 0; i < nMaterials; i++) {
                     // Read all 16 uint32 fields (64 bytes)
                     uint32_t fields[16];
-                    for (int j = 0; j < 16; j++) {
-                        fields[j] = read<uint32_t>(wmoData, offset);
+                    for (uint32_t& field : fields) {
+                        field = read<uint32_t>(wmoData, offset);
                     }
 
                     // SMOMaterial layout (wowdev.wiki):
@@ -199,7 +202,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
             }
 
             case MOGN: {
-                // Group names — store raw chunk for offset-based lookup (MOGI nameOffset)
+                // Group names - store raw chunk for offset-based lookup (MOGI nameOffset)
                 if (chunkSize > 0 && chunkEnd <= wmoData.size()) {
                     model.groupNameRaw.assign(wmoData.begin() + chunkStart, wmoData.begin() + chunkEnd);
                 }
@@ -258,8 +261,8 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
                     light.attenuationStart = read<float>(wmoData, offset);
                     light.attenuationEnd = read<float>(wmoData, offset);
 
-                    for (int j = 0; j < 4; j++) {
-                        light.unknown[j] = read<float>(wmoData, offset);
+                    for (float& value : light.unknown) {
+                        value = read<float>(wmoData, offset);
                     }
 
                     model.lights.push_back(light);
@@ -269,7 +272,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
             }
 
             case MODN: {
-                // Doodad names — stored by byte offset into the MODN chunk
+                // Doodad names - stored by byte offset into the MODN chunk
                 // (MODD nameIndex is a byte offset, not a vector index)
                 uint32_t nameOffset = 0;  // Offset relative to chunk start
                 while (chunkStart + nameOffset < chunkEnd) {
@@ -395,7 +398,7 @@ WMOModel WMOLoader::load(const std::vector<uint8_t>& wmoData) {
     }
 
     // Initialize groups array. Cap at a sanity limit so a hostile or
-    // corrupted WMO header can't trigger a multi-gigabyte allocation —
+    // corrupted WMO header can't trigger a multi-gigabyte allocation -
     // Blizzard's largest real WMOs cap out around a few hundred groups.
     constexpr uint32_t kMaxWMOGroups = 4096;
     if (model.nGroups > kMaxWMOGroups) {
@@ -482,11 +485,18 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
             while (mogpOffset + 8 < chunkEnd) {
                 uint32_t subChunkId = read<uint32_t>(groupData, mogpOffset);
                 uint32_t subChunkSize = read<uint32_t>(groupData, mogpOffset);
-                uint32_t subChunkEnd = mogpOffset + subChunkSize;
-
-                if (subChunkEnd > chunkEnd) {
+                // Widened for the same reason as the root chunk loop: both
+                // operands are uint32 read from the file, and a wrapped
+                // subChunkEnd is smaller than mogpOffset, which every
+                // "parseOffset + n <= subChunkEnd" test below then reads as
+                // "no room" or, worse, as room that is not there.
+                const uint64_t subChunkEnd64 =
+                    static_cast<uint64_t>(mogpOffset) + subChunkSize;
+                if (subChunkEnd64 > chunkEnd) {
                     break;
                 }
+                // Past the guard it is <= chunkEnd, so this cannot truncate.
+                const uint32_t subChunkEnd = static_cast<uint32_t>(subChunkEnd64);
 
                 // Debug: log chunk magic as string
                 char magic[5] = {0};
@@ -494,7 +504,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                 magic[1] = (subChunkId >> 8) & 0xFF;
                 magic[2] = (subChunkId >> 16) & 0xFF;
                 magic[3] = (subChunkId >> 24) & 0xFF;
-                // Not static — previously this throttle was per-process, silencing
+                // Not static - previously this throttle was per-process, silencing
                 // all WMO group logging after the first 30 sub-chunks globally.
                 if (groupLogCount < 30) {
                     core::Logger::getInstance().debug("  WMO sub-chunk: ", magic, " (0x", std::hex, subChunkId, std::dec, ") size=", subChunkSize);
@@ -630,7 +640,7 @@ bool WMOLoader::loadGroup(const std::vector<uint8_t>& groupData,
                         group.liquid.heights.clear();
                         group.liquid.flags.clear();
 
-                        // MLIQ vertex data: each vertex is 8 bytes —
+                        // MLIQ vertex data: each vertex is 8 bytes -
                         // 4 bytes flow/unknown data + 4 bytes float height.
                         const size_t VERTEX_STRIDE = 8; // bytes per vertex
                         if (vertexCount > 0 && bytesRemaining >= vertexCount * VERTEX_STRIDE) {

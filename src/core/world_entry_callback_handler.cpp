@@ -24,13 +24,11 @@ WorldEntryCallbackHandler::WorldEntryCallbackHandler(
     game::GameHandler& gameHandler,
     WorldLoader* worldLoader,
     EntitySpawner* entitySpawner,
-    audio::AudioCoordinator* audioCoordinator,
     pipeline::AssetManager* assetManager)
     : renderer_(renderer)
     , gameHandler_(gameHandler)
     , worldLoader_(worldLoader)
     , entitySpawner_(entitySpawner)
-    , audioCoordinator_(audioCoordinator)
     , assetManager_(assetManager)
 {
 }
@@ -138,7 +136,7 @@ static void precacheNearbyTiles(rendering::TerrainManager* terrainMgr,
     tiles.reserve(static_cast<size_t>(side) * static_cast<size_t>(side));
     for (int dy = -radius; dy <= radius; dy++)
         for (int dx = -radius; dx <= radius; dx++)
-            tiles.push_back({tileX + dx, tileY + dy});
+            tiles.emplace_back(tileX + dx, tileY + dy);
     terrainMgr->precacheTiles(tiles);
 }
 
@@ -157,7 +155,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         if (entitySpawner_ && mapId == currentLoadedMap && renderer_.getTerrainManager() && isInitialEntry) {
             LOG_INFO("Reconnect to same map ", mapId, ": clearing stale online entities (terrain preserved)");
 
-            // Pending spawn queues and failure caches — clear so previously-failed GUIDs can retry.
+            // Pending spawn queues and failure caches - clear so previously-failed GUIDs can retry.
             // Dead creature guids will be re-populated from fresh server state.
             entitySpawner_->clearAllQueues();
 
@@ -176,6 +174,11 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                 renderer_.getCameraController()->clearMovementInputs();
                 renderer_.getCameraController()->suppressMovementFor(1.0f);
                 renderer_.getCameraController()->suspendGravityFor(10.0f);
+                // The heightfield loads before the buildings do, and over
+                // anything underground it sits well above where the player
+                // actually is. Hold the floor to what the server said until
+                // the WMOs have had time to arrive.
+                renderer_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
             }
             worldEntryMovementGraceTimer_ = 2.0f;
             taxiLandingClampTimer_ = 0.0f;
@@ -207,6 +210,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                     renderer_.getCameraController()->clearMovementInputs();
                     renderer_.getCameraController()->suppressMovementFor(1.0f);
                     renderer_.getCameraController()->suspendGravityFor(10.0f);
+                    renderer_.getCameraController()->setEntryFloorAnchor(renderPos.z, 10.0f);
                 }
                 if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
                 return;
@@ -227,10 +231,9 @@ void WorldEntryCallbackHandler::setupCallbacks() {
                 renderer_.getCameraController()->suppressMovementFor(0.5f);
             }
             // Kick off async upload for any tiles that finished background
-            // parsing.  Use the bounded processReadyTiles() instead of
-            // processAllReadyTiles() to avoid multi-second main-thread stalls
-            // when many tiles are ready (the rest will finalize over subsequent
-            // frames via the normal terrain update loop).
+            // parsing. Bounded on purpose: finalizing every ready tile here
+            // stalls the main thread for seconds when many are ready, and the
+            // rest finalize over subsequent frames via the terrain update loop.
             renderer_.getTerrainManager()->processReadyTiles();
 
             // Queue all remaining tiles within the load radius (8 tiles = 17x17)
@@ -259,7 +262,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
     });
 
-    // /unstuck — nudge player forward and snap to floor at destination.
+    // /unstuck - nudge player forward and snap to floor at destination.
     gameHandler_.setUnstuckCallback([this]() {
         if (!renderer_.getCameraController()) return;
         clearMountForUnstuck();
@@ -296,7 +299,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         LOG_INFO("Unstuck: nudged forward and snapped to floor");
     });
 
-    // /unstuckgy — stronger recovery: safe/home position, then sampled floor fallback.
+    // /unstuckgy - stronger recovery: safe/home position, then sampled floor fallback.
     gameHandler_.setUnstuckGyCallback([this]() {
         if (!renderer_.getCameraController()) return;
         clearMountForUnstuck();
@@ -333,7 +336,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             return;
         }
 
-        // No safe/bind position — try current XY with a high floor probe.
+        // No safe/bind position - try current XY with a high floor probe.
         glm::vec3 pos = *ft;
         if (auto floor = sampleBestFloorAt(pos.x, pos.y, pos.z + 120.0f)) {
             pos.z = *floor + 0.5f;
@@ -354,7 +357,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         LOG_INFO("Unstuck: high fallback snap");
     });
 
-    // /unstuckhearth — teleport to hearthstone bind point (server-synced).
+    // /unstuckhearth - teleport to hearthstone bind point (server-synced).
     // Freezes player until terrain loads at destination to prevent falling through world.
     gameHandler_.setUnstuckHearthCallback([this]() {
         if (!renderer_.getCameraController()) return;
@@ -368,7 +371,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
 
         clearMountForUnstuck();
 
-        worldEntryMovementGraceTimer_ = 10.0f;  // long grace — terrain load check will clear it
+        worldEntryMovementGraceTimer_ = 10.0f;  // long grace - terrain load check will clear it
         taxiLandingClampTimer_ = 0.0f;
         lastTaxiFlight_ = false;
         clearStuckMovement();
@@ -383,7 +386,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         forceServerTeleportCommand(renderPos);
         clearStuckMovement();
 
-        // Set pending state — update loop will unfreeze once terrain is loaded
+        // Set pending state - update loop will unfreeze once terrain is loaded
         hearthTeleportPending_ = true;
         hearthTeleportPos_ = renderPos;
         hearthTeleportTimer_ = 15.0f;  // 15s safety timeout
@@ -411,7 +414,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         });
     }
 
-    // Bind point update (innkeeper) — position stored in gameHandler->getHomeBind()
+    // Bind point update (innkeeper) - position stored in gameHandler->getHomeBind()
     gameHandler_.setBindPointCallback([](uint32_t mapId, float x, float y, float z) {
         LOG_INFO("Bindpoint set: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")");
     });
@@ -438,7 +441,7 @@ void WorldEntryCallbackHandler::setupCallbacks() {
         if (mapId == currentLoadedMap) {
             // Same map: pre-enqueue tiles around the bind point so workers start
             // loading them now. Uses render-space coords (canonicalToRender).
-            // Use radius 4 (9x9=81 tiles) — hearthstone cast is ~10s, enough time
+            // Use radius 4 (9x9=81 tiles) - hearthstone cast is ~10s, enough time
             // for workers to parse most of these before the player arrives.
             glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
             precacheNearbyTiles(terrainMgr, renderPos, 4);
@@ -468,7 +471,7 @@ void WorldEntryCallbackHandler::update(float deltaTime) {
         auto terrainH = renderer_.getTerrainManager()->getHeightAt(
             hearthTeleportPos_.x, hearthTeleportPos_.y);
         if (terrainH || hearthTeleportTimer_ <= 0.0f) {
-            // Terrain loaded (or timeout) — snap to floor and release
+            // Terrain loaded (or timeout) - snap to floor and release
             if (terrainH) {
                 hearthTeleportPos_.z = *terrainH + 0.5f;
                 renderer_.getCameraController()->teleportTo(hearthTeleportPos_);

@@ -1,3 +1,4 @@
+#include "core/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "core/logger.hpp"
 #include <nlohmann/json.hpp>
@@ -47,7 +48,7 @@ bool WoweeTerrainLoader::loadHeightmap(const std::string& whmPath, ADTTerrain& t
 
         float base;
         f.read(reinterpret_cast<char*>(&base), 4);
-        // Reject NaN/inf chunk base height — would break collision/pathing
+        // Reject NaN/inf chunk base height - would break collision/pathing
         // and produce non-finite vertex positions in the terrain mesh.
         if (!std::isfinite(base)) base = 0.0f;
         chunk.position[2] = base;
@@ -59,7 +60,7 @@ bool WoweeTerrainLoader::loadHeightmap(const std::string& whmPath, ADTTerrain& t
         }
 
         // Read alpha map data (may not be present in older WHM files).
-        // Reject overlong alphaSize to keep the per-chunk block alignment —
+        // Reject overlong alphaSize to keep the per-chunk block alignment -
         // skipping a 100MB alpha block would leave the next chunk's
         // baseHeight read parsing alpha bytes as floats.
         uint32_t alphaSize = 0;
@@ -101,7 +102,7 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
         if (terrain.coord.y < 0 || terrain.coord.y > 63) terrain.coord.y = 32;
 
         // Compute chunk world positions from tile coordinates
-        float tileSize = 533.33333f;
+        float tileSize = core::coords::TILE_SIZE;
         float chunkSize = tileSize / 16.0f;
         for (int cy = 0; cy < 16; cy++) {
             for (int cx = 0; cx < 16; cx++) {
@@ -111,7 +112,7 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
             }
         }
 
-        // Parse textures (cap at 1024 — far above any realistic ADT)
+        // Parse textures (cap at 1024 - far above any realistic ADT)
         if (j.contains("textures") && j["textures"].is_array()) {
             constexpr size_t kMaxTextures = 1024;
             for (const auto& tex : j["textures"]) {
@@ -121,7 +122,7 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
             }
         }
 
-        // Parse chunk layers — WoW ADT supports max 4 layers per chunk;
+        // Parse chunk layers - WoW ADT supports max 4 layers per chunk;
         // cap to 8 to allow some headroom without unbounded growth.
         if (j.contains("chunkLayers") && j["chunkLayers"].is_array()) {
             const auto& layers = j["chunkLayers"];
@@ -145,6 +146,13 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
                         ? cl["holes"].get<int64_t>() : 0;
                     if (raw < 0 || raw > 0xFFFF) raw = 0;
                     terrain.chunks[ci].holes = static_cast<uint16_t>(raw);
+                }
+                // Optional, absent from most custom maps: quads where ground
+                // effect doodads (grass) must not grow, as in the ADT format.
+                if (cl.contains("noEffectDoodad") &&
+                    cl["noEffectDoodad"].is_number_unsigned()) {
+                    terrain.chunks[ci].noEffectDoodad =
+                        cl["noEffectDoodad"].get<uint64_t>();
                 }
             }
         }
@@ -174,7 +182,7 @@ bool WoweeTerrainLoader::loadMetadata(const std::string& wotPath, ADTTerrain& te
         }
 
         // Parse doodad placements. n.get<std::string> throws on non-string
-        // entries — guard with is_string and cap the list at 65536 (uint32
+        // entries - guard with is_string and cap the list at 65536 (uint32
         // nameId range is far larger but real zones top out around ~5k).
         if (j.contains("doodadNames") && j["doodadNames"].is_array()) {
             constexpr size_t kMaxNames = 65536;

@@ -1,5 +1,5 @@
 // src/game/transport_path_repository.cpp
-// Owns and manages transport path data — DBC, taxi, and custom paths.
+// Owns and manages transport path data - DBC, taxi, and custom paths.
 // Ported from TransportManager (path management subset).
 #include "game/transport_path_repository.hpp"
 #include "core/coordinates.hpp"
@@ -8,6 +8,7 @@
 #include "pipeline/asset_manager.hpp"
 #include <algorithm>
 #include <map>
+#include <set>
 #include <cmath>
 #include <limits>
 
@@ -127,28 +128,18 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
         return e->fromDBC && !e->zOnly && e->spline.durationMs() > 0 && e->spline.keyCount() > 1;
     };
 
-    // Known AzerothCore transport entry remaps (WotLK): server entry -> moving DBC path id.
-    // Zeppelins are client-animated and map to real zeppelin TransportAnimation paths.
-    // The continent-crossing SHIPS (Maiden's Fancy, Bravery, Black Princess, and the
-    // icebreakers) were previously remapped to Deeprun Tram paths (176080-176085) here
-    // — a straight ~2482-unit underground line — which sailed them underwater to
-    // nowhere. Those ships are server-driven MO_TRANSPORT objects with no
-    // TransportAnimation.dbc entry; they get their route from their taxi path
-    // (GO template data[0] -> TaxiPathNode.dbc), assigned by the GO-query hook. So
-    // they are intentionally NOT listed here — a ship with no real/taxi path stays
-    // docked rather than borrowing an unrelated route (see the looksLikeShip guard below).
-    static const std::unordered_map<uint32_t, uint32_t> kEntryRemap = {
-        {164871u, 193182u}, // The Thundercaller (zeppelin)
-        {176495u, 193183u}, // The Purple Princess (zeppelin)
-        {175080u, 193182u}, // The Iron Eagle (zeppelin)
-        {181689u, 193183u}, // Cloudkisser (zeppelin)
-        {186238u, 193182u}, // The Mighty Wind (zeppelin)
-    };
-
-    auto itMapped = kEntryRemap.find(entry);
-    if (itMapped != kEntryRemap.end() && isUsableMovingPath(itMapped->second)) {
-        return itMapped->second;
-    }
+    // There was a table here remapping the five WotLK zeppelins onto paths
+    // 193182 and 193183. Those are real TransportAnimation.dbc entries, but
+    // they belong to two Cataclysm transports; none of 164871, 175080, 176495,
+    // 181689 or 186238 appears in that file at all. So each zeppelin was
+    // handed a stranger's loop, which is why the Undercity one flew its own
+    // journey while the server flew the real one and a rider saw both.
+    //
+    // A zeppelin is a MO_TRANSPORT like the continent ships below, and gets
+    // its route the same way: GO template data[0] into TaxiPathNode.dbc, via
+    // the GO-query hook. Until that arrives it stays docked - the transport
+    // the server is carrying the player on cannot be somewhere the server
+    // does not think it is.
 
     if (displayId == 3831u) {
         static constexpr uint32_t kDeeprunTramCandidates[] = {
@@ -167,36 +158,30 @@ uint32_t TransportPathRepository::pickFallbackMovingPath(uint32_t entry, uint32_
     }
 
     // Fallback by display model family.
-    const bool looksLikeShip =
-        (displayId == 3015u || displayId == 2454u || displayId == 7446u ||
-         displayId == 7087u);
-    const bool looksLikeZeppelin =
-        (displayId == 3031u || displayId == 7546u || displayId == 1587u || displayId == 807u || displayId == 808u);
-
+    const bool looksLikeShip = isOceanGoingTransportDisplay(displayId);
     if (looksLikeShip) {
         // Continent-crossing ships are server-driven MO_TRANSPORT objects: their
         // route comes from their taxi path (TaxiPathNode.dbc via GO template data[0]),
         // not from TransportAnimation.dbc. There is no correct TransportAnimation
-        // fallback for them — borrowing any (previously the Deeprun Tram paths) sent
+        // fallback for them - borrowing any (previously the Deeprun Tram paths) sent
         // them underwater. Return 0 so the ship stays docked until the GO-query hook
         // assigns its taxi path; never fabricate a path from an unrelated route.
         return 0;
     }
 
-    if (looksLikeZeppelin) {
-        static constexpr uint32_t kZeppelinCandidates[] = {193182u, 193183u, 188360u, 190587u};
-        for (uint32_t id : kZeppelinCandidates) {
-            if (isUsableMovingPath(id)) return id;
-        }
-    }
-
-    // Last-resort: pick any moving DBC path so transport does not remain stationary.
-    for (const auto& [pathId, e] : paths_) {
-        if (e.fromDBC && !e.zOnly && e.spline.durationMs() > 0 && e.spline.keyCount() > 1) {
-            return pathId;
-        }
-    }
-
+    // Zeppelins used to fall back to the first usable id in a candidate list,
+    // which is one route - so every zeppelin flew it. Three of them are already
+    // remapped to 193182 above, and the display families cover five more ids, so
+    // in practice the whole fleet traced the same line regardless of where it
+    // spawned or where it was meant to go.
+    //
+    // The reasoning already written down for ships applies just as well here: a
+    // transport whose route is not known stays docked. It is the same object the
+    // server carries the player on, so an invented route does not merely look
+    // wrong, it disagrees with where the server says the player is.
+    // No last-resort "any moving path" either. Handing a transport an unrelated
+    // route is what sailed the continent ships underwater, and picking the first
+    // entry of an unordered map made it arbitrary as well as wrong.
     return 0;
 }
 
@@ -219,7 +204,7 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
     // Single point = stationary (durationMs = 0)
     if (waypoints.size() == 1) {
         std::vector<math::SplineKey> keys;
-        keys.push_back({0, waypoints[0]});
+        keys.push_back({.timeMs = 0, .position = waypoints[0]});
         math::CatmullRomSpline spline(std::move(keys), false);
         // Runtime fallbacks may replace stale runtime/taxi copies left under the
         // same entry, but must never overwrite an authentic expansion DBC path.
@@ -235,12 +220,12 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
     std::vector<math::SplineKey> keys;
     keys.reserve(waypoints.size() + (looping ? 1 : 0));
     uint32_t cumulativeMs = 0;
-    keys.push_back({0, waypoints[0]});
+    keys.push_back({.timeMs = 0, .position = waypoints[0]});
 
     for (size_t i = 1; i < waypoints.size(); i++) {
         float dist = glm::distance(waypoints[i-1], waypoints[i]);
         cumulativeMs += glm::max(1u, segMsFromDist(dist));
-        keys.push_back({cumulativeMs, waypoints[i]});
+        keys.push_back({.timeMs = cumulativeMs, .position = waypoints[i]});
     }
 
     // Add explicit wrap segment (last → first) for looping paths.
@@ -250,7 +235,7 @@ void TransportPathRepository::loadPathFromNodes(uint32_t pathId, const std::vect
     if (looping && waypoints.size() >= 2) {
         float wrapDist = glm::distance(waypoints.back(), waypoints.front());
         cumulativeMs += glm::max(1u, segMsFromDist(wrapDist));
-        keys.push_back({cumulativeMs, waypoints[0]});
+        keys.push_back({.timeMs = cumulativeMs, .position = waypoints[0]});
     }
 
     math::CatmullRomSpline spline(std::move(keys), false);
@@ -338,7 +323,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
                      " raw=(", posX, ",", posY, ",", posZ, ")");
         }
 
-        waypointsByTransport[transportEntry].push_back({timeIndex, glm::vec3(posX, posY, posZ)});
+        waypointsByTransport[transportEntry].emplace_back(timeIndex, glm::vec3(posX, posY, posZ));
     }
 
     // Create time-indexed paths from waypoints
@@ -386,7 +371,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
             tramYMajor = (mx.y - mn.y) > (mx.x - mn.x);
             if (tramYMajor) {
                 LOG_INFO("Tram entry ", transportEntry,
-                         " uses Y-major local frame (WotLK export) — rotating to X-major");
+                         " uses Y-major local frame (WotLK export) - rotating to X-major");
             }
         }
         auto tramNormalize = [tramYMajor](const glm::vec3& p) {
@@ -402,7 +387,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
             // Skip waypoints where serverToCanonical zeroes nonzero inputs
             if ((pos.x != 0.0f || pos.y != 0.0f || pos.z != 0.0f) &&
                 (canonical.x == 0.0f && canonical.y == 0.0f && canonical.z == 0.0f)) {
-                LOG_ERROR("serverToCanonical ZEROED — skipping waypoint! entry=", transportEntry,
+                LOG_ERROR("serverToCanonical ZEROED - skipping waypoint! entry=", transportEntry,
                           " server=(", pos.x, ",", pos.y, ",", pos.z, ")",
                           " → canon=(", canonical.x, ",", canonical.y, ",", canonical.z, ")");
                 continue;
@@ -422,7 +407,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
                          " → canon=(", canonical.x, ",", canonical.y, ",", canonical.z, ")");
             }
 
-            keys.push_back({tMs - t0, canonical});  // Normalize: subtract first timeIndex
+            keys.push_back({.timeMs = tMs - t0, .position = canonical});  // Normalize: subtract first timeIndex
         }
 
         // Get base duration from last normalized timeIndex
@@ -445,7 +430,7 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
         // This makes the wrap segment (last → first) have proper duration
         const glm::vec3 fp = tramNormalize(sortedWaypoints.front().second);
         glm::vec3 firstCanonical = transportAnimationOffsetToCanonical(transportEntry, fp);
-        keys.push_back({lastTimeMs + wrapMs, firstCanonical});
+        keys.push_back({.timeMs = lastTimeMs + wrapMs, .position = firstCanonical});
 
         // Build the spline (time-closed=false because we added explicit wrap point)
         math::CatmullRomSpline spline(std::move(keys), false);
@@ -493,62 +478,169 @@ bool TransportPathRepository::loadTransportAnimationDBC(pipeline::AssetManager* 
 
 // ── DBC: TaxiPathNode ──────────────────────────────────────────
 
-math::CatmullRomSpline TransportPathRepository::buildTaxiSegmentSpline(
-    const std::vector<glm::vec3>& pts,
-    const std::vector<uint32_t>& nodeDelaysMs,
-    float transportSpeed)
-{
-    auto legMs = [transportSpeed](float dist) {
-        return std::max<uint32_t>(100u, static_cast<uint32_t>(dist / transportSpeed * 1000.0f));
-    };
+bool TransportPathRepository::taxiRouteIsCircuit(const TaxiRoute& route) {
+    const auto& nodes = route.nodes;
+    if (nodes.size() < 3) return false;
+    // Ends on a different map than it started: the closing leg is the
+    // server's teleport home, so the route is a ring by construction.
+    if (nodes.front().mapId != nodes.back().mapId) return true;
+
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < nodes.size(); ++i) {
+        if (nodes[i].mapId != nodes[i + 1].mapId) continue;
+        length += glm::distance(nodes[i].position, nodes[i + 1].position);
+    }
+    const float endGap = glm::distance(nodes.front().position, nodes.back().position);
+    // A quarter of the run, with a floor for the short routes where the ratio
+    // is noise. 118 on 787 is a circuit; a pier-to-open-water shuttle has its
+    // ends the whole way apart.
+    return endGap < std::max(60.0f, length * 0.25f);
+}
+
+namespace {
+
+/// The order a hull visits a route's nodes in, over one cycle.
+///
+/// A ring is flown once round. An open run is flown out and back, so every
+/// node but the two ends is visited twice and the cycle is position-closed.
+std::vector<size_t> taxiVisitOrder(const TaxiRoute& route) {
+    std::vector<size_t> order;
+    const size_t n = route.nodes.size();
+    order.reserve(route.circuit ? n : n * 2);
+    for (size_t i = 0; i < n; ++i) order.push_back(i);
+    if (!route.circuit && n > 2) {
+        for (size_t i = n - 1; i-- > 1; ) order.push_back(i);
+    }
+    return order;
+}
+
+uint32_t taxiLegMs(float dist, float speed) {
+    if (speed <= 0.0f) return 1000u;
+    return std::max<uint32_t>(100u, static_cast<uint32_t>(dist / speed * 1000.0f));
+}
+
+}  // namespace
+
+float TransportPathRepository::taxiRouteSpeedFor(const TaxiRoute& route, uint32_t periodMs) {
+    if (periodMs == 0 || route.cycleDistance <= 0.0f) return 0.0f;
+    // The stops are authored in seconds and do not scale; only the flying does.
+    if (periodMs <= route.cycleDwellMs) return 0.0f;
+    const float flyingSeconds = static_cast<float>(periodMs - route.cycleDwellMs) / 1000.0f;
+    if (flyingSeconds <= 0.0f) return 0.0f;
+    const float speed = route.cycleDistance / flyingSeconds;
+    // A speed outside this range means the period and the route do not
+    // describe the same journey; better to keep the default than to believe it.
+    if (!(speed > 1.0f) || speed > 200.0f) return 0.0f;
+    return speed;
+}
+
+PathEntry TransportPathRepository::buildTaxiRouteSlice(const TaxiRoute& route,
+                                                      uint32_t mapId,
+                                                      float speed) {
+    const std::vector<size_t> order = taxiVisitOrder(route);
+
+    // Walk the whole route once, on every map, so every slice shares a clock.
+    struct Visit { size_t node; uint32_t arriveMs; uint32_t departMs; };
+    std::vector<Visit> visits;
+    visits.reserve(order.size());
+    uint32_t t = 0;
+    for (size_t k = 0; k < order.size(); ++k) {
+        const TaxiRouteNode& nd = route.nodes[order[k]];
+        const uint32_t arrive = t;
+        t += nd.dwellMs;
+        visits.push_back({order[k], arrive, t});
+        const TaxiRouteNode& nxt = route.nodes[order[(k + 1) % order.size()]];
+        // A map change costs no time. The server teleports the hull across and
+        // the rider gets a loading screen; there is no crossing to animate.
+        if (nxt.mapId == nd.mapId) {
+            t += taxiLegMs(glm::distance(nd.position, nxt.position), speed);
+        }
+    }
+    const uint32_t cycleMs = std::max(1u, t);
+
+    // This map's runs through that timeline.
+    struct Stop { uint32_t arriveMs; uint32_t departMs; glm::vec3 pos; };
+    std::vector<std::vector<Stop>> runs;
+    bool inRun = false;
+    for (const Visit& v : visits) {
+        const TaxiRouteNode& nd = route.nodes[v.node];
+        if (nd.mapId != mapId) { inRun = false; continue; }
+        if (!inRun) { runs.emplace_back(); inRun = true; }
+        runs.back().push_back({v.arriveMs, v.departMs, nd.position});
+    }
+
+    if (runs.empty()) {
+        return PathEntry(math::CatmullRomSpline({}, false), route.nodes.empty() ? 0u : mapId,
+                         false, false, true);
+    }
+
+    const bool wrapsHere = route.nodes[order.front()].mapId == mapId &&
+                           route.nodes[order.back()].mapId == mapId;
 
     std::vector<math::SplineKey> keys;
-    if (pts.size() < 2) {
-        if (!pts.empty()) keys.push_back({0u, pts.front()});
-        return math::CatmullRomSpline(std::move(keys), false);
+    std::vector<std::pair<uint32_t, uint32_t>> presence;
+    keys.reserve(visits.size() * 2 + 4);
+
+    // Before the hull first arrives it is on another map. It waits at the
+    // position it will arrive at, rather than being swept there: an
+    // interpolation across the gap is a hull crossing Tirisfal in one frame,
+    // and a tangent taken off that leg points the bow anywhere at all.
+    const uint32_t firstArrive = runs.front().front().arriveMs;
+    if (firstArrive >= 2) {
+        keys.push_back({0u, runs.front().front().pos});
+        keys.push_back({firstArrive - 1u, runs.front().front().pos});
     }
 
-    const float endGap = glm::distance(pts.front(), pts.back());
-    const bool closedLoop = endGap < 60.0f;
-
-    // Forward pass through the authored nodes, holding each node's dock dwell as a
-    // repeated-position key (CatmullRomSpline evaluates those as exact stops).
-    keys.reserve(pts.size() * 2 + 1);
-    uint32_t cumulativeMs = 0;
-    for (size_t i = 0; i < pts.size(); ++i) {
-        keys.push_back({cumulativeMs, pts[i]});
-        const uint32_t delayMs = (i < nodeDelaysMs.size()) ? nodeDelaysMs[i] : 0u;
-        if (delayMs != 0) {
-            cumulativeMs += delayMs;
-            keys.push_back({cumulativeMs, pts[i]});
+    for (size_t r = 0; r < runs.size(); ++r) {
+        if (r > 0) {
+            // Between two visits to this map, hold at the node just left until
+            // halfway and at the node about to be reached after - so the
+            // teleport falls in the middle of the gap, where the hull is
+            // hidden, and both ends of every run are continuous.
+            const uint32_t gapFrom = runs[r - 1].back().departMs;
+            const uint32_t gapTo = runs[r].front().arriveMs;
+            if (gapTo > gapFrom + 3) {
+                const uint32_t mid = gapFrom + (gapTo - gapFrom) / 2;
+                keys.push_back({gapFrom + 1u, runs[r - 1].back().pos});
+                keys.push_back({mid, runs[r - 1].back().pos});
+                keys.push_back({mid + 1u, runs[r].front().pos});
+                keys.push_back({gapTo - 1u, runs[r].front().pos});
+            }
         }
-        if (i + 1 < pts.size()) {
-            cumulativeMs += legMs(glm::distance(pts[i], pts[i + 1]));
+        for (const Stop& stop : runs[r]) {
+            keys.push_back({stop.arriveMs, stop.pos});
+            // A repeated position is how CatmullRomSpline holds an exact stop.
+            if (stop.departMs > stop.arriveMs) {
+                keys.push_back({stop.departMs, stop.pos});
+            }
         }
+        presence.emplace_back(runs[r].front().arriveMs, runs[r].back().departMs);
     }
 
-    if (closedLoop) {
-        // Endpoints already coincide: close the ring back to the first node.
-        cumulativeMs += legMs(endGap);
-        keys.push_back({cumulativeMs, pts.front()});
-    } else {
-        // Open route: the boat oscillates. Append the outbound points in reverse so the
-        // cycle is one continuous there-and-back that is position-closed (ends where it
-        // began), so the modulo phase wrap is seamless. This covers both a single-map
-        // harbour shuttle AND one map's slice of a continent route (nodes run
-        // offshore-in -> dock -> offshore-out): the hull sails out, U-turns at the far
-        // node, and sails back through its dock. It must NEVER hold stationary offshore
-        // for the time it "spends" on the other continent — a rider aboard experiences
-        // that hold as the boat sitting dead at sea. The real cross-continent handoff is
-        // the server's SMSG_NEW_WORLD teleport at the offshore node, independent of this
-        // client animation; the boat just keeps ferrying while it waits for passengers.
-        for (size_t i = pts.size() - 1; i-- > 0; ) {
-            cumulativeMs += legMs(glm::distance(pts[i + 1], pts[i]));
-            keys.push_back({cumulativeMs, pts[i]});
+    if (wrapsHere) {
+        // The closing leg is flown here too, back to the first node.
+        if (cycleMs > keys.back().timeMs) {
+            keys.push_back({cycleMs, route.nodes[order.front()].position});
         }
+        presence.back().second = cycleMs;
+    } else if (keys.back().timeMs < cycleMs) {
+        // And it waits where it left, until the cycle wraps round again.
+        keys.push_back({cycleMs, runs.back().back().pos});
     }
 
-    return math::CatmullRomSpline(std::move(keys), false);
+    PathEntry entry(math::CatmullRomSpline(std::move(keys), false), 0u, false, false, true);
+    // A route that never leaves this map is always present; saying so with an
+    // empty list keeps presentAt free for every path that is not a ferry.
+    if (!(presence.size() == 1 && presence.front().first == 0 &&
+          presence.front().second >= cycleMs)) {
+        entry.presentMs = std::move(presence);
+    }
+    return entry;
+}
+
+const TaxiRoute* TransportPathRepository::findTaxiRoute(uint32_t taxiPathId) const {
+    auto it = taxiRoutes_.find(taxiPathId);
+    return it != taxiRoutes_.end() ? &it->second : nullptr;
 }
 
 bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr) {
@@ -574,19 +666,22 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
     LOG_INFO("TaxiPathNode.dbc: ", dbc.getRecordCount(), " records, ",
              dbc.getFieldCount(), " fields per record");
 
-    // Group nodes by (PathID, MapID), storing (NodeIndex, X, Y, Z).
-    // Paths are split per map: a continent-crossing boat path (e.g. Menethil ->
-    // Valgarde) has nodes on two maps, but only the segment on the transport's
-    // current map is valid world geometry. The old loader skipped any multi-map
-    // path entirely (to filter flight-master routes), which dropped every
-    // cross-continent boat. Instead, keep each map's segment separately and let
-    // the assignment pick the one matching the transport's map.
+    // Grouped by PathID alone, with each node's map kept on it.
+    //
+    // These used to be split per (PathID, MapID) and each slice timed on its
+    // own, stretched to the whole route's length with the surplus spent at the
+    // pier. That gave every map its own clock: the Undercity zeppelin flew a
+    // circuit of its tower and waited, while the server flew it to Howling
+    // Fjord and back. A route is one journey with one clock, and the server
+    // publishes a phase against it - so it is built whole here and each map
+    // takes its own view of it, sharing the cycle.
     struct TaxiNode {
         uint32_t nodeIndex;
+        uint32_t mapId;
         float x, y, z;
         uint32_t delaySeconds;
     };
-    std::map<std::pair<uint32_t, uint32_t>, std::vector<TaxiNode>> nodesByPathMap;
+    std::map<uint32_t, std::vector<TaxiNode>> nodesByPath;
 
     for (uint32_t i = 0; i < dbc.getRecordCount(); i++) {
         uint32_t pathId = dbc.getUInt32(i, 1);    // PathID
@@ -597,50 +692,59 @@ bool TransportPathRepository::loadTaxiPathNodeDBC(pipeline::AssetManager* assetM
         float posZ = dbc.getFloat(i, 6);          // Z (server coords)
         uint32_t delaySeconds = dbc.getUInt32(i, 8); // Dock dwell time
 
-        nodesByPathMap[{pathId, mapId}].push_back({nodeIdx, posX, posY, posZ, delaySeconds});
+        nodesByPath[pathId].push_back({.nodeIndex = nodeIdx, .mapId = mapId,
+                                       .x = posX, .y = posY, .z = posZ,
+                                       .delaySeconds = delaySeconds});
     }
 
-    for (auto& [key, nodes] : nodesByPathMap) {
+    int pathsLoaded = 0;
+    for (auto& [pathId, nodes] : nodesByPath) {
+        if (nodes.size() < 2) continue;
         std::sort(nodes.begin(), nodes.end(),
                   [](const TaxiNode& a, const TaxiNode& b) { return a.nodeIndex < b.nodeIndex; });
-    }
 
-    constexpr float transportSpeed = 28.0f;  // units per second
-
-    // Build world-coordinate transport paths, one segment per (pathId, mapId).
-    int pathsLoaded = 0;
-    for (auto& [key, nodes] : nodesByPathMap) {
-        const uint32_t pathId = key.first;
-        const uint32_t mapId = key.second;
-        if (nodes.size() < 2) continue;
-
-        // Convert nodes to canonical world positions and collect their authored dwells.
-        std::vector<glm::vec3> pts;
-        std::vector<uint32_t> nodeDelaysMs;
-        pts.reserve(nodes.size());
-        nodeDelaysMs.reserve(nodes.size());
+        TaxiRoute route;
+        route.nodes.reserve(nodes.size());
         for (const auto& node : nodes) {
-            pts.push_back(core::coords::serverToCanonical(glm::vec3(node.x, node.y, node.z)));
-            nodeDelaysMs.push_back(node.delaySeconds * 1000u);
+            route.nodes.push_back({
+                .position = core::coords::serverToCanonical(glm::vec3(node.x, node.y, node.z)),
+                .mapId = node.mapId,
+                .dwellMs = node.delaySeconds * 1000u});
+        }
+        route.circuit = taxiRouteIsCircuit(route);
+
+        // What one cycle costs, in the two currencies that scale differently:
+        // distance flown, which a speed converts to time, and time stopped,
+        // which no speed touches.
+        const std::vector<size_t> order = taxiVisitOrder(route);
+        for (size_t k = 0; k < order.size(); ++k) {
+            const TaxiRouteNode& nd = route.nodes[order[k]];
+            route.cycleDwellMs += nd.dwellMs;
+            const TaxiRouteNode& nxt = route.nodes[order[(k + 1) % order.size()]];
+            if (nxt.mapId == nd.mapId) {
+                route.cycleDistance += glm::distance(nd.position, nxt.position);
+            }
         }
 
-        // Each map's slice is animated independently as a continuous there-and-back
-        // ferry (see buildTaxiSegmentSpline). The cross-continent handoff is the server's
-        // SMSG_NEW_WORLD teleport at the offshore node, not this client animation, so a
-        // slice must never park offshore waiting on the other map — that reads as the boat
-        // sitting dead at sea to anyone aboard.
-        math::CatmullRomSpline spline = buildTaxiSegmentSpline(
-            pts, nodeDelaysMs, transportSpeed);
-        // TaxiPathNode is a separate, per-map route source. Do not label it as
-        // TransportAnimation DBC data: copied taxi segments live temporarily in
-        // paths_ for the active transport, and fromDBC=true made later inference
-        // offer Bravery's cached route to unrelated icebreakers after zoning.
-        taxiPaths_[pathId].emplace(mapId, PathEntry(std::move(spline), pathId, false, false, true));
-        pathsLoaded++;
+        std::set<uint32_t> maps;
+        for (const auto& node : route.nodes) maps.insert(node.mapId);
+        for (uint32_t mapId : maps) {
+            PathEntry slice = buildTaxiRouteSlice(route, mapId);
+            if (slice.spline.keyCount() < 2) continue;
+            // TaxiPathNode is a separate, per-map route source. Do not label it
+            // as TransportAnimation DBC data: copied taxi slices live
+            // temporarily in paths_ for the active transport, and fromDBC=true
+            // made later inference offer Bravery's cached route to unrelated
+            // icebreakers after zoning.
+            slice.pathId = pathId;
+            taxiPaths_[pathId].emplace(mapId, std::move(slice));
+            pathsLoaded++;
+        }
+        taxiRoutes_[pathId] = std::move(route);
     }
 
-    LOG_INFO("Loaded ", pathsLoaded, " TaxiPathNode transport path segments (",
-             taxiPaths_.size(), " distinct taxi paths across all maps)");
+    LOG_INFO("Loaded ", taxiRoutes_.size(), " TaxiPathNode routes as ", pathsLoaded,
+             " per-map slices, each sharing its route's cycle");
     return pathsLoaded > 0;
 }
 

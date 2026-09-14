@@ -1,6 +1,6 @@
-// map_resolver.cpp — Centralized map navigation resolution for the world map.
+// map_resolver.cpp - Centralized map navigation resolution for the world map.
 // Map folder names resolved from a built-in table matching
-// Data/interface/worldmap/ — no dependency on WorldLoader.
+// Data/interface/worldmap/ - no dependency on WorldLoader.
 #include "rendering/world_map/map_resolver.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
 #include "core/logger.hpp"
@@ -22,8 +22,11 @@ struct MapFolderEntry {
     const char* displayName;  // UI display name
 };
 
+/// Above this is a view the interface assembles, not a map the game has.
+static constexpr uint32_t kFirstUiOnlyMapId = UINT32_MAX - 15;
+
 static constexpr MapFolderEntry kMapFolders[] = {
-    // Special UI-only views (no DBC MapID — sentinel values)
+    // Special UI-only views (no DBC MapID - sentinel values)
     { UINT32_MAX,     "World",        "World"            },
     { UINT32_MAX - 1, "Cosmic",       "Cosmic"           },
     // Continents
@@ -55,22 +58,20 @@ static constexpr MapFolderEntry kMapFolders[] = {
     { 724, "TheRubySanctum",       "Ruby Sanctum"              },
 };
 
-static constexpr int kMapFolderCount = sizeof(kMapFolders) / sizeof(kMapFolders[0]);
-
 // ── Map folder lookup functions ──────────────────────────────
 
 const char* mapIdToFolder(uint32_t mapId) {
-    for (int i = 0; i < kMapFolderCount; i++) {
-        if (kMapFolders[i].mapId == mapId)
-            return kMapFolders[i].folder;
+    for (const auto& mapFolder : kMapFolders) {
+        if (mapFolder.mapId == mapId)
+            return mapFolder.folder;
     }
     return "";
 }
 
 int folderToMapId(const std::string& folder) {
-    for (int i = 0; i < kMapFolderCount; i++) {
+    for (const auto& mapFolder : kMapFolders) {
         // Case-insensitive compare
-        const char* entry = kMapFolders[i].folder;
+        const char* entry = mapFolder.folder;
         if (folder.size() != std::char_traits<char>::length(entry)) continue;
         bool match = true;
         for (size_t j = 0; j < folder.size(); j++) {
@@ -80,15 +81,33 @@ int folderToMapId(const std::string& folder) {
                 break;
             }
         }
-        if (match) return static_cast<int>(kMapFolders[i].mapId);
+        if (match) return static_cast<int>(mapFolder.mapId);
     }
     return -1;
 }
 
+bool isUiOnlyMapFolder(const std::string& folder) {
+    for (const auto& mapFolder : kMapFolders) {
+        if (mapFolder.mapId < kFirstUiOnlyMapId) continue;
+        const char* entry = mapFolder.folder;
+        if (folder.size() != std::char_traits<char>::length(entry)) continue;
+        bool match = true;
+        for (size_t j = 0; j < folder.size(); j++) {
+            if (std::tolower(static_cast<unsigned char>(folder[j])) !=
+                std::tolower(static_cast<unsigned char>(entry[j]))) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
 const char* mapDisplayName(uint32_t mapId) {
-    for (int i = 0; i < kMapFolderCount; i++) {
-        if (kMapFolders[i].mapId == mapId)
-            return kMapFolders[i].displayName;
+    for (const auto& mapFolder : kMapFolders) {
+        if (mapFolder.mapId == mapId)
+            return mapFolder.displayName;
     }
     return nullptr;
 }
@@ -128,14 +147,14 @@ MapResolveResult resolveWorldRegionClick(uint32_t regionMapId,
     MapResolveResult result;
 
     if (static_cast<int>(regionMapId) == currentMapId) {
-        // Target map is already loaded — navigate to the matching continent
+        // Target map is already loaded - navigate to the matching continent
         // within the current zone data (no reload needed).
         int contIdx = findContinentForMapId(zones, regionMapId, cosmicIdx);
         if (contIdx >= 0) {
             result.action = MapResolveAction::NAVIGATE_CONTINENT;
             result.targetZoneIdx = contIdx;
             LOG_INFO("resolveWorldRegionClick: mapId=", regionMapId,
-                     " matches current map — NAVIGATE_CONTINENT idx=", contIdx);
+                     " matches current map - NAVIGATE_CONTINENT idx=", contIdx);
         } else {
             LOG_WARNING("resolveWorldRegionClick: mapId=", regionMapId,
                         " matches current but no continent found");
@@ -143,7 +162,7 @@ MapResolveResult resolveWorldRegionClick(uint32_t regionMapId,
         return result;
     }
 
-    // Different map — need to load it
+    // Different map - need to load it
     const char* folder = mapIdToFolder(regionMapId);
     if (folder[0]) {
         result.action = MapResolveAction::LOAD_MAP;

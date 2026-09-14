@@ -1,4 +1,4 @@
-// ChatBubbleManager — 3D-projected chat bubbles above entities.
+// ChatBubbleManager - 3D-projected chat bubbles above entities.
 // Moved from ChatPanel::renderBubbles / setupCallbacks (Phase 1.4).
 #include "ui/chat/chat_bubble_manager.hpp"
 #include "game/game_handler.hpp"
@@ -7,6 +7,9 @@
 #include "core/coordinates.hpp"
 #include "core/window.hpp"
 #include <imgui.h>
+#include "ui/chat/chat_utils.hpp"
+#include "ui/sight_cache.hpp"
+
 #include <glm/glm.hpp>
 
 namespace wowee { namespace ui {
@@ -30,10 +33,13 @@ void ChatBubbleManager::addBubble(uint64_t senderGuid, const std::string& messag
     if (bubbles_.size() >= kMaxBubbles) {
         bubbles_.erase(bubbles_.begin());
     }
-    bubbles_.push_back({senderGuid, message, duration, duration, isYell});
+    bubbles_.push_back({.senderGuid = senderGuid, .message = message, .timeRemaining = duration, .totalDuration = duration, .isYell = isYell});
 }
 
 void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices& services) {
+    // Off means off: the queue is dropped as well, so turning the setting off
+    // clears what is on screen rather than leaving it to fade for five seconds.
+    if (!show_) { bubbles_.clear(); return; }
     if (bubbles_.empty()) return;
 
     auto* renderer = services.renderer;
@@ -66,6 +72,16 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         glm::vec3 canonical(entity->getX(), entity->getY(), entity->getZ() + 2.5f);
         glm::vec3 renderPos = core::coords::canonicalToRender(canonical);
 
+        // Not through a wall. A bubble carries a name as well as a line, so
+        // one drawn over the building someone is standing behind says they are
+        // in front of it - the same fault the nameplates had, answered by the
+        // same query.
+        static SightCache sight;
+        if (sight.blocked(renderer->getWMORenderer(), bubble.senderGuid,
+                          camera->getPosition(), renderPos)) {
+            continue;
+        }
+
         // Project to screen
         glm::vec4 clipPos = viewProj * glm::vec4(renderPos, 1.0f);
         if (clipPos.w <= 0.0f) continue;  // Behind camera
@@ -73,7 +89,7 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
         glm::vec2 ndc(clipPos.x / clipPos.w, clipPos.y / clipPos.w);
         float screenX = (ndc.x * 0.5f + 0.5f) * screenW;
         // Camera bakes the Vulkan Y-flip into the projection matrix:
-        // NDC y=-1 is top, y=1 is bottom — same convention as nameplate/minimap projection.
+        // NDC y=-1 is top, y=1 is bottom - same convention as nameplate/minimap projection.
         float screenY = (ndc.y * 0.5f + 0.5f) * screenH;
 
         // Skip if off-screen
@@ -86,43 +102,51 @@ void ChatBubbleManager::render(game::GameHandler& gameHandler, const UIServices&
             alpha = bubble.timeRemaining / 2.0f;
         }
 
-        // Draw bubble window — format the window ID into a stack buffer
-        // so we don't allocate a fresh std::string per bubble per frame.
-        char winId[40];
-        std::snprintf(winId, sizeof(winId), "##ChatBubble%llu",
-                      static_cast<unsigned long long>(bubble.senderGuid));
-        ImGui::SetNextWindowPos(ImVec2(screenX, screenY), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::SetNextWindowBgAlpha(0.7f * alpha);
-        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
-            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+        // Into the background draw list, which is where the interface is
+        // drawn - and drawn into before it, so the interface covers this.
+        //
+        // These were ImGui windows, and an ImGui window is above every draw
+        // list the interface uses, whatever the interface is doing: a bubble
+        // sat on top of the auction house, the bags, the map, anything open.
+        // Nothing about the position was wrong; a window was simply the one
+        // thing that cannot go underneath.
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        ImFont* font = ImGui::GetFont();
+        const float fontSize = ImGui::GetFontSize();
+        constexpr float kWrapWidth = 200.0f;
+        const ImVec2 padding(8.0f, 4.0f);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 4));
+        const ImVec2 textSize =
+            font->CalcTextSizeA(fontSize, FLT_MAX, kWrapWidth, bubble.message.c_str());
+        const ImVec2 size(textSize.x + padding.x * 2.0f, textSize.y + padding.y * 2.0f);
+        // The point is where the speaker's head is, and the bubble sits above
+        // it, centred - which is what the window's pivot of (0.5, 1) did.
+        const ImVec2 topLeft(screenX - size.x * 0.5f, screenY - size.y);
 
-        ImGui::Begin(winId, nullptr, flags);
+        ImVec4 background = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+        background.w = 0.7f * alpha;
+        dl->AddRectFilled(topLeft, ImVec2(topLeft.x + size.x, topLeft.y + size.y),
+                          ImGui::GetColorU32(background), 8.0f);
 
-        ImVec4 textColor = bubble.isYell
+        const ImVec4 textColor = bubble.isYell
             ? ImVec4(1.0f, 0.2f, 0.2f, alpha)
             : ImVec4(1.0f, 1.0f, 1.0f, alpha);
-
-        ImGui::PushStyleColor(ImGuiCol_Text, textColor);
-        ImGui::PushTextWrapPos(200.0f);
-        ImGui::TextWrapped("%s", bubble.message.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-
-        ImGui::End();
-        ImGui::PopStyleVar(2);
+        dl->AddText(font, fontSize, ImVec2(topLeft.x + padding.x, topLeft.y + padding.y),
+                    ImGui::GetColorU32(textColor), bubble.message.c_str(), nullptr,
+                    kWrapWidth);
     }
 }
 
 void ChatBubbleManager::setupCallback(game::GameHandler& gameHandler) {
     if (!callbackSet_) {
-        gameHandler.setChatBubbleCallback([this](uint64_t guid, const std::string& msg, bool isYell) {
-            addBubble(guid, msg, isYell);
-        });
+        // Resolve $-tokens here rather than at draw time: a bubble is built once
+        // and drawn every frame. The chat panel already does this for the same
+        // text, which is why an NPC line read correctly in the log and showed
+        // its raw $r/$c/$g markers in the bubble over their head.
+        gameHandler.setChatBubbleCallback(
+            [this, &gameHandler](uint64_t guid, const std::string& msg, bool isYell) {
+                addBubble(guid, chat_utils::replaceGenderPlaceholders(msg, gameHandler), isYell);
+            });
         callbackSet_ = true;
     }
 }

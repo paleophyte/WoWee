@@ -58,13 +58,23 @@ struct WaterSurface {
     // Material descriptor set (set 1)
     VkDescriptorSet materialSet = VK_NULL_HANDLE;
 
-    bool hasHeightData() const { return !heights.empty(); }
+    [[nodiscard]] bool hasHeightData() const { return !heights.empty(); }
 };
 
 /**
  * Water renderer (Vulkan) with planar reflections, Gerstner waves,
  * GGX specular, shoreline foam, and subsurface scattering.
  */
+// Matches set 2 binding 3 in water.frag.glsl. Keep kMaxWakePoints in step with
+// the MAX_WAKE_POINTS constant declared there.
+constexpr int kMaxWakePoints = 32;
+
+struct WaterFrameUBOData {
+    glm::mat4 reflViewProj{1.0f};
+    glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
+    glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
+};
+
 class WaterRenderer {
 public:
     WaterRenderer();
@@ -83,15 +93,16 @@ public:
 
     void recreatePipelines();
 
-    // Separate 1x pass for MSAA mode — water rendered after MSAA resolve
+    // Separate 1x pass for MSAA mode - water rendered after MSAA resolve
     bool createWater1xPass(VkFormat colorFormat, VkFormat depthFormat);
     void createWater1xFramebuffers(const std::vector<VkImageView>& swapViews,
                                     VkImageView depthView, VkExtent2D extent);
     void destroyWater1xResources();
-    bool beginWater1xPass(VkCommandBuffer cmd, uint32_t imageIndex, VkExtent2D extent);
-    void endWater1xPass(VkCommandBuffer cmd);
     bool hasWater1xPass() const { return water1xRenderPass != VK_NULL_HANDLE; }
     VkRenderPass getWater1xRenderPass() const { return water1xRenderPass; }
+    VkFramebuffer getWater1xFramebuffer(uint32_t index) const {
+        return index < water1xFramebuffers.size() ? water1xFramebuffers[index] : VK_NULL_HANDLE;
+    }
 
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera, float time, bool use1x = false, uint32_t frameIndex = 0);
     void captureSceneHistory(VkCommandBuffer cmd,
@@ -117,8 +128,15 @@ public:
     // Update the reflection UBO with reflected viewProj matrix
     void updateReflectionUBO(const glm::mat4& reflViewProj);
 
+    /// Feed the surface disturbance left by something moving through the water.
+    /// `intensity` is 0 when nothing is disturbing the surface. `wading` picks
+    /// churned-up froth underfoot; swimming instead lays a V wake off the
+    /// shoulders. Call once per frame.
+    void updateWake(float deltaTime, const glm::vec2& pos, const glm::vec2& travelDir,
+                    float intensity, bool wading);
+
     VkRenderPass getReflectionRenderPass() const { return reflectionRenderPass; }
-    VkExtent2D getReflectionExtent() const { return {REFLECTION_WIDTH, REFLECTION_HEIGHT}; }
+    VkExtent2D getReflectionExtent() const { return {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}; }
     bool hasReflectionPass() const { return reflectionRenderPass != VK_NULL_HANDLE; }
     bool hasSurfaces() const { return !surfaces.empty(); }
 
@@ -127,6 +145,17 @@ public:
 
     void setRefractionEnabled(bool enabled);
     bool isRefractionEnabled() const { return refractionEnabled; }
+    // Display brightness (1.0 = neutral). The scene-history capture used for
+    // refraction bakes this in, so the shader divides it back out.
+    // Size of the target the water is drawn into. Screen-space lookups derive
+    // their UVs from this rather than from the refraction texture's own size,
+    // which is deliberately smaller than the frame.
+    void setRenderExtent(VkExtent2D e) { renderExtent_ = e; }
+
+    /// Where a point sits on a surface, if that surface has water there:
+    /// the projection and the render mask, which every query asks first.
+    std::optional<glm::vec2> wateredGridPosition(const WaterSurface& surface,
+                                                 float glX, float glY) const;
 
     std::optional<float> getWaterHeightAt(float glX, float glY) const;
     /// Like getWaterHeightAt but only returns water surfaces whose height is
@@ -147,6 +176,7 @@ private:
 
     void updateMaterialUBO(WaterSurface& surface);
     VkDescriptorSet allocateMaterialSet();
+    VkExtent2D refractionCaptureExtent() const;
     void createSceneHistoryResources(VkExtent2D extent, VkFormat colorFormat, VkFormat depthFormat);
     void destroySceneHistoryResources();
 
@@ -179,7 +209,7 @@ private:
         VkDescriptorSet sceneSet = VK_NULL_HANDLE;
     };
     PerFrameSceneHistory sceneHistory[SCENE_HISTORY_FRAMES];
-    VkExtent2D sceneHistoryExtent = {0, 0};
+    VkExtent2D sceneHistoryExtent = {.width = 0, .height = 0};
     bool sceneHistoryReady = false;
     mutable uint32_t renderDiagCounter_ = 0;
 
@@ -198,6 +228,22 @@ private:
     VkImageLayout reflectionColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Reflection UBO (mat4 reflViewProj)
+    // Surface disturbance trail. Points age out, spreading as they go; the
+    // per-point drift is what turns a swimmer's pair of emissions into a V.
+    struct WakePoint {
+        glm::vec2 pos{0.0f};
+        glm::vec2 drift{0.0f};
+        float age = 0.0f;        // seconds
+        float life = 1.0f;       // seconds
+        float strength = 0.0f;
+    };
+    std::vector<WakePoint> wakePoints_;
+    WaterFrameUBOData frameUBO_{};
+    glm::vec2 lastWakeEmitPos_{0.0f};
+    bool hasWakeEmitPos_ = false;
+
+    void uploadFrameUBO();
+
     ::VkBuffer reflectionUBO = VK_NULL_HANDLE;
     VmaAllocation reflectionUBOAlloc = VK_NULL_HANDLE;
     void* reflectionUBOMapped = nullptr;
@@ -210,6 +256,7 @@ private:
     std::vector<WaterSurface> surfaces;
     bool renderingEnabled = true;
     bool refractionEnabled = false;
+    VkExtent2D renderExtent_{.width = 0, .height = 0};
 };
 
 } // namespace rendering

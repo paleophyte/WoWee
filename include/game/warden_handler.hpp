@@ -17,7 +17,6 @@ class GameHandler;
 class WardenCrypto;
 class WardenMemory;
 class WardenModule;
-class WardenModuleManager;
 
 class WardenHandler {
 public:
@@ -34,18 +33,17 @@ public:
     void reset();
 
     /** Initialize warden module manager (called once from GameHandler ctor). */
-    void initModuleManager();
 
     /** Whether the server requires Warden (gates char enum / create). */
-    bool requiresWarden() const { return requiresWarden_; }
+    [[nodiscard]] bool requiresWarden() const { return requiresWarden_; }
     void setRequiresWarden(bool v) { requiresWarden_ = v; }
 
-    bool wardenGateSeen() const { return wardenGateSeen_; }
+    [[nodiscard]] bool wardenGateSeen() const { return wardenGateSeen_; }
 
     /** Increment packet-after-gate counter (called from handlePacket). */
     void notifyPacketAfterGate() { ++wardenPacketsAfterGate_; }
 
-    bool wardenCharEnumBlockedLogged() const { return wardenCharEnumBlockedLogged_; }
+    [[nodiscard]] bool wardenCharEnumBlockedLogged() const { return wardenCharEnumBlockedLogged_; }
     void setWardenCharEnumBlockedLogged(bool v) { wardenCharEnumBlockedLogged_ = v; }
 
     /** Called from GameHandler::update() to drain async warden response + log gate timing. */
@@ -66,7 +64,6 @@ private:
     bool wardenCharEnumBlockedLogged_ = false;
     std::unique_ptr<WardenCrypto> wardenCrypto_;
     std::unique_ptr<WardenMemory> wardenMemory_;
-    std::unique_ptr<WardenModuleManager> wardenModuleManager_;
 
     // Warden module download state
     enum class WardenState {
@@ -80,7 +77,6 @@ private:
     std::vector<uint8_t> wardenModuleKey_;     // 16 bytes RC4
     uint32_t wardenModuleSize_ = 0;
     std::vector<uint8_t> wardenModuleData_;    // Downloaded module chunks
-    std::vector<uint8_t> wardenLoadedModuleImage_; // Parsed module image for key derivation
     std::shared_ptr<WardenModule> wardenLoadedModule_; // Loaded Warden module
 
     // Pre-computed challenge/response entries from .cr file

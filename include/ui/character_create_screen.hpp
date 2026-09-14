@@ -2,6 +2,8 @@
 
 #include "game/character.hpp"
 #include "game/world_packets.hpp"
+#include "ui/paper_ui.hpp"
+#include "ui/text_edit.hpp"
 #include <imgui.h>
 #include <string>
 #include <functional>
@@ -33,7 +35,11 @@ public:
     void setExpansionConstraints(const std::vector<uint32_t>& races, const std::vector<uint32_t>& classes);
 
 private:
-    char nameBuffer[13] = {};  // WoW max name = 12 chars + null
+    /// WoW allows twelve characters in a name. See paper_ui.hpp for why this
+    /// screen draws its own box around them rather than asking ImGui for one.
+    TextEdit name_{12};
+    /// The controls, and the frame-to-frame state behind them.
+    PaperUI ui_;
     int raceIndex = 0;
     int classIndex = 0;
     int genderIndex = 0;
@@ -80,8 +86,6 @@ private:
     int prevRangeSkin_ = -1;
     int prevRangeHairStyle_ = -1;
     float createTimer_ = -1.0f;  // >=0 while waiting for SMSG_CHAR_CREATE response
-    bool draggingPreview_ = false;
-    float dragStartX_ = 0.0f;
 
     void updatePreviewIfNeeded();
     void updateAppearanceRanges();

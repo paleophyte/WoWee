@@ -13,6 +13,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <utility>
 #include <string>
 #include <array>
 
@@ -39,7 +40,7 @@ public:
 
     bool connect(const std::string& host, uint16_t port) override;
     void disconnect() override;
-    bool isConnected() const override;
+    [[nodiscard]] bool isConnected() const override;
 
     /**
      * Send a world packet
@@ -61,7 +62,7 @@ public:
      * @param callback Function to call when packet is received
      */
     void setPacketCallback(std::function<void(const Packet&)> callback) {
-        packetCallback = callback;
+        packetCallback = std::move(callback);
     }
 
     /**
@@ -78,7 +79,7 @@ public:
     /**
      * Check if header encryption is enabled
      */
-    bool isEncryptionEnabled() const { return encryptionEnabled; }
+    [[nodiscard]] bool isEncryptionEnabled() const { return encryptionEnabled; }
 
 private:
     /**

@@ -1,4 +1,4 @@
-// subzone_tooltip_layer.cpp — Overlay area hover labels in zone view.
+// subzone_tooltip_layer.cpp - Overlay area hover labels in zone view.
 // Extracted from WorldMap::renderImGuiOverlay (Phase 8 of refactoring plan).
 #include "rendering/world_map/layers/subzone_tooltip_layer.hpp"
 #include <imgui.h>
@@ -46,7 +46,7 @@ void SubzoneTooltipLayer::render(const LayerContext& ctx) {
                 pixelX > static_cast<float>(ov.hitRectRight) ||
                 pixelY < static_cast<float>(ov.hitRectTop) ||
                 pixelY > static_cast<float>(ov.hitRectBottom)) {
-                continue;  // Mouse outside HitRect — skip this overlay
+                continue;  // Mouse outside HitRect - skip this overlay
             }
         } else {
             // Fallback: use overlay offset+size AABB (old behaviour)
@@ -63,10 +63,10 @@ void SubzoneTooltipLayer::render(const LayerContext& ctx) {
         if (area < bestArea) {
             bestArea = area;
             // Find display name from the first valid area ID
-            for (int a = 0; a < 4; a++) {
-                if (ov.areaIDs[a] == 0) continue;
+            for (unsigned int areaID : ov.areaIDs) {
+                if (areaID == 0) continue;
                 if (ctx.areaNameByAreaId) {
-                    auto nameIt = ctx.areaNameByAreaId->find(ov.areaIDs[a]);
+                    auto nameIt = ctx.areaNameByAreaId->find(areaID);
                     if (nameIt != ctx.areaNameByAreaId->end()) {
                         hoveredName = nameIt->second;
                         break;

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Skill Cost catalog (.wscs) — novel
+// Wowee Open Skill Cost catalog (.wscs) - novel
 // replacement for Blizzard's SkillCostsData.dbc plus the
 // per-rank training cost tables. Defines the tiered
 // progression of trainable skills: each rank unlocks a
@@ -72,17 +72,17 @@ struct WoweeSkillCost {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t costId) const;
+    [[nodiscard]] const Entry* findById(uint32_t costId) const;
 
     // Returns the entry that would be next-trainable for a
     // character with the given current skill points and
-    // character level — i.e. the lowest-rank entry the
+    // character level - i.e. the lowest-rank entry the
     // character qualifies for and hasn't already maxed out.
     // Returns nullptr if every entry is either capped or
     // gated by level.
-    const Entry* nextTrainable(uint16_t currentSkill,
+    [[nodiscard]] const Entry* nextTrainable(uint16_t currentSkill,
                                 uint8_t characterLevel) const;
 
     static const char* costKindName(uint8_t k);
@@ -97,16 +97,16 @@ public:
 
     // Preset emitters used by --gen-scs* variants.
     //
-    //   makeProfession — 6 canonical profession tiers
+    //   makeProfession - 6 canonical profession tiers
     //                     (Apprentice through Grand Master)
     //                     with the standard skill ranges and
     //                     gold costs from a Vanilla / TBC /
     //                     WotLK-era server.
-    //   makeWeapon     — 5 weapon skill tiers (Beginner /
+    //   makeWeapon     - 5 weapon skill tiers (Beginner /
     //                     Trained / Skilled / Expert /
     //                     Master) for free-to-train weapon
     //                     skills capped at 5x character lvl.
-    //   makeRiding     — 5 riding skill tiers (Apprentice
+    //   makeRiding     - 5 riding skill tiers (Apprentice
     //                     60% / Journeyman 100% / Expert
     //                     150% / Artisan 280% / Cold Weather
     //                     Flying) with the canonical Vanilla

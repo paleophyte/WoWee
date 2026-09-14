@@ -77,14 +77,23 @@ jobs:
         # Binary
         cp build/bin/wowee "${STAGING}/"
 
-        # Asset extraction tool (if built — requires StormLib)
+        # Asset extraction tool (if built - requires StormLib)
         if [ -f build/bin/asset_extract ]; then
           cp build/bin/asset_extract "${STAGING}/"
         fi
 
-        # Extraction scripts and GUI
+        # The asset manager window, and the script for the command line.
+        if [ -f build/bin/wowee_assets ]; then
+          cp build/bin/wowee_assets "${STAGING}/"
+        fi
         cp extract_assets.sh "${STAGING}/"
-        cp tools/asset_pipeline_gui.py "${STAGING}/"
+
+        # This client's own addons, which the build puts beside the binary and
+        # every release so far has left behind. WoweeAllBags is the combined bag
+        # window and the Sort Bags button - the two things the client used to
+        # draw itself and handed to FrameXML, which has neither - so on a
+        # released build they simply were not there.
+        cp -r addons "${STAGING}/"
 
         # Assets (exclude proprietary music)
         rsync -a --exclude='Original Music' build/bin/assets/ "${STAGING}/assets/"
@@ -98,15 +107,32 @@ jobs:
         tar czf "${STAGING}.tar.gz" "${STAGING}"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: wowee-linux-${{ matrix.arch }}
         path: wowee-*.tar.gz
         if-no-files-found: error
 
   build-macos:
-    name: Build (macOS arm64)
-    runs-on: macos-15
+    name: Build (macOS ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Each architecture builds natively on its own runner, the way Linux and
+      # Windows do here. Not a universal binary: every dependency would have to
+      # be universal too, and Homebrew's are per-arch.
+      fail-fast: false
+      matrix:
+        include:
+        - arch: arm64
+          runner: macos-15
+          verify_arch: arm64
+        - arch: x86-64
+          # macos-13 was the old Intel image and has been retired; a job asking
+          # for it queues for ever rather than failing. macos-15-intel is the
+          # current x64 label.
+          runner: macos-15-intel
+          # What lipo calls it, which is not what the archive is named.
+          verify_arch: x86_64
 
     steps:
     - name: Checkout
@@ -180,9 +206,17 @@ jobs:
         test -x build/bin/asset_extract
         cp build/bin/asset_extract Wowee.app/Contents/MacOS/
 
-        # Extraction scripts and GUI
+        # The asset manager window, beside the binaries rather than in
+        # Resources: it is a program, not a file the app reads.
+        test -x build/bin/wowee_assets
+        cp build/bin/wowee_assets Wowee.app/Contents/MacOS/
+
         cp extract_assets.sh Wowee.app/Contents/Resources/
-        cp tools/asset_pipeline_gui.py Wowee.app/Contents/Resources/
+
+        # This client's own addons. Into Resources rather than MacOS, because
+        # that is the directory the app makes current at startup and the addon
+        # search is relative to it.
+        cp -r addons Wowee.app/Contents/Resources/
 
         # Assets (exclude proprietary music)
         rsync -a --exclude='Original Music' build/bin/assets/ \
@@ -229,6 +263,9 @@ jobs:
         if [ -f Wowee.app/Contents/MacOS/asset_extract ]; then
           BUNDLE_ROOTS+=(Wowee.app/Contents/MacOS/asset_extract)
         fi
+        if [ -f Wowee.app/Contents/MacOS/wowee_assets ]; then
+          BUNDLE_ROOTS+=(Wowee.app/Contents/MacOS/wowee_assets)
+        fi
         BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libMoltenVK.dylib)
         BUNDLE_ROOTS+=(Wowee.app/Contents/Frameworks/libSDL3.dylib)
         python3 tools/macos/bundle_dependencies.py \
@@ -269,20 +306,25 @@ jobs:
         if [ "${MACOS_SIGNING_ENABLED}" = "true" ]; then
           IDENTITY="${APPLE_SIGNING_IDENTITY}"
         fi
-        bash tools/macos/sign_app.sh Wowee.app "${IDENTITY}"
+        bash tools/macos/sign_app.sh Wowee.app "${IDENTITY}" \
+          tools/macos/wowee.entitlements
         bash tools/macos/sign_app.sh "Wowee Asset Extractor.app" "${IDENTITY}"
-        bash tools/macos/verify_signature.sh Wowee.app "${IDENTITY}"
+        bash tools/macos/verify_signature.sh Wowee.app "${IDENTITY}" \
+          com.apple.security.cs.allow-jit
         bash tools/macos/verify_signature.sh \
           "Wowee Asset Extractor.app" "${IDENTITY}"
 
     - name: Verify bundled dylibs
       run: |
-        bash tools/macos/verify_bundle.sh Wowee.app arm64
+        bash tools/macos/verify_bundle.sh Wowee.app ${{ matrix.verify_arch }}
         codesign --verify --deep --strict --verbose=2 "Wowee Asset Extractor.app"
 
     - name: Create DMG
       run: |
+        set -euo pipefail
         TAG="${GITHUB_REF_NAME}"
+        DMG="wowee-${TAG}-macos-${{ matrix.arch }}.dmg"
+        rm -f "${DMG}"
         rm -rf dmg-root
         mkdir dmg-root
         mv Wowee.app dmg-root/
@@ -290,12 +332,36 @@ jobs:
         cp tools/macos/ASSET_EXTRACTION_README.txt \
           "dmg-root/README - Asset Extraction.txt"
         ln -s /Applications dmg-root/Applications
-        hdiutil create -volname Wowee -srcfolder dmg-root -ov -format UDZO \
-          "wowee-${TAG}-macos-arm64.dmg"
+        # A runner can leave a Wowee volume mounted from an earlier job, and
+        # hdiutil will not create over it. build.yml hit this and grew both a
+        # detach and a retry; this step is the one that cannot be re-run without
+        # cutting the tag again, and it had neither.
+        if [ -d "/Volumes/Wowee" ]; then
+          hdiutil detach "/Volumes/Wowee" -force || true
+          sleep 2
+        fi
+
+        ok=0
+        for attempt in 1 2 3 4 5; do
+          if hdiutil create -volname Wowee -srcfolder dmg-root -ov -format UDZO "${DMG}"; then
+            ok=1
+            break
+          fi
+          echo "hdiutil create failed on attempt ${attempt}; retrying..."
+          if [ -d "/Volumes/Wowee" ]; then
+            hdiutil detach "/Volumes/Wowee" -force || true
+          fi
+          sleep 3
+        done
+
+        if [ "$ok" -ne 1 ] || [ ! -f "${DMG}" ]; then
+          echo "Failed to create ${DMG} after retries."
+          exit 1
+        fi
+
         codesign --force --sign "${APPLE_SIGNING_IDENTITY}" \
-          --timestamp "wowee-${TAG}-macos-arm64.dmg"
-        codesign --verify --strict --verbose=2 \
-          "wowee-${TAG}-macos-arm64.dmg"
+          --timestamp "${DMG}"
+        codesign --verify --strict --verbose=2 "${DMG}"
 
     - name: Notarize and staple DMG
       env:
@@ -310,7 +376,7 @@ jobs:
           exit 1
         fi
 
-        DMG="wowee-${GITHUB_REF_NAME}-macos-arm64.dmg"
+        DMG="wowee-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.dmg"
         printf '%s' "${APPLE_NOTARY_KEY}" | base64 -D \
           > "${RUNNER_TEMP}/AuthKey.p8"
         xcrun notarytool submit "${DMG}" \
@@ -324,9 +390,9 @@ jobs:
           --verbose=2 "${DMG}"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
-        name: wowee-macos-arm64
+        name: wowee-macos-${{ matrix.arch }}
         path: wowee-*.dmg
         if-no-files-found: error
 
@@ -389,7 +455,7 @@ jobs:
       shell: msys2 {0}
       run: |
         git clone --depth 1 https://github.com/ladislav-zezula/StormLib.git /tmp/StormLib
-        # Disable x86 inline asm in bundled libtomcrypt (bswapl/movl) —
+        # Disable x86 inline asm in bundled libtomcrypt (bswapl/movl) -
         # __MINGW32__ is defined on CLANGARM64 which incorrectly enables x86 asm
         cmake -S /tmp/StormLib -B /tmp/StormLib/build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
@@ -435,15 +501,20 @@ jobs:
         cp build/bin/wowee.exe "${STAGING}/"
         cp build/bin/*.dll "${STAGING}/" 2>/dev/null || true
 
-        # Asset extraction tool (if built — requires StormLib)
+        # Asset extraction tool (if built - requires StormLib)
         if [ -f build/bin/asset_extract.exe ]; then
           cp build/bin/asset_extract.exe "${STAGING}/"
         fi
 
-        # Extraction scripts and GUI
+        # The asset manager window, and the scripts for the command line.
+        if [ -f build/bin/wowee_assets.exe ]; then
+          cp build/bin/wowee_assets.exe "${STAGING}/"
+        fi
         cp extract_assets.ps1 "${STAGING}/"
         cp extract_assets.bat "${STAGING}/"
-        cp tools/asset_pipeline_gui.py "${STAGING}/"
+
+        # This client's own addons, beside the exe where the addon search looks.
+        cp -r addons "${STAGING}/"
 
         # Assets (exclude proprietary music)
         mkdir -p "${STAGING}/assets"
@@ -465,20 +536,78 @@ jobs:
         zip -r "${STAGING}.zip" "${STAGING}"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: wowee-windows-${{ matrix.arch }}
         path: wowee-*.zip
         if-no-files-found: error
 
+  build-android:
+    name: Build (android arm64)
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        submodules: true
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Install the NDK the project pins
+      run: |
+        # android/app/build.gradle names this version; the runner ships another.
+        yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+          --install "ndk;28.2.13676358" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+
+    - name: Cache OpenSSL for Android
+      id: cache-openssl
+      uses: actions/cache@v4
+      with:
+        path: build-android-deps
+        key: android-openssl-${{ hashFiles('tools/build-android-deps.sh') }}
+
+    - name: Build OpenSSL for arm64
+      if: steps.cache-openssl.outputs.cache-hit != 'true'
+      run: |
+        # ANDROID_HOME is set by the runner image, so it is read in the shell
+        # rather than through an expression, which only sees workflow env.
+        export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/28.2.13676358"
+        tools/build-android-deps.sh arm64-v8a
+
+    - name: Build the APK
+      working-directory: android
+      run: |
+        export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/28.2.13676358"
+        ./gradlew :app:assembleRelease --no-daemon
+
+    - name: Name it after the tag
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        APK=android/app/build/outputs/apk/release/app-release.apk
+        # assembleRelease is signed with the debug key: this is a sideloaded
+        # build, not a Play listing, and an unsigned APK will not install at all.
+        test -f "${APK}" || APK=android/app/build/outputs/apk/release/app-release-unsigned.apk
+        cp "${APK}" "wowee-${TAG}-android-arm64.apk"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: wowee-android-arm64
+        path: wowee-*-android-arm64.apk
+
   release:
     name: Create Release
-    needs: [ build-linux, build-macos, build-windows ]
+    needs: [ build-linux, build-macos, build-windows, build-android ]
     runs-on: ubuntu-latest
 
     steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v5
       with:
         path: artifacts/
 

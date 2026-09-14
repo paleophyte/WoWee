@@ -10,20 +10,27 @@
 namespace wowee {
 namespace game {
 
-// Resolve "assets/Original Music/<name>" to an absolute path, or return empty
+// Resolve "assets/Original Music/<name>" to an absolute path, or return empty.
+// fs::exists already resolves a relative path against the working directory, so
+// there is only ever one place to look; the track is found when the process runs
+// from the source tree and not otherwise.
 static std::string resolveOriginalMusic(const char* filename) {
     namespace fs = std::filesystem;
+    std::error_code ec;
     fs::path rel = fs::path("assets") / "Original Music" / filename;
-    if (fs::exists(rel)) return fs::canonical(rel).string();
-    fs::path abs = fs::current_path() / rel;
-    if (fs::exists(abs)) return fs::canonical(abs).string();
-    return "";
+    if (!fs::exists(rel, ec)) return "";
+    fs::path abs = fs::canonical(rel, ec);
+    return ec ? std::string() : abs.string();
 }
 
 // Helper: prefix with "file:" so the renderer knows to use playFilePath
 static std::string filePrefix(const std::string& path) {
     if (path.empty()) return "";
     return "file:" + path;
+}
+
+std::string ZoneManager::resolveOriginalMusicFile(const char* filename) {
+    return filePrefix(resolveOriginalMusic(filename));
 }
 
 void ZoneManager::initialize() {
@@ -45,6 +52,8 @@ void ZoneManager::initialize() {
     std::string omRunBackPolka   = om("RunBackPolka.mp3");
     std::string omWhoPulled      = om("WHO PULLED_.mp3");
     std::string omStormwindInst  = om("stormwindinst.mp3");
+    std::string omStormwindGtr   = om("stormwindguitar.mp3");
+    std::string omIronforgeIntro = om("Ironforge Intro.mp3");
 
     // Elwynn Forest (zone 12)
     ZoneInfo elwynn;
@@ -73,6 +82,7 @@ void ZoneManager::initialize() {
         "Sound\\Music\\CityMusic\\Stormwind\\stormwind10-zone.mp3",
     };
     if (!omStormwindInst.empty()) stormwind.musicPaths.push_back(omStormwindInst);
+    if (!omStormwindGtr.empty()) stormwind.musicPaths.push_back(omStormwindGtr);
     zones[1519] = stormwind;
 
     // Dun Morogh (zone 1) - neighboring zone
@@ -197,6 +207,7 @@ void ZoneManager::initialize() {
     };
     if (!omRunBackPolka.empty()) ironforge.musicPaths.push_back(omRunBackPolka);
     if (!omRollNeedGreed.empty()) ironforge.musicPaths.push_back(omRollNeedGreed);
+    if (!omIronforgeIntro.empty()) ironforge.musicPaths.push_back(omIronforgeIntro);
     zones[1537] = ironforge;
 
     // Loch Modan (zone 38)
@@ -422,7 +433,7 @@ void ZoneManager::initialize() {
     tileToZone[14 * 100 + 16] = 1657;
     tileToZone[14 * 100 + 17] = 1657;
 
-    // Seed removed — music shuffle now uses a local mt19937 (see pickMusicTrack).
+    // Seed removed - music shuffle now uses a local mt19937 (see pickMusicTrack).
 
     LOG_INFO("Zone manager initialized: ", zones.size(), " zones, ", tileToZone.size(), " tile mappings");
 }
@@ -434,6 +445,19 @@ uint32_t ZoneManager::getZoneId(int tileX, int tileY) const {
         return it->second;
     }
     return 0;  // Unknown zone
+}
+
+bool ZoneManager::isOutdoorPvpArea(uint32_t areaId) const {
+    if (areaId == 0) return false;
+    auto it = areaFlags_.find(areaId);
+    if (it == areaFlags_.end()) return false;
+    // The eleven objective subzones - the Plaguelands towers, Halaa, the
+    // Hellfire towers, Twin Spire Ruins, the Bone Wastes - and Wintergrasp,
+    // whose eighteen areas are marked with a flag of their own rather than
+    // this one.
+    constexpr uint32_t kOutdoorPvp  = 0x00008000u;
+    constexpr uint32_t kWintergrasp = 0x01000000u;
+    return (it->second & (kOutdoorPvp | kWintergrasp)) != 0;
 }
 
 uint32_t ZoneManager::resolveAreaZoneId(uint32_t areaId) const {
@@ -472,10 +496,14 @@ std::string ZoneManager::getRandomMusic(uint32_t zoneId) {
         if (!useOriginalSoundtrack_ && p.rfind("file:", 0) == 0) continue;
         pool.push_back(&p);
     }
-    // Fall back to full list if filtering left nothing
-    if (pool.empty()) {
-        for (const auto& p : all) pool.push_back(&p);
-    }
+    // No fallback to the full list. The only thing filtered out here is the
+    // client's own soundtrack, and only when the player has turned it off - so
+    // a pool that came back empty means every track this zone has is one they
+    // asked not to hear, and the answer is silence rather than all of them.
+    // Putting them back was the whole of "the setting does not stay off": it
+    // held in any zone with a mixed pool and did nothing in the zones that are
+    // entirely ours, which are the ones a player notices.
+    if (pool.empty()) return "";
 
     if (pool.size() == 1) {
         lastPlayedMusic_ = *pool[0];
@@ -531,9 +559,17 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
     // layouts supported here. Preserve this relationship even when the music
     // DBCs are absent: renderer and ambience classification depend on it.
     areaParents_.clear();
+    areaFlags_.clear();
+    const bool haveFlags = areaFields > 4;
     for (uint32_t i = 0; i < numAreas; ++i) {
         const uint32_t areaId = areaDbc->getUInt32(i, 0);
-        if (areaId != 0) areaParents_[areaId] = areaDbc->getUInt32(i, 2);
+        if (areaId == 0) continue;
+        areaParents_[areaId] = areaDbc->getUInt32(i, 2);
+        // Field 4 is Flags. Not in dbc_layouts.json, so checked against known
+        // rows rather than trusted from its position: area 4197 is Wintergrasp
+        // and must carry 0x01000000, and 3703 is Shattrath and must carry the
+        // sanctuary bit 0x800. A wrong column reads as zero forever.
+        if (haveFlags) areaFlags_[areaId] = areaDbc->getUInt32(i, 4);
     }
 
     if (!zoneMusicDbc || !zoneMusicDbc->isLoaded()) {

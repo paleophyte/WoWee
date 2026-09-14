@@ -110,7 +110,7 @@ TEST_CASE("CombatFSM: stun does not override swimming", "[combat]") {
     in.swimming = true;
     auto out = fsm.resolve(in, caps, wl);
 
-    // Swimming overrides combat entirely — FSM should go inactive
+    // Swimming overrides combat entirely - FSM should go inactive
     // The exact behavior depends on implementation, but stun should not
     // force an animation while swimming
     CHECK(fsm.getState() != CombatFSM::State::STUNNED);
@@ -178,4 +178,28 @@ TEST_CASE("CombatFSM: equipped thrown weapon does not replace melee ready stance
 
     in.rangedWeaponActive = true;
     CHECK(fsm.resolve(in, caps, loadout).animId == anim::READY_THROWN);
+}
+
+// A wand shares INVTYPE_RANGEDRIGHT with a gun, so reading the inventory type
+// alone shouldered it like a rifle. It is aimed the way a directed spell is.
+TEST_CASE("CombatFSM: a drawn wand takes the directed spell stance, not the rifle's",
+          "[combat]") {
+    CombatFSM fsm;
+    auto caps = makeCombatCaps();
+    caps.resolvedReadyRifle = anim::READY_RIFLE;
+    caps.resolvedReadyWand  = anim::READY_SPELL_DIRECTED;
+    WeaponLoadout loadout;
+    loadout.rangedType = RangedWeaponType::WAND;
+
+    fsm.setState(CombatFSM::State::COMBAT_IDLE);
+    auto in = combatInput();
+    in.rangedWeaponActive = true;
+    const uint32_t chosen = fsm.resolve(in, caps, loadout).animId;
+    CHECK(chosen == anim::READY_SPELL_DIRECTED);
+    CHECK(chosen != anim::READY_RIFLE);
+
+    // And a gun still takes the rifle's, which is the half that was right.
+    loadout.rangedType = RangedWeaponType::GUN;
+    fsm.setState(CombatFSM::State::COMBAT_IDLE);
+    CHECK(fsm.resolve(in, caps, loadout).animId == anim::READY_RIFLE);
 }

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Boss Encounter catalog (.wbos) — novel
+// Wowee Open Boss Encounter catalog (.wbos) - novel
 // replacement for AzerothCore's instance_encounter SQL
 // table plus the per-boss script bindings. Defines raid
 // boss encounter metadata: which creature is the boss,
@@ -70,19 +70,19 @@ struct WoweeBossEncounter {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t encounterId) const;
+    [[nodiscard]] const Entry* findById(uint32_t encounterId) const;
 
     // Returns all encounters bound to a given map id
     // (typically all bosses in one raid instance), in the
     // order they appear in the catalog. Used by the Encounter
     // Journal UI and instance lockout logic.
-    std::vector<const Entry*> findByMap(uint32_t mapId) const;
+    [[nodiscard]] std::vector<const Entry*> findByMap(uint32_t mapId) const;
 
     // Returns all encounters bound to a given boss creature
     // (typically the per-difficulty variants of one boss).
-    std::vector<const Entry*> findByBossCreature(
+    [[nodiscard]] std::vector<const Entry*> findByBossCreature(
         uint32_t bossCreatureId) const;
 };
 
@@ -95,15 +95,15 @@ public:
 
     // Preset emitters used by --gen-bos* variants.
     //
-    //   makeFiveMan  — 3 5-man dungeon bosses (trash boss,
+    //   makeFiveMan  - 3 5-man dungeon bosses (trash boss,
     //                   mid boss, final boss) at recommended
     //                   ilvl 200 with no soft-enrage.
-    //   makeRaid10   — 4 ICC-style 10-man raid bosses
+    //   makeRaid10   - 4 ICC-style 10-man raid bosses
     //                   (Marrowgar / Deathwhisper / Saurfang
     //                   / Lich King) with multi-phase
     //                   structure and soft-enrage timers.
-    //   makeWorldBoss — 2 outdoor world bosses (Doom Lord
-    //                   Kazzak / Doomwalker) — single phase,
+    //   makeWorldBoss - 2 outdoor world bosses (Doom Lord
+    //                   Kazzak / Doomwalker) - single phase,
     //                   no enrage timer, 25-player size.
     static WoweeBossEncounter makeFiveMan(const std::string& catalogName);
     static WoweeBossEncounter makeRaid10(const std::string& catalogName);

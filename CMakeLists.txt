@@ -28,9 +28,24 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(WOWEE_BUILD_TESTS "Build tests" ON)
 option(WOWEE_ENABLE_ASAN "Enable AddressSanitizer + UBSan (applied to all build configs; pairs well with Debug)" OFF)
 option(WOWEE_ENABLE_TRACY "Enable Tracy profiler instrumentation" OFF)
-option(WOWEE_ENABLE_AMD_FSR2 "Enable AMD FidelityFX FSR2 backend when SDK is present" ON)
-option(WOWEE_ENABLE_AMD_FSR3_FRAMEGEN "Enable AMD FidelityFX SDK FSR3 frame generation interface probe when SDK is present" ON)
-option(WOWEE_BUILD_AMD_FSR3_RUNTIME "Build native AMD FidelityFX VK runtime (Path A) from extern/FidelityFX-SDK/Kits" ON)
+# AMD's FidelityFX SDK backends, off by default.
+#
+# They give neither a performance nor a quality gain here today, and FSR3 frame
+# generation is broken on RADV/Mesa. Turning them off also takes AMD's headers
+# out of the build, which -Werror was policing: the macOS build failed on a
+# -Wmissing-braces inside ffx_internal_types.h.
+#
+# This client's own upscaling is unaffected. FSR 1 (fsr_easu/fsr_rcas) and the
+# fsr2_* compute shaders are in-tree and stay in the build; only the vendored
+# SDK path is gone.
+#
+# To build it back, set any of these ON and place the SDKs under extern/:
+#   extern/FidelityFX-FSR2   github.com/GPUOpen-Effects/FidelityFX-FSR2 (master)
+#   extern/FidelityFX-SDK    github.com/Kelsidavis/FidelityFX-SDK (main)
+# CI used to clone both on every run and no longer does.
+option(WOWEE_ENABLE_AMD_FSR2 "Enable AMD FidelityFX FSR2 backend when SDK is present" OFF)
+option(WOWEE_ENABLE_AMD_FSR3_FRAMEGEN "Enable AMD FidelityFX SDK FSR3 frame generation interface probe when SDK is present" OFF)
+option(WOWEE_BUILD_AMD_FSR3_RUNTIME "Build native AMD FidelityFX VK runtime (Path A) from extern/FidelityFX-SDK/Kits" OFF)
 set(WOWEE_MANGOS_TBC_DIR "C:/Users/admin/code/mangos-tbc" CACHE PATH "Optional CMaNGOS TBC checkout used to build mmap_path_query")
 
 # AMD FidelityFX FSR2 SDK detection (drop-in under extern/FidelityFX-FSR2)
@@ -68,7 +83,10 @@ if(WOWEE_ENABLE_AMD_FSR2 AND EXISTS ${WOWEE_AMD_FSR2_HEADER} AND EXISTS ${WOWEE_
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
     )
-    target_include_directories(wowee_fsr2_amd_vk PUBLIC
+    # SYSTEM: these are AMD's headers, not ours. Without it they are ordinary
+    # -I includes and -Werror polices vendored code, which failed the macOS
+    # build on a -Wmissing-braces inside ffx_internal_types.h.
+    target_include_directories(wowee_fsr2_amd_vk SYSTEM PUBLIC
         ${WOWEE_AMD_FSR2_DIR}/src
         ${WOWEE_AMD_FSR2_DIR}/src/ffx-fsr2-api
         ${WOWEE_AMD_FSR2_DIR}/src/ffx-fsr2-api/vk
@@ -120,7 +138,8 @@ if(WOWEE_ENABLE_AMD_FSR3_FRAMEGEN AND WOWEE_AMD_FFX_SDK_KITS_READY)
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
     )
-    target_include_directories(wowee_fsr3_framegen_amd_vk_probe PUBLIC
+    # SYSTEM, for the reason given at the FSR2 target above.
+    target_include_directories(wowee_fsr3_framegen_amd_vk_probe SYSTEM PUBLIC
         ${WOWEE_AMD_FFX_SDK_KITS_DIR}/upscalers/include
         ${WOWEE_AMD_FFX_SDK_KITS_DIR}/upscalers/fsr3/include
         ${WOWEE_AMD_FFX_SDK_KITS_DIR}/framegeneration/fsr3/include
@@ -248,7 +267,57 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 # Find required packages
-find_package(SDL2 REQUIRED)
+#
+# Android has no system SDL2, so it is fetched and built with the client. SDL's
+# own CMake provides the same SDL2::SDL2 target find_package would, so nothing
+# downstream changes.
+#
+# Pinned to the last SDL2 release rather than to what the desktop packages
+# carry: 2.30 calls ALooper_pollAll, which NDK 28 marks unavailable, so it does
+# not compile against a current NDK at all.
+if(ANDROID)
+    include(FetchContent)
+    set(SDL_SHARED ON  CACHE BOOL "" FORCE)   # SDLActivity loads libSDL2.so
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST   OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(SDL2
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG        release-2.32.10
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(SDL2)
+
+    # This client includes <SDL2/SDL.h>, the layout the Linux and macOS packages
+    # install. SDL's own build tree puts the headers at the top of include/, so
+    # a directory holding one link named SDL2 makes the same spelling work
+    # without touching the 30-odd files that use it.
+    set(WOWEE_SDL2_COMPAT_INC ${CMAKE_BINARY_DIR}/sdl2-compat-include)
+    file(MAKE_DIRECTORY ${WOWEE_SDL2_COMPAT_INC})
+    file(CREATE_LINK ${sdl2_SOURCE_DIR}/include ${WOWEE_SDL2_COMPAT_INC}/SDL2
+         SYMBOLIC COPY_ON_ERROR)
+    include_directories(${WOWEE_SDL2_COMPAT_INC})
+
+    # Header-only, and there is no system copy to find on Android.
+    FetchContent_Declare(glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG        1.0.1
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(glm)
+    include_directories(${glm_SOURCE_DIR})
+
+    # log is Android's logging, which Catch2 writes through as well as this
+    # client; android carries ANativeWindow and the asset manager. Directory
+    # scope, so every target below gets them without being named.
+    link_libraries(log android)
+
+    # miniaudio's OpenSL and AAudio backends are only compiled on Android, and
+    # they have unused parameters that this build treats as errors. It is
+    # vendored, so the warning is turned off for the one unit that compiles it
+    # rather than patched out of the header.
+    set_source_files_properties(src/audio/audio_engine.cpp PROPERTIES
+                                COMPILE_OPTIONS "-Wno-unused-parameter")
+else()
+    find_package(SDL2 REQUIRED)
+endif()
 find_package(Vulkan QUIET)
 if(NOT Vulkan_FOUND)
     # For Windows cross-compilation the host pkg-config finds the Linux libvulkan-dev
@@ -267,7 +336,7 @@ if(NOT Vulkan_FOUND)
                 add_library(Vulkan::Vulkan INTERFACE IMPORTED)
             endif()
             # Vulkan::Headers is provided by vcpkg's vulkan-headers port and carries
-            # the correct MinGW include path — no Linux system headers involved.
+            # the correct MinGW include path - no Linux system headers involved.
             set_property(TARGET Vulkan::Vulkan APPEND PROPERTY
                 INTERFACE_LINK_LIBRARIES Vulkan::Headers)
             # Link against the Vulkan loader import library (vulkan-1.dll).
@@ -339,7 +408,7 @@ if(NOT Vulkan_FOUND)
     endif()
 endif()
 # macOS cross-compilation: the Vulkan loader (MoltenVK) is not available at link
-# time. Allow unresolved Vulkan symbols — they are resolved at runtime.
+# time. Allow unresolved Vulkan symbols - they are resolved at runtime.
 if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(WOWEE_MACOS_CROSS_COMPILE TRUE)
 endif()
@@ -351,10 +420,19 @@ if(WIN32)
 else()
     find_package(PkgConfig REQUIRED)
 endif()
-if(PkgConfig_FOUND)
+if(ANDROID)
+    # Not through pkg-config. There is no Android FFmpeg to find and the host's
+    # copy answers with the host's include path, which puts glibc headers in
+    # front of the NDK sysroot and fails on the first system header. The same
+    # trap the Windows cross build hit with Vulkan, one probe further down.
+    #
+    # Cinematics are the only thing behind this, and the no-FFmpeg path is
+    # already supported.
+    set(FFMPEG_FOUND FALSE)
+elseif(PkgConfig_FOUND)
     pkg_check_modules(FFMPEG libavformat libavcodec libswscale libavutil)
 else()
-    # Fallback for MSVC/vcpkg — find FFmpeg libraries manually
+    # Fallback for MSVC/vcpkg - find FFmpeg libraries manually
     find_path(FFMPEG_INCLUDE_DIRS libavformat/avformat.h)
     find_library(AVFORMAT_LIB NAMES avformat)
     find_library(AVCODEC_LIB  NAMES avcodec)
@@ -369,7 +447,7 @@ elseif(FFMPEG_FOUND)
     set(HAVE_FFMPEG TRUE)
 else()
     set(HAVE_FFMPEG FALSE)
-    message(WARNING "FFmpeg not found — video_player will be disabled. Install via vcpkg: ffmpeg:x64-windows")
+    message(WARNING "FFmpeg not found - video_player will be disabled. Install via vcpkg: ffmpeg:x64-windows")
 endif()
 
 # Unicorn Engine (x86 emulator for cross-platform Warden module execution)
@@ -404,12 +482,26 @@ else()
     message(WARNING "Shaders will not be compiled to SPIR-V.")
 endif()
 
+# Shaders carry no source information by default, because -O strips it. Without
+# it a GPU-assisted validation error names a pipeline handle and an instruction
+# index and nothing else - which is a shader you then have to identify by
+# elimination, and that has already cost a full session once.
+#
+#   cmake -B build -DWOWEE_SHADER_DEBUG_INFO=ON && cmake --build build
+#
+# Off by default and worth keeping that way: it disables optimisation as well,
+# since an optimised shader has no line numbers left to report. The .spv files
+# are tracked, so a debug build rewrites them in place - check them out again
+# before committing anything else.
+option(WOWEE_SHADER_DEBUG_INFO
+       "Compile shaders unoptimised and with debug info, so GPU validation can name a line" OFF)
+
 # Function to compile GLSL shaders to SPIR-V
 function(compile_shaders TARGET_NAME)
     set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders)
     # Compile in place, next to the GLSL. The .spv files are tracked (they are the
     # fallback when glslc is absent), and the POST_BUILD step below copies the whole
-    # source assets/ tree over the runtime one — so compiling into the runtime tree
+    # source assets/ tree over the runtime one - so compiling into the runtime tree
     # would just be overwritten by the committed .spv, silently running stale shaders.
     set(SPV_DIR ${SHADER_DIR})
     file(MAKE_DIRECTORY ${SPV_DIR})
@@ -467,7 +559,8 @@ if(EXISTS ${IMGUI_DIR})
         ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
         ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
     )
-    target_include_directories(imgui PUBLIC
+    # SYSTEM: vendored, so -Werror on wowee does not police it.
+    target_include_directories(imgui SYSTEM PUBLIC
         ${IMGUI_DIR}
         ${IMGUI_DIR}/backends
     )
@@ -483,7 +576,7 @@ if(EXISTS ${VK_BOOTSTRAP_DIR})
     add_library(vk-bootstrap STATIC
         ${VK_BOOTSTRAP_DIR}/src/VkBootstrap.cpp
     )
-    target_include_directories(vk-bootstrap PUBLIC ${VK_BOOTSTRAP_DIR}/src)
+    target_include_directories(vk-bootstrap SYSTEM PUBLIC ${VK_BOOTSTRAP_DIR}/src)
     target_link_libraries(vk-bootstrap PUBLIC Vulkan::Vulkan)
 else()
     message(FATAL_ERROR "vk-bootstrap not found in extern/vk-bootstrap")
@@ -497,6 +590,7 @@ set(WOWEE_SOURCES
     src/core/entity_spawner_player.cpp
     src/core/entity_spawner_processing.cpp
     src/core/appearance_composer.cpp
+    src/core/helm_visual.cpp
     src/core/world_loader.cpp
     src/core/npc_interaction_callback_handler.cpp
     src/core/audio_callback_handler.cpp
@@ -510,6 +604,7 @@ set(WOWEE_SOURCES
     src/core/logger.cpp
     src/core/crash_diagnostics.cpp
     src/core/memory_monitor.cpp
+    src/core/app_clock.cpp
     src/core/config_paths.cpp
 
     # Math
@@ -541,15 +636,19 @@ set(WOWEE_SOURCES
     src/game/game_handler_packets.cpp
     src/game/game_handler_callbacks.cpp
     src/game/chat_handler.cpp
+    src/game/text_tokens.cpp
+    src/game/text_tokens_subject.cpp
     src/game/movement_handler.cpp
     src/game/combat_handler.cpp
     src/game/spell_handler.cpp
+    src/game/spell_description_eval.cpp
     src/game/inventory_handler.cpp
     src/game/social_handler.cpp
     src/game/quest_handler.cpp
     src/game/entity_controller.cpp
     src/game/warden_handler.cpp
     src/game/warden_crypto.cpp
+    src/game/cata_movement.cpp
     src/game/warden_module.cpp
     src/game/warden_emulator.cpp
     src/game/warden_memory.cpp
@@ -567,6 +666,8 @@ set(WOWEE_SOURCES
     src/game/world_packets_world.cpp
     src/game/world_packets_economy.cpp
     src/game/spline_packet.cpp
+    src/game/shapeshift_forms.cpp
+    src/game/calendar_data.cpp
     src/game/faction_hostility.cpp
     src/game/packet_parsers_tbc.cpp
     src/game/packet_parsers_classic.cpp
@@ -591,8 +692,10 @@ set(WOWEE_SOURCES
 
     # Pipeline (asset loaders)
     src/pipeline/blp_loader.cpp
+    src/pipeline/dds_loader.cpp
     src/pipeline/dbc_loader.cpp
     src/pipeline/asset_manager.cpp
+    src/pipeline/asset_inventory.cpp
     src/pipeline/asset_manifest.cpp
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
@@ -746,13 +849,20 @@ set(WOWEE_SOURCES
     src/pipeline/wowee_combat_formulas.cpp
     src/pipeline/wowee_chat_links.cpp
     src/pipeline/custom_zone_discovery.cpp
+    src/pipeline/char_sections.cpp
+    src/ui/settings_schema.cpp
+    src/pipeline/item_textures.cpp
+    src/pipeline/m2_asset_loader.cpp
     src/pipeline/dbc_layout.cpp
+    src/pipeline/spell_icon_paths.cpp
 
     src/pipeline/terrain_mesh.cpp
 
     # Rendering (Vulkan infrastructure)
+    src/rendering/pass_ablation.cpp
     src/rendering/vk_context.cpp
     src/rendering/vk_utils.cpp
+    src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
     src/rendering/vk_texture.cpp
     src/rendering/vk_buffer.cpp
@@ -766,6 +876,7 @@ set(WOWEE_SOURCES
     src/rendering/camera_controller.cpp
     src/rendering/material.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/shadow_params.cpp
     src/rendering/terrain_manager.cpp
     src/rendering/frustum.cpp
     src/rendering/performance_hud.cpp
@@ -783,6 +894,9 @@ set(WOWEE_SOURCES
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/imgui_texture.cpp
+    src/rendering/bone_slots.cpp
+    src/rendering/normal_map.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_renderer_particles.cpp
@@ -790,6 +904,13 @@ set(WOWEE_SOURCES
     src/rendering/m2_model_classifier.cpp
     src/rendering/render_graph.cpp
     src/rendering/hiz_system.cpp
+    src/rendering/grass_renderer.cpp
+    src/pipeline/adt_alpha.cpp
+    src/pipeline/grass_terrain.cpp
+    src/pipeline/grass_population.cpp
+    src/pipeline/grass_profile.cpp
+    src/pipeline/grass_biomes.cpp
+    src/pipeline/grass_clearing.cpp
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
     src/rendering/minimap.cpp
@@ -810,7 +931,6 @@ set(WOWEE_SOURCES
     src/rendering/world_map/layers/quest_poi_layer.cpp
     src/rendering/world_map/layers/corpse_marker_layer.cpp
     src/rendering/world_map/layers/rare_tracker_layer.cpp
-    src/rendering/world_map/layers/chest_tracker_layer.cpp
     src/rendering/world_map/layers/zone_highlight_layer.cpp
     src/rendering/world_map/layers/coordinate_display.cpp
     src/rendering/world_map/layers/subzone_tooltip_layer.cpp
@@ -837,26 +957,40 @@ set(WOWEE_SOURCES
 
     # UI
     src/ui/ui_manager.cpp
+    src/ui/ui_upload_budget.cpp
+    src/ui/widget_tree.cpp
+    src/ui/xml_parser.cpp
+    src/ui/framexml_emitter.cpp
+    src/ui/framexml_takeover.cpp
+    src/ui/unit_portrait.cpp
+    src/ui/interface_fonts.cpp
+    src/ui/text_edit.cpp
+    src/ui/paper_ui.cpp
+    src/ui/widget_renderer.cpp
     src/ui/ui_raid_icons.cpp
+    src/ui/ui_texture_load.cpp
     src/ui/auth_screen.cpp
     src/ui/realm_screen.cpp
     src/ui/character_create_screen.cpp
     src/ui/character_screen.cpp
+    src/ui/escape_action.cpp
     src/ui/game_screen.cpp
+    src/ui/scene_pick.cpp
     src/ui/game_screen_frames.cpp
     src/ui/game_screen_hud.cpp
     src/ui/game_screen_minimap.cpp
     src/ui/chat_panel.cpp
+    src/ui/macro_text.cpp
     src/ui/chat/chat_settings.cpp
-    src/ui/chat/chat_input.cpp
     src/ui/chat/chat_utils.cpp
-    src/ui/chat/chat_tab_manager.cpp
     src/ui/chat/chat_bubble_manager.cpp
     src/ui/chat/chat_markup_parser.cpp
+    src/ui/plural_escape.cpp
     src/ui/chat/chat_markup_renderer.cpp
+    src/core/open_url.cpp
+    src/core/click_drag.cpp
     src/ui/chat/item_tooltip_renderer.cpp
     src/ui/chat/chat_command_registry.cpp
-    src/ui/chat/chat_tab_completer.cpp
     src/ui/chat/macro_evaluator.cpp
     src/ui/chat/macro_eval_convenience.cpp
     src/ui/chat/game_state_adapter.cpp
@@ -875,24 +1009,25 @@ set(WOWEE_SOURCES
     src/ui/toast_manager.cpp
     src/ui/dialog_manager.cpp
     src/ui/settings_panel.cpp
+    src/ui/touch_controls.cpp
     src/ui/combat_ui.cpp
-    src/ui/social_panel.cpp
-    src/ui/action_bar_panel.cpp
     src/ui/window_manager.cpp
-    src/ui/crafting_window.cpp
+    src/ui/bis_gear_data.cpp
     src/ui/inventory_screen.cpp
-    src/ui/quest_log_screen.cpp
+    src/ui/item_tooltip.cpp
     src/ui/spellbook_screen.cpp
-    src/ui/talent_screen.cpp
     src/ui/keybinding_manager.cpp
 
     # Addons
     src/addons/addon_manager.cpp
     src/addons/lua_engine.cpp
+    src/addons/lua_handler_globals.cpp
     src/addons/lua_unit_api.cpp
     src/addons/lua_spell_api.cpp
     src/addons/lua_inventory_api.cpp
     src/addons/lua_quest_api.cpp
+    src/addons/lua_lfg_api.cpp
+    src/addons/lua_socket_api.cpp
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp
     src/addons/lua_action_api.cpp
@@ -1001,7 +1136,6 @@ set(WOWEE_HEADERS
     include/rendering/world_map/layers/quest_poi_layer.hpp
     include/rendering/world_map/layers/corpse_marker_layer.hpp
     include/rendering/world_map/layers/rare_tracker_layer.hpp
-    include/rendering/world_map/layers/chest_tracker_layer.hpp
     include/rendering/world_map/layers/zone_highlight_layer.hpp
     include/rendering/world_map/layers/coordinate_display.hpp
     include/rendering/world_map/layers/subzone_tooltip_layer.hpp
@@ -1018,15 +1152,23 @@ set(WOWEE_HEADERS
     include/ui/game_screen.hpp
     include/ui/inventory_screen.hpp
     include/ui/spellbook_screen.hpp
-    include/ui/talent_screen.hpp
     include/ui/keybinding_manager.hpp
 )
+
+# macOS needs an Objective-C++ shim for AppKit behavior that has no SDL
+# equivalent (press-and-hold accents).  window.cpp calls into it, so every
+# target that compiles window.cpp must link it.
+set(WOWEE_MACOS_SOURCES)
+if(APPLE)
+    enable_language(OBJCXX)
+    set(WOWEE_MACOS_SOURCES src/core/macos_platform.mm)
+endif()
 
 set(WOWEE_PLATFORM_SOURCES)
 if(WIN32)
     # Copy icon into build tree so windres can find it via the relative path
     # in wowee.rc ("assets\\wowee.ico").  Tell the RC compiler to also search
-    # the build directory — GNU windres uses cwd (already the build dir) but
+    # the build directory - GNU windres uses cwd (already the build dir) but
     # llvm-windres resolves relative to the .rc file, so it needs the hint.
     configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/Wowee.ico
@@ -1053,15 +1195,33 @@ set(LUA_SOURCES
 )
 add_library(lua51 STATIC ${LUA_SOURCES})
 set_target_properties(lua51 PROPERTIES LINKER_LANGUAGE C C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
-target_include_directories(lua51 PUBLIC ${LUA_DIR})
+target_include_directories(lua51 SYSTEM PUBLIC ${LUA_DIR})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(lua51 PRIVATE -w)
 endif()
+if(ANDROID)
+    # Lua stores a string's bytes immediately after the TString union that
+    # describes them, and reaches them with (ts + 1). That pointer is one past
+    # the declared object, so __builtin_object_size answers 0, and bionic's
+    # fortified strchr aborts on a read that is in bounds of the allocation and
+    # NUL terminated. lgc.c does exactly that on every garbage collection that
+    # walks a table with a __mode field, so the client died during startup as
+    # soon as one existed. glibc does not check, which is why only Android saw
+    # it. The bound is wrong, not the read.
+    target_compile_options(lua51 PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
+endif()
 
 # Create executable
-add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES})
+# On Android the client is a shared library, not a program: SDLActivity loads
+# it and calls SDL_main, and SDL_main.h has already renamed main() to that - so
+# an executable link asks for a main that no longer exists.
+if(ANDROID)
+    add_library(wowee SHARED ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
+else()
+    add_executable(wowee ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_PLATFORM_SOURCES} ${WOWEE_MACOS_SOURCES})
+endif()
 
-# Tracy profiler — zero overhead when WOWEE_ENABLE_TRACY is OFF
+# Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF
 if(WOWEE_ENABLE_TRACY)
     target_sources(wowee PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
     target_compile_definitions(wowee PRIVATE TRACY_ENABLE)
@@ -1073,7 +1233,7 @@ if(TARGET opcodes-generate)
     add_dependencies(wowee opcodes-generate)
 endif()
 # macOS cross-compilation: MoltenVK is not available at link time.
-# Allow unresolved Vulkan symbols — resolved at runtime. Scoped to wowee only.
+# Allow unresolved Vulkan symbols - resolved at runtime. Scoped to wowee only.
 if(WOWEE_MACOS_CROSS_COMPILE)
     target_link_options(wowee PRIVATE "-undefined" "dynamic_lookup")
 endif()
@@ -1117,6 +1277,55 @@ target_include_directories(wowee PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/generated
 )
+
+# Precompiled header.
+#
+# Chosen by measuring preprocessed output, not by reading include lists. A
+# translation unit that includes game_handler.hpp expands to 133k lines, of
+# which the standard library and glm are 115k -- every project header it drags
+# in, game_handler.hpp's own 5000 lines included, accounts for the remaining
+# 13%. The expensive headers in this codebase are not its own:
+#
+#   <chrono>  89k    <glm/glm.hpp> 89k    <future> 87k    <map>  74k
+#   <set>     73k    <deque>       73k    <mutex>  53k    <array> 48k
+#
+# (reproduce with: c++ -E -std=c++20 <build flags> on a one-line TU)
+#
+# Deliberately no project headers beyond the logger. Putting a widely-included
+# but frequently-edited header (game_handler.hpp, renderer.hpp) in a PCH makes
+# every edit to it a full rebuild, which costs more than the parsing it saves.
+# logger.hpp qualifies because it is stable - it is a logging macro façade that
+# has no reason to churn. glm qualifies for the same reason: vendored, 135
+# direct includers, and never edited here.
+# The standard-library half is shared with the test targets, which are more
+# than half of a clean build (477 test objects against 413 for wowee) and
+# otherwise get no PCH at all. Kept free of glm and of any project header so it
+# is safe on every test target, including those that link neither.
+set(WOWEE_PCH_STD
+    <cstdint>
+    <cstddef>
+    <string>
+    <vector>
+    <memory>
+    <unordered_map>
+    <unordered_set>
+    <map>
+    <set>
+    <deque>
+    <array>
+    <optional>
+    <functional>
+    <algorithm>
+    <chrono>
+    <mutex>
+    <future>
+)
+
+target_precompile_headers(wowee PRIVATE
+    ${WOWEE_PCH_STD}
+    <glm/glm.hpp>
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+)
 # Vendored headers as SYSTEM to suppress third-party warnings
 target_include_directories(wowee SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern
@@ -1147,8 +1356,13 @@ if(HAVE_FFMPEG)
 endif()
 
 # Platform-specific libraries
-if(UNIX AND NOT APPLE)
+# Android is UNIX and not APPLE, and has no X11: the ungrab path in main.cpp is
+# compiled out there, so there is nothing to link.
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     target_link_libraries(wowee PRIVATE X11)
+endif()
+if(APPLE)
+    target_link_libraries(wowee PRIVATE "-framework Foundation")
 endif()
 if(WIN32)
     target_link_libraries(wowee PRIVATE ws2_32)
@@ -1177,7 +1391,7 @@ endif()
 if(TARGET wowee_fsr3_official_runtime_copy)
     # FSR3 Path A runtime is an opt-in artifact; build explicitly with:
     #   cmake --build build --target wowee_fsr3_official_runtime_copy
-    # Do NOT add as a hard dependency of wowee — it would break arm64 and Windows CI
+    # Do NOT add as a hard dependency of wowee - it would break arm64 and Windows CI
     # (no DXC available on arm64; bash context issues on MSYS2 Windows).
 endif()
 
@@ -1198,11 +1412,37 @@ elseif(glm_FOUND)
     target_include_directories(wowee PRIVATE ${GLM_INCLUDE_DIRS})
 endif()
 
-# Compiler warnings
+# Compiler warnings.
+#
+# Errors by default: a warning left standing accumulates into tech debt and
+# hides real defects. Two found this way while turning it on: an NPC boot
+# geoset read out of CreatureDisplayInfoExtra and never applied, and a dead
+# duplicate of the character atlas region lookup.
+#
+# WOWEE_WARNINGS_AS_ERRORS=OFF turns it off for a bisect or a new-compiler
+# build, where an unfamiliar diagnostic should not stop the build outright.
+option(WOWEE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+
 if(MSVC)
     target_compile_options(wowee PRIVATE /W4)
+    if(WOWEE_WARNINGS_AS_ERRORS)
+        target_compile_options(wowee PRIVATE /WX)
+    endif()
 else()
     target_compile_options(wowee PRIVATE -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+    # A constant left behind by a deleted function is not in -Wall for C++ on
+    # every clang, and the macOS and Windows runners have it where the clang
+    # here does not, so it failed two of five CI jobs and no local build.
+    #
+    # Clang only. GCC applies the same flag to header constants that exist to
+    # write down a whole wire enum, InvType::AMMO and GuildEvent::SIGNED_ON
+    # among them, and those are documentation rather than dead code.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(wowee PRIVATE -Wunused-const-variable)
+    endif()
+    if(WOWEE_WARNINGS_AS_ERRORS)
+        target_compile_options(wowee PRIVATE -Werror)
+    endif()
     # GCC LTO emits -Wodr for FFX enum-name mismatches across SDK generations.
     # We intentionally keep FSR2+FSR3 integrations in separate TUs and suppress
     # this linker-time diagnostic to avoid CI noise.
@@ -1214,10 +1454,10 @@ endif()
 
 # Debug build flags
 if(MSVC)
-    # /ZI  — Edit-and-Continue debug info (works with hot-reload in VS 2022)
-    # /RTC1 — stack-frame and uninitialised-variable runtime checks (Debug only)
-    # /sdl  — additional SDL security checks
-    # /Od   — disable optimisation so stepping matches source lines exactly
+    # /ZI  - Edit-and-Continue debug info (works with hot-reload in VS 2022)
+    # /RTC1 - stack-frame and uninitialised-variable runtime checks (Debug only)
+    # /sdl  - additional SDL security checks
+    # /Od   - disable optimisation so stepping matches source lines exactly
     target_compile_options(wowee PRIVATE
         $<$<CONFIG:Debug>:/ZI /RTC1 /sdl /Od>
     )
@@ -1227,9 +1467,9 @@ if(MSVC)
         $<$<CONFIG:RelWithDebInfo>:/DEBUG:FASTLINK>
     )
 else()
-    # -g3          — maximum DWARF debug info (includes macro definitions)
-    # -Og          — optimise for debugging (better than -O0, keeps most frames)
-    # -fno-omit-frame-pointer — preserve frame pointers so stack traces are clean
+    # -g3          - maximum DWARF debug info (includes macro definitions)
+    # -Og          - optimise for debugging (better than -O0, keeps most frames)
+    # -fno-omit-frame-pointer - preserve frame pointers so stack traces are clean
     # Frame pointers in all configs (negligible perf cost, critical for crash backtraces)
     target_compile_options(wowee PRIVATE
         -fno-omit-frame-pointer
@@ -1244,7 +1484,7 @@ if(WOWEE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-# AddressSanitizer — catch buffer overflows, use-after-free, etc.
+# AddressSanitizer - catch buffer overflows, use-after-free, etc.
 # Enable with:  cmake ... -DWOWEE_ENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
 if(WOWEE_ENABLE_ASAN)
     if(MSVC)
@@ -1310,7 +1550,7 @@ if(WIN32)
             COMMENT "Copying vulkan-1.dll to output directory"
         )
     else()
-        message(STATUS "  vulkan-1.dll not found — skipping copy (MSYS2 provides it via PATH)")
+        message(STATUS "  vulkan-1.dll not found - skipping copy (MSYS2 provides it via PATH)")
     endif()
 endif()
 
@@ -1323,10 +1563,23 @@ install(TARGETS wowee
 
 # Note: tool install rules are placed next to each target definition below.
 
-# Install built-in assets (exclude proprietary music)
+# Install built-in assets (the soundtrack ships with debug builds only)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/assets
     DESTINATION bin
     PATTERN "Original Music" EXCLUDE)
+
+# The expansion profiles, which say what each game this client can speak is:
+# its build number, protocol version, races and classes, opcode table and
+# update-field layout. Nineteen small files that are not extracted from
+# anything - they ship with the client.
+#
+# Only symlinked into the build output before this, which is a development
+# convenience and not an install rule, so every package cpack built - the
+# Debian one, the Windows zip and the NSIS installer - went out without them.
+# A client that finds no expansion profile falls back to a hardcoded default
+# and offers nothing to choose at its login screen.
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Data
+    DESTINATION bin)
 
 # On Windows, install any DLLs that were bundled into the build output dir
 # (populated by the CI workflow's DLL-bundling step before cpack runs)
@@ -1352,9 +1605,130 @@ if(UNIX AND NOT APPLE)
         RENAME wowee.png)
 endif()
 
+# ---- Tool: framexml_run (load FrameXML for real, headless) ----
+#
+# Every sweep in tools/ reads the interface as text and they are at their
+# floor. What is left is what only happens when it runs: a Lua error raised
+# inside a handler and swallowed, which looks exactly like a handler that
+# decided to do nothing. This target is that run without the client - the real
+# emitter, the real bindings, no game behind them and no window.
+#
+# Off by default because it compiles the client a second time, which is a cost
+# only worth paying on the machine asking the question. Other platforms and CI
+# are untouched.
+#
+#     cmake -S . -B build -DWOWEE_BUILD_FRAMEXML_RUN=ON
+#     cmake --build build --target framexml_run
+#     ./build/bin/framexml_run Data 'ToggleGameMenu()'
+option(WOWEE_BUILD_FRAMEXML_RUN
+       "Build the headless FrameXML runner (tools/framexml_run.cpp)" OFF)
+if(WOWEE_BUILD_FRAMEXML_RUN)
+    set(WOWEE_HEADLESS_SOURCES ${WOWEE_SOURCES})
+    list(REMOVE_ITEM WOWEE_HEADLESS_SOURCES src/main.cpp)
+    add_executable(framexml_run
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/framexml_run.cpp
+        ${WOWEE_HEADLESS_SOURCES}
+        ${WOWEE_PLATFORM_SOURCES}
+        ${WOWEE_MACOS_SOURCES}
+    )
+    # Copied from the client rather than written out again. This target is the
+    # client minus its main, so any answer that differs from wowee's is wrong
+    # by construction - and a hand-kept second list would drift the first time
+    # a dependency moved.
+    get_target_property(_wowee_libs wowee LINK_LIBRARIES)
+    get_target_property(_wowee_incs wowee INCLUDE_DIRECTORIES)
+    get_target_property(_wowee_defs wowee COMPILE_DEFINITIONS)
+    # And where to find them. Three of the four properties were copied and this
+    # one was not, so a dependency named by pkg-config as a bare library - which
+    # is every one of them on a Homebrew prefix - linked for wowee and not for
+    # this: "ld: library 'avformat' not found", from a target built out of the
+    # same sources. The tool that exists to answer questions about the running
+    # interface could not be built at all on that setup.
+    get_target_property(_wowee_libdirs wowee LINK_DIRECTORIES)
+    if(_wowee_libs)
+        target_link_libraries(framexml_run PRIVATE ${_wowee_libs})
+    endif()
+    if(_wowee_libdirs)
+        target_link_directories(framexml_run PRIVATE ${_wowee_libdirs})
+    endif()
+    if(_wowee_incs)
+        target_include_directories(framexml_run PRIVATE ${_wowee_incs})
+    endif()
+    if(_wowee_defs)
+        target_compile_definitions(framexml_run PRIVATE ${_wowee_defs})
+    endif()
+    target_include_directories(framexml_run SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/extern
+        ${CMAKE_CURRENT_SOURCE_DIR}/extern/vk-bootstrap/src)
+    add_dependencies(framexml_run wowee_version)
+    if(TARGET opcodes-generate)
+        add_dependencies(framexml_run opcodes-generate)
+    endif()
+endif()
+
+# Everything a StormLib consumer has to link besides StormLib itself.
+#
+# A static libstorm leaves its own dependencies to whoever links it: bzip2
+# everywhere, and on Windows LibTomCrypt, LibTomMath and wininet as well. This
+# was written out once per tool, so mpq_build linked what asset_extract needed
+# minus the Windows half and failed to link there with fifteen undefined
+# symbols - md5_init, ltc_mp, InternetOpenA - none of which name StormLib.
+function(wowee_link_stormlib target)
+    target_link_libraries(${target} PRIVATE ${STORMLIB_LIBRARY} ZLIB::ZLIB Threads::Threads)
+    if(NOT WIN32)
+        find_library(BZ2_LIB NAMES bz2 bzip2)
+        if(BZ2_LIB)
+            target_link_libraries(${target} PRIVATE ${BZ2_LIB})
+        endif()
+    else()
+        find_library(WININET_LIB wininet)
+        find_library(BZ2_LIB bz2)
+        find_library(TOMCRYPT_LIB NAMES tomcrypt libtomcrypt)
+        find_library(TOMMATH_LIB NAMES tommath libtommath)
+        if(WININET_LIB)
+            target_link_libraries(${target} PRIVATE ${WININET_LIB})
+        endif()
+        if(BZ2_LIB)
+            target_link_libraries(${target} PRIVATE ${BZ2_LIB})
+        endif()
+        if(TOMCRYPT_LIB AND TOMMATH_LIB)
+            target_link_libraries(${target} PRIVATE ${TOMCRYPT_LIB} ${TOMMATH_LIB})
+        else()
+            message(FATAL_ERROR
+                "Static StormLib on Windows requires LibTomCrypt and LibTomMath")
+        endif()
+    endif()
+endfunction()
+
+# ---- Tool: mpq_build (loose files → MPQ) ----
+# The reverse of asset_extract, and not for WoWee, which reads loose files: for
+# handing an override directory to a client that only reads archives, and for
+# keeping one as a single file with its paths intact. See docs/upgraded-assets.md.
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    add_executable(mpq_build tools/mpq_build/main.cpp)
+    target_include_directories(mpq_build PRIVATE ${STORMLIB_INCLUDE_DIR})
+    wowee_link_stormlib(mpq_build)
+    # Which spelling of "last error" this StormLib has - see the note beside
+    # lastStormError(). Asked of the header rather than of the platform: the
+    # two Linux packages do not agree with each other either.
+    include(CheckCXXSymbolExists)
+    set(CMAKE_REQUIRED_INCLUDES ${STORMLIB_INCLUDE_DIR})
+    # With the library, not just the header: the check takes the symbol's
+    # address, so without something to link against it answers "no" even where
+    # the declaration is right there.
+    set(CMAKE_REQUIRED_LIBRARIES ${STORMLIB_LIBRARY})
+    check_cxx_symbol_exists(SErrGetLastError "StormLib.h" WOWEE_STORMLIB_SERR)
+    unset(CMAKE_REQUIRED_INCLUDES)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(WOWEE_STORMLIB_SERR)
+        target_compile_definitions(mpq_build PRIVATE WOWEE_STORMLIB_SERR=1)
+    endif()
+endif()
+
 # ---- Tool: asset_extract (MPQ → loose files) ----
 if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     add_executable(asset_extract
+        ${WOWEE_PLATFORM_SOURCES}
         tools/asset_extract/main.cpp
         tools/asset_extract/extractor.cpp
         tools/asset_extract/path_mapper.cpp
@@ -1362,6 +1736,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
         tools/asset_extract/open_format_emitter.cpp
         src/pipeline/dbc_loader.cpp
         src/pipeline/blp_loader.cpp
+    src/pipeline/dds_loader.cpp
         src/pipeline/m2_loader.cpp
         src/pipeline/wmo_loader.cpp
         src/pipeline/adt_loader.cpp
@@ -1378,30 +1753,7 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     target_include_directories(asset_extract SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/extern
     )
-    target_link_libraries(asset_extract PRIVATE
-        ${STORMLIB_LIBRARY}
-        ZLIB::ZLIB
-        Threads::Threads
-    )
-    if(WIN32)
-        find_library(WININET_LIB wininet)
-        find_library(BZ2_LIB bz2)
-        find_library(TOMCRYPT_LIB NAMES tomcrypt libtomcrypt)
-        find_library(TOMMATH_LIB NAMES tommath libtommath)
-        if(WININET_LIB)
-            target_link_libraries(asset_extract PRIVATE ${WININET_LIB})
-        endif()
-        if(BZ2_LIB)
-            target_link_libraries(asset_extract PRIVATE ${BZ2_LIB})
-        endif()
-        if(TOMCRYPT_LIB AND TOMMATH_LIB)
-            # Static StormLib exposes its LibTomCrypt/LibTomMath dependencies.
-            target_link_libraries(asset_extract PRIVATE ${TOMCRYPT_LIB} ${TOMMATH_LIB})
-        else()
-            message(FATAL_ERROR
-                "Static StormLib on Windows requires LibTomCrypt and LibTomMath")
-        endif()
-    endif()
+    wowee_link_stormlib(asset_extract)
     set_target_properties(asset_extract PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
@@ -1409,6 +1761,105 @@ if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     message(STATUS "  asset_extract tool: ENABLED")
 else()
     message(STATUS "  asset_extract tool: DISABLED (requires StormLib)")
+endif()
+
+# ---- Tool: wowee_assets (the asset manager window) ----
+#
+# A native window for building this client's assets: SDL2 and Dear ImGui, both
+# of which the client already carries, and Extractor::run called in this
+# process. It replaces a Tkinter window that drove shell scripts that drove
+# Python scripts - a chain where every link was a thing to have installed, and
+# where a `python3` without Tkinter meant the window simply did not appear.
+#
+# SDL's own renderer rather than Vulkan or GL: this draws a form and a log, and
+# the backend that needs no API choice is the one that builds everywhere.
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR AND SDL2_FOUND AND EXISTS ${IMGUI_DIR}/imgui.cpp)
+    add_library(imgui_sdlrenderer STATIC
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+    )
+    target_include_directories(imgui_sdlrenderer SYSTEM PUBLIC
+        ${IMGUI_DIR} ${IMGUI_DIR}/backends
+    )
+    target_link_libraries(imgui_sdlrenderer PUBLIC SDL2::SDL2)
+
+    add_executable(wowee_assets
+        # The icon resource, so this is not a blank executable in Explorer and
+        # on the Start menu entry the installer makes for it. Empty off Windows.
+        ${WOWEE_PLATFORM_SOURCES}
+        tools/asset_manager/main.cpp
+        tools/asset_manager/profiles.cpp
+        tools/asset_manager/install_scan.cpp
+        tools/asset_manager/job.cpp
+        tools/asset_manager/casc.cpp
+        tools/asset_manager/texture_ops.cpp
+        tools/asset_manager/upscale.cpp
+        tools/asset_manager/pack.cpp
+        tools/asset_manager/model_import.cpp
+        tools/asset_manager/model_source.cpp
+        tools/asset_manager/folder_picker.cpp
+        src/pipeline/asset_inventory.cpp
+        src/rendering/m2_model_classifier.cpp
+        tools/asset_extract/extractor.cpp
+        tools/asset_extract/path_mapper.cpp
+        tools/asset_extract/manifest_writer.cpp
+        tools/asset_extract/open_format_emitter.cpp
+        src/pipeline/dbc_loader.cpp
+        src/pipeline/blp_loader.cpp
+        src/pipeline/dds_loader.cpp
+        src/pipeline/m2_loader.cpp
+        src/pipeline/wmo_loader.cpp
+        src/pipeline/adt_loader.cpp
+        src/pipeline/wowee_model.cpp
+        src/pipeline/wowee_building.cpp
+        src/pipeline/wowee_collision.cpp
+        src/core/logger.cpp
+    )
+    # The folder chooser is the operating system's own where there is one. On
+    # Linux and the BSDs there is no such call - the usual answer is to run
+    # zenity or kdialog, which is a program that may not be installed and a
+    # button that silently does nothing when it is not - so those get the
+    # browser drawn in the window instead.
+    if(APPLE)
+        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_mac.mm)
+        set_source_files_properties(tools/asset_manager/folder_picker_mac.mm
+            PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(wowee_assets PRIVATE
+            "-framework AppKit" "-framework UniformTypeIdentifiers")
+    elseif(WIN32)
+        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_win.cpp)
+        target_link_libraries(wowee_assets PRIVATE ole32 shell32)
+        # SDL.h redefines main, and SDL2main is what supplies the WinMain that
+        # calls it. Without this the link ends at "undefined reference to
+        # WinMain" - which the client and the editor both already link for.
+        if(TARGET SDL2::SDL2main)
+            target_link_libraries(wowee_assets PRIVATE SDL2::SDL2main)
+        endif()
+    else()
+        target_sources(wowee_assets PRIVATE tools/asset_manager/folder_picker_none.cpp)
+    endif()
+
+    target_include_directories(wowee_assets PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/asset_extract
+        ${STORMLIB_INCLUDE_DIR}
+    )
+    target_include_directories(wowee_assets SYSTEM PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/extern
+    )
+    target_link_libraries(wowee_assets PRIVATE imgui_sdlrenderer Threads::Threads ZLIB::ZLIB)
+    wowee_link_stormlib(wowee_assets)
+    set_target_properties(wowee_assets PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    install(TARGETS wowee_assets RUNTIME DESTINATION bin)
+    message(STATUS "  wowee_assets window: ENABLED")
+else()
+    message(STATUS "  wowee_assets window: DISABLED (needs StormLib, SDL2 and extern/imgui)")
 endif()
 
 # ---- Tool: dbc_to_csv (DBC → CSV text) ----
@@ -1576,6 +2027,7 @@ endif()
 add_executable(blp_convert
     tools/blp_convert/main.cpp
     src/pipeline/blp_loader.cpp
+    src/pipeline/dds_loader.cpp
     src/core/logger.cpp
 )
 target_include_directories(blp_convert PRIVATE
@@ -1589,6 +2041,12 @@ set_target_properties(blp_convert PROPERTIES
 install(TARGETS blp_convert RUNTIME DESTINATION bin)
 
 # ---- Tool: wowee_editor (Standalone World Editor) ----
+# Off the default build: it is a large standalone tool that compiles on every
+# `cmake --build build` for no benefit to ordinary client work. Still built on
+# demand with `cmake --build build --target wowee_editor`, or configured back
+# into the default build with -DWOWEE_BUILD_EDITOR=ON.
+option(WOWEE_BUILD_EDITOR
+       "Build the standalone world editor as part of the default build" OFF)
 add_executable(wowee_editor
     tools/editor/main.cpp
     tools/editor/cli_gen_audio.cpp
@@ -1848,9 +2306,16 @@ add_executable(wowee_editor
 
     # Pipeline (asset loading)
     src/pipeline/blp_loader.cpp
+    src/pipeline/dds_loader.cpp
     src/pipeline/dbc_loader.cpp
+    src/pipeline/char_sections.cpp
+    src/ui/settings_schema.cpp
+    src/pipeline/item_textures.cpp
+    src/pipeline/m2_asset_loader.cpp
     src/pipeline/dbc_layout.cpp
+    src/pipeline/spell_icon_paths.cpp
     src/pipeline/asset_manager.cpp
+    src/pipeline/asset_inventory.cpp
     src/pipeline/asset_manifest.cpp
     src/pipeline/loose_file_reader.cpp
     src/pipeline/m2_loader.cpp
@@ -2005,22 +2470,28 @@ add_executable(wowee_editor
     src/pipeline/wowee_chat_links.cpp
     src/pipeline/custom_zone_discovery.cpp
     src/pipeline/terrain_mesh.cpp
+    src/pipeline/adt_alpha.cpp
 
     # Rendering core
     src/rendering/vk_context.cpp
     src/rendering/vk_utils.cpp
+    src/rendering/polygon_triangulate.cpp
     src/rendering/vk_shader.cpp
     src/rendering/vk_texture.cpp
     src/rendering/vk_buffer.cpp
     src/rendering/vk_pipeline.cpp
     src/rendering/camera.cpp
     src/rendering/terrain_renderer.cpp
+    src/rendering/shadow_params.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_instance.cpp
     src/rendering/m2_renderer_particles.cpp
     src/rendering/m2_renderer_render.cpp
     src/rendering/m2_model_classifier.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/imgui_texture.cpp
+    src/rendering/bone_slots.cpp
+    src/rendering/normal_map.cpp
     src/rendering/frustum.cpp
 
     # Core
@@ -2030,6 +2501,8 @@ add_executable(wowee_editor
 
     # stb_image (needed by AssetManager for PNG overrides)
     tools/editor/stb_image_impl.cpp
+
+    ${WOWEE_MACOS_SOURCES}
 )
 target_include_directories(wowee_editor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -2062,6 +2535,9 @@ if(UNIX AND NOT APPLE)
         target_link_libraries(wowee_editor PRIVATE X11)
     endif()
 endif()
+if(APPLE)
+    target_link_libraries(wowee_editor PRIVATE "-framework Foundation")
+endif()
 if(WIN32)
     target_link_libraries(wowee_editor PRIVATE ws2_32)
     if(TARGET SDL2::SDL2main)
@@ -2077,15 +2553,28 @@ if(NOT MSVC)
         -Wall -Wextra -Wpedantic
         -Wno-missing-field-initializers
         -Wno-unused-parameter)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(wowee_editor PRIVATE -Wunused-const-variable)
+    endif()
+    if(WOWEE_WARNINGS_AS_ERRORS)
+        target_compile_options(wowee_editor PRIVATE -Werror)
+    endif()
 endif()
 if(GLSLC)
     add_dependencies(wowee_editor wowee_shaders)
 endif()
 set_target_properties(wowee_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    EXCLUDE_FROM_ALL $<NOT:$<BOOL:${WOWEE_BUILD_EDITOR}>>
 )
-install(TARGETS wowee_editor RUNTIME DESTINATION bin)
-message(STATUS "  wowee_editor tool: ENABLED")
+if(WOWEE_BUILD_EDITOR)
+    # Only installable when it is part of the default build - installing a
+    # target excluded from ALL fails at install time on a missing binary.
+    install(TARGETS wowee_editor RUNTIME DESTINATION bin)
+    message(STATUS "  wowee_editor tool: ENABLED (in default build)")
+else()
+    message(STATUS "  wowee_editor tool: on demand only (--target wowee_editor)")
+endif()
 
 # Print configuration summary
 message(STATUS "")
@@ -2096,6 +2585,17 @@ message(STATUS "  SDL2: ${SDL2_VERSION}")
 message(STATUS "  OpenSSL: ${OPENSSL_VERSION}")
 message(STATUS "  ImGui: ${IMGUI_DIR}")
 message(STATUS "  ASAN: ${WOWEE_ENABLE_ASAN}")
+if(APPLE)
+    # Release CI pins this (13.0); a local build that leaves it unset is stamped
+    # with the build host's own OS version and will not launch on anything
+    # older. Worth seeing which one you got.
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+        message(STATUS "  macOS target: ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    else()
+        message(STATUS "  macOS target: build host's version "
+                       "(pass -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 to match release CI)")
+    endif()
+endif()
 message(STATUS "")
 
 # ---- CPack packaging ----
@@ -2112,16 +2612,30 @@ if(WIN32)
     set(CPACK_NSIS_PACKAGE_NAME "Wowee")
     set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+
+    # The installer and uninstaller were NSIS's default icon, and the entry in
+    # Add or Remove Programs had none at all. Backslashes because NSIS reads
+    # these as Windows paths.
+    string(REPLACE "/" "\\\\" CPACK_NSIS_MUI_ICON
+           "${CMAKE_CURRENT_SOURCE_DIR}/assets/Wowee.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CPACK_NSIS_MUI_ICON}")
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\wowee.exe")
     # Run wowee from bin/ so that ./assets/ resolves correctly.
     # SetOutPath sets the shortcut's working directory in NSIS.
+    #
+    # Two shortcuts, because there are two programs and the first thing anyone
+    # has to do is the second one: a client installed next to no game assets
+    # starts and says there is nothing to draw, and the asset manager is what
+    # fills that in. One entry pointing only at the client leaves the other
+    # program sitting in an install directory nobody opens.
     set(CPACK_NSIS_CREATE_ICONS_EXTRA
-        "SetOutPath '$INSTDIR\\\\bin'\nCreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee.lnk' '$INSTDIR\\\\bin\\\\wowee.exe'")
+        "SetOutPath '$INSTDIR\\\\bin'\nCreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee.lnk' '$INSTDIR\\\\bin\\\\wowee.exe'\nCreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee Asset Manager.lnk' '$INSTDIR\\\\bin\\\\wowee_assets.exe'")
     set(CPACK_NSIS_DELETE_ICONS_EXTRA
-        "Delete '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee.lnk'")
+        "Delete '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee.lnk'\nDelete '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Wowee Asset Manager.lnk'")
 elseif(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
 else()
-    # Linux — generate postinst/prerm wrapper scripts
+    # Linux - generate postinst/prerm wrapper scripts
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/packaging)
     # postinst: write a wrapper script at /usr/local/bin/wowee that cd's to
     # the install dir so ./assets/ resolves correctly.
@@ -2160,3 +2674,21 @@ chmod +x /usr/local/bin/wowee
 endif()
 
 include(CPack)
+
+# Bundled addons ship next to the executable, so the client finds them without
+# anyone copying files into an extracted game install. AddonManager searches
+# here as well as the game data's own Interface/AddOns.
+# Removed first, because copy_directory only ever adds. An addon deleted from
+# addons/ stays in every build tree that already had it and ships from there --
+# which is how WoweeWidgetDemo and WoweeXmlDemo kept going out after 3182e4fed
+# deleted them.
+add_custom_target(copy_bundled_addons ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf $<TARGET_FILE_DIR:wowee>/addons
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/addons $<TARGET_FILE_DIR:wowee>/addons
+    # And without anyone's saved variables - see the script for why the source
+    # tree has them at all.
+    COMMAND ${CMAKE_COMMAND} -DDIR=$<TARGET_FILE_DIR:wowee>/addons
+            -P ${CMAKE_SOURCE_DIR}/cmake/strip_saved_vars.cmake
+    COMMENT "Copying bundled addons")
+add_dependencies(copy_bundled_addons wowee)

@@ -29,16 +29,23 @@ public:
     [[nodiscard]] bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void shutdown();
     void recreatePipelines();
+    /// The two pipelines both initialize() and recreatePipelines() need.
+    void buildBoltPipeline(VkDevice device,
+                           const VkPipelineShaderStageCreateInfo& vertStage,
+                           const VkPipelineShaderStageCreateInfo& fragStage);
+    void buildFlashPipeline(VkDevice device,
+                            const VkPipelineShaderStageCreateInfo& vertStage,
+                            const VkPipelineShaderStageCreateInfo& fragStage);
 
     void update(float deltaTime, const Camera& camera);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     // Control
     void setEnabled(bool enabled);
-    bool isEnabled() const { return enabled; }
+    [[nodiscard]] bool isEnabled() const { return enabled; }
 
     void setIntensity(float intensity);  // 0.0 - 1.0 (affects frequency)
-    float getIntensity() const { return intensity; }
+    [[nodiscard]] float getIntensity() const { return intensity; }
 
     // Trigger manual strike (for testing or scripted events)
     void triggerStrike(const glm::vec3& position);

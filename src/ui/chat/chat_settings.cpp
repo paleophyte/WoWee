@@ -15,10 +15,12 @@ void ChatSettings::restoreDefaults() {
     autoJoinLocalDefense = true;
     autoJoinLFG          = true;
     autoJoinLocal        = true;
+    showBubbles          = true;
+    partyBubbles         = false;
 }
 
 // Render the "Chat" tab inside the Settings window.
-void ChatSettings::renderSettingsTab(std::function<void()> saveSettingsFn) {
+void ChatSettings::renderSettingsTab(const std::function<void()>& saveSettingsFn) {
     ImGui::Spacing();
 
     ImGui::Text("Appearance");

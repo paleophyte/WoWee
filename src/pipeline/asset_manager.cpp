@@ -1,4 +1,6 @@
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/base_fallback.hpp"
+#include "pipeline/dds_loader.hpp"
 #include "core/logger.hpp"
 #include "core/memory_monitor.hpp"
 #include "core/profiler.hpp"
@@ -182,7 +184,16 @@ void AssetManager::setupFileCacheBudget() {
     const size_t envMaxMB = parseEnvSizeMB("WOWEE_FILE_CACHE_MAX_MB");
 
     const size_t minBudgetBytes = 256ull * 1024ull * 1024ull;
+#ifdef __ANDROID__
+    // Half of available RAM is a desktop rule. Android does not let one app
+    // have that: it enforces a per-app limit far below the machine's memory and
+    // kills the process rather than swapping when it is passed. A phone with
+    // 8 GB was handing this cache 840 MB, which is both more than the app may
+    // hold and a good way to be killed the moment it goes to the background.
+    const size_t defaultMaxBudgetBytes = 384ull * 1024ull * 1024ull;
+#else
     const size_t defaultMaxBudgetBytes = 12288ull * 1024ull * 1024ull;  // 12 GB max for file cache
+#endif
     const size_t maxBudgetBytes = (envMaxMB > 0)
         ? (envMaxMB * 1024ull * 1024ull)
         : defaultMaxBudgetBytes;
@@ -226,6 +237,18 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
                 return overrideFsPath;
             }
         }
+        // A pack is allowed to add as well as replace, and an addition has no
+        // manifest entry to be resolved against: a later client's leaf atlas
+        // arrives under a name this expansion has never had. So the path is
+        // taken as the path. Without this, a model dropped in as an override
+        // rendered white, because its own new textures were unreachable while
+        // it was not.
+        std::string overrideByPath = normalizedPath;
+        std::replace(overrideByPath.begin(), overrideByPath.end(), '\\', '/');
+        overrideByPath = overridePath_ + "/" + overrideByPath;
+        if (LooseFileReader::fileExists(overrideByPath)) {
+            return overrideByPath;
+        }
     }
     // Primary manifest
     std::string primaryPath = manifest_.resolveFilesystemPath(normalizedPath);
@@ -235,7 +258,10 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
     // holds DBC overrides), retry against the base extraction.
     if (!baseFallbackDataPath_.empty()) {
         std::string baseFallbackPath = baseFallbackManifest_.resolveFilesystemPath(normalizedPath);
-        if (!baseFallbackPath.empty()) return baseFallbackPath;
+        if (!baseFallbackPath.empty()) {
+            baseFallbackHits_.fetch_add(1, std::memory_order_relaxed);
+            return baseFallbackPath;
+        }
     }
 
     // Last resort: some files (e.g. DBFilesClient\TransportAnimation.dbc) can end up
@@ -258,23 +284,73 @@ std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
     return {};
 }
 
-void AssetManager::setBaseFallbackPath(const std::string& basePath) {
-    if (basePath.empty() || basePath == dataPath) return;  // nothing to do
+bool AssetManager::setBaseFallbackPath(const std::string& basePath,
+                                       const std::string& expansionId) {
+    if (baseFallbackHits_.load(std::memory_order_relaxed) > 0) {
+        // Said on the way out rather than per lookup. Next to a warning about
+        // an unlabelled or forced base, this is how much of what was on screen
+        // came from it.
+        LOG_INFO("AssetManager: previous base fallback '", baseFallbackDataPath_,
+                 "' answered ", baseFallbackHits_.load(std::memory_order_relaxed),
+                 " lookups");
+    }
+    baseFallbackDataPath_.clear();
+    baseFallbackHits_.store(0, std::memory_order_relaxed);
+    if (basePath.empty() || basePath == dataPath) return false;  // nothing to do
     std::string manifestPath = basePath + "/manifest.json";
     if (!std::filesystem::exists(manifestPath)) {
         LOG_DEBUG("AssetManager: base fallback manifest not found at ", manifestPath,
-                  " — fallback disabled");
-        return;
+                  " - fallback disabled");
+        return false;
     }
-    if (baseFallbackManifest_.load(manifestPath)) {
-        baseFallbackDataPath_ = basePath;
-        LOG_INFO("AssetManager: base fallback path set to '", basePath,
-                 "' (", baseFallbackManifest_.getEntryCount(), " files)");
+    if (!baseFallbackManifest_.load(manifestPath)) return false;
+
+    const std::string& baseExpansion = baseFallbackManifest_.getExpansion();
+    const char* forcedEnv = std::getenv("WOWEE_ASSET_BASE_FALLBACK");
+    const bool forced = forcedEnv && forcedEnv[0] == '1';
+
+    switch (decideBaseFallback(baseExpansion, expansionId, forced)) {
+        case BaseFallbackDecision::Use:
+            break;
+        case BaseFallbackDecision::UseUnlabelled:
+            // Nothing can be concluded, so it is used and said: an unlabelled
+            // tree is how the wrong client's assets reach the screen without
+            // anybody having chosen that.
+            LOG_WARNING("AssetManager: base fallback '", basePath,
+                        "' does not record which client it was extracted from, so it "
+                        "cannot be checked against '", expansionId,
+                        "'. Re-extract to label it. Files it holds and '", expansionId,
+                        "' does not will be used as they are");
+            break;
+        case BaseFallbackDecision::Refuse:
+            LOG_ERROR("AssetManager: base fallback '", basePath, "' was extracted from '",
+                      baseExpansion, "' and the client is running '", expansionId,
+                      "'. Refusing it: every file '", expansionId,
+                      "' does not cover would otherwise be drawn from '", baseExpansion,
+                      "' with nothing to say so. Extract '", expansionId,
+                      "' into its own data root, or set WOWEE_ASSET_BASE_FALLBACK=1 "
+                      "to use it anyway");
+            return false;
+        case BaseFallbackDecision::UseForced:
+            LOG_WARNING("AssetManager: using base fallback '", basePath, "' from '",
+                        baseExpansion, "' while running '", expansionId,
+                        "' because WOWEE_ASSET_BASE_FALLBACK=1");
+            break;
     }
+
+    baseFallbackDataPath_ = basePath;
+    LOG_INFO("AssetManager: base fallback path set to '", basePath, "' (",
+             baseFallbackManifest_.getEntryCount(), " files, expansion '",
+             baseExpansion.empty() ? std::string("unrecorded") : baseExpansion, "')");
+    return true;
 }
 
-BLPImage AssetManager::loadTexture(const std::string& path) {
+BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed) {
     ZoneScopedN("AssetManager::loadTexture");
+    // Callers ask for the blocks to save the decompression and the memory. On a
+    // GPU that cannot sample them the saving is a blank surface, so the answer
+    // is no and the loader unpacks to RGBA8 instead.
+    keepCompressed = keepCompressed && blockCompressionSupported();
     if (!initialized) {
         LOG_ERROR("AssetManager not initialized");
         return BLPImage();
@@ -285,6 +361,13 @@ BLPImage AssetManager::loadTexture(const std::string& path) {
     LOG_DEBUG("Loading texture: ", normalizedPath);
 
     // Check for PNG override
+    // Block-compressed override first, then the RGBA8 one. Both are read in
+    // preference to the .blp beside them.
+    BLPImage ddsImage = tryLoadDdsOverride(normalizedPath);
+    if (ddsImage.isValid()) {
+        return ddsImage;
+    }
+
     BLPImage pngImage = tryLoadPngOverride(normalizedPath);
     if (pngImage.isValid()) {
         return pngImage;
@@ -309,7 +392,7 @@ BLPImage AssetManager::loadTexture(const std::string& path) {
         return BLPImage();
     }
 
-    BLPImage image = BLPLoader::load(blpData);
+    BLPImage image = BLPLoader::load(blpData, keepCompressed);
     if (!image.isValid()) {
         static std::mutex logMtx;
         static std::unordered_set<std::string> loggedDecodeFails;
@@ -332,34 +415,73 @@ BLPImage AssetManager::loadTexture(const std::string& path) {
     return image;
 }
 
-BLPImage AssetManager::tryLoadPngOverride(const std::string& normalizedPath) const {
-    if (normalizedPath.size() < 4) return BLPImage();
+std::string AssetManager::resolveSidecarPath(const std::string& normalizedPath,
+                                             const char* extension) const {
+    if (normalizedPath.size() < 4) return {};
+    if (normalizedPath.substr(normalizedPath.size() - 4) != ".blp") return {};
 
-    std::string ext = normalizedPath.substr(normalizedPath.size() - 4);
-    if (ext != ".blp") return BLPImage();
-
-    // Try the standard sidecar path first: extracted .blp's directory + .png.
+    // The standard sidecar path first: the extracted .blp's directory, same
+    // basename, the sidecar's extension.
     std::string fsPath = resolveFile(normalizedPath);
-    std::string pngPath;
     if (!fsPath.empty() && fsPath.size() >= 4) {
-        pngPath = fsPath.substr(0, fsPath.size() - 4) + ".png";
-        if (!LooseFileReader::fileExists(pngPath)) pngPath.clear();
+        std::string candidate = fsPath.substr(0, fsPath.size() - 4) + extension;
+        if (LooseFileReader::fileExists(candidate)) return candidate;
     }
 
-    // Fallback: probe well-known custom-zone texture roots so that PNG-only
+    // Fallback: probe well-known custom-zone texture roots so that sidecar-only
     // assets ship without needing a phantom BLP manifest entry. Path is
-    // forward-slash + lowercase to match the editor's PNG export convention.
-    if (pngPath.empty()) {
-        std::string norm = normalizedPath;
-        std::replace(norm.begin(), norm.end(), '\\', '/');
-        std::transform(norm.begin(), norm.end(), norm.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        std::string candidate = norm.substr(0, norm.size() - 4) + ".png";
-        for (const char* root : {"custom_zones/textures/", "output/textures/"}) {
-            std::string p = std::string(root) + candidate;
-            if (LooseFileReader::fileExists(p)) { pngPath = p; break; }
-        }
+    // forward-slash + lowercase to match the editor's export convention.
+    std::string norm = normalizedPath;
+    std::replace(norm.begin(), norm.end(), '\\', '/');
+    std::transform(norm.begin(), norm.end(), norm.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    const std::string tail = norm.substr(0, norm.size() - 4) + extension;
+    for (const char* root : {"custom_zones/textures/", "output/textures/"}) {
+        std::string p = std::string(root) + tail;
+        if (LooseFileReader::fileExists(p)) return p;
     }
+    return {};
+}
+
+/// A block-compressed override, preferred to the PNG one.
+///
+/// A PNG arrives as RGBA8 and the renderer generates its mips on upload, which
+/// costs four times the memory of the blocks it replaced and loses the one
+/// thing worth writing a mip chain by hand for: a cutout's coverage. A .dds
+/// sidecar hands over the blocks and the chain as they were made. On a device
+/// that cannot sample BC at all - Mali and Adreno carry ASTC and ETC2 instead -
+/// this declines, and the PNG or the original BLP answers instead.
+BLPImage AssetManager::tryLoadDdsOverride(const std::string& normalizedPath) const {
+    // WOWEE_NO_DDS=1 takes the shipped BLP instead, for telling an upscale
+    // apart from the thing it is being blamed for. Something that looks wrong
+    // and has a sidecar is two questions at once, and there was no way to ask
+    // them separately without moving files out of the installation by hand.
+    static const bool kDisabled = [] {
+        const char* v = std::getenv("WOWEE_NO_DDS");
+        return v && *v && *v != '0';
+    }();
+    if (kDisabled) return BLPImage();
+    if (!blockCompressionSupported()) return BLPImage();
+    const std::string ddsPath = resolveSidecarPath(normalizedPath, ".dds");
+    if (ddsPath.empty()) return BLPImage();
+
+    std::vector<uint8_t> ddsData = LooseFileReader::readFile(ddsPath);
+    if (ddsData.empty()) {
+        LOG_WARNING("DDS override exists but could not be read: ", ddsPath);
+        return BLPImage();
+    }
+    BLPImage image = DdsLoader::load(ddsData);
+    if (!image.isValid()) {
+        LOG_WARNING("DDS override rejected, falling back: ", ddsPath);
+        return BLPImage();
+    }
+    LOG_INFO("DDS override loaded: ", ddsPath, " (", image.width, "x", image.height,
+             ", ", image.mipLevels, " mips)");
+    return image;
+}
+
+BLPImage AssetManager::tryLoadPngOverride(const std::string& normalizedPath) const {
+    const std::string pngPath = resolveSidecarPath(normalizedPath, ".png");
     if (pngPath.empty()) return BLPImage();
 
     int w, h, channels;
@@ -470,7 +592,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBC(const std::string& name) {
         }
         dbDirs.push_back(dataPath + "/db");
         dbDirs.push_back(dataPath + "/../../db");
-        dbDirs.push_back("Data/db");
+        dbDirs.emplace_back("Data/db");
         // Try exact-case first, then case-insensitive scan (Linux is case-sensitive
         // but DBC filenames in Data/db/ are often all-lowercase).
         std::string nameLower = name;
@@ -646,7 +768,7 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     }
 
     if (dbcData.empty()) {
-        // Expected on some expansions — log at debug level only.
+        // Expected on some expansions - log at debug level only.
         LOG_DEBUG("Optional DBC not found (expected on some expansions): ", name);
         return nullptr;
     }
@@ -661,30 +783,25 @@ std::shared_ptr<DBCFile> AssetManager::loadDBCOptional(const std::string& name) 
     LOG_INFO("Loaded optional DBC: ", name, " (", dbc->getRecordCount(), " records)");
     return dbc;
 }
-
-std::shared_ptr<DBCFile> AssetManager::getDBC(const std::string& name) const {
-    auto it = dbcCache.find(name);
-    if (it != dbcCache.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
-
 bool AssetManager::fileExists(const std::string& path) const {
     if (!initialized) {
         return false;
     }
     std::string normalized = normalizePath(path);
-    if (manifest_.hasEntry(normalized)) {
-        return true;
-    }
-    std::string looseRelativePath = normalized;
-    std::replace(looseRelativePath.begin(), looseRelativePath.end(), '\\', '/');
-    if (!expansionDataPath_.empty() &&
-        LooseFileReader::fileExists(expansionDataPath_ + "/" + looseRelativePath)) {
-        return true;
-    }
-    return LooseFileReader::fileExists(dataPath + "/" + looseRelativePath);
+    // Resolved the same way a read is, not looked up in the primary manifest.
+    //
+    // A read walks override, primary manifest, base fallback manifest, then the
+    // loose file; this asked the primary manifest alone. With one asset source
+    // the two agree, which is why it stood. The moment an expansion overlay
+    // becomes the primary - an overlay holding a few thousand models over a
+    // two-hundred-thousand file base - this answered NO for every file in the
+    // base game, while the read that follows would have found it.
+    //
+    // Fifty-eight callers ask this before deciding what to read, so every one
+    // of them took the wrong branch at once: a weapon texture that is present
+    // under Weapon\ was declared missing and looked for under Shield\, where
+    // it has never been, and the weapon drew white.
+    return !resolveFile(normalized).empty();
 }
 
 std::vector<uint8_t> AssetManager::readFile(const std::string& path) const {
@@ -768,135 +885,6 @@ void AssetManager::clearCache() {
     fileCacheAccessCounter = 0;
     LOG_INFO("Cleared asset cache (DBC + file cache)");
 }
-
-size_t AssetManager::purgeExtractedAssets() {
-    clearCache();
-
-    if (dataPath.empty()) {
-        LOG_WARNING("Cannot purge: no data path set");
-        return 0;
-    }
-
-    size_t removed = 0;
-    namespace fs = std::filesystem;
-
-    // Extracted MPQ content directories
-    const char* extractedDirs[] = {
-        "db", "character", "creature", "terrain", "world",
-        "interface", "item", "sound", "spell", "environment",
-        "misc", "enUS",
-        // Case variants (Windows-extracted assets)
-        "Character", "Creature", "World"
-    };
-
-    for (const auto& dir : extractedDirs) {
-        fs::path p = fs::path(dataPath) / dir;
-        if (fs::exists(p)) {
-            std::error_code ec;
-            auto count = fs::remove_all(p, ec);
-            if (!ec) {
-                LOG_INFO("Purged: ", p.string(), " (", count, " entries)");
-                removed += count;
-            } else {
-                LOG_WARNING("Failed to remove ", p.string(), ": ", ec.message());
-            }
-        }
-    }
-
-    // Root manifest
-    fs::path manifestPath = fs::path(dataPath) / "manifest.json";
-    if (fs::exists(manifestPath)) {
-        std::error_code ec;
-        fs::remove(manifestPath, ec);
-        if (!ec) {
-            LOG_INFO("Purged: ", manifestPath.string());
-            ++removed;
-        }
-    }
-
-    // Override directory
-    if (!overridePath_.empty() && fs::exists(overridePath_)) {
-        std::error_code ec;
-        auto count = fs::remove_all(overridePath_, ec);
-        if (!ec) {
-            LOG_INFO("Purged: ", overridePath_, " (", count, " entries)");
-            removed += count;
-        }
-    }
-
-    // HD texture packs
-    fs::path hdPath = fs::path(dataPath) / "hd";
-    if (fs::exists(hdPath)) {
-        std::error_code ec;
-        auto count = fs::remove_all(hdPath, ec);
-        if (!ec) {
-            LOG_INFO("Purged: ", hdPath.string(), " (", count, " entries)");
-            removed += count;
-        }
-    }
-
-    // Per-expansion extracted assets, manifests, and overlays
-    fs::path expansionsDir = fs::path(dataPath) / "expansions";
-    if (fs::is_directory(expansionsDir)) {
-        for (auto& expEntry : fs::directory_iterator(expansionsDir)) {
-            if (!expEntry.is_directory()) continue;
-            fs::path expDir = expEntry.path();
-
-            // Extracted assets
-            fs::path assetsDir = expDir / "assets";
-            if (fs::exists(assetsDir)) {
-                std::error_code ec;
-                auto count = fs::remove_all(assetsDir, ec);
-                if (!ec) {
-                    LOG_INFO("Purged: ", assetsDir.string(), " (", count, " entries)");
-                    removed += count;
-                }
-            }
-
-            // Expansion manifest
-            fs::path expManifest = expDir / "manifest.json";
-            if (fs::exists(expManifest)) {
-                std::error_code ec;
-                fs::remove(expManifest, ec);
-                if (!ec) {
-                    LOG_INFO("Purged: ", expManifest.string());
-                    ++removed;
-                }
-            }
-
-            // Overlay
-            fs::path overlayDir = expDir / "overlay";
-            if (fs::exists(overlayDir)) {
-                std::error_code ec;
-                auto count = fs::remove_all(overlayDir, ec);
-                if (!ec) {
-                    LOG_INFO("Purged: ", overlayDir.string(), " (", count, " entries)");
-                    removed += count;
-                }
-            }
-
-            // Generated CSVs
-            fs::path dbDir = expDir / "db";
-            if (fs::is_directory(dbDir)) {
-                for (auto& f : fs::directory_iterator(dbDir)) {
-                    if (f.path().extension() == ".csv") {
-                        std::error_code ec;
-                        fs::remove(f.path(), ec);
-                        if (!ec) ++removed;
-                    }
-                }
-            }
-        }
-    }
-
-    // Reset manifest state so initialize() knows it needs re-extraction
-    manifest_ = AssetManifest();
-    initialized = false;
-
-    LOG_INFO("Purge complete: ", removed, " entries removed from ", dataPath);
-    return removed;
-}
-
 std::string AssetManager::normalizePath(const std::string& path) const {
     std::string normalized = path;
     std::replace(normalized.begin(), normalized.end(), '/', '\\');

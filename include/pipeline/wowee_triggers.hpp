@@ -8,13 +8,13 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Area Trigger catalog (.wtrg) — novel
+// Wowee Open Area Trigger catalog (.wtrg) - novel
 // replacement for Blizzard's AreaTrigger.dbc +
 // AreaTriggerTeleport.dbc + the AzerothCore-style
 // areatrigger_template / areatrigger_teleport SQL tables.
 // The 29th open format added to the editor.
 //
-// Defines proximity-based event zones — when a player
+// Defines proximity-based event zones - when a player
 // enters a defined region (box or sphere), the runtime
 // fires the trigger's action: teleport to another map,
 // award exploration XP for a quest, run a server script,
@@ -84,9 +84,9 @@ struct WoweeTrigger {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t triggerId) const;
+    [[nodiscard]] const Entry* findById(uint32_t triggerId) const;
 
     static const char* shapeName(uint8_t s);
     static const char* kindName(uint8_t k);
@@ -101,14 +101,14 @@ public:
 
     // Preset emitters used by --gen-triggers* variants.
     //
-    //   makeStarter — 2 triggers: 1 area-name (player enters
+    //   makeStarter - 2 triggers: 1 area-name (player enters
     //                  Goldshire) + 1 quest exploration
     //                  (matches WQT 100 "Investigate the Camp").
-    //   makeDungeon — 3 triggers around an instance: outdoor
+    //   makeDungeon - 3 triggers around an instance: outdoor
     //                  approach area-name + portal-style
     //                  teleport into the instance + instance
     //                  exit teleport back outdoors.
-    //   makeFlightPath — 2 triggers marking flight-master
+    //   makeFlightPath - 2 triggers marking flight-master
     //                     proximity (Stormwind / Goldshire) so
     //                     the runtime knows when to open the
     //                     flight UI without explicit interact.

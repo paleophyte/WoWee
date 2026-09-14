@@ -8,12 +8,14 @@
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
 #include "core/application.hpp"
+#include "game/expansion_profile.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include "game/warden_constants.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -144,10 +146,6 @@ const std::unordered_map<std::string, std::array<uint8_t, 20>>& knownDoorHashes(
 
 WardenHandler::WardenHandler(GameHandler& owner)
     : owner_(owner) {}
-
-void WardenHandler::initModuleManager() {
-    wardenModuleManager_ = std::make_unique<WardenModuleManager>();
-}
 
 // ---------------------------------------------------------------------------
 // Opcode registration
@@ -288,7 +286,7 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
 }
 
 // ---------------------------------------------------------------------------
-// handleWardenData — main Warden packet dispatcher
+// handleWardenData - main Warden packet dispatcher
 // ---------------------------------------------------------------------------
 
 void WardenHandler::handleWardenData(network::Packet& packet) {
@@ -443,6 +441,14 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                 // Load the module (decrypt, decompress, parse, relocate, init)
                 wardenLoadedModule_ = std::make_shared<WardenModule>();
+                // Check the signature against the key this realm actually
+                // signs with, when its profile names one.
+                if (auto* reg = core::Application::getInstance().getExpansionRegistry()) {
+                    if (const auto* profile = reg->getActive();
+                        profile && !profile->wardenRsaModulus.empty()) {
+                        wardenLoadedModule_->setRsaModulus(profile->wardenRsaModulus);
+                    }
+                }
                 // Inject crypto and socket so module callbacks (sendPacket, generateRC4)
                 // can reach the network layer during initializeModule().
                 wardenLoadedModule_->setCallbackDependencies(
@@ -505,7 +511,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                 }
 
                 if (match) {
-                    LOG_DEBUG("Warden: HASH_REQUEST — CR entry MATCHED, sending pre-computed reply");
+                    LOG_DEBUG("Warden: HASH_REQUEST - CR entry MATCHED, sending pre-computed reply");
 
                     // Send HASH_RESULT
                     std::vector<uint8_t> resp;
@@ -523,9 +529,8 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                     wardenState_ = WardenState::WAIT_CHECKS;
                     break;
-                } else {
-                    LOG_DEBUG("Warden: Seed not found in ", wardenCREntries_.size(), " CR entries");
-                }
+                }                     LOG_DEBUG("Warden: Seed not found in ", wardenCREntries_.size(), " CR entries");
+               
             }
 
             // --- No CR match: decide strategy based on server strictness ---
@@ -535,6 +540,21 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                 bool isTurtle = isActiveExpansion("turtle");
                 bool isClassic = (owner_.getBuild() <= 6005) && !isTurtle;
+                const char* turtleFallbackEnv = std::getenv("WOWEE_WARDEN_TURTLE_NO_CR");
+                const bool turtleFallbackAllowed =
+                    turtleFallbackEnv && std::string(turtleFallbackEnv) == "fallback";
+
+                if (isTurtle && !turtleFallbackAllowed) {
+                    // Turtle-derived servers close the world connection when given an
+                    // invented HASH_RESULT. Without a verified .cr entry, preserving
+                    // the cipher state and waiting for follow-up checks is the only
+                    // safe protocol behavior.
+                    LOG_WARNING("Warden: HASH_REQUEST seed=", seedHex,
+                                " - no CR match, skipping response for Turtle "
+                                "(set WOWEE_WARDEN_TURTLE_NO_CR=fallback to test the legacy fallback)");
+                    wardenState_ = WardenState::WAIT_CHECKS;
+                    break;
+                }
 
                 if (!isTurtle && !isClassic) {
                     // WotLK/TBC: don't respond to HASH_REQUEST without a valid CR match.
@@ -542,7 +562,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     // but REJECTS a wrong hash and closes the connection immediately.
                     // Staying silent lets the server continue the session without Warden checks.
                     LOG_DEBUG("Warden: HASH_REQUEST seed=", seedHex,
-                                " — no CR match, skipping response (server tolerates silence)");
+                                " - no CR match, skipping response (server tolerates silence)");
                     wardenState_ = WardenState::WAIT_CHECKS;
                     break;
                 }
@@ -616,7 +636,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     }
                 }
                 if (hasSlowChecks && !wardenResponsePending_) {
-                    LOG_WARNING("Warden: PAGE_A/PAGE_B detected — building response async to avoid main-loop stall");
+                    LOG_WARNING("Warden: PAGE_A/PAGE_B detected - building response async to avoid main-loop stall");
                     // Ensure wardenMemory_ is loaded on main thread before launching async task
                     if (!wardenMemory_) {
                         wardenMemory_ = std::make_unique<WardenMemory>();
@@ -629,7 +649,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     size_t capturedPos = pos;
                     wardenPendingEncrypted_ = std::async(std::launch::async,
                         [this, decrypted, strings, xorByte, capturedPos]() -> std::vector<uint8_t> {
-                            // This runs on a background thread — same logic as the synchronous path below.
+                            // This runs on a background thread - same logic as the synchronous path below.
                             // BEGIN: duplicated check processing (kept in sync with synchronous path)
                             enum CheckType { CT_MEM=0, CT_PAGE_A=1, CT_PAGE_B=2, CT_MPQ=3, CT_LUA=4,
                                              CT_DRIVER=5, CT_TIMING=6, CT_PROC=7, CT_MODULE=8, CT_UNKNOWN=9 };
@@ -830,14 +850,14 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                     bool isWanted = hmacSha1Matches(sb, "KERNEL32.DLL", rh);
                                     std::string mn = isWanted ? "KERNEL32.DLL" : "?";
                                     if (!isWanted) {
-                                        // Cheat modules (unwanted — report not found)
+                                        // Cheat modules (unwanted - report not found)
                                         if (hmacSha1Matches(sb,"WPESPY.DLL",rh)) mn = "WPESPY.DLL";
                                         else if (hmacSha1Matches(sb,"TAMIA.DLL",rh)) mn = "TAMIA.DLL";
                                         else if (hmacSha1Matches(sb,"PRXDRVPE.DLL",rh)) mn = "PRXDRVPE.DLL";
                                         else if (hmacSha1Matches(sb,"SPEEDHACK-I386.DLL",rh)) mn = "SPEEDHACK-I386.DLL";
                                         else if (hmacSha1Matches(sb,"D3DHOOK.DLL",rh)) mn = "D3DHOOK.DLL";
                                         else if (hmacSha1Matches(sb,"NJUMD.DLL",rh)) mn = "NJUMD.DLL";
-                                        // System DLLs (wanted — report found)
+                                        // System DLLs (wanted - report found)
                                         else if (hmacSha1Matches(sb,"USER32.DLL",rh)) { mn = "USER32.DLL"; isWanted = true; }
                                         else if (hmacSha1Matches(sb,"NTDLL.DLL",rh)) { mn = "NTDLL.DLL"; isWanted = true; }
                                         else if (hmacSha1Matches(sb,"WS2_32.DLL",rh)) { mn = "WS2_32.DLL"; isWanted = true; }
@@ -901,7 +921,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                             return resp; // plaintext; main thread will encrypt + send
                         });
                     wardenResponsePending_ = true;
-                    break; // exit case 0x02 — response will be sent from update()
+                    break; // exit case 0x02 - response will be sent from update()
                 }
             }
 
@@ -1075,7 +1095,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                             resultData.push_back(0x00);
                             resultData.insert(resultData.end(), memBuf.begin(), memBuf.end());
                         } else {
-                            // Address not in PE/KUSER — return 0xE9 (not readable).
+                            // Address not in PE/KUSER - return 0xE9 (not readable).
                             LOG_WARNING("Warden:   (sync) MEM_CHECK -> 0xE9 (unmapped 0x",
                                         [&]{char s[12];snprintf(s,12,"%08x",offset);return std::string(s);}(), ")");
                             resultData.push_back(0xE9);
@@ -1320,7 +1340,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                     " xorByte=0x",
                                     [&]{char s[4];snprintf(s,4,"%02x",xorByte);return std::string(s);}(),
                                     " opcodes=[",
-                                    [&]{std::string r;for(int i=0;i<9;i++){char s[6];snprintf(s,6,"0x%02x ",wardenCheckOpcodes_[i]);r+=s;}return r;}(),
+                                    [&]{std::string r;for(uint8_t wardenCheckOpcode : wardenCheckOpcodes_){char s[6];snprintf(s,6,"0x%02x ",wardenCheckOpcode);r+=s;}return r;}(),
                                     "] pos=", pos, "/", checkEnd);
                         pos = checkEnd; // stop parsing
                         break;

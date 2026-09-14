@@ -11,7 +11,7 @@ namespace pipeline {
 
 struct M2Model;
 
-// Wowee Open Model format (.wom) — novel format, no Blizzard IP
+// Wowee Open Model format (.wom) - novel format, no Blizzard IP
 // WOM1: static geometry | WOM2: + bones + animations | WOM3: + multi-batch materials
 struct WoweeModel {
     struct Vertex {
@@ -44,7 +44,7 @@ struct WoweeModel {
     };
 
     // WOM3: a contiguous slice of indices that draws with one material/texture.
-    // Most M2 models have multiple submeshes (body, hair, eyes, etc.) — each
+    // Most M2 models have multiple submeshes (body, hair, eyes, etc.) - each
     // becomes one Batch in WOM3.
     struct Batch {
         uint32_t indexStart = 0;       // first index in the global index buffer
@@ -65,9 +65,9 @@ struct WoweeModel {
     glm::vec3 boundMin{0}, boundMax{0};
     uint32_t version = 1; // 1=WOM1(static), 2=WOM2(animated), 3=WOM3(multi-batch)
 
-    bool isValid() const { return !vertices.empty() && !indices.empty(); }
-    bool hasAnimation() const { return !bones.empty() && !animations.empty(); }
-    bool hasBatches() const { return !batches.empty(); }
+    [[nodiscard]] bool isValid() const { return !vertices.empty() && !indices.empty(); }
+    [[nodiscard]] bool hasAnimation() const { return !bones.empty() && !animations.empty(); }
+    [[nodiscard]] bool hasBatches() const { return !batches.empty(); }
 };
 
 class WoweeModelLoader {
@@ -91,12 +91,12 @@ public:
     static bool exists(const std::string& basePath);
 
     // Convert WoweeModel to an in-memory M2Model so the M2Renderer can consume it.
-    // Single batch, single material — sufficient for static and simple animated meshes.
+    // Single batch, single material - sufficient for static and simple animated meshes.
     static M2Model toM2(const WoweeModel& wom);
 
     // Convenience: try loading <path-without-ext>.wom from the standard editor
     // search paths (custom_zones/models/, output/models/). Returns valid model on hit.
-    // `extraPrefixes` are tried before the defaults — pass per-zone roots like
+    // `extraPrefixes` are tried before the defaults - pass per-zone roots like
     // {"output/<map>/models/", "custom_zones/<map>/models/"} when the caller
     // knows the active zone.
     static WoweeModel tryLoadByGamePath(

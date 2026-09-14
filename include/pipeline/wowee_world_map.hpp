@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open World Map index (.womx) — novel replacement for
+// Wowee Open World Map index (.womx) - novel replacement for
 // Blizzard's WDT (top-level world definition table). A WOMX file
 // holds the manifest of which terrain tiles exist within a world,
 // plus a tiny bit of map-level metadata. The runtime consults it
@@ -49,13 +49,13 @@ struct WoweeWorldMap {
     // when a tile exists at column x, row y.
     std::vector<uint8_t> tileBitmap;
 
-    bool isValid() const { return gridSize > 0 && gridSize <= 128; }
+    [[nodiscard]] bool isValid() const { return gridSize > 0 && gridSize <= 128; }
 
-    bool hasTile(uint32_t x, uint32_t y) const;
+    [[nodiscard]] bool hasTile(uint32_t x, uint32_t y) const;
     void setTile(uint32_t x, uint32_t y, bool present);
 
     // Count of set bits in the bitmap (= number of present tiles).
-    uint32_t countTiles() const;
+    [[nodiscard]] uint32_t countTiles() const;
 
     static const char* worldTypeName(uint8_t t);
 };
@@ -69,10 +69,10 @@ public:
 
     // Preset emitters used by --gen-world-map* variants.
     //
-    //   makeContinent — full 64×64 grid with all tiles present
+    //   makeContinent - full 64×64 grid with all tiles present
     //                    (continent-style world map, ~4.3 km²)
-    //   makeInstance  — small 4×4 grid for dungeon-scale worlds
-    //   makeArena     — 1×1 single-tile arena
+    //   makeInstance  - small 4×4 grid for dungeon-scale worlds
+    //   makeArena     - 1×1 single-tile arena
     static WoweeWorldMap makeContinent(const std::string& mapName);
     static WoweeWorldMap makeInstance(const std::string& mapName);
     static WoweeWorldMap makeArena(const std::string& mapName);

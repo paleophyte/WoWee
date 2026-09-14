@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Glyph Slot catalog (.wgfs) — novel
+// Wowee Open Glyph Slot catalog (.wgfs) - novel
 // replacement for Blizzard's GlyphSlot.dbc. Defines the
 // per-class glyph slot layout: which slots a class
 // has (Major / Minor / Prime), in which display order
@@ -22,8 +22,8 @@ namespace pipeline {
 // level 25, and only Mages have it".
 //
 // Layout grew across expansions:
-//   Wrath of the Lich King — 3 Major + 3 Minor (6 slots)
-//   Cataclysm              — 3 Prime + 3 Major + 3 Minor (9 slots)
+//   Wrath of the Lich King - 3 Major + 3 Minor (6 slots)
+//   Cataclysm              - 3 Prime + 3 Major + 3 Minor (9 slots)
 // The presets cover both, plus a starter Classic-style
 // "any class" 6-slot layout for the simplest case.
 //
@@ -68,14 +68,14 @@ struct WoweeGlyphSlot {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t slotId) const;
+    [[nodiscard]] const Entry* findById(uint32_t slotId) const;
 
     // Returns true if a character of the given class+level
     // has access to this slot. classBit is one of the WCHC
     // class-bit flags (Warrior=0x01, Paladin=0x02, ...).
-    bool isUnlockedFor(uint32_t slotId,
+    [[nodiscard]] bool isUnlockedFor(uint32_t slotId,
                         uint32_t classBit,
                         uint8_t characterLevel) const;
 
@@ -91,15 +91,15 @@ public:
 
     // Preset emitters used by --gen-gfs* variants.
     //
-    //   makeStarter — 6 slots: 3 Major + 3 Minor available
+    //   makeStarter - 6 slots: 3 Major + 3 Minor available
     //                  to every class (classMask=0xFFFFFFFF),
     //                  unlocking at 25/50/75 for each kind.
     //                  Simplest baseline layout.
-    //   makeWotlk   — 6 slots: 3 Major + 3 Minor matching
+    //   makeWotlk   - 6 slots: 3 Major + 3 Minor matching
     //                  the WotLK 3.3.5a layout (any class).
     //                  Major unlocks at 15/30/50, Minor at
     //                  15/50/70.
-    //   makeCata    — 9 slots: 3 Prime + 3 Major + 3 Minor
+    //   makeCata    - 9 slots: 3 Prime + 3 Major + 3 Minor
     //                  matching the Cataclysm layout. Prime
     //                  unlocks at 25/50/75, Major at 25/50/75,
     //                  Minor at 25/50/75.

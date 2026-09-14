@@ -25,6 +25,13 @@ public:
     [[nodiscard]] bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void shutdown();
     void recreatePipelines();
+    /// The two pipelines both initialize() and recreatePipelines() need.
+    void buildRibbonPipeline(VkDevice device,
+                             const VkPipelineShaderStageCreateInfo& vertStage,
+                             const VkPipelineShaderStageCreateInfo& fragStage);
+    void buildDustPipeline(VkDevice device,
+                           const VkPipelineShaderStageCreateInfo& vertStage,
+                           const VkPipelineShaderStageCreateInfo& fragStage);
 
     /// Try to load M2 spell models (Charge_Caster.m2, etc.)
     void tryLoadM2Models(M2Renderer* m2Renderer, pipeline::AssetManager* assets);
@@ -38,13 +45,11 @@ public:
     /// Stop adding trail points (existing ribbon fades out)
     void stop();
 
-    /// Spawn M2 impact burst at target position
-    void triggerImpact(const glm::vec3& position);
 
     void update(float deltaTime);
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
-    bool isActive() const { return emitting_ || !trail_.empty() || !dustPuffs_.empty(); }
+    [[nodiscard]] bool isActive() const { return emitting_ || !trail_.empty() || !dustPuffs_.empty(); }
 
 private:
     // --- Ribbon trail ---
@@ -105,7 +110,6 @@ private:
 
     M2Renderer* m2Renderer_ = nullptr;
     bool casterModelLoaded_ = false;
-    bool impactModelLoaded_ = false;
 
     uint32_t activeCasterInstanceId_ = 0;
     struct ActiveM2 {

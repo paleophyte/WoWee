@@ -27,9 +27,7 @@ public:
 
     /// Render "early" dialogs (group invite through LFG role check)
     /// called in render() before guild roster / social frame
-    void renderDialogs(game::GameHandler& gameHandler,
-                       InventoryScreen& inventoryScreen,
-                       ChatPanel& chatPanel);
+    void renderDialogs(game::GameHandler& gameHandler);
 
     /// Render "late" dialogs (resurrect, talent wipe, pet unlearn)
     /// called in render() after reclaim corpse button
@@ -46,30 +44,9 @@ private:
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize;
 
     // ---- LFG role state ----
-    uint8_t lfgRoles_ = 0x08;  // default: DPS (0x02=tank, 0x04=healer, 0x08=dps)
 
     // ---- Individual dialog renderers ----
-    void renderGroupInvitePopup(game::GameHandler& gameHandler);
-    void renderDuelRequestPopup(game::GameHandler& gameHandler);
     void renderDuelCountdown(game::GameHandler& gameHandler);
-    void renderItemTextWindow(game::GameHandler& gameHandler);
-    void renderSharedQuestPopup(game::GameHandler& gameHandler);
-    void renderSummonRequestPopup(game::GameHandler& gameHandler);
-    void renderTradeRequestPopup(game::GameHandler& gameHandler);
-    void renderTradeWindow(game::GameHandler& gameHandler,
-                           InventoryScreen& inventoryScreen,
-                           ChatPanel& chatPanel);
-    void renderLootRollPopup(game::GameHandler& gameHandler,
-                             InventoryScreen& inventoryScreen,
-                             ChatPanel& chatPanel);
-    void renderGuildInvitePopup(game::GameHandler& gameHandler);
-    void renderReadyCheckPopup(game::GameHandler& gameHandler);
-    void renderBgInvitePopup(game::GameHandler& gameHandler);
-    void renderBfMgrInvitePopup(game::GameHandler& gameHandler);
-    void renderLfgProposalPopup(game::GameHandler& gameHandler);
-    void renderLfgRoleCheckPopup(game::GameHandler& gameHandler);
-    void renderResurrectDialog(game::GameHandler& gameHandler);
-    void renderTalentWipeConfirmDialog(game::GameHandler& gameHandler);
     void renderPetUnlearnConfirmDialog(game::GameHandler& gameHandler);
 };
 

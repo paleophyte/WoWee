@@ -49,6 +49,10 @@ struct ZoneAudioContext {
 /// Owned by Application; Renderer and UI components access through Application.
 class AudioCoordinator {
 public:
+    /// Loop Music, from the audio options. Takes effect on the next
+    /// track; a track already running is not restarted to obey it.
+    void setZoneMusicLooping(bool loop);
+
     AudioCoordinator();
     ~AudioCoordinator();
 
@@ -56,8 +60,6 @@ public:
     /// @return true if audio is available (engine initialized successfully)
     [[nodiscard]] bool initialize();
 
-    /// Initialize managers that need AssetManager (music lookups, sound banks).
-    void initializeWithAssets(pipeline::AssetManager* assetManager);
 
     /// Shutdown all audio managers and engine.
     void shutdown();
@@ -66,8 +68,8 @@ public:
     /// Called from Renderer::update() with a pre-filled context.
     void updateZoneAudio(const ZoneAudioContext& ctx);
 
-    const std::string& getCurrentZoneName() const { return currentZoneName_; }
-    uint32_t getCurrentZoneId() const { return currentZoneId_; }
+    [[nodiscard]] const std::string& getCurrentZoneName() const { return currentZoneName_; }
+    [[nodiscard]] uint32_t getCurrentZoneId() const { return currentZoneId_; }
 
     /// Called when the "Enable WoWee Music" setting is turned off. If one of
     /// the WoWee (file-based) tracks is currently playing, crossfade to a
@@ -105,7 +107,7 @@ private:
 
     bool audioAvailable_ = false;
 
-    // Zone/music state — moved from Renderer
+    // Zone/music state - moved from Renderer
     uint32_t currentZoneId_ = 0;
     std::string currentZoneName_;
     bool inTavern_ = false;

@@ -1,6 +1,6 @@
-// zone_metadata.hpp — Zone level ranges, faction data, and label formatting.
+// zone_metadata.hpp - Zone level ranges, faction data, and label formatting.
 // Extracted from WorldMap::initZoneMeta and inline label formatting
-// (Phase 4 of refactoring plan). DRY — formatLabel used by multiple layers.
+// (Phase 4 of refactoring plan). DRY - formatLabel used by multiple layers.
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
@@ -17,7 +17,7 @@ public:
     void initialize();
 
     /// Look up metadata for a zone by area name. Returns nullptr if not found.
-    const ZoneMeta* find(const std::string& areaName) const;
+    [[nodiscard]] const ZoneMeta* find(const std::string& areaName) const;
 
     /// Format a zone label with level range and faction tag.
     /// e.g. "Elwynn (1-10) [Alliance]"

@@ -1,4 +1,4 @@
-// input_handler.cpp — Input processing for the world map.
+// input_handler.cpp - Input processing for the world map.
 // Extracted from WorldMap::render (Phase 9 of refactoring plan).
 #include "rendering/world_map/input_handler.hpp"
 #include "core/input.hpp"
@@ -24,13 +24,10 @@ InputResult InputHandler::process(ViewLevel currentLevel,
     // Scroll wheel zoom
     auto& io = ImGui::GetIO();
     float wheelDelta = io.MouseWheel;
-    if (std::abs(wheelDelta) < 0.001f)
-        wheelDelta = input.getMouseWheelDelta();
-
     if (wheelDelta > 0.0f) {
         result.action = InputAction::ZOOM_IN;
         return result;
-    } else if (wheelDelta < 0.0f) {
+    } if (wheelDelta < 0.0f) {
         result.action = InputAction::ZOOM_OUT;
         return result;
     }

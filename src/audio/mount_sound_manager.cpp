@@ -8,7 +8,6 @@ namespace wowee {
 namespace audio {
 
 MountSoundManager::MountSoundManager() {
-    lastSoundUpdate_ = std::chrono::steady_clock::now();
 }
 
 MountSoundManager::~MountSoundManager() {
@@ -334,7 +333,6 @@ void MountSoundManager::update(float deltaTime) {
 
 void MountSoundManager::onMount(uint32_t creatureDisplayId, bool isFlying, const std::string& modelPath) {
     mounted_ = true;
-    currentDisplayId_ = creatureDisplayId;
     currentMountType_ = detectMountType(creatureDisplayId);
 
     // Prefer model path detection (reliable) over display ID ranges (fragile)
@@ -361,7 +359,6 @@ void MountSoundManager::onDismount() {
     mounted_ = false;
     currentMountType_ = MountType::NONE;
     currentMountFamily_ = MountFamily::UNKNOWN;
-    currentDisplayId_ = 0;
     flying_ = false;
     moving_ = false;
 }
@@ -534,7 +531,7 @@ MountFamily MountSoundManager::detectMountFamilyFromPath(const std::string& mode
 }
 
 MountFamily MountSoundManager::detectMountFamily(uint32_t creatureDisplayId) const {
-    // Undead horses (skeletal warhorses) — check before generic horse range
+    // Undead horses (skeletal warhorses) - check before generic horse range
     // Display IDs: 10670 (Skeletal Horse), 10671-10672, 5765-5768
     if ((creatureDisplayId >= 10670 && creatureDisplayId <= 10672) ||
         (creatureDisplayId >= 5765 && creatureDisplayId <= 5768))
@@ -589,7 +586,7 @@ MountFamily MountSoundManager::detectMountFamily(uint32_t creatureDisplayId) con
         creatureDisplayId == 10180 || creatureDisplayId == 14584)
         return MountFamily::MECHANOSTRIDER;
 
-    // Tallstriders (plainstrider mounts — Turtle WoW custom or future)
+    // Tallstriders (plainstrider mounts - Turtle WoW custom or future)
     // 1961-1964
     if (creatureDisplayId >= 1961 && creatureDisplayId <= 1964)
         return MountFamily::TALLSTRIDER;
@@ -620,7 +617,6 @@ void MountSoundManager::updateMountSounds() {
                 AudioEngine::instance().playSound2D(
                     sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
                 soundLoopTimer_ = 0.0f;
-                playingMovementSound_ = true;
             }
         } else if (!moving_ && !wingIdleSounds_.empty()) {
             if (soundLoopTimer_ >= 3.5f) {
@@ -631,11 +627,10 @@ void MountSoundManager::updateMountSounds() {
                 AudioEngine::instance().playSound2D(
                     sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
                 soundLoopTimer_ = 0.0f;
-                playingIdleSound_ = true;
             }
         }
     }
-    // Ground mounts — use per-family sounds
+    // Ground mounts - use per-family sounds
     else if (currentMountType_ == MountType::GROUND && !flying_) {
         // Horse vocals are already driven semantically by MountFSM: rear-up uses
         // the aggro/whinny clip and the sparse idle timer uses the stand/snort clip.
@@ -655,7 +650,6 @@ void MountSoundManager::updateMountSounds() {
                 AudioEngine::instance().playSound2D(
                     sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
                 soundLoopTimer_ = 0.0f;
-                playingMovementSound_ = true;
             }
         } else if (!moving_ && !sounds.idle.empty()) {
             if (soundLoopTimer_ >= 4.5f) {
@@ -666,15 +660,12 @@ void MountSoundManager::updateMountSounds() {
                 AudioEngine::instance().playSound2D(
                     sample.data, volumeDist(rng) * volumeScale_, pitchDist(rng));
                 soundLoopTimer_ = 0.0f;
-                playingIdleSound_ = true;
             }
         }
     }
 }
 
 void MountSoundManager::stopAllMountSounds() {
-    playingMovementSound_ = false;
-    playingIdleSound_ = false;
     soundLoopTimer_ = 0.0f;
 }
 

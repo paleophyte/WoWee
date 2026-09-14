@@ -32,12 +32,25 @@ public:
     void clearSelectionCircle();
     void renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                VkCommandBuffer cmd,
-                               HeightQuery2D terrainHeight,
-                               HeightQuery3D wmoHeight,
-                               HeightQuery3D m2Height);
+                               const HeightQuery2D& terrainHeight,
+                               const HeightQuery3D& wmoHeight,
+                               const HeightQuery3D& m2Height);
 
     // Fullscreen color overlay (underwater tint, etc.)
     void renderOverlay(const glm::vec4& color, VkCommandBuffer cmd);
+
+    /// Underwater tint bounded by a waterline that sweeps across the view as the
+    /// camera crosses the surface. lineNdc runs from +1 (line off the bottom, so
+    /// nothing is tinted) to -1 (off the top, so everything is), softness spans
+    /// the meniscus and rippleAmp bends the edge.
+    void renderWaterline(const glm::vec4& color, const glm::mat4& invViewProj,
+                         float waterZ, float softness, float rippleAmp,
+                         float time, bool hasSeam, VkCommandBuffer cmd);
+
+    // Fullscreen multiplicative brightness scale (scene.rgb *= scale). Uses a
+    // dst-color blend so brightness > 1 truly scales luminance instead of
+    // lerping toward white (which washed everything out). scale > 1 only.
+    void renderBrightnessScale(float scale, VkCommandBuffer cmd);
 
     /// Destroy all Vulkan resources (called before VkContext teardown).
     void cleanup();
@@ -48,6 +61,7 @@ public:
 private:
     void initSelectionCircle();
     void initOverlayPipeline();
+    void initBrightnessPipeline();
 
     VkContext* vkCtx_ = nullptr;
 
@@ -74,6 +88,8 @@ private:
     // Fullscreen overlay resources
     VkPipeline overlayPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout overlayPipelineLayout_ = VK_NULL_HANDLE;
+    // Multiplicative brightness pipeline (shares overlayPipelineLayout_).
+    VkPipeline brightnessPipeline_ = VK_NULL_HANDLE;
 };
 
 } // namespace rendering

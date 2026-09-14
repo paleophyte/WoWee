@@ -12,24 +12,30 @@ public:
     static Input& getInstance();
 
     void update();
-    void handleEvent(const SDL_Event& event);
 
     // Keyboard
-    bool isKeyPressed(SDL_Scancode key) const;
-    bool isKeyJustPressed(SDL_Scancode key) const;
-    bool isKeyJustReleased(SDL_Scancode key) const;
+    [[nodiscard]] bool isKeyPressed(SDL_Scancode key) const;
+
+    /// Holds a key down from somewhere that is not a keyboard.
+    ///
+    /// The on-screen stick is the reason: movement, its animations and the
+    /// packets that announce it are a long chain that starts at
+    /// isKeyPressed(SDL_SCANCODE_W), and a phone has no W. Setting the key here
+    /// drives all of it without any of it knowing where the press came from.
+    /// Merged over the hardware state, so a keyboard still works alongside.
+    void setVirtualKey(SDL_Scancode key, bool held);
+    void clearVirtualKeys();
+    [[nodiscard]] bool isKeyJustPressed(SDL_Scancode key) const;
 
     // Mouse
-    bool isMouseButtonPressed(int button) const;
-    bool isMouseButtonJustPressed(int button) const;
-    bool isMouseButtonJustReleased(int button) const;
+    [[nodiscard]] bool isMouseButtonPressed(int button) const;
+    [[nodiscard]] bool isMouseButtonJustPressed(int button) const;
+    [[nodiscard]] bool isMouseButtonJustReleased(int button) const;
 
-    glm::vec2 getMousePosition() const { return mousePosition; }
-    glm::vec2 getMouseDelta() const { return mouseDelta; }
-    float getMouseWheelDelta() const { return mouseWheelDelta; }
+    [[nodiscard]] glm::vec2 getMousePosition() const { return mousePosition; }
+    [[nodiscard]] glm::vec2 getMouseDelta() const { return mouseDelta; }
 
-    bool isMouseLocked() const { return mouseLocked; }
-    void setMouseLocked(bool locked);
+    [[nodiscard]] bool isMouseLocked() const { return mouseLocked; }
 
 private:
     Input() = default;
@@ -41,6 +47,7 @@ private:
     static constexpr int NUM_MOUSE_BUTTONS = 8;
 
     std::array<bool, NUM_KEYS> currentKeyState = {};
+    std::array<bool, NUM_KEYS> virtualKeyState = {};
     std::array<bool, NUM_KEYS> previousKeyState = {};
 
     std::array<bool, NUM_MOUSE_BUTTONS> currentMouseState = {};
@@ -49,7 +56,6 @@ private:
     glm::vec2 mousePosition = glm::vec2(0.0f);
     glm::vec2 previousMousePosition = glm::vec2(0.0f);
     glm::vec2 mouseDelta = glm::vec2(0.0f);
-    float mouseWheelDelta = 0.0f;
     bool mouseLocked = false;
 };
 

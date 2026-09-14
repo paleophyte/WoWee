@@ -1,4 +1,4 @@
-// taxi_node_layer.hpp — Flight master markers on the world map.
+// taxi_node_layer.hpp - Flight master markers on the world map.
 // Two modes: passive diamonds on the normal world map, and the interactive
 // flight map (taxi selection) shown while a flight master window is open.
 #pragma once
@@ -24,7 +24,7 @@ public:
             onSelect_ = nullptr;
         }
     }
-    bool taxiModeActive() const { return taxiMode_; }
+    [[nodiscard]] bool taxiModeActive() const { return taxiMode_; }
 
     /// routeProvider: destination node id → hop chain (current → dest, inclusive).
     /// onSelect: called with the destination node id when the player clicks it.

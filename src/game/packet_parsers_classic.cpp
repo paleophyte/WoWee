@@ -103,18 +103,6 @@ bool skipClassicSpellCastTargets(network::Packet& packet, uint64_t* primaryTarge
     return true;
 }
 
-const char* updateTypeName(UpdateType type) {
-    switch (type) {
-        case UpdateType::VALUES: return "VALUES";
-        case UpdateType::MOVEMENT: return "MOVEMENT";
-        case UpdateType::CREATE_OBJECT: return "CREATE_OBJECT";
-        case UpdateType::CREATE_OBJECT2: return "CREATE_OBJECT2";
-        case UpdateType::OUT_OF_RANGE_OBJECTS: return "OUT_OF_RANGE_OBJECTS";
-        case UpdateType::NEAR_OBJECTS: return "NEAR_OBJECTS";
-        default: return "UNKNOWN";
-    }
-}
-
 } // namespace
 
 // ============================================================================
@@ -189,12 +177,18 @@ bool ClassicPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlo
     const uint8_t UPDATEFLAG_ALL             = 0x10;
     const uint8_t UPDATEFLAG_LIVING          = 0x20;
     const uint8_t UPDATEFLAG_HAS_POSITION    = 0x40;
+    // These bits are NOT the same as the other expansions' and must not be
+    // merged with them. 1.12 assigns HIGHGUID 0x8 and ALL 0x10; 2.4.3 moved
+    // HIGHGUID to 0x10 and put LOWGUID at 0x8, and 0x4 means MELEE_ATTACKING
+    // here and HAS_TARGET there. Three tables that look like three copies of
+    // one, and reading a stationary object's position off the wrong bit is a
+    // misparse of everything after it.
 
     if (updateFlags & UPDATEFLAG_LIVING) {
         // Minimum: moveFlags(4)+time(4)+position(16)+fallTime(4)+speeds(24) = 52 bytes
         if (rem() < 52) return false;
 
-        // Movement flags (u32 only — NO extra flags byte in Classic)
+        // Movement flags (u32 only - NO extra flags byte in Classic)
         uint32_t moveFlags = packet.readUInt32();
         /*uint32_t time =*/ packet.readUInt32();
 
@@ -245,7 +239,7 @@ bool ClassicPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlo
             /*float splineElevation =*/ packet.readFloat();
         }
 
-        // Speeds (Classic: 6 values — no flight speeds, no pitchRate)
+        // Speeds (Classic: 6 values - no flight speeds, no pitchRate)
         if (rem() < 24) return false;
         block.walkSpeed     = packet.readFloat();
         block.runSpeed      = packet.readFloat();
@@ -325,23 +319,9 @@ void ClassicPacketParsers::writeMovementPayload(network::Packet& packet, const M
 
     // Transport data (Classic ONTRANSPORT = 0x02000000, no timestamp)
     if (wireFlags & ClassicMoveFlags::ONTRANSPORT) {
-        // Packed GUID compression: only transmit non-zero bytes of the 8-byte GUID.
-        // The mask byte indicates which positions are present (bit N = byte N included).
-        // This is the standard WoW packed GUID wire format across all expansions.
-        uint8_t transMask = 0;
-        uint8_t transGuidBytes[8];
-        int transGuidByteCount = 0;
-        for (int i = 0; i < 8; i++) {
-            uint8_t byte = static_cast<uint8_t>((info.transportGuid >> (i * 8)) & 0xFF);
-            if (byte != 0) {
-                transMask |= (1 << i);
-                transGuidBytes[transGuidByteCount++] = byte;
-            }
-        }
-        packet.writeUInt8(transMask);
-        for (int i = 0; i < transGuidByteCount; i++) {
-            packet.writeUInt8(transGuidBytes[i]);
-        }
+        // Packed, which is the same wire format in every expansion: a mask
+        // byte saying which of the eight are non-zero, then those bytes.
+        packet.writePackedGuid(info.transportGuid);
 
         // Transport local position
         packet.writeFloat(info.transportX);
@@ -396,27 +376,12 @@ network::Packet ClassicPacketParsers::buildCastSpell(uint32_t spellId, uint64_t 
 
     packet.writeUInt32(spellId);
 
-    // SpellCastTargets — vanilla/CMaNGOS uses uint16 target mask (WotLK uses uint32)
+    // SpellCastTargets - vanilla/CMaNGOS uses uint16 target mask (WotLK uses uint32)
     if (targetGuid != 0) {
         packet.writeUInt16(0x02); // TARGET_FLAG_UNIT
 
         // Write packed GUID
-        uint8_t mask = 0;
-        uint8_t bytes[8];
-        int byteCount = 0;
-        uint64_t g = targetGuid;
-        for (int i = 0; i < 8; ++i) {
-            uint8_t b = g & 0xFF;
-            if (b != 0) {
-                mask |= (1 << i);
-                bytes[byteCount++] = b;
-            }
-            g >>= 8;
-        }
-        packet.writeUInt8(mask);
-        for (int i = 0; i < byteCount; ++i) {
-            packet.writeUInt8(bytes[i]);
-        }
+        packet.writePackedGuid(targetGuid);
     } else {
         packet.writeUInt16(0x00); // TARGET_FLAG_SELF
     }
@@ -459,7 +424,7 @@ network::Packet ClassicPacketParsers::buildUseItem(uint8_t bagIndex, uint8_t slo
 }
 
 // ============================================================================
-// Classic parseSpellStart — Vanilla 1.12 SMSG_SPELL_START
+// Classic parseSpellStart - Vanilla 1.12 SMSG_SPELL_START
 //
 // Key differences from TBC:
 //   - GUIDs are PackedGuid (variable-length byte mask + non-zero bytes),
@@ -515,7 +480,7 @@ bool ClassicPacketParsers::parseSpellStart(network::Packet& packet, SpellStartDa
 }
 
 // ============================================================================
-// Classic parseSpellGo — Vanilla 1.12 SMSG_SPELL_GO
+// Classic parseSpellGo - Vanilla 1.12 SMSG_SPELL_GO
 //
 // Same GUID and castFlags format differences as parseSpellStart:
 //   - GUIDs are PackedGuid (not full uint64)
@@ -622,6 +587,19 @@ bool ClassicPacketParsers::parseSpellGo(network::Packet& packet, SpellGoData& da
             return true;
         };
 
+        // Full eight-byte GUIDs first, because that is what the wire carries.
+        // Turtle's own server writes this list as `*data << ihit.targetGUID`,
+        // and ObjectGuid's stream operator is `buf << uint64(GetRawValue())`;
+        // packed is written explicitly, through GetPackGUID, and SendSpellGo
+        // uses it for exactly two fields - the caster and the caster unit -
+        // which are the two this parser already reads as packed above.
+        // mangos-zero writes it the same way, so this holds for vanilla cores
+        // generally.
+        //
+        // #135 turned this order round on the reading that the layout
+        // documented above says packed. It does not: the packed guids it names
+        // are the two at the head. Packed first would consume a full guid's
+        // bytes by its mask and shift every field after the lists.
         if (!parseHitList(false) && !parseHitList(true)) {
             LOG_WARNING("[Classic] Spell go: truncated hit targets at index 0/", static_cast<int>(rawHitCount));
             traceFailure("truncated_hit_target", packet.getReadPos(), rawHitCount);
@@ -692,6 +670,8 @@ bool ClassicPacketParsers::parseSpellGo(network::Packet& packet, SpellGoData& da
             for (uint16_t i = 0; i < rawMissCount; ++i) {
                 SpellGoMissEntry m;
                 const size_t missEntryPos = packet.getReadPos();
+                // Full first here too, and for the same reason: the miss
+                // list is written with the same operator as the hit list.
                 if (!parseMissEntry(m, false)) {
                     packet.setReadPos(missEntryPos);
                     if (!parseMissEntry(m, true)) {
@@ -739,7 +719,7 @@ bool ClassicPacketParsers::parseSpellGo(network::Packet& packet, SpellGoData& da
         return false;
     }
 
-    // SpellCastTargets follows the miss list — consume all target bytes so that
+    // SpellCastTargets follows the miss list - consume all target bytes so that
     // any subsequent fields (e.g. castFlags extras) are not misaligned.
     skipClassicSpellCastTargets(packet, &data.targetGuid);
 
@@ -749,7 +729,7 @@ bool ClassicPacketParsers::parseSpellGo(network::Packet& packet, SpellGoData& da
 }
 
 // ============================================================================
-// Classic parseAttackerStateUpdate — Vanilla 1.12 SMSG_ATTACKERSTATEUPDATE
+// Classic parseAttackerStateUpdate - Vanilla 1.12 SMSG_ATTACKERSTATEUPDATE
 //
 // Identical to TBC format except GUIDs are PackedGuid (not full uint64).
 // Format: uint32(hitInfo) + PackedGuid(attacker) + PackedGuid(target)
@@ -762,48 +742,10 @@ bool ClassicPacketParsers::parseAttackerStateUpdate(network::Packet& packet, Att
     data = AttackerStateUpdateData{};
 
     auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() < 5) return false;  // hitInfo(4) + at least GUID mask byte(1)
+    if (rem() < 5) return false;  // hitInfo + at least one packed guid mask byte
 
     const size_t startPos = packet.getReadPos();
-    data.hitInfo      = packet.readUInt32();
-    if (!packet.hasFullPackedGuid()) {
-        packet.setReadPos(startPos);
-        return false;
-    }
-    data.attackerGuid = packet.readPackedGuid(); // PackedGuid in Vanilla
-    if (!packet.hasFullPackedGuid()) {
-        packet.setReadPos(startPos);
-        return false;
-    }
-    data.targetGuid   = packet.readPackedGuid(); // PackedGuid in Vanilla
-
-    if (rem() < 5) {
-        packet.setReadPos(startPos);
-        return false;
-    }  // int32 totalDamage + uint8 subDamageCount
-    data.totalDamage    = static_cast<int32_t>(packet.readUInt32());
-    data.subDamageCount = packet.readUInt8();
-
-    const uint8_t maxSubDamageCount = static_cast<uint8_t>(std::min<size_t>(rem() / 20, 64));
-    if (data.subDamageCount > maxSubDamageCount) {
-        data.subDamageCount = maxSubDamageCount;
-    }
-
-    data.subDamages.reserve(data.subDamageCount);
-    for (uint8_t i = 0; i < data.subDamageCount; ++i) {
-        if (rem() < 20) {
-            packet.setReadPos(startPos);
-            return false;
-        }
-        SubDamage sub;
-        sub.schoolMask = packet.readUInt32();
-        sub.damage     = packet.readFloat();
-        sub.intDamage  = packet.readUInt32();
-        sub.absorbed   = packet.readUInt32();
-        sub.resisted   = packet.readUInt32();
-        data.subDamages.push_back(sub);
-    }
-    data.subDamageCount = static_cast<uint8_t>(data.subDamages.size());
+    if (!data.readCommonHead(packet, startPos)) return false;
 
     if (rem() < 8) {
         packet.setReadPos(startPos);
@@ -823,23 +765,26 @@ bool ClassicPacketParsers::parseAttackerStateUpdate(network::Packet& packet, Att
 }
 
 // ============================================================================
-// Classic parseSpellDamageLog — Vanilla 1.12 SMSG_SPELLNONMELEEDAMAGELOG
+// Classic parseSpellDamageLog - Vanilla 1.12 SMSG_SPELLNONMELEEDAMAGELOG
 //
 // Identical to TBC except GUIDs are PackedGuid (not full uint64).
 // Format: PackedGuid(target) + PackedGuid(caster) + uint32(spellId)
 //       + uint32(damage) + uint8(schoolMask) + uint32(absorbed) + uint32(resisted)
 //       + uint8(periodicLog) + uint8(unused) + uint32(blocked) + uint32(flags)
 // ============================================================================
-bool ClassicPacketParsers::parseSpellDamageLog(network::Packet& packet, SpellDamageLogData& data) {
+bool parseSpellDamageLogPreWotlk(network::Packet& packet, SpellDamageLogData& data,
+                                 const char* tag) {
+    data = SpellDamageLogData{};
     auto rem = [&]() { return packet.getRemainingSize(); };
     if (rem() < 2 || !packet.hasFullPackedGuid()) return false;
 
-    data.targetGuid   = packet.readPackedGuid(); // PackedGuid in Vanilla
+    data.targetGuid   = packet.readPackedGuid(); // PackedGuid before WotLK
     if (rem() < 1 || !packet.hasFullPackedGuid()) return false;
-    data.attackerGuid = packet.readPackedGuid(); // PackedGuid in Vanilla
+    data.attackerGuid = packet.readPackedGuid();
 
     // uint32(spellId) + uint32(damage) + uint8(schoolMask) + uint32(absorbed)
-    // + uint32(resisted) + uint8 + uint8 + uint32(blocked) + uint32(flags) = 21 bytes
+    // + uint32(resisted) + uint8 + uint8 + uint32(blocked) + uint32(flags) = 21 bytes.
+    // No overkill: that is the field WotLK adds.
     if (rem() < 21) return false;
     data.spellId    = packet.readUInt32();
     data.damage     = packet.readUInt32();
@@ -849,17 +794,20 @@ bool ClassicPacketParsers::parseSpellDamageLog(network::Packet& packet, SpellDam
     packet.readUInt8();    // periodicLog
     packet.readUInt8();    // unused
     packet.readUInt32();   // blocked
-    uint32_t flags  = packet.readUInt32();
+    const uint32_t flags = packet.readUInt32();
     data.isCrit     = (flags & 0x02) != 0;
-    data.overkill   = 0;  // no overkill field in Vanilla (same as TBC)
 
-    LOG_DEBUG("[Classic] Spell damage: spellId=", data.spellId, " dmg=", data.damage,
+    LOG_DEBUG(tag, " Spell damage: spellId=", data.spellId, " dmg=", data.damage,
               data.isCrit ? " CRIT" : "");
     return true;
 }
 
+bool ClassicPacketParsers::parseSpellDamageLog(network::Packet& packet, SpellDamageLogData& data) {
+    return parseSpellDamageLogPreWotlk(packet, data, "[Classic]");
+}
+
 // ============================================================================
-// Classic parseSpellHealLog — Vanilla 1.12 SMSG_SPELLHEALLOG
+// Classic parseSpellHealLog - Vanilla 1.12 SMSG_SPELLHEALLOG
 //
 // Identical to TBC except GUIDs are PackedGuid (not full uint64).
 // Format: PackedGuid(target) + PackedGuid(caster) + uint32(spellId)
@@ -885,9 +833,9 @@ bool ClassicPacketParsers::parseSpellHealLog(network::Packet& packet, SpellHealL
 }
 
 // ============================================================================
-// Classic parseAuraUpdate — Vanilla 1.12 SMSG_AURA_UPDATE / SMSG_AURA_UPDATE_ALL
+// Classic parseAuraUpdate - Vanilla 1.12 SMSG_AURA_UPDATE / SMSG_AURA_UPDATE_ALL
 //
-// Classic has SMSG_AURA_UPDATE (TBC does not — TBC uses a different aura system
+// Classic has SMSG_AURA_UPDATE (TBC does not - TBC uses a different aura system
 // and the TBC override returns false with a warning).  Classic inherits TBC's
 // override by default, so this override is needed to restore aura tracking.
 //
@@ -922,7 +870,7 @@ bool ClassicPacketParsers::parseAuraUpdate(network::Packet& packet, AuraUpdateDa
         AuraSlot aura;
         if (spellId != 0) {
             aura.spellId = spellId;
-            if (rem() < 3) { data.updates.push_back({slot, aura}); break; }
+            if (rem() < 3) { data.updates.emplace_back(slot, aura); break; }
             aura.flags   = packet.readUInt8();
             aura.level   = packet.readUInt8();
             aura.charges = packet.readUInt8();
@@ -936,7 +884,7 @@ bool ClassicPacketParsers::parseAuraUpdate(network::Packet& packet, AuraUpdateDa
             // No effect amounts field in Classic (WotLK added it gated by 0x40)
         }
 
-        data.updates.push_back({slot, aura});
+        data.updates.emplace_back(slot, aura);
         if (!isAll) break;
     }
 
@@ -1031,100 +979,9 @@ bool ClassicPacketParsers::parseCastResult(network::Packet& packet, uint32_t& sp
 // - After flags: uint8 firstLogin (same as TBC)
 // ============================================================================
 bool ClassicPacketParsers::parseCharEnum(network::Packet& packet, CharEnumResponse& response) {
-    // Validate minimum packet size for count byte
-    if (packet.getSize() < 1) {
-        LOG_ERROR("[Classic] SMSG_CHAR_ENUM packet too small: ", packet.getSize(), " bytes");
-        return false;
-    }
-
-    uint8_t count = packet.readUInt8();
-
-    // Cap count to prevent excessive memory allocation
-    constexpr uint8_t kMaxCharacters = 32;
-    if (count > kMaxCharacters) {
-        LOG_WARNING("[Classic] Character count ", static_cast<int>(count), " exceeds max ", static_cast<int>(kMaxCharacters),
-                    ", capping");
-        count = kMaxCharacters;
-    }
-
-    LOG_INFO("[Classic] Parsing SMSG_CHAR_ENUM: ", static_cast<int>(count), " characters");
-
-    response.characters.clear();
-    response.characters.reserve(count);
-
-    for (uint8_t i = 0; i < count; ++i) {
-        // Sanity check: ensure we have at least minimal data before reading next character
-        // Minimum: guid(8) + name(1) + race(1) + class(1) + gender(1) + appearance(4)
-        //          + facialFeatures(1) + level(1) + zone(4) + map(4) + pos(12) + guild(4)
-        //          + flags(4) + firstLogin(1) + pet(12) + equipment(20*5)
-        constexpr size_t kMinCharacterSize = 8 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 4 + 4 + 12 + 4 + 4 + 1 + 12 + 100;
-        if (!packet.hasRemaining(kMinCharacterSize)) {
-            LOG_WARNING("[Classic] Character enum packet truncated at character ", static_cast<int>(i + 1),
-                        ", pos=", packet.getReadPos(), " needed=", kMinCharacterSize,
-                        " size=", packet.getSize());
-            break;
-        }
-
-        Character character;
-
-        // GUID (8 bytes)
-        character.guid = packet.readUInt64();
-
-        // Name (null-terminated string)
-        character.name = packet.readString();
-
-        // Race, class, gender
-        character.race = static_cast<Race>(packet.readUInt8());
-        character.characterClass = static_cast<Class>(packet.readUInt8());
-        character.gender = static_cast<Gender>(packet.readUInt8());
-
-        // Appearance (5 bytes: skin, face, hairStyle, hairColor packed + facialFeatures)
-        character.appearanceBytes = packet.readUInt32();
-        character.facialFeatures = packet.readUInt8();
-
-        // Level
-        character.level = packet.readUInt8();
-
-        // Location
-        character.zoneId = packet.readUInt32();
-        character.mapId = packet.readUInt32();
-        character.x = packet.readFloat();
-        character.y = packet.readFloat();
-        character.z = packet.readFloat();
-
-        // Guild ID
-        character.guildId = packet.readUInt32();
-
-        // Flags
-        character.flags = packet.readUInt32();
-
-        // Classic: uint8 firstLogin (same as TBC)
-        /*uint8_t firstLogin =*/ packet.readUInt8();
-
-        // Pet data (always present)
-        character.pet.displayModel = packet.readUInt32();
-        character.pet.level = packet.readUInt32();
-        character.pet.family = packet.readUInt32();
-
-        // Equipment (Classic: 20 items, NO enchantment field)
-        character.equipment.reserve(20);
-        for (int j = 0; j < 20; ++j) {
-            EquipmentItem item;
-            item.displayModel = packet.readUInt32();
-            item.inventoryType = packet.readUInt8();
-            item.enchantment = 0;  // Classic has no enchant field in char enum
-            character.equipment.push_back(item);
-        }
-
-        LOG_DEBUG("  Character ", static_cast<int>(i + 1), ": ", character.name,
-                  " (", getRaceName(character.race), " ", getClassName(character.characterClass),
-                  " level ", static_cast<int>(character.level), " zone ", character.zoneId, ")");
-
-        response.characters.push_back(character);
-    }
-
-    LOG_INFO("[Classic] Parsed ", response.characters.size(), " characters");
-    return true;
+    // Vanilla's char enum has no per-item enchantment field, which is the only
+    // way it differs from TBC's.
+    return parseCharEnumPreWotlk(packet, response, /*hasEnchantment=*/false, "[Classic]");
 }
 
 // ============================================================================
@@ -1153,17 +1010,10 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
     // Type-specific data (matches CMaNGOS-Classic BuildChatPacket)
     switch (data.type) {
         case ChatType::MONSTER_EMOTE: {
-            // nameLen(u32) + name + targetGuid(u64)
-            uint32_t nameLen = packet.readUInt32();
-            if (nameLen > 0 && nameLen < 256) {
-                data.senderName.resize(nameLen);
-                for (uint32_t i = 0; i < nameLen; ++i) {
-                    data.senderName[i] = static_cast<char>(packet.readUInt8());
-                }
-                if (!data.senderName.empty() && data.senderName.back() == '\0') {
-                    data.senderName.pop_back();
-                }
-            }
+            // Length-prefixed, bounds-checked against the packet, terminator stripped.
+            // Truncated here means the name length is a lie, and reading on would
+            // consume it as the leading bytes of the GUID below.
+            if (!packet.readSizedString(data.senderName)) return false;
             data.receiverGuid = packet.readUInt64();
             break;
         }
@@ -1172,7 +1022,7 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
         case ChatType::PARTY:
         case ChatType::YELL:
         {
-            // senderGuid(u64) + senderGuid(u64) — written twice by server
+            // senderGuid(u64) + senderGuid(u64) - written twice by server
             data.senderGuid = packet.readUInt64();
             /*duplicateGuid*/ packet.readUInt64();
             break;
@@ -1196,16 +1046,10 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
         case ChatType::MONSTER_YELL: {
             // senderGuid(u64) + nameLen(u32) + name + targetGuid(u64)
             data.senderGuid = packet.readUInt64();
-            uint32_t nameLen = packet.readUInt32();
-            if (nameLen > 0 && nameLen < 256) {
-                data.senderName.resize(nameLen);
-                for (uint32_t i = 0; i < nameLen; ++i) {
-                    data.senderName[i] = static_cast<char>(packet.readUInt8());
-                }
-                if (!data.senderName.empty() && data.senderName.back() == '\0') {
-                    data.senderName.pop_back();
-                }
-            }
+            // Length-prefixed, bounds-checked against the packet, terminator stripped.
+            // Truncated here means the name length is a lie, and reading on would
+            // consume it as the leading bytes of the GUID below.
+            if (!packet.readSizedString(data.senderName)) return false;
             data.receiverGuid = packet.readUInt64();
             break;
         }
@@ -1219,7 +1063,7 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
         }
 
         default: {
-            // All other types: senderGuid(u64) + senderGuid(u64) — written twice
+            // All other types: senderGuid(u64) + senderGuid(u64) - written twice
             data.senderGuid = packet.readUInt64();
             /*duplicateGuid*/ packet.readUInt64();
             break;
@@ -1229,8 +1073,21 @@ bool ClassicPacketParsers::parseMessageChat(network::Packet& packet, MessageChat
     // Read message length
     uint32_t messageLen = packet.readUInt32();
 
+    // Against what is actually left, not only against a ceiling. readUInt8
+    // answers zero at the end of the buffer without advancing, so a declared
+    // length longer than the packet built a message padded with NULs out of
+    // nothing and reported success - and a length of 8192 or more skipped the
+    // message entirely and then read its first byte as the chat tag. Neither
+    // overruns the buffer; both hand the interface a fabricated line.
+    if (messageLen >= 8192 || messageLen > packet.getRemainingSize()) {
+        LOG_WARNING("[Classic] Chat message length ", messageLen,
+                    " does not fit the ", packet.getRemainingSize(),
+                    " bytes left; dropping the message");
+        return false;
+    }
+
     // Read message
-    if (messageLen > 0 && messageLen < 8192) {
+    if (messageLen > 0) {
         data.message.resize(messageLen);
         for (uint32_t i = 0; i < messageLen; ++i) {
             data.message[i] = static_cast<char>(packet.readUInt8());
@@ -1281,41 +1138,10 @@ network::Packet ClassicPacketParsers::buildLeaveChannel(const std::string& chann
 // ============================================================================
 
 bool ClassicPacketParsers::parseGuildRoster(network::Packet& packet, GuildRosterData& data) {
-    if (packet.getSize() < 4) {
-        LOG_ERROR("Classic SMSG_GUILD_ROSTER too small: ", packet.getSize());
-        return false;
-    }
-    uint32_t numMembers = packet.readUInt32();
-    data.motd = packet.readString();
-    data.guildInfo = packet.readString();
-
-    // Classic: fixed 10 ranks, just uint32 rights each (no goldLimit, no bank tabs)
-    data.ranks.resize(10);
-    for (int i = 0; i < 10; ++i) {
-        data.ranks[i].rights = packet.readUInt32();
-        data.ranks[i].goldLimit = 0;
-    }
-
-    data.members.resize(numMembers);
-    for (uint32_t i = 0; i < numMembers; ++i) {
-        auto& m = data.members[i];
-        m.guid = packet.readUInt64();
-        m.online = (packet.readUInt8() != 0);
-        m.name = packet.readString();
-        m.rankIndex = packet.readUInt32();
-        m.level = packet.readUInt8();
-        m.classId = packet.readUInt8();
-        // Classic: NO gender byte
-        m.gender = 0;
-        m.zoneId = packet.readUInt32();
-        if (!m.online) {
-            m.lastOnline = packet.readFloat();
-        }
-        m.publicNote = packet.readString();
-        m.officerNote = packet.readString();
-    }
-    LOG_INFO("Parsed Classic SMSG_GUILD_ROSTER: ", numMembers, " members");
-    return true;
+    // Vanilla sends ten ranks and nothing but their rights, and no gender
+    // byte. Its own copy of this checked no read against what was left, so a
+    // truncated roster read past the end of the packet.
+    return parseGuildRosterBody(packet, data, {/*rankCount=*/.rankCount=false, /*gender=*/.gender=false});
 }
 
 // ============================================================================
@@ -1331,8 +1157,8 @@ bool ClassicPacketParsers::parseGuildQueryResponse(network::Packet& packet, Guil
     }
     data.guildId = packet.readUInt32();
     data.guildName = packet.readString();
-    for (int i = 0; i < 10; ++i) {
-        data.rankNames[i] = packet.readString();
+    for (auto& rankName : data.rankNames) {
+        rankName = packet.readString();
     }
     data.emblemStyle = packet.readUInt32();
     data.emblemColor = packet.readUInt32();
@@ -1346,72 +1172,18 @@ bool ClassicPacketParsers::parseGuildQueryResponse(network::Packet& packet, Guil
 }
 
 // ============================================================================
-// GameObject Query — Classic has no extra strings before data[]
+// GameObject Query - Classic has no extra strings before data[]
 // WotLK has iconName + castBarCaption + unk1 between names and data[].
 // Vanilla: entry, type, displayId, name[4], data[24]
 // ============================================================================
 
 bool ClassicPacketParsers::parseGameObjectQueryResponse(network::Packet& packet, GameObjectQueryResponseData& data) {
-    // Validate minimum packet size: entry(4)
-    if (packet.getSize() < 4) {
-        LOG_ERROR("Classic SMSG_GAMEOBJECT_QUERY_RESPONSE: packet too small (", packet.getSize(), " bytes)");
-        return false;
-    }
-
-    data.entry = packet.readUInt32();
-
-    // High bit set means gameobject not found
-    if (data.entry & 0x80000000) {
-        data.entry &= ~0x80000000;
-        data.name = "";
-        return true;
-    }
-
-    // Validate minimum size for fixed fields: type(4) + displayId(4)
-    if (!packet.hasRemaining(8)) {
-        LOG_ERROR("Classic SMSG_GAMEOBJECT_QUERY_RESPONSE: truncated before names (entry=", data.entry, ")");
-        return false;
-    }
-
-    data.type = packet.readUInt32();
-    data.displayId = packet.readUInt32();
-    // 4 name strings
-    data.name = packet.readString();
-    packet.readString();
-    packet.readString();
-    packet.readString();
-
-    // Classic: data[24] comes immediately after names (no extra strings)
-    size_t remaining = packet.getRemainingSize();
-    if (remaining >= 24 * 4) {
-        for (int i = 0; i < 24; i++) {
-            data.data[i] = packet.readUInt32();
-        }
-        data.hasData = true;
-    } else if (remaining > 0) {
-        // Partial data field; read what we can
-        uint32_t fieldsToRead = remaining / 4;
-        for (uint32_t i = 0; i < fieldsToRead && i < 24; i++) {
-            data.data[i] = packet.readUInt32();
-        }
-        if (fieldsToRead < 24) {
-            LOG_WARNING("Classic SMSG_GAMEOBJECT_QUERY_RESPONSE: truncated in data fields (", fieldsToRead,
-                        " of 24 read, entry=", data.entry, ")");
-        }
-    }
-
-    if (data.type == 15) { // MO_TRANSPORT
-        LOG_DEBUG("Classic GO query: MO_TRANSPORT entry=", data.entry,
-                  " name=\"", data.name, "\" displayId=", data.displayId,
-                  " taxiPathId=", data.data[0], " moveSpeed=", data.data[1]);
-    } else {
-        LOG_DEBUG("Classic GO query: ", data.name, " type=", data.type, " entry=", data.entry);
-    }
-    return true;
+    // Vanilla has no 2.0.3 block at all: the data fields follow the names.
+    return parseGameObjectQueryBody(packet, data, /*extraStrings=*/0);
 }
 
 // ============================================================================
-// Gossip — Classic has no menuId, and quest items lack questFlags + isRepeatable
+// Gossip - Classic has no menuId, and quest items lack questFlags + isRepeatable
 // ============================================================================
 
 bool ClassicPacketParsers::parseGossipMessage(network::Packet& packet, GossipMessageData& data) {
@@ -1460,7 +1232,7 @@ bool ClassicPacketParsers::parseGossipMessage(network::Packet& packet, GossipMes
     remaining = packet.getRemainingSize();
     if (remaining < 4) {
         LOG_WARNING("Classic SMSG_GOSSIP_MESSAGE truncated before questCount");
-        return data.options.size() > 0;  // Return true if we got at least some options
+        return !data.options.empty();  // Return true if we got at least some options
     }
 
     uint32_t questCount = packet.readUInt32();
@@ -1499,7 +1271,7 @@ bool ClassicPacketParsers::parseGossipMessage(network::Packet& packet, GossipMes
 }
 
 // ============================================================================
-// Classic CMSG_SEND_MAIL — Vanilla 1.12 format
+// Classic CMSG_SEND_MAIL - Vanilla 1.12 format
 // Differences from WotLK:
 // - Single uint64 itemGuid instead of uint8 attachmentCount + item array
 // - Trailing uint64 unk3 + uint8 unk4 (clients > 1.9.4)
@@ -1528,7 +1300,7 @@ network::Packet ClassicPacketParsers::buildSendMail(uint64_t mailboxGuid,
 }
 
 // ============================================================================
-// Classic SMSG_MAIL_LIST_RESULT — Vanilla 1.12 format (per vmangos)
+// Classic SMSG_MAIL_LIST_RESULT - Vanilla 1.12 format (per vmangos)
 // Key differences from WotLK:
 // - uint8 count (not uint32 totalCount + uint8 shownCount)
 // - No msgSize prefix per entry
@@ -1618,8 +1390,8 @@ bool ClassicPacketParsers::parseMailList(network::Packet& packet,
 }
 
 // ============================================================================
-// Classic CMSG_MAIL_TAKE_ITEM — Vanilla only sends mailboxGuid + mailId
-// (no itemSlot — Vanilla only supports 1 item per mail)
+// Classic CMSG_MAIL_TAKE_ITEM - Vanilla only sends mailboxGuid + mailId
+// (no itemSlot - Vanilla only supports 1 item per mail)
 // ============================================================================
 network::Packet ClassicPacketParsers::buildMailTakeItem(uint64_t mailboxGuid,
                                                          uint32_t mailId,
@@ -1631,7 +1403,7 @@ network::Packet ClassicPacketParsers::buildMailTakeItem(uint64_t mailboxGuid,
 }
 
 // ============================================================================
-// Classic CMSG_MAIL_DELETE — Vanilla only sends mailboxGuid + mailId
+// Classic CMSG_MAIL_DELETE - Vanilla only sends mailboxGuid + mailId
 // (no mailTemplateId field)
 // ============================================================================
 network::Packet ClassicPacketParsers::buildMailDelete(uint64_t mailboxGuid,
@@ -1657,10 +1429,16 @@ network::Packet ClassicPacketParsers::buildItemQuery(uint32_t entry, uint64_t gu
     return packet;
 }
 
-bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQueryResponseData& data) {
-    // Validate minimum packet size: entry(4)
+/// SMSG_ITEM_QUERY_SINGLE_RESPONSE as classic and TBC send it.
+///
+/// The two readers were 154 lines each and differed in one field, which is now
+/// the parameter. WotLK is deliberately not folded in: that reader scores two
+/// candidate price layouts against each other to decide which the server sent,
+/// which is a different mechanism rather than a longer version of this one.
+bool parseItemQueryPreWotlk(network::Packet& packet, ItemQueryResponseData& data,
+                            bool hasSoundOverrideSubclass, const char* tag) {    // Validate minimum packet size: entry(4)
     if (packet.getSize() < 4) {
-        LOG_ERROR("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: packet too small (", packet.getSize(), " bytes)");
+        LOG_ERROR(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: packet too small (", packet.getSize(), " bytes)");
         return false;
     }
 
@@ -1672,15 +1450,18 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
         return true;
     }
 
-    // Validate minimum size for fixed fields: itemClass(4) + subClass(4) + 4 name strings + displayInfoId(4) + quality(4)
-    if (!packet.hasRemaining(8)) {
-        LOG_ERROR("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before names (entry=", data.entry, ")");
+    // itemClass(4) + subClass(4), plus the sound override where it is sent.
+    if (!packet.hasRemaining(hasSoundOverrideSubclass ? 12u : 8u)) {
+        LOG_ERROR(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before names (entry=", data.entry, ")");
         return false;
     }
 
     uint32_t itemClass = packet.readUInt32();
     uint32_t subClass = packet.readUInt32();
-    // Vanilla: NO SoundOverrideSubclass
+    // TBC sends a SoundOverrideSubclass here (int32, -1 = no override) and
+    // vanilla does not. It is the only field the two layouts differ by;
+    // everything after it is the same run in the same order.
+    if (hasSoundOverrideSubclass) packet.readUInt32();
 
     data.itemClass = itemClass;
     data.subClass = subClass;
@@ -1697,7 +1478,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
 
     // Validate minimum size for fixed fields: Flags(4) + BuyPrice(4) + SellPrice(4) + inventoryType(4)
     if (!packet.hasRemaining(16)) {
-        LOG_ERROR("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before inventoryType (entry=", data.entry, ")");
+        LOG_ERROR(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before inventoryType (entry=", data.entry, ")");
         return false;
     }
 
@@ -1708,52 +1489,30 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
 
     data.inventoryType = packet.readUInt32();
 
-    // Validate minimum size for remaining fixed fields: 13×4 = 52 bytes
-    if (!packet.hasRemaining(52)) {
-        LOG_ERROR("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before stats (entry=", data.entry, ")");
+    // readCommonRequirements guards its own fourteen fields at 56 bytes, so
+    // this is only an early exit with a clearer message. It said 13x4 and the
+    // run had grown to fourteen; classic asked for 52 here and TBC for 56.
+    if (!packet.hasRemaining(56)) {
+        LOG_ERROR(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before stats (entry=", data.entry, ")");
         return false;
     }
 
-    data.allowableClass = packet.readUInt32(); // AllowableClass
-    data.allowableRace  = packet.readUInt32(); // AllowableRace
-    data.itemLevel = packet.readUInt32();
-    data.requiredLevel = packet.readUInt32();
-    data.requiredSkill     = packet.readUInt32(); // RequiredSkill
-    data.requiredSkillRank = packet.readUInt32(); // RequiredSkillRank
-    packet.readUInt32(); // RequiredSpell
-    packet.readUInt32(); // RequiredHonorRank
-    packet.readUInt32(); // RequiredCityRank
-    data.requiredReputationFaction = packet.readUInt32(); // RequiredReputationFaction
-    data.requiredReputationRank    = packet.readUInt32(); // RequiredReputationRank
-    data.maxCount = static_cast<int32_t>(packet.readUInt32()); // MaxCount (1 = Unique)
-    data.maxStack = static_cast<int32_t>(packet.readUInt32()); // Stackable
-    data.containerSlots = packet.readUInt32();
+    // The run every expansion sends identically, read in one place.
+    if (!data.readCommonRequirements(packet)) return false;
 
     // Vanilla: 10 stat pairs, NO statsCount prefix (10×8 = 80 bytes)
     if (!packet.hasRemaining(80)) {
-        LOG_WARNING("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated in stats section (entry=", data.entry, ")");
+        LOG_WARNING(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated in stats section (entry=", data.entry, ")");
         // Read what we can
     }
     for (uint32_t i = 0; i < 10; i++) {
         if (!packet.hasRemaining(8)) {
-            LOG_WARNING("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: stat ", i, " truncated (entry=", data.entry, ")");
+            LOG_WARNING(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: stat ", i, " truncated (entry=", data.entry, ")");
             break;
         }
         uint32_t statType = packet.readUInt32();
         int32_t statValue = static_cast<int32_t>(packet.readUInt32());
-        if (statType != 0) {
-            switch (statType) {
-                case 3: data.agility = statValue; break;
-                case 4: data.strength = statValue; break;
-                case 5: data.intellect = statValue; break;
-                case 6: data.spirit = statValue; break;
-                case 7: data.stamina = statValue; break;
-                default:
-                    if (statValue != 0)
-                        data.extraStats.push_back({statType, statValue});
-                    break;
-            }
-        }
+        data.applyStat(statType, statValue);
     }
 
     // Vanilla: NO ScalingStatDistribution, NO ScalingStatValue
@@ -1763,7 +1522,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
     for (int i = 0; i < 5; i++) {
         // Each damage entry is dmgMin(4) + dmgMax(4) + damageType(4) = 12 bytes
         if (!packet.hasRemaining(12)) {
-            LOG_WARNING("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: damage ", i, " truncated (entry=", data.entry, ")");
+            LOG_WARNING(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: damage ", i, " truncated (entry=", data.entry, ")");
             break;
         }
         float dmgMin = packet.readFloat();
@@ -1781,7 +1540,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
 
     // Validate minimum size for armor field (4 bytes)
     if (!packet.hasRemaining(4)) {
-        LOG_WARNING("Classic SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before armor (entry=", data.entry, ")");
+        LOG_WARNING(tag, " SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before armor (entry=", data.entry, ")");
         return true;  // Have core fields; armor is important but optional
     }
     data.armor = static_cast<int32_t>(packet.readUInt32());
@@ -1827,7 +1586,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
     if (packet.hasRemaining(16)) {
         data.pageTextId = packet.readUInt32(); // PageText
         packet.readUInt32(); // LanguageID
-        packet.readUInt32(); // PageMaterial
+        data.pageMaterial = packet.readUInt32(); // PageMaterial
         data.startQuestId = packet.readUInt32(); // StartQuest
     }
 
@@ -1837,6 +1596,12 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
     return true;
 }
 
+bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet,
+                                                  ItemQueryResponseData& data) {
+    return parseItemQueryPreWotlk(packet, data, /*hasSoundOverrideSubclass=*/false,
+                                  "Classic");
+}
+
 // ============================================================================
 // Turtle WoW (build 7234) parseMovementBlock
 //
@@ -1844,7 +1609,7 @@ bool ClassicPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQ
 // analysis the wire format is nearly identical to Classic with one key addition:
 //
 //   LIVING section:
-//     moveFlags       u32     (NO moveFlags2 — confirmed by position alignment)
+//     moveFlags       u32     (NO moveFlags2 - confirmed by position alignment)
 //     time            u32
 //     position        4×float
 //     transport       guarded by moveFlags & 0x02000000 (Classic flag)
@@ -1889,6 +1654,12 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
     const uint8_t UPDATEFLAG_ALL             = 0x10;
     const uint8_t UPDATEFLAG_LIVING          = 0x20;
     const uint8_t UPDATEFLAG_HAS_POSITION    = 0x40;
+    // These bits are NOT the same as the other expansions' and must not be
+    // merged with them. 1.12 assigns HIGHGUID 0x8 and ALL 0x10; 2.4.3 moved
+    // HIGHGUID to 0x10 and put LOWGUID at 0x8, and 0x4 means MELEE_ATTACKING
+    // here and HAS_TARGET there. Three tables that look like three copies of
+    // one, and reading a stationary object's position off the wrong bit is a
+    // misparse of everything after it.
 
     if (updateFlags & UPDATEFLAG_LIVING) {
         // Minimum: moveFlags(4)+time(4)+position(16)+fallTime(4)+speeds(24) = 52 bytes
@@ -1896,7 +1667,7 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
         size_t livingStart = packet.getReadPos();
 
         uint32_t moveFlags = packet.readUInt32();
-        // Turtle: NO moveFlags2 (confirmed by hex dump — positions are only correct without it)
+        // Turtle: NO moveFlags2 (confirmed by hex dump - positions are only correct without it)
         /*uint32_t time =*/ packet.readUInt32();
 
         // Position
@@ -1909,7 +1680,7 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
         LOG_DEBUG("  [Turtle] LIVING: (", block.x, ", ", block.y, ", ", block.z,
                   "), o=", block.orientation, " moveFlags=0x", std::hex, moveFlags, std::dec);
 
-        // Transport — Classic flag position 0x02000000
+        // Transport - Classic flag position 0x02000000
         if (moveFlags & TurtleMoveFlags::ONTRANSPORT) {
             if (rem() < 1) return false; // PackedGuid mask byte
             block.onTransport = true;
@@ -1947,7 +1718,7 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
             /*float splineElevation =*/ packet.readFloat();
         }
 
-        // Turtle: 6 speeds (same as Classic — no flight speeds)
+        // Turtle: 6 speeds (same as Classic - no flight speeds)
         if (rem() < 24) return false; // 6 × float
         float walkSpeed = packet.readFloat();
         float runSpeed = packet.readFloat();
@@ -1967,7 +1738,7 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
                   " runBack=", runBackSpeed, " swim=", swimSpeed,
                   " swimBack=", swimBackSpeed, " turn=", turnRate);
 
-        // Spline data — check both Classic (0x00400000) and TBC (0x08000000) flag positions
+        // Spline data - check both Classic (0x00400000) and TBC (0x08000000) flag positions
         bool hasSpline = (moveFlags & TurtleMoveFlags::SPLINE_CLASSIC) ||
                          (moveFlags & TurtleMoveFlags::SPLINE_TBC);
         if (hasSpline) {
@@ -1989,7 +1760,7 @@ bool TurtlePacketParsers::parseMovementBlock(network::Packet& packet, UpdateBloc
         LOG_DEBUG("  [Turtle] STATIONARY: (", block.x, ", ", block.y, ", ", block.z, ")");
     }
 
-    // High GUID — 1×u32
+    // High GUID - 1×u32
     if (updateFlags & UPDATEFLAG_HIGHGUID) {
         if (rem() < 4) return false;
         /*uint32_t highGuid =*/ packet.readUInt32();
@@ -2270,7 +2041,9 @@ bool TurtlePacketParsers::parseMonsterMove(network::Packet& packet, MonsterMoveD
 // Vanilla sends status as uint32 with different enum values:
 //   0=NONE, 1=UNAVAILABLE, 2=CHAT, 3=INCOMPLETE, 4=REWARD_REP, 5=AVAILABLE
 // WotLK uses uint8 with:
-//   0=NONE, 1=UNAVAILABLE, 5=INCOMPLETE, 6=REWARD_REP, 7=AVAILABLE_LOW, 8=AVAILABLE, 10=REWARD
+//   0=NONE, 1=UNAVAILABLE, 2=LOW_LEVEL_AVAILABLE, 3=LOW_LEVEL_REWARD_REP,
+//   4=LOW_LEVEL_AVAILABLE_REP, 5=INCOMPLETE, 6=REWARD_REP, 7=AVAILABLE_REP,
+//   8=AVAILABLE, 9=REWARD2, 10=REWARD
 //
 // Read uint32, translate to WotLK enum values.
 // ============================================================================
@@ -2289,25 +2062,33 @@ uint8_t ClassicPacketParsers::readQuestGiverStatus(network::Packet& packet) {
 }
 
 // ============================================================================
-// Classic CMSG_QUESTGIVER_QUERY_QUEST — Vanilla 1.12 format
+// Classic CMSG_QUESTGIVER_QUERY_QUEST - Vanilla 1.12 format
 // WotLK appends a trailing unk1 byte; Vanilla servers don't expect it and
 // some reject or misparse the 13-byte packet, preventing quest details from
 // being sent back.  Classic format: guid(8) + questId(4) = 12 bytes.
 // ============================================================================
-network::Packet ClassicPacketParsers::buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) {
+network::Packet buildQueryQuestPacketPreWotlk(uint64_t npcGuid, uint32_t questId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_QUESTGIVER_QUERY_QUEST));
     packet.writeUInt64(npcGuid);
     packet.writeUInt32(questId);
-    // No trailing unk byte (WotLK-only field)
+    // No trailing isDialogContinued byte; WotLK is the only version with one.
     return packet;
 }
 
-network::Packet ClassicPacketParsers::buildAcceptQuestPacket(uint64_t npcGuid, uint32_t questId) {
+network::Packet buildAcceptQuestPacketPreWotlk(uint64_t npcGuid, uint32_t questId) {
     network::Packet packet(wireOpcode(Opcode::CMSG_QUESTGIVER_ACCEPT_QUEST));
     packet.writeUInt64(npcGuid);
     packet.writeUInt32(questId);
-    // Classic/Turtle: no trailing unk1 uint32
+    // No trailing unk1 uint32.
     return packet;
+}
+
+network::Packet ClassicPacketParsers::buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) {
+    return buildQueryQuestPacketPreWotlk(npcGuid, questId);
+}
+
+network::Packet ClassicPacketParsers::buildAcceptQuestPacket(uint64_t npcGuid, uint32_t questId) {
+    return buildAcceptQuestPacketPreWotlk(npcGuid, questId);
 }
 
 // ============================================================================
@@ -2338,7 +2119,7 @@ bool ClassicPacketParsers::parseCreatureQueryResponse(network::Packet& packet,
     packet.readString(); // name3
     packet.readString(); // name4
     data.subName = packet.readString();
-    // NOTE: NO iconName field in Classic 1.12 — goes straight to typeFlags
+    // NOTE: NO iconName field in Classic 1.12 - goes straight to typeFlags
     if (!packet.hasRemaining(16)) {
         LOG_WARNING("Classic SMSG_CREATURE_QUERY_RESPONSE: truncated at typeFlags (entry=", data.entry, ")");
         data.typeFlags = 0;

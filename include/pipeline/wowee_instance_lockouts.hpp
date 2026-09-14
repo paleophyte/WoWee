@@ -8,7 +8,7 @@ namespace wowee {
 namespace pipeline {
 
 // Wowee Open Instance Lockout Schedule catalog (.whld)
-// — novel replacement for the engine-side instance reset
+// - novel replacement for the engine-side instance reset
 // timer logic plus the per-map InstanceTemplate.dbc reset
 // fields. Defines how often each (map × difficulty)
 // combination resets its lockout, how many boss kills
@@ -16,7 +16,7 @@ namespace pipeline {
 // number of bonus rolls available (Cataclysm+ feature
 // stubbed for forward compatibility).
 //
-// One entry per (map × difficulty × group size) — Icecrown
+// One entry per (map × difficulty × group size) - Icecrown
 // Citadel 10-Normal weekly, ICC 25-Normal weekly, ICC
 // 10-Heroic weekly, and ICC 25-Heroic weekly are four
 // separate entries with the same mapId but different
@@ -73,20 +73,20 @@ struct WoweeInstanceLockout {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t lockoutId) const;
+    [[nodiscard]] const Entry* findById(uint32_t lockoutId) const;
 
     // Returns all lockouts bound to a given map (typically
     // all 4 difficulty variants of one raid). Used by the
     // raid-finder UI to populate the difficulty picker.
-    std::vector<const Entry*> findByMap(uint32_t mapId) const;
+    [[nodiscard]] std::vector<const Entry*> findByMap(uint32_t mapId) const;
 
     // Returns the next reset wall-clock millis after the
     // given current time, assuming the standard Tuesday
     // reset epoch. Engines override with their server's
     // chosen reset time.
-    uint64_t nextResetMs(uint32_t lockoutId,
+    [[nodiscard]] uint64_t nextResetMs(uint32_t lockoutId,
                          uint64_t currentMs) const;
 
     static const char* lockoutKindName(uint8_t k);
@@ -101,14 +101,14 @@ public:
 
     // Preset emitters used by --gen-hld* variants.
     //
-    //   makeRaidWeekly  — 4 raid weekly lockouts (ICC 10N /
+    //   makeRaidWeekly  - 4 raid weekly lockouts (ICC 10N /
     //                      ICC 25N / ICC 10H / ICC 25H) with
     //                      12-boss kill caps and 7-day
     //                      reset.
-    //   makeDungeonDaily — 4 5-man daily heroic lockouts
+    //   makeDungeonDaily - 4 5-man daily heroic lockouts
     //                      (HoR / FoS / PoS / TotC) with
     //                      24h reset and 1-boss caps each.
-    //   makeWorldEvent  — 3 special event lockouts
+    //   makeWorldEvent  - 3 special event lockouts
     //                      (Brewfest daily / Hallow's End
     //                      pumpkin daily / Wintergrasp
     //                      battle 2.5h reset).

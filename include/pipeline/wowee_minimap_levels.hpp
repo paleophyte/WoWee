@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Minimap Multi-Level catalog (.wmnl) —
+// Wowee Open Minimap Multi-Level catalog (.wmnl) -
 // novel replacement for the WorldMapTransforms.dbc +
 // WorldMapOverlay.dbc pair that vanilla WoW used to
 // describe zones with multiple vertical layers visible
@@ -38,13 +38,13 @@ namespace pipeline {
 //     nameLen + name
 //     descLen + description
 //     mapId (uint32) / areaId (uint32)
-//     levelIndex (uint8)         — 0=ground, 1=upper,
+//     levelIndex (uint8)         - 0=ground, 1=upper,
 //                                   2=second-upper, etc.
 //     pad0 (uint8) / pad1 (uint8) / pad2 (uint8)
-//     minZ (float) / maxZ (float)  — world units
-//     pathLen + texturePath        — minimap layer
+//     minZ (float) / maxZ (float)  - world units
+//     pathLen + texturePath        - minimap layer
 //                                     texture (BLP/WOT)
-//     labelLen + displayName       — UI label, e.g.
+//     labelLen + displayName       - UI label, e.g.
 //                                     "Ground Floor"
 //     iconColorRGBA (uint32)
 struct WoweeMinimapLevels {
@@ -68,23 +68,23 @@ struct WoweeMinimapLevels {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t levelId) const;
+    [[nodiscard]] const Entry* findById(uint32_t levelId) const;
 
     // Returns the level entry whose Z-range contains the
     // player's current Z position, for the given (map,
     // area). Used by the minimap renderer at every camera
     // tick to swap the overlay layer when the player
     // crosses a floor boundary.
-    const Entry* findContainingZ(uint32_t mapId,
+    [[nodiscard]] const Entry* findContainingZ(uint32_t mapId,
                                    uint32_t areaId,
                                    float z) const;
 
     // Returns all levels for one (map, area) sorted by
     // levelIndex. Used by the world-map UI to populate
     // the per-zone level-picker dropdown.
-    std::vector<const Entry*> findByArea(uint32_t mapId,
+    [[nodiscard]] std::vector<const Entry*> findByArea(uint32_t mapId,
                                            uint32_t areaId) const;
 };
 
@@ -97,17 +97,17 @@ public:
 
     // Preset emitters used by --gen-mnl* variants.
     //
-    //   makeStormwind  — 3 levels (Old Town / Cathedral
+    //   makeStormwind  - 3 levels (Old Town / Cathedral
     //                     District / Stormwind Keep
     //                     Throne Room) covering the
     //                     city's vertical extent at
     //                     mapId 0 / areaId 1519.
-    //   makeDalaran    — 4 levels (Sewers / Street /
+    //   makeDalaran    - 4 levels (Sewers / Street /
     //                     Above Street / Floating
-    //                     Cathedral) — most vertical
+    //                     Cathedral) - most vertical
     //                     city in Northrend.
-    //   makeUndercity  — 5 levels (Throne / Inner Ring /
-    //                     Outer Ring / Canal / Sewer) —
+    //   makeUndercity  - 5 levels (Throne / Inner Ring /
+    //                     Outer Ring / Canal / Sewer) -
     //                     deepest vertical-layer city.
     static WoweeMinimapLevels makeStormwind(const std::string& catalogName);
     static WoweeMinimapLevels makeDalaran(const std::string& catalogName);

@@ -18,6 +18,48 @@ LensFlare::~LensFlare() {
     shutdown();
 }
 
+/// Builds the one pipeline this effect draws with, vertex layout and all.
+///
+/// initialize() and recreatePipelines() described it identically, which is
+/// two statements of what a flare vertex is in one file.
+void LensFlare::buildPipelines(VkDevice device,
+                               const VkPipelineShaderStageCreateInfo& vertStage,
+                               const VkPipelineShaderStageCreateInfo& fragStage) {
+    VkVertexInputBindingDescription binding{};
+    binding.binding = 0;
+    binding.stride = 4 * sizeof(float);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription posAttr{};
+    posAttr.location = 0;
+    posAttr.binding = 0;
+    posAttr.format = VK_FORMAT_R32G32_SFLOAT;
+    posAttr.offset = 0;
+
+    VkVertexInputAttributeDescription uvAttr{};
+    uvAttr.location = 1;
+    uvAttr.binding = 0;
+    uvAttr.format = VK_FORMAT_R32G32_SFLOAT;
+    uvAttr.offset = 2 * sizeof(float);
+
+    // Dynamic viewport and scissor
+    std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
+
+    pipeline = PipelineBuilder()
+        .setShaders(vertStage, fragStage)
+        .setVertexInput({binding}, {posAttr, uvAttr})
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setNoDepthTest()
+        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
+        .setMultisample(vkCtx->getMsaaSamples())
+        .setLayout(pipelineLayout)
+        .setRenderPass(vkCtx->getImGuiRenderPass())
+        .setDynamicStates(dynamicStates)
+        .build(device, vkCtx->getPipelineCache());
+
+}
+
 bool LensFlare::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayout*/) {
     LOG_INFO("Initializing lens flare system");
 
@@ -46,20 +88,10 @@ bool LensFlare::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayou
     vertexAlloc  = vbuf.allocation;
 
     // Load SPIR-V shaders
-    VkShaderModule vertModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/lens_flare.vert.spv")) {
-        LOG_ERROR("Failed to load lens flare vertex shader");
-        return false;
-    }
-
-    VkShaderModule fragModule;
-    if (!fragModule.loadFromFile(device, "assets/shaders/lens_flare.frag.spv")) {
-        LOG_ERROR("Failed to load lens flare fragment shader");
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    auto shaders = loadShaderPair(device, "assets/shaders/lens_flare.vert.spv", "assets/shaders/lens_flare.frag.spv", "lens_flare");
+    if (!shaders) return false;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
     // Push constant range: FlarePushConstants = 32 bytes, used by both vert and frag
     VkPushConstantRange pushRange{};
@@ -67,7 +99,7 @@ bool LensFlare::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayou
     pushRange.offset = 0;
     pushRange.size = sizeof(FlarePushConstants);  // 32 bytes
 
-    // No descriptor set layouts — lens flare only uses push constants
+    // No descriptor set layouts - lens flare only uses push constants
     pipelineLayout = createPipelineLayout(device, {}, {pushRange});
     if (pipelineLayout == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create lens flare pipeline layout");
@@ -75,45 +107,9 @@ bool LensFlare::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayou
     }
 
     // Vertex input: pos2 + uv2, stride = 4 * sizeof(float)
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = 4 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32_SFLOAT;
-    posAttr.offset = 0;
-
-    VkVertexInputAttributeDescription uvAttr{};
-    uvAttr.location = 1;
-    uvAttr.binding = 0;
-    uvAttr.format = VK_FORMAT_R32G32_SFLOAT;
-    uvAttr.offset = 2 * sizeof(float);
-
-    // Dynamic viewport and scissor
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    pipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr, uvAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest()
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
+    buildPipelines(device, vertStage, fragStage);
 
     // Shader modules can be freed after pipeline creation
-    vertModule.destroy();
-    fragModule.destroy();
 
     if (pipeline == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create lens flare pipeline");
@@ -126,22 +122,8 @@ bool LensFlare::initialize(VkContext* ctx, VkDescriptorSetLayout /*perFrameLayou
 
 void LensFlare::shutdown() {
     if (vkCtx) {
-        VkDevice device = vkCtx->getDevice();
-        VmaAllocator allocator = vkCtx->getAllocator();
-
-        if (vertexBuffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(allocator, vertexBuffer, vertexAlloc);
-            vertexBuffer = VK_NULL_HANDLE;
-            vertexAlloc  = VK_NULL_HANDLE;
-        }
-        if (pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, pipeline, nullptr);
-            pipeline = VK_NULL_HANDLE;
-        }
-        if (pipelineLayout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            pipelineLayout = VK_NULL_HANDLE;
-        }
+        destroyParticleResources(vkCtx->getDevice(), vkCtx->getAllocator(),
+                                 pipeline, pipelineLayout, vertexBuffer, vertexAlloc);
     }
 
     vkCtx = nullptr;
@@ -152,89 +134,44 @@ void LensFlare::recreatePipelines() {
     VkDevice device = vkCtx->getDevice();
 
     // Destroy old pipeline (NOT layout)
-    if (pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, pipeline, nullptr);
-        pipeline = VK_NULL_HANDLE;
-    }
+    destroy(device, pipeline);
 
-    VkShaderModule vertModule;
-    VkShaderModule fragModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/lens_flare.vert.spv") ||
-        !fragModule.loadFromFile(device, "assets/shaders/lens_flare.frag.spv")) {
-        LOG_ERROR("LensFlare::recreatePipelines: failed to load shader modules");
-        return;
-    }
+    auto shaders = loadShaderPair(device, "assets/shaders/lens_flare.vert.spv", "assets/shaders/lens_flare.frag.spv", "lens_flare");
+    if (!shaders) return;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
-
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = 4 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding = 0;
-    posAttr.format = VK_FORMAT_R32G32_SFLOAT;
-    posAttr.offset = 0;
-
-    VkVertexInputAttributeDescription uvAttr{};
-    uvAttr.location = 1;
-    uvAttr.binding = 0;
-    uvAttr.format = VK_FORMAT_R32G32_SFLOAT;
-    uvAttr.offset = 2 * sizeof(float);
-
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    pipeline = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr, uvAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest()
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
-        .setMultisample(vkCtx->getMsaaSamples())
-        .setLayout(pipelineLayout)
-        .setRenderPass(vkCtx->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx->getPipelineCache());
-
-    vertModule.destroy();
-    fragModule.destroy();
+    buildPipelines(device, vertStage, fragStage);
 }
 
 void LensFlare::generateFlareElements() {
     flareElements.clear();
 
     // Main sun glow (at sun position)
-    flareElements.push_back({0.0f, 0.3f, glm::vec3(1.0f, 0.95f, 0.8f), 0.8f});
+    flareElements.push_back({.position = 0.0f, .size = 0.3f, .color = glm::vec3(1.0f, 0.95f, 0.8f), .brightness = 0.8f});
 
     // Flare ghosts along sun-to-center axis
 
     // Bright white ghost near sun
-    flareElements.push_back({0.2f, 0.08f, glm::vec3(1.0f, 1.0f, 1.0f), 0.5f});
+    flareElements.push_back({.position = 0.2f, .size = 0.08f, .color = glm::vec3(1.0f, 1.0f, 1.0f), .brightness = 0.5f});
 
     // Blue-tinted ghost
-    flareElements.push_back({0.4f, 0.15f, glm::vec3(0.4f, 0.55f, 0.9f), 0.35f});
+    flareElements.push_back({.position = 0.4f, .size = 0.15f, .color = glm::vec3(0.4f, 0.55f, 0.9f), .brightness = 0.35f});
 
     // Small bright spot
-    flareElements.push_back({0.6f, 0.05f, glm::vec3(1.0f, 0.8f, 0.6f), 0.5f});
+    flareElements.push_back({.position = 0.6f, .size = 0.05f, .color = glm::vec3(1.0f, 0.8f, 0.6f), .brightness = 0.5f});
 
     // Warm amber ghost (replaced oversaturated green)
-    flareElements.push_back({0.8f, 0.10f, glm::vec3(0.9f, 0.75f, 0.5f), 0.2f});
+    flareElements.push_back({.position = 0.8f, .size = 0.10f, .color = glm::vec3(0.9f, 0.75f, 0.5f), .brightness = 0.2f});
 
     // Large halo on opposite side
-    flareElements.push_back({-0.5f, 0.22f, glm::vec3(1.0f, 0.8f, 0.5f), 0.15f});
+    flareElements.push_back({.position = -0.5f, .size = 0.22f, .color = glm::vec3(1.0f, 0.8f, 0.5f), .brightness = 0.15f});
 
     // Faint blue ghost far from sun
-    flareElements.push_back({-0.8f, 0.08f, glm::vec3(0.6f, 0.5f, 0.9f), 0.15f});
+    flareElements.push_back({.position = -0.8f, .size = 0.08f, .color = glm::vec3(0.6f, 0.5f, 0.9f), .brightness = 0.15f});
 
     // Small warm ghost
-    flareElements.push_back({-1.2f, 0.05f, glm::vec3(1.0f, 0.6f, 0.4f), 0.2f});
+    flareElements.push_back({.position = -1.2f, .size = 0.05f, .color = glm::vec3(1.0f, 0.6f, 0.4f), .brightness = 0.2f});
 }
 
 glm::vec2 LensFlare::worldToScreen(const Camera& camera, const glm::vec3& worldPos) const {
@@ -291,8 +228,17 @@ float LensFlare::calculateSunVisibility(const Camera& camera, const glm::vec3& s
 
 void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
                        float timeOfDay, float fogDensity, float cloudDensity,
-                       float weatherIntensity) {
+                       float weatherIntensity, float sunOcclusion) {
     if (!enabled || pipeline == VK_NULL_HANDLE) {
+        return;
+    }
+
+    // Nothing reaching the lens, nothing to scatter in it. Everything below
+    // asks where the sun is on screen and how thick the air is; none of it
+    // asks whether the sun can be seen from here, so a flare hung over the
+    // hillside that was covering it and over the ceiling of a building.
+    const float unblocked = 1.0f - glm::clamp(sunOcclusion, 0.0f, 1.0f);
+    if (unblocked < 0.01f) {
         return;
     }
 
@@ -317,12 +263,12 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
         return;
     }
 
-    // Sun height attenuation — flare weakens when sun is near horizon (sunrise/sunset)
+    // Sun height attenuation - flare weakens when sun is near horizon (sunrise/sunset)
     float sunHeight = sunDir.z;  // z = up in render space; 0 = horizon, 1 = zenith
     float heightFactor = glm::smoothstep(-0.05f, 0.25f, sunHeight);
 
-    // Atmospheric attenuation — fog, clouds, and weather reduce lens flare
-    float atmosphericFactor = heightFactor;
+    // Atmospheric attenuation - fog, clouds, and weather reduce lens flare
+    float atmosphericFactor = heightFactor * unblocked;
     atmosphericFactor *= (1.0f - glm::clamp(fogDensity * 0.8f, 0.0f, 0.9f));       // Heavy fog nearly kills flare
     atmosphericFactor *= (1.0f - glm::clamp(cloudDensity * 0.6f, 0.0f, 0.7f));     // Clouds attenuate
     atmosphericFactor *= (1.0f - glm::clamp(weatherIntensity * 0.9f, 0.0f, 0.95f)); // Rain/snow heavily attenuates
@@ -347,7 +293,7 @@ void LensFlare::render(VkCommandBuffer cmd, const Camera& camera, const glm::vec
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &offset);
 
-    // Warm tint at sunrise/sunset — shift flare color toward orange/amber when sun is low
+    // Warm tint at sunrise/sunset - shift flare color toward orange/amber when sun is low
     float warmTint = 1.0f - glm::smoothstep(0.05f, 0.35f, sunHeight);
 
     // Render each flare element

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Creature Family catalog (.wcef) — novel
+// Wowee Open Creature Family catalog (.wcef) - novel
 // replacement for Blizzard's CreatureFamily.dbc plus the
 // per-creature family fields in Creature.dbc. Defines the
 // family categorization that pet-able beasts share: Bear /
@@ -87,9 +87,9 @@ struct WoweeCreatureFamily {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t familyId) const;
+    [[nodiscard]] const Entry* findById(uint32_t familyId) const;
 
     static const char* familyKindName(uint8_t k);
     static const char* petTalentTreeName(uint8_t t);
@@ -104,15 +104,15 @@ public:
 
     // Preset emitters used by --gen-cef* variants.
     //
-    //   makeStarter   — 5 baseline beast families (Bear,
+    //   makeStarter   - 5 baseline beast families (Bear,
     //                    Cat, Wolf, Boar, Crab) covering
     //                    one entry per pet talent tree
     //                    plus a bonus Tenacity entry.
-    //   makeFerocity  — 4 Ferocity-tree damage pets
+    //   makeFerocity  - 4 Ferocity-tree damage pets
     //                    (Cat, Wolf, Devilsaur, Raptor).
-    //   makeExotic    — 4 exotic Beast Master families
+    //   makeExotic    - 4 exotic Beast Master families
     //                    (Worm, Devilsaur, Chimaera,
-    //                    CoreHound) — Exotic kind, requires
+    //                    CoreHound) - Exotic kind, requires
     //                    51-point BM talent to tame.
     static WoweeCreatureFamily makeStarter(const std::string& catalogName);
     static WoweeCreatureFamily makeFerocity(const std::string& catalogName);

@@ -11,44 +11,23 @@
 
 using wowee::ui::chat_utils::trim;
 using wowee::ui::chat_utils::toLower;
+namespace chat_utils = wowee::ui::chat_utils;
 
 namespace {
 
-bool isPortBotTarget(const std::string& target) {
-    std::string t = toLower(trim(target));
-    return t == "portbot" || t == "gmbot" || t == "telebot";
-}
-
-std::string buildPortBotCommand(const std::string& rawInput) {
-    std::string input = trim(rawInput);
-    if (input.empty()) return "";
-    std::string lower = toLower(input);
-    if (lower == "help" || lower == "?") return "__help__";
-    if (lower.rfind(".tele ", 0) == 0 || lower.rfind(".go ", 0) == 0) return input;
-    if (lower.rfind("xyz ", 0) == 0) return ".go " + input;
-    if (lower == "sw" || lower == "stormwind") return ".tele stormwind";
-    if (lower == "if" || lower == "ironforge") return ".tele ironforge";
-    if (lower == "darn" || lower == "darnassus") return ".tele darnassus";
-    if (lower == "org" || lower == "orgrimmar") return ".tele orgrimmar";
-    if (lower == "tb" || lower == "thunderbluff") return ".tele thunderbluff";
-    if (lower == "uc" || lower == "undercity") return ".tele undercity";
-    if (lower == "shatt" || lower == "shattrath") return ".tele shattrath";
-    if (lower == "dal" || lower == "dalaran") return ".tele dalaran";
-    return ".tele " + input;
-}
 
 // Send a whisper, intercepting PortBot targets for GM teleport commands.
 // Returns true if the whisper was handled (PortBot or normal send), false if empty.
 bool sendWhisperOrPortBot(wowee::game::GameHandler& gameHandler,
                           const std::string& target,
                           const std::string& message) {
-    if (isPortBotTarget(target)) {
-        std::string cmd = buildPortBotCommand(message);
+    if (chat_utils::isPortBotTarget(target)) {
+        std::string cmd = chat_utils::portBotCommandFor(message);
         wowee::game::MessageChatData msg;
         msg.type = wowee::game::ChatType::SYSTEM;
         msg.language = wowee::game::ChatLanguage::UNIVERSAL;
         if (cmd.empty() || cmd == "__help__") {
-            msg.message = "PortBot: /w PortBot <dest>. Aliases: sw if darn org tb uc shatt dal. Also supports '.tele ...' or 'xyz x y z [map [o]]'.";
+            msg.message = chat_utils::portBotHelpText();
             gameHandler.addLocalChatMessage(msg);
             return true;
         }
@@ -84,8 +63,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::SAY, 0);
     }
-    std::vector<std::string> aliases() const override { return {"s", "say"}; }
-    std::string helpText() const override { return "Say to nearby players"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"s", "say"}; }
+    [[nodiscard]] std::string helpText() const override { return "Say to nearby players"; }
 };
 
 // --- /y, /yell, /shout ---
@@ -94,8 +73,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::YELL, 1);
     }
-    std::vector<std::string> aliases() const override { return {"y", "yell", "shout"}; }
-    std::string helpText() const override { return "Yell to a wider area"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"y", "yell", "shout"}; }
+    [[nodiscard]] std::string helpText() const override { return "Yell to a wider area"; }
 };
 
 // --- /p, /party ---
@@ -104,8 +83,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::PARTY, 2);
     }
-    std::vector<std::string> aliases() const override { return {"p", "party"}; }
-    std::string helpText() const override { return "Party chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"p", "party"}; }
+    [[nodiscard]] std::string helpText() const override { return "Party chat"; }
 };
 
 // --- /g, /guild ---
@@ -114,8 +93,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::GUILD, 3);
     }
-    std::vector<std::string> aliases() const override { return {"g", "guild"}; }
-    std::string helpText() const override { return "Guild chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"g", "guild"}; }
+    [[nodiscard]] std::string helpText() const override { return "Guild chat"; }
 };
 
 // --- /raid, /rsay, /ra ---
@@ -124,8 +103,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::RAID, 5);
     }
-    std::vector<std::string> aliases() const override { return {"raid", "rsay", "ra"}; }
-    std::string helpText() const override { return "Raid chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"raid", "rsay", "ra"}; }
+    [[nodiscard]] std::string helpText() const override { return "Raid chat"; }
 };
 
 // --- /raidwarning, /rw ---
@@ -134,8 +113,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::RAID_WARNING, 8);
     }
-    std::vector<std::string> aliases() const override { return {"raidwarning", "rw"}; }
-    std::string helpText() const override { return "Raid warning"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"raidwarning", "rw"}; }
+    [[nodiscard]] std::string helpText() const override { return "Raid warning"; }
 };
 
 // --- /officer, /o, /osay ---
@@ -144,8 +123,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::OFFICER, 6);
     }
-    std::vector<std::string> aliases() const override { return {"officer", "o", "osay"}; }
-    std::string helpText() const override { return "Guild officer chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"officer", "o", "osay"}; }
+    [[nodiscard]] std::string helpText() const override { return "Guild officer chat"; }
 };
 
 // --- /battleground, /bg ---
@@ -154,8 +133,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::BATTLEGROUND, 7);
     }
-    std::vector<std::string> aliases() const override { return {"battleground", "bg"}; }
-    std::string helpText() const override { return "Battleground chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"battleground", "bg"}; }
+    [[nodiscard]] std::string helpText() const override { return "Battleground chat"; }
 };
 
 // --- /instance, /i ---
@@ -164,8 +143,8 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         return sendAndSwitch(ctx, game::ChatType::PARTY, 9);
     }
-    std::vector<std::string> aliases() const override { return {"instance", "i"}; }
-    std::string helpText() const override { return "Instance chat"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"instance", "i"}; }
+    [[nodiscard]] std::string helpText() const override { return "Instance chat"; }
 };
 
 // --- /join ---
@@ -184,8 +163,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"join"}; }
-    std::string helpText() const override { return "Join a chat channel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"join"}; }
+    [[nodiscard]] std::string helpText() const override { return "Join a chat channel"; }
 };
 
 // --- /leave (channel) ---
@@ -199,18 +178,18 @@ public:
         }
         // If no args, the group LeaveCommand will handle /leave (leave party)
         // so we return not-handled to allow fallthrough
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"leavechannel"}; }
-    std::string helpText() const override { return "Leave a chat channel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"leavechannel"}; }
+    [[nodiscard]] std::string helpText() const override { return "Leave a chat channel"; }
 };
 
 // --- /wts, /wtb ---
 class TradeChannelCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         const std::string tag = (ctx.fullCommand == "wts") ? "[WTS] " : "[WTB] ";
         std::string tradeChan;
         for (const auto& ch : ctx.gameHandler.getJoinedChannels()) {
@@ -229,11 +208,11 @@ public:
         ctx.gameHandler.sendChatMessage(game::ChatType::CHANNEL, tag + ctx.args, tradeChan);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"wts", "wtb"}; }
-    std::string helpText() const override { return "Send to Trade channel ([WTS]/[WTB] prefix)"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"wts", "wtb"}; }
+    [[nodiscard]] std::string helpText() const override { return "Send to Trade channel ([WTS]/[WTB] prefix)"; }
 };
 
-// --- /1 through /9 — channel shortcuts ---
+// --- /1 through /9 - channel shortcuts ---
 class ChannelNumberCommand : public IChatCommand {
 public:
     explicit ChannelNumberCommand(int num) : num_(num), alias_(std::to_string(num)) {}
@@ -251,8 +230,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {alias_}; }
-    std::string helpText() const override { return "Send to channel " + alias_; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {alias_}; }
+    [[nodiscard]] std::string helpText() const override { return "Send to channel " + alias_; }
 private:
     int num_;
     std::string alias_;
@@ -266,7 +245,7 @@ public:
         if (!ctx.args.empty()) {
             size_t msgStart = ctx.args.find(' ');
             if (msgStart != std::string::npos) {
-                // /w PlayerName message — send whisper immediately (PortBot-aware)
+                // /w PlayerName message - send whisper immediately (PortBot-aware)
                 std::string target = ctx.args.substr(0, msgStart);
                 std::string message = ctx.args.substr(msgStart + 1);
                 sendWhisperOrPortBot(ctx.gameHandler, target, message);
@@ -276,7 +255,7 @@ public:
                 strncpy(buf, target.c_str(), sz - 1);
                 buf[sz - 1] = '\0';
             } else {
-                // /w PlayerName — switch to whisper mode with target set
+                // /w PlayerName - switch to whisper mode with target set
                 char* buf = ctx.panel.getWhisperTargetBuffer();
                 size_t sz = ctx.panel.getWhisperTargetBufferSize();
                 strncpy(buf, ctx.args.c_str(), sz - 1);
@@ -285,8 +264,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"w", "whisper", "tell", "t"}; }
-    std::string helpText() const override { return "Whisper to a player"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"w", "whisper", "tell", "t"}; }
+    [[nodiscard]] std::string helpText() const override { return "Whisper to a player"; }
 };
 
 // --- /r, /reply ---
@@ -313,8 +292,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"r", "reply"}; }
-    std::string helpText() const override { return "Reply to last whisper"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"r", "reply"}; }
+    [[nodiscard]] std::string helpText() const override { return "Reply to last whisper"; }
 };
 
 // --- Registration ---

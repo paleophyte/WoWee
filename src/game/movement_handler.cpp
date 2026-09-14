@@ -35,10 +35,10 @@ struct KnownAreaTriggerDestination {
 };
 
 constexpr KnownAreaTriggerDestination kKnownAreaTriggerDestinations[] = {
-    {2166, 0,   -4838.95f, -1318.46f, 501.868f, 1.42372f}, // Deeprun Tram -> Ironforge
-    {2171, 0,   -8364.57f,   535.981f, 91.7969f, 2.24619f}, // Deeprun Tram -> Stormwind
-    {2173, 369,    68.3006f, 2490.91f, -4.29647f, 3.12192f}, // Stormwind -> Deeprun Tram
-    {2175, 369,    69.2542f,   10.257f, -4.29664f, 3.09832f}, // Ironforge -> Deeprun Tram
+    {.triggerId = 2166, .mapId = 0,   .serverX = -4838.95f, .serverY = -1318.46f, .serverZ = 501.868f, .serverO = 1.42372f}, // Deeprun Tram -> Ironforge
+    {.triggerId = 2171, .mapId = 0,   .serverX = -8364.57f,   .serverY = 535.981f, .serverZ = 91.7969f, .serverO = 2.24619f}, // Deeprun Tram -> Stormwind
+    {.triggerId = 2173, .mapId = 369,    .serverX = 68.3006f, .serverY = 2490.91f, .serverZ = -4.29647f, .serverO = 3.12192f}, // Stormwind -> Deeprun Tram
+    {.triggerId = 2175, .mapId = 369,    .serverX = 69.2542f,   .serverY = 10.257f, .serverZ = -4.29664f, .serverO = 3.09832f}, // Ironforge -> Deeprun Tram
 };
 
 const KnownAreaTriggerDestination* findKnownAreaTriggerDestination(uint32_t triggerId, uint32_t mapId) {
@@ -114,19 +114,41 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 
     // Spline move: synth flags (each opcode produces different flags)
     {
-        auto makeSynthHandler = [this](uint32_t synthFlags) {
-            return [this, synthFlags](network::Packet& packet) {
+        auto makeSynthHandler = [this](uint32_t synthFlags, uint32_t mask) {
+            return [this, synthFlags, mask](network::Packet& packet) {
                 if (!packet.hasRemaining(1)) return;
                 uint64_t guid = packet.readPackedGuid();
                 if (guid == 0 || guid == owner_.getPlayerGuid() || !owner_.unitMoveFlagsCallbackRef()) return;
-                owner_.unitMoveFlagsCallbackRef()(guid, synthFlags);
+                owner_.unitMoveFlagsCallbackRef()(guid, synthFlags, mask);
             };
         };
-        table[Opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE] = makeSynthHandler(0x00000100u);
-        table[Opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE]  = makeSynthHandler(0u);
-        table[Opcode::SMSG_SPLINE_MOVE_SET_FLYING]    = makeSynthHandler(0x01000000u | 0x00800000u);
-        table[Opcode::SMSG_SPLINE_MOVE_START_SWIM]    = makeSynthHandler(0x00200000u);
-        table[Opcode::SMSG_SPLINE_MOVE_STOP_SWIM]     = makeSynthHandler(0u);
+        // These are this client's own movement flags, not wire values: the
+        // opcode carries no flag word and the handler invents one to describe
+        // what the unit is now doing. Naming them keeps them following
+        // MovementFlags, which is what every reader compares against.
+        constexpr auto asFlag = [](MovementFlags f) { return static_cast<uint32_t>(f); };
+        constexpr uint32_t kWalkBit = asFlag(MovementFlags::WALKING);
+        constexpr uint32_t kSwimBit = asFlag(MovementFlags::SWIMMING);
+        constexpr uint32_t kFlyBits =
+            asFlag(MovementFlags::CAN_FLY) | asFlag(MovementFlags::FLYING);
+
+        table[Opcode::SMSG_SPLINE_MOVE_SET_WALK_MODE] =
+            makeSynthHandler(kWalkBit, kWalkBit);
+        // Run mode says the unit is not walking. It says nothing about
+        // swimming or flying, and clearing those took the flight animation off
+        // anything that started moving.
+        table[Opcode::SMSG_SPLINE_MOVE_SET_RUN_MODE]  = makeSynthHandler(0u, kWalkBit);
+        // CAN_FLY because that is what the opcode means - AzerothCore sends it
+        // from Unit::SetCanFly for units the client does not control - and
+        // FLYING because that is the flag the animation reads.
+        //
+        // It used to synthesise CAN_FLY and DESCENDING. Nothing reads either:
+        // the callback these flags reach keys swimming, walking and flying off
+        // SWIMMING, WALKING and FLYING, so the opcode landed, was parsed, and
+        // changed nothing. A gryphon told to fly kept its ground animation.
+        table[Opcode::SMSG_SPLINE_MOVE_SET_FLYING]    = makeSynthHandler(kFlyBits, kFlyBits);
+        table[Opcode::SMSG_SPLINE_MOVE_START_SWIM]    = makeSynthHandler(kSwimBit, kSwimBit);
+        table[Opcode::SMSG_SPLINE_MOVE_STOP_SWIM]     = makeSynthHandler(0u, kSwimBit);
     }
 
     // Spline speed: all opcodes share the same PackedGuid+float format, differing
@@ -226,6 +248,17 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
                      Opcode::MSG_MOVE_START_DESCEND, Opcode::MSG_MOVE_SET_PITCH,
                      Opcode::MSG_MOVE_GRAVITY_CHNG, Opcode::MSG_MOVE_UPDATE_CAN_FLY,
                      Opcode::MSG_MOVE_UPDATE_CAN_TRANSITION_BETWEEN_SWIM_AND_FLY,
+                     // The three that were left out of this list while their
+                     // siblings were in it. AzerothCore answers a force-move
+                     // ack by broadcasting the mover's movement info to
+                     // everyone but the mover - MiscHandler's switch turns
+                     // CMSG_MOVE_HOVER_ACK into MSG_MOVE_HOVER and so on - so
+                     // these carry another player's position and flags at the
+                     // moment they start hovering, feather-falling or walking
+                     // on water, and dropping them left that player where they
+                     // were last seen until their next heartbeat.
+                     Opcode::MSG_MOVE_HOVER, Opcode::MSG_MOVE_FEATHER_FALL,
+                     Opcode::MSG_MOVE_WATER_WALK,
                      Opcode::MSG_MOVE_ROOT, Opcode::MSG_MOVE_UNROOT }) {
         table[op] = [this](network::Packet& packet) {
             if (owner_.getState() == WorldState::IN_WORLD) handleOtherPlayerMovement(packet);
@@ -254,7 +287,7 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
                     Opcode::SMSG_SPLINE_MOVE_UNSET_HOVER,
                     Opcode::SMSG_SPLINE_MOVE_WATER_WALK}) {
         table[op] = [](network::Packet& packet) {
-            // Minimal parse: PackedGuid only — no animation-relevant state change.
+            // Minimal parse: PackedGuid only - no animation-relevant state change.
             if (packet.hasRemaining(1)) {
                 (void)packet.readPackedGuid();
             }
@@ -266,16 +299,21 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
         if (!packet.hasRemaining(1)) return;
         uint64_t guid = packet.readPackedGuid();
         if (guid == 0 || guid == owner_.getPlayerGuid() || !owner_.unitMoveFlagsCallbackRef()) return;
-        owner_.unitMoveFlagsCallbackRef()(guid, 0u); // clear flying/CAN_FLY
+        // Only the flying bits: this opcode says nothing about walking or
+        // swimming.
+        owner_.unitMoveFlagsCallbackRef()(
+            guid, 0u,
+            static_cast<uint32_t>(MovementFlags::CAN_FLY) |
+                static_cast<uint32_t>(MovementFlags::FLYING));
     };
 
-    // Remaining spline speed opcodes — same factory as above.
+    // Remaining spline speed opcodes - same factory as above.
     table[Opcode::SMSG_SPLINE_SET_FLIGHT_SPEED]      = makeSplineSpeedHandler(&MovementHandler::serverFlightSpeed_);
     table[Opcode::SMSG_SPLINE_SET_FLIGHT_BACK_SPEED]  = makeSplineSpeedHandler(&MovementHandler::serverFlightBackSpeed_);
     table[Opcode::SMSG_SPLINE_SET_SWIM_BACK_SPEED]    = makeSplineSpeedHandler(&MovementHandler::serverSwimBackSpeed_);
     table[Opcode::SMSG_SPLINE_SET_WALK_SPEED]          = makeSplineSpeedHandler(&MovementHandler::serverWalkSpeed_);
     table[Opcode::SMSG_SPLINE_SET_TURN_RATE]           = makeSplineSpeedHandler(&MovementHandler::serverTurnRate_);
-    // Pitch rate not stored locally — consume packet to keep stream aligned.
+    // Pitch rate not stored locally - consume packet to keep stream aligned.
     table[Opcode::SMSG_SPLINE_SET_PITCH_RATE] = [](network::Packet& packet) { packet.skipAll(); };
 
     // ---- Player movement flag changes (server-pushed) ----
@@ -321,27 +359,23 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
 // ============================================================
 
 void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
-    // Minimal parse: PackedGuid + uint8 allowMovement.
-    if (!packet.hasRemaining(2)) {
-        LOG_WARNING("SMSG_CLIENT_CONTROL_UPDATE too short: ", packet.getSize(), " bytes");
-        return;
-    }
-    uint8_t guidMask = packet.readUInt8();
-    size_t guidBytes = 0;
-    uint64_t controlGuid = 0;
-    for (int i = 0; i < 8; ++i) {
-        if (guidMask & (1u << i)) ++guidBytes;
-    }
-    if (!packet.hasRemaining(guidBytes + 1)) {
+    // PackedGuid + uint8 allowMovement.
+    //
+    // Through readPackedGuid rather than the byte loop that used to be written
+    // out here. It decoded correctly, but it was a second copy of the packed
+    // guid rule, and the layout sweep - which reads the widths a handler asks
+    // for - saw a handler taking a uint8 where the server writes a guid and
+    // called it a misparse. A second copy of a wire rule costs that twice
+    // over: it can drift, and it hides the handler from the check.
+    if (!packet.hasFullPackedGuid()) {
         LOG_WARNING("SMSG_CLIENT_CONTROL_UPDATE malformed (truncated packed guid)");
         packet.skipAll();
         return;
     }
-    for (int i = 0; i < 8; ++i) {
-        if (guidMask & (1u << i)) {
-            uint8_t b = packet.readUInt8();
-            controlGuid |= (static_cast<uint64_t>(b) << (i * 8));
-        }
+    const uint64_t controlGuid = packet.readPackedGuid();
+    if (!packet.hasRemaining(1)) {
+        LOG_WARNING("SMSG_CLIENT_CONTROL_UPDATE too short: ", packet.getSize(), " bytes");
+        return;
     }
     bool allowMovement = (packet.readUInt8() != 0);
     if (controlGuid == 0 || controlGuid == owner_.getPlayerGuid()) {
@@ -398,8 +432,8 @@ bool MovementHandler::restoreWorldTransferFallbackIfNearOrigin(const char* conte
     if (!worldTransferFallbackValid_ || owner_.getCurrentMapId() != worldTransferFallbackMapId_) {
         return false;
     }
-    if (owner_.getCurrentMapId() != 0 ||
-        std::abs(movementInfo.x) >= 1000.0f || std::abs(movementInfo.y) >= 1000.0f) {
+    if (!isCorruptOriginPosition(owner_.getCurrentMapId(),
+                                movementInfo.x, movementInfo.y, movementInfo.z)) {
         return false;
     }
 
@@ -564,6 +598,33 @@ void MovementHandler::sendMovement(Opcode opcode) {
             movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::ASCENDING);
             movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::DESCENDING);
             break;
+        case Opcode::MSG_MOVE_START_SWIM:
+            // The camera controller has sent this pair on every water entry
+            // and exit all along; nothing here listened, so no movement packet
+            // this client sends has ever carried SWIMMING. The server reads
+            // pitch only when the flag is set, which is why a swimming
+            // character looked flat to everyone else, and isSwimming() - which
+            // reads this same word - answered no while the player swam.
+            movementInfo.flags |= static_cast<uint32_t>(MovementFlags::SWIMMING);
+            // Entering water ends a fall, and nothing else would: FALL_LAND is
+            // sent on touching ground and a swimmer never touches it, so a
+            // jump into a lake left FALLING set with fallTime still climbing.
+            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::FALLING);
+            isFalling_ = false;
+            fallStartMs_ = 0;
+            movementInfo.fallTime = 0;
+            movementInfo.jumpVelocity = 0.0f;
+            movementInfo.jumpSinAngle = 0.0f;
+            movementInfo.jumpCosAngle = 0.0f;
+            movementInfo.jumpXYSpeed = 0.0f;
+            break;
+        case Opcode::MSG_MOVE_STOP_SWIM:
+            movementInfo.flags &= ~static_cast<uint32_t>(MovementFlags::SWIMMING);
+            // Out of the water level again, so the next packet that does carry
+            // a pitch - a flying mount - starts from horizontal rather than
+            // from however the swimmer was last angled.
+            movementInfo.pitch = 0.0f;
+            break;
         case Opcode::MSG_MOVE_START_DESCEND:
             // Must set DESCENDING so outgoing movement packets carry the correct
             // flag during flight descent. Only clearing ASCENDING left the flag
@@ -628,11 +689,11 @@ void MovementHandler::sendMovement(Opcode opcode) {
             }
         }
         if (!transportResolved) {
-            // Transport not tracked — don't send ONTRANSPORT to the server.
+            // Transport not tracked - don't send ONTRANSPORT to the server.
             // Sending stale transport GUID + local offset causes the server to
             // compute a bad world position and teleport us to map origin.
             LOG_WARNING("sendMovement: transport 0x", std::hex, owner_.playerTransportGuidRef(),
-                        std::dec, " not found — clearing transport state");
+                        std::dec, " not found - clearing transport state");
             includeTransportInWire = false;
             owner_.clearPlayerTransport();
         }
@@ -667,24 +728,13 @@ void MovementHandler::sendMovement(Opcode opcode) {
     }
 
     if (opcode == Opcode::MSG_MOVE_HEARTBEAT && isClassicLikeExpansion()) {
-        const uint32_t locomotionFlags =
-            static_cast<uint32_t>(MovementFlags::FORWARD) |
-            static_cast<uint32_t>(MovementFlags::BACKWARD) |
-            static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
-            static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) |
-            static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
-            static_cast<uint32_t>(MovementFlags::TURN_RIGHT) |
-            static_cast<uint32_t>(MovementFlags::ASCENDING) |
-            static_cast<uint32_t>(MovementFlags::FALLING) |
-            static_cast<uint32_t>(MovementFlags::FALLINGFAR) |
-            static_cast<uint32_t>(MovementFlags::SWIMMING);
         const bool stationaryIdle =
             !onTaxiFlight_ &&
             !taxiMountActive_ &&
             !taxiActivatePending_ &&
             !taxiClientActive_ &&
             !includeTransportInWire &&
-            (movementInfo.flags & locomotionFlags) == 0;
+            (movementInfo.flags & kLocomotionFlags) == 0;
         const uint32_t sinceLastHeartbeatMs =
             lastHeartbeatSendTimeMs_ != 0 && movementTime >= lastHeartbeatSendTimeMs_
                 ? (movementTime - lastHeartbeatSendTimeMs_)
@@ -717,8 +767,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // These positions are almost certainly bugs (area trigger misfire, corrupted
     // save). Sending them tells the server the player is there, which persists
     // the bad position across sessions and creates a teleport loop.
-    if (owner_.getCurrentMapId() == 0 &&
-        std::abs(movementInfo.x) < 1000.0f && std::abs(movementInfo.y) < 1000.0f) {
+    if (isCorruptOriginPosition(owner_.getCurrentMapId(),
+                               movementInfo.x, movementInfo.y, movementInfo.z)) {
         if (!restoreWorldTransferFallbackIfNearOrigin("sendMovement")) {
             LOG_WARNING("sendMovement: BLOCKED near-origin heartbeat canonical=(",
                         movementInfo.x, ", ", movementInfo.y, ", ", movementInfo.z,
@@ -736,7 +786,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
     wireInfo.y = serverPos.y;
     wireInfo.z = serverPos.z;
 
-    // Periodic position audit — log every ~60 heartbeats (~30s) to trace position drift.
+    // Periodic position audit - log every ~60 heartbeats (~30s) to trace position drift.
     if (opcode == Opcode::MSG_MOVE_HEARTBEAT && ++heartbeatLogCount_ % 60 == 0) {
         LOG_DEBUG("HEARTBEAT #", heartbeatLogCount_, " canonical=(",
                     movementInfo.x, ",", movementInfo.y, ",", movementInfo.z,
@@ -819,7 +869,6 @@ void MovementHandler::forceClearTaxiAndMovementState() {
         owner_.mountCallbackRef()(0);
     }
     taxiMountActive_ = false;
-    taxiMountDisplayId_ = 0;
     // A normal mount is owned by its aura/update-field path. Do not silently
     // zero it here without firing the mount callback: that leaves the rendered
     // mount behind and reconciliation spawns a duplicate. Unstuck explicitly
@@ -870,6 +919,14 @@ void MovementHandler::setOrientation(float orientation) {
 
 void MovementHandler::dismount() {
     if (!owner_.getSocket()) return;
+    // The player's mount field goes on reading its old value for a few frames
+    // after the request goes out. Believing it re-mounts the player behind their
+    // back, and that stale value then makes the server's own SMSG_DISMOUNT look
+    // transient and get thrown away - the mount blinked off, back on, and off
+    // again over about two hundred milliseconds, with the character caught
+    // holding the seated rider pose in between.
+    constexpr float kDismountGraceSeconds = 1.5f;
+    dismountGraceRemaining_ = kDismountGraceSeconds;
     uint32_t savedMountAura = owner_.mountAuraSpellIdRef();
     if (owner_.currentMountDisplayIdRef() != 0 || taxiMountActive_) {
         if (owner_.mountCallbackRef()) {
@@ -877,7 +934,6 @@ void MovementHandler::dismount() {
         }
         owner_.currentMountDisplayIdRef() = 0;
         taxiMountActive_ = false;
-        taxiMountDisplayId_ = 0;
         owner_.mountAuraSpellIdRef() = 0;
         LOG_INFO("Dismount: cleared local mount state, onTaxiFlight=", onTaxiFlight_);
     }
@@ -889,13 +945,13 @@ void MovementHandler::dismount() {
     } else if (savedMountAura != 0) {
         auto pkt = CancelAuraPacket::build(savedMountAura);
         owner_.getSocket()->send(pkt);
-        LOG_INFO("Sent CMSG_CANCEL_AURA (mount spell ", savedMountAura, ") — Classic fallback");
+        LOG_INFO("Sent CMSG_CANCEL_AURA (mount spell ", savedMountAura, ") - Classic fallback");
     } else {
         for (const auto& a : owner_.getPlayerAuras()) {
             if (!a.isEmpty() && a.maxDurationMs < 0 && a.casterGuid == owner_.getPlayerGuid()) {
                 auto pkt = CancelAuraPacket::build(a.spellId);
                 owner_.getSocket()->send(pkt);
-                LOG_INFO("Sent CMSG_CANCEL_AURA (spell ", a.spellId, ") — brute force dismount");
+                LOG_INFO("Sent CMSG_CANCEL_AURA (spell ", a.spellId, ") - brute force dismount");
             }
         }
     }
@@ -965,7 +1021,7 @@ void MovementHandler::handleForceSpeedChange(network::Packet& packet, const char
 
     if (guid != owner_.getPlayerGuid()) return;
 
-    // Validate BEFORE sending ACK — if we echo a bad speed back to the server
+    // Validate BEFORE sending ACK - if we echo a bad speed back to the server
     // but don't apply it locally, the client and server desync on movement speed.
     if (std::isnan(newSpeed) || newSpeed < 0.1f || newSpeed > 100.0f) {
         LOG_WARNING("Ignoring invalid ", name, " speed: ", newSpeed);
@@ -1217,7 +1273,7 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     }
 
     if (owner_.unitMoveFlagsCallbackRef()) {
-        owner_.unitMoveFlagsCallbackRef()(moverGuid, info.flags);
+        owner_.unitMoveFlagsCallbackRef()(moverGuid, info.flags, ~0u);
     }
 }
 
@@ -1539,7 +1595,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
             isPreWotlkSplineWalking(data.splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.unitMoveFlagsCallbackRef()(data.guid, locomotionFlags);
+        owner_.unitMoveFlagsCallbackRef()(data.guid, locomotionFlags, ~0u);
     }
 
     if (data.hasDest) {
@@ -1709,7 +1765,10 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
     // Consolidated spline body parser
     SplineBlockData spline;
     if (!parseMonsterMoveSplineBody(packet, spline, splineFlags,
-                                    glm::vec3(localX, localY, localZ))) {
+                                    glm::vec3(localX, localY, localZ),
+                                    /*useTbcUncompressedMask=*/false,
+                                    isPreWotlk() ? SplineFlagSet::PreWotlk
+                                                 : SplineFlagSet::Wotlk)) {
         return;
     }
     uint32_t duration = spline.duration;
@@ -1727,7 +1786,7 @@ void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
             isPreWotlkSplineWalking(splineFlags)
                 ? static_cast<uint32_t>(MovementFlags::WALKING)
                 : 0u;
-        owner_.unitMoveFlagsCallbackRef()(moverGuid, locomotionFlags);
+        owner_.unitMoveFlagsCallbackRef()(moverGuid, locomotionFlags, ~0u);
     }
 
     if (!owner_.getTransportManager()) {
@@ -1787,21 +1846,24 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     if (!packet.hasRemaining(4)) return;
     uint32_t counter = packet.readUInt32();
 
-    const bool taNoFlags2 = isPreWotlk();
-    // TBC sends one extra byte here that isn't part of the documented
-    // MovementInfo layout - confirmed by live capture against CMaNGOS TBC
-    // (byte value 0x04, constant across samples) and verified against a
-    // known ground-truth teleport target (.go xyz to ironforge-city decoded
-    // to the exact expected x/y/z only once this byte was accounted for).
-    // True Vanilla (VMangos) does NOT send it - confirmed by live capture
-    // against VMangos 1.12.1: assuming this byte for "classic" produced
-    // garbage x/y/z (denormalized near-zero floats), and removing it for
-    // classic decoded the exact expected .go xyz target with no remainder.
-    // So this is a TBC-only quirk, not a general pre-WotLK one - narrower
-    // than the moveFlags2 check below, which WotLK genuinely added and
-    // every earlier expansion (classic/tbc/turtle) genuinely lacks.
-    const bool taExtraByte = isActiveExpansion("tbc");
-    const size_t minMoveSz = (4 + (taNoFlags2 ? 0 : 2) + 4 + (taExtraByte ? 1 : 0) + 4 * 4);
+    // Three layouts, not two.
+    //
+    // WotLK writes moveFlags2 as a uint16. TBC writes it as a single byte -
+    // that is the "unknown byte, constant 0x04" a live capture found here, and
+    // reading it is what made a ground-truth teleport (.go xyz to
+    // ironforge-city) decode to the expected x/y/z. Vanilla has no moveFlags2
+    // field at all.
+    //
+    // isPreWotlk() is true for vanilla and TBC alike, so gating the byte on it
+    // read one byte too many on vanilla and shifted x, y, z and orientation by
+    // a byte each. The coordinates that came out were garbage derived from the
+    // same misalignment every time, which is why .tele to three different
+    // places all arrived somewhere in Stonetalon. Reported as issue 113.
+    const bool taNoFlags2 = isPreWotlk();          // no uint16 moveFlags2
+    const bool taByteFlags2 = isActiveExpansion("tbc");  // ...but TBC has a uint8
+    const size_t minMoveSz = taNoFlags2
+        ? (4 + (taByteFlags2 ? 1u : 0u) + 4 + 4 * 4)
+        : (4 + 2 + 4 + 4 * 4);
     if (packet.getRemainingSize() < minMoveSz) {
         LOG_WARNING("MSG_MOVE_TELEPORT_ACK: not enough data for movement info");
         return;
@@ -1811,8 +1873,8 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
     if (!taNoFlags2)
         packet.readUInt16();  // moveFlags2 (WotLK only)
     uint32_t moveTime = packet.readUInt32();
-    if (taExtraByte)
-        packet.readUInt8();  // unknown byte, TBC only (see comment above)
+    if (taByteFlags2)
+        packet.readUInt8();  // TBC's uint8 moveFlags2 (see comment above)
     float serverX = packet.readFloat();
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
@@ -1830,37 +1892,63 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
             entity->setPosition(canonical.x, canonical.y, canonical.z,
                                 core::coords::serverToCanonicalYaw(orientation));
         }
-        LOG_INFO("MSG_MOVE_TELEPORT_ACK for remote entity 0x", std::hex, guid, std::dec, " — ignored for local player");
+        LOG_INFO("MSG_MOVE_TELEPORT_ACK for remote entity 0x", std::hex, guid, std::dec, " - ignored for local player");
         return;
     }
 
     glm::vec3 canonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
 
-    // Reject teleports to a near-origin position on Eastern Kingdoms (map 0).
-    // No legitimate gameplay sends the player there; in this codebase it has
-    // only ever been an area-trigger-destination misfire on the server side.
-    // Refusing it (no ACK, no position update, no world reload) keeps the
-    // client at its current position. Heartbeats from the real position will
-    // eventually convince the server's anti-cheat to update its record.
-    if (owner_.getCurrentMapId() == 0 &&
-        std::abs(canonical.x) < 1000.0f && std::abs(canonical.y) < 1000.0f) {
-        LOG_WARNING("REJECTED MSG_MOVE_TELEPORT to near-origin canonical=(",
-                    canonical.x, ", ", canonical.y, ", ", canonical.z, ")"
-                    " — keeping current position");
-        return;
+    // A destination that is the map origin itself, which is a server-side
+    // area-trigger misfire rather than anywhere anyone goes.
+    //
+    // This used to be a two-thousand-yard box - |x| and |y| under a thousand
+    // on map 0 - and returned from here without acknowledging. Both halves
+    // were wrong, and together they are what desynced the player from the
+    // server for the rest of the session.
+    //
+    // The box: canonical swaps x and y off the wire, so that test was a square
+    // two thousand yards on a side centred on the origin of Eastern Kingdoms,
+    // and Hillsbrad Foothills sits on it. AzerothCore's own game_tele puts
+    // Southshore at -853, -533 - inside it. So the hearthstone to the
+    // Southshore inn, the Southshore graveyard and the inn's own tavern
+    // trigger were all "near-origin misfires".
+    //
+    // The silence: the server sets a teleport semaphore when it sends this and
+    // clears it when the acknowledgement comes back. Until then
+    // WorldSession::HandleMovementOpcodes returns at its first line and throws
+    // away every movement packet we send. So the note this replaces - that
+    // heartbeats from the real position would eventually convince the server -
+    // had it exactly backwards: no heartbeat could be heard at all. The client
+    // walked on from where it thought it was, the server kept the player where
+    // it had put them, no creatures arrived anywhere near the player, and a
+    // relog put them back at the server's copy.
+    //
+    // The acknowledgement is now unconditional. Only the position is refused,
+    // and only for a destination within a few yards of the origin, which no
+    // legitimate teleport is.
+    constexpr float kOriginMisfireRadius = 50.0f;
+    const bool originMisfire = owner_.getCurrentMapId() == 0 &&
+        std::abs(canonical.x) < kOriginMisfireRadius &&
+        std::abs(canonical.y) < kOriginMisfireRadius;
+
+    if (originMisfire) {
+        LOG_WARNING("MSG_MOVE_TELEPORT to the map origin canonical=(",
+                    canonical.x, ", ", canonical.y, ", ", canonical.z,
+                    ") - acknowledging so the server stops discarding our "
+                    "movement, then telling it where we really are");
+    } else {
+        movementInfo.x = canonical.x;
+        movementInfo.y = canonical.y;
+        movementInfo.z = canonical.z;
+        movementInfo.orientation = core::coords::serverToCanonicalYaw(orientation);
+        movementInfo.flags = 0;
     }
 
-    movementInfo.x = canonical.x;
-    movementInfo.y = canonical.y;
-    movementInfo.z = canonical.z;
-    movementInfo.orientation = core::coords::serverToCanonicalYaw(orientation);
-    movementInfo.flags = 0;
-
-    // Clear cast bar on teleport — SpellHandler owns the casting_ flag
+    // Clear cast bar on teleport - SpellHandler owns the casting_ flag
     if (owner_.getSpellHandler()) owner_.getSpellHandler()->resetCastState();
 
     // Suppress area triggers briefly after teleport. A one-shot flag is not
-    // enough — the player can leave and re-enter a trigger within seconds and
+    // enough - the player can leave and re-enter a trigger within seconds and
     // get teleported again before the world has finished loading. Deeprun Tram
     // (map 369) is a narrow hallway with portal triggers close to the spawn,
     // so keep its grace window short enough that exits remain usable.
@@ -1890,7 +1978,9 @@ void MovementHandler::handleTeleportAck(network::Packet& packet) {
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
-    if (owner_.worldEntryCallbackRef()) {
+    // Only where the destination was taken. A misfire leaves the player where
+    // they are, so there is no world entry to announce.
+    if (!originMisfire && owner_.worldEntryCallbackRef()) {
         owner_.worldEntryCallbackRef()(owner_.currentMapIdRef(), serverX, serverY, serverZ, false);
     }
 }
@@ -1965,7 +2055,8 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
 
     glm::vec3 receivedCanonical = core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ));
     const bool badEasternKingdomsNearOrigin =
-        mapId == 0 && std::abs(receivedCanonical.x) < 1000.0f && std::abs(receivedCanonical.y) < 1000.0f;
+        isCorruptOriginPosition(mapId, receivedCanonical.x, receivedCanonical.y,
+                                receivedCanonical.z);
     if (badEasternKingdomsNearOrigin) {
         if (hasPendingAreaTriggerDestination && pendingAreaTriggerDestinationMapId == mapId) {
             LOG_WARNING("Correcting bad SMSG_NEW_WORLD near-origin destination for area trigger ",
@@ -2000,7 +2091,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     const bool isSameMap       = (mapId == owner_.currentMapIdRef());
     const bool isResurrection  = owner_.resurrectPendingRef();
     if (isSameMap && isResurrection) {
-        LOG_INFO("SMSG_NEW_WORLD same-map resurrection — skipping world reload");
+        LOG_INFO("SMSG_NEW_WORLD same-map resurrection - skipping world reload");
 
         glm::vec3 canonical = receivedCanonical;
         movementInfo.x = canonical.x;
@@ -2067,7 +2158,6 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     taxiRecoverPending_ = false;
     taxiStartGrace_ = 0.0f;
     owner_.currentMountDisplayIdRef() = 0;
-    taxiMountDisplayId_ = 0;
     if (owner_.mountCallbackRef()) {
         owner_.mountCallbackRef()(0);
     }
@@ -2091,7 +2181,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     owner_.getEntityManager().clear();
     owner_.clearHostileAttackers();
     owner_.worldStatesRef().clear();
-    owner_.gossipPoisRef().clear();
+    owner_.clearGossipPois();
     owner_.worldStateMapIdRef() = mapId;
     owner_.worldStateZoneIdRef() = 0;
     owner_.activeAreaTriggersRef().clear();
@@ -2134,10 +2224,13 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
 
 void MovementHandler::loadTaxiDbc() {
     if (taxiDbcLoaded_) return;
-    taxiDbcLoaded_ = true;
 
     auto* am = owner_.services().assetManager;
+    // Not an attempt: the assets are not there to read yet, and a
+    // caller can reach this before they are. Marking it loaded here
+    // meant one early call disabled this file for the whole session.
     if (!am || !am->isInitialized()) return;
+    taxiDbcLoaded_ = true;
 
     auto nodesDbc = am->loadDBC("TaxiNodes.dbc");
     if (nodesDbc && nodesDbc->isLoaded()) {
@@ -2149,10 +2242,13 @@ void MovementHandler::loadTaxiDbc() {
         const uint32_t tnYField    = tnL ? (*tnL)["Y"]     : 3;
         const uint32_t tnZField    = tnL ? (*tnL)["Z"]     : 4;
         const uint32_t tnNameField = tnL ? (*tnL)["Name"]  : 5;
-        const uint32_t mountAllianceField = tnL ? (*tnL)["MountDisplayIdAlliance"]         : 22;
-        const uint32_t mountHordeField    = tnL ? (*tnL)["MountDisplayIdHorde"]            : 23;
-        const uint32_t mountAllianceFB    = tnL ? (*tnL)["MountDisplayIdAllianceFallback"] : 20;
-        const uint32_t mountHordeFB       = tnL ? (*tnL)["MountDisplayIdHordeFallback"]    : 21;
+        // TaxiNodes.dbc ends with the two mount creature ids and nothing else.
+        // There used to be a "fallback" pair read when both were zero, at 20
+        // and 21 - which are the last name locale and the name flags word, so
+        // a node with no mount took 16712190 as a display id. There is no
+        // second pair to fall back to; a node without a mount has none.
+        const uint32_t mountAllianceField = tnL ? (*tnL)["MountDisplayIdAlliance"] : 22;
+        const uint32_t mountHordeField    = tnL ? (*tnL)["MountDisplayIdHorde"]    : 23;
         uint32_t fieldCount = nodesDbc->getFieldCount();
         for (uint32_t i = 0; i < nodesDbc->getRecordCount(); i++) {
             TaxiNode node;
@@ -2165,10 +2261,6 @@ void MovementHandler::loadTaxiDbc() {
             if (fieldCount > mountHordeField) {
                 node.mountDisplayIdAlliance = nodesDbc->getUInt32(i, mountAllianceField);
                 node.mountDisplayIdHorde = nodesDbc->getUInt32(i, mountHordeField);
-                if (node.mountDisplayIdAlliance == 0 && node.mountDisplayIdHorde == 0 && fieldCount > mountHordeFB) {
-                    node.mountDisplayIdAlliance = nodesDbc->getUInt32(i, mountAllianceFB);
-                    node.mountDisplayIdHorde = nodesDbc->getUInt32(i, mountHordeFB);
-                }
             }
             uint32_t nodeId = node.id;
             if (nodeId > 0) {
@@ -2281,6 +2373,10 @@ void MovementHandler::handleShowTaxiNodes(network::Packet& packet) {
                  " H=", it->second.mountDisplayIdHorde);
     }
     LOG_INFO("Taxi window opened, nearest node=", data.nearestNode);
+    // The flight map opens on this and closes on its pair. Neither was fired,
+    // so the original interface's map could not appear however complete the
+    // functions behind it were.
+    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("TAXIMAP_OPENED", {});
 }
 
 void MovementHandler::applyTaxiMountForCurrentNode() {
@@ -2295,7 +2391,6 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
             default: break;
         }
         uint32_t mountId = isAlliance ? 1210u : 1310u;
-        taxiMountDisplayId_ = mountId;
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount fallback (node ", currentTaxiData_.nearestNode, " not in DBC): displayId=", mountId);
         owner_.mountCallbackRef()(mountId);
@@ -2346,7 +2441,6 @@ void MovementHandler::applyTaxiMountForCurrentNode() {
         mountId = isAlliance ? 30412u : 30413u;
     }
     if (mountId != 0) {
-        taxiMountDisplayId_ = mountId;
         taxiMountActive_ = true;
         LOG_INFO("Taxi mount apply: displayId=", mountId);
         owner_.mountCallbackRef()(mountId);
@@ -2561,9 +2655,9 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         // is true (see its "Sync character render position" block) - by the time
         // this function returns, onTaxiFlight_/taxiMountActive_ are already false,
         // so that sync won't pick up this correction. Push it to the renderer
-        // directly instead - see taxiLandingPositionCallbackRef()'s comment.
-        if (owner_.taxiLandingPositionCallbackRef()) {
-            owner_.taxiLandingPositionCallbackRef()(landingPos.x, landingPos.y, landingPos.z);
+        // directly instead - see playerPositionCorrectionCallbackRef()'s comment.
+        if (owner_.playerPositionCorrectionCallbackRef()) {
+            owner_.playerPositionCorrectionCallbackRef()(landingPos.x, landingPos.y, landingPos.z);
         }
         LOG_INFO("Taxi landing: snapped to final waypoint (",
                  landingPos.x, ", ", landingPos.y, ", ", landingPos.z, ")");
@@ -2575,7 +2669,6 @@ void MovementHandler::finishClientTaxiFlight(bool snapToFinalWaypoint) {
         owner_.mountCallbackRef()(0);
     }
     taxiMountActive_ = false;
-    taxiMountDisplayId_ = 0;
     owner_.currentMountDisplayIdRef() = 0;
     // Some WotLK servers expose the taxi mount through vehicle data.
     // Clear that cached ID at landing so the dismount control does not
@@ -2610,6 +2703,10 @@ bool MovementHandler::isNearTaxiDestination(float maxDistance) const {
 }
 
 void MovementHandler::updateClientTaxi(float deltaTime) {
+    if (dismountGraceRemaining_ > 0.0f) {
+        dismountGraceRemaining_ -= deltaTime;
+    }
+
     // Live-confirmed: a CMSG_ACTIVATETAXI the server can't make sense of (e.g.
     // a stale start node vs. the player's actual position) can go completely
     // unanswered - no SMSG_ACTIVATETAXIREPLY at all, success or failure. Before
@@ -2634,7 +2731,6 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
                 owner_.mountCallbackRef()(0);
             }
             taxiMountActive_ = false;
-            taxiMountDisplayId_ = 0;
             onTaxiFlight_ = false;
         }
     }
@@ -2719,8 +2815,8 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
 
     float currentOrientation = movementInfo.orientation;
     float orientDiff = targetOrientation - currentOrientation;
-    while (orientDiff > 3.14159265f) orientDiff -= 6.28318530f;
-    while (orientDiff < -3.14159265f) orientDiff += 6.28318530f;
+    while (orientDiff > core::coords::PI) orientDiff -= core::coords::TWO_PI;
+    while (orientDiff < -core::coords::PI) orientDiff += core::coords::TWO_PI;
     float roll = -orientDiff * 2.5f;
     roll = std::clamp(roll, -0.7f, 0.7f);
 
@@ -2758,6 +2854,11 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         return;
     }
 
+    // Whether a reply arrived at all is the first thing worth knowing when a
+    // flight does not happen, and it was only ever said at info level.
+    LOG_WARNING("SMSG_ACTIVATETAXIREPLY: result=", data.result,
+                " pending=", taxiActivatePending_);
+
     if (!taxiActivatePending_) {
         LOG_DEBUG("Ignoring stray taxi reply: result=", data.result);
         return;
@@ -2770,7 +2871,15 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
         onTaxiFlight_ = true;
         taxiStartGrace_ = std::max(taxiStartGrace_, 2.0f);
         sanitizeMovementForTaxi();
+        // Closed here rather than through closeTaxi, which would clear the taxi
+        // mount that is about to be applied - but the event has to be sent all
+        // the same, with closeTaxi's own guard: the flight map hides on this,
+        // and setting the flag alone left FrameXML's open for the whole flight.
+        const bool taxiWasOpen = taxiWindowOpen_;
         taxiWindowOpen_ = false;
+        if (taxiWasOpen && owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+        }
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
         applyTaxiMountForCurrentNode();
@@ -2789,7 +2898,7 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
             return;
         }
         LOG_WARNING("Taxi activation failed, result=", data.result);
-        owner_.addSystemChatMessage("Cannot take that flight path.");
+        owner_.raiseUiError("Cannot take that flight path.");
         taxiActivatePending_ = false;
         taxiActivateTimer_ = 0.0f;
         // Clear the pending path data built speculatively by activateTaxi() -
@@ -2803,13 +2912,18 @@ void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {
             owner_.mountCallbackRef()(0);
         }
         taxiMountActive_ = false;
-        taxiMountDisplayId_ = 0;
         onTaxiFlight_ = false;
     }
 }
 
 void MovementHandler::closeTaxi() {
+    const bool wasOpen = taxiWindowOpen_;
     taxiWindowOpen_ = false;
+    // Only when it was actually open: closeTaxi is also reached on paths that
+    // never opened a window, and the flight map hides itself on this.
+    if (wasOpen && owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+    }
 
     if (taxiActivatePending_ || onTaxiFlight_ || taxiClientActive_) {
         return;
@@ -2820,7 +2934,6 @@ void MovementHandler::closeTaxi() {
         owner_.mountCallbackRef()(0);
     }
     taxiMountActive_ = false;
-    taxiMountDisplayId_ = 0;
 
     taxiActivatePending_ = false;
     onTaxiFlight_ = false;
@@ -2837,7 +2950,7 @@ void MovementHandler::buildTaxiCostMap() {
     struct AdjEntry { uint32_t node; uint32_t cost; };
     std::unordered_map<uint32_t, std::vector<AdjEntry>> adj;
     for (const auto& edge : taxiPathEdges_) {
-        adj[edge.fromNode].push_back({edge.toNode, edge.cost});
+        adj[edge.fromNode].push_back({.node = edge.toNode, .cost = edge.cost});
     }
 
     std::deque<uint32_t> queue;
@@ -2848,7 +2961,7 @@ void MovementHandler::buildTaxiCostMap() {
         uint32_t cur = queue.front();
         queue.pop_front();
         for (const auto& next : adj[cur]) {
-            // Flights only route through nodes the player has discovered —
+            // Flights only route through nodes the player has discovered -
             // the server rejects paths crossing unknown nodes, so a cost map
             // built over them would show routes/prices the server won't honor.
             if (!currentTaxiData_.isNodeKnown(next.node)) continue;
@@ -2881,7 +2994,7 @@ std::vector<uint32_t> MovementHandler::getTaxiRouteTo(uint32_t destNodeId) const
         route.push_back(cur);
         auto it = taxiPrevMap_.find(cur);
         if (it == taxiPrevMap_.end() || route.size() > taxiPrevMap_.size()) {
-            return {};  // broken chain — should not happen with a consistent BFS
+            return {};  // broken chain - should not happen with a consistent BFS
         }
         cur = it->second;
     }
@@ -2920,47 +3033,33 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
         }
     }
 
-    // BFS to find path from startNode to destNodeId
-    std::unordered_map<uint32_t, std::vector<uint32_t>> adj;
-    for (const auto& edge : taxiPathEdges_) {
-        adj[edge.fromNode].push_back(edge.toNode);
-    }
+    // The route the cost map already worked out, rather than a second search of
+    // the same graph.
+    //
+    // The one here searched every edge, including those reaching nodes the
+    // player has never been to. The server refuses a flight the moment one
+    // appears in the list - ERR_TAXINOTVISITED, checked node by node - so a
+    // route through an undiscovered stop is turned down outright rather than
+    // flown badly. buildTaxiCostMap already skips those, which is why the price
+    // quoted came from a route this then declined to use.
+    std::vector<uint32_t> path = getTaxiRouteTo(destNodeId);
 
-    std::unordered_map<uint32_t, uint32_t> parent;
-    std::deque<uint32_t> queue;
-    queue.push_back(startNode);
-    parent[startNode] = startNode;
-
-    bool found = false;
-    while (!queue.empty()) {
-        uint32_t cur = queue.front();
-        queue.pop_front();
-        if (cur == destNodeId) { found = true; break; }
-        for (uint32_t next : adj[cur]) {
-            if (parent.find(next) == parent.end()) {
-                parent[next] = cur;
-                queue.push_back(next);
-            }
-        }
-    }
-
-    if (!found) {
-        LOG_WARNING("No taxi path found from node ", startNode, " to ", destNodeId);
+    if (path.size() < 2) {
+        LOG_WARNING("No taxi route through discovered nodes from ", startNode,
+                    " to ", destNodeId);
         owner_.addSystemChatMessage("No flight path available to that destination.");
         return;
     }
 
-    std::vector<uint32_t> path;
-    for (uint32_t n = destNodeId; n != startNode; n = parent[n]) {
-        path.push_back(n);
-    }
-    path.push_back(startNode);
-    std::reverse(path.begin(), path.end());
-
     LOG_INFO("Taxi path: ", path.size(), " nodes, from ", startNode, " to ", destNodeId);
 
-    LOG_INFO("Taxi activate: npc=0x", std::hex, taxiNpcGuid_, std::dec,
-             " start=", startNode, " dest=", destNodeId, " pathLen=", path.size());
+    // At warning level: the log carries nothing below it, and a flight that
+    // goes wrong is otherwise reported with the request that caused it
+    // invisible. A guid of zero here means no flight master was recorded, and
+    // the server has nothing to answer.
+    LOG_WARNING("Taxi activate: npc=0x", std::hex, taxiNpcGuid_, std::dec,
+                " start=", startNode, " dest=", destNodeId,
+                " pathLen=", path.size());
     if (!path.empty()) {
         std::string pathStr;
         for (size_t i = 0; i < path.size(); i++) {
@@ -2973,10 +3072,33 @@ void MovementHandler::activateTaxi(uint32_t destNodeId) {
     uint32_t totalCost = getTaxiCostTo(destNodeId);
     LOG_INFO("Taxi activate: start=", startNode, " dest=", destNodeId, " cost=", totalCost);
 
-    auto basicPkt = ActivateTaxiPacket::build(taxiNpcGuid_, startNode, destNodeId);
-    owner_.getSocket()->send(basicPkt);
+    // A route of more than two nodes has to go as ACTIVATETAXIEXPRESS with the
+    // whole path. CMSG_ACTIVATETAXI carries only a source and a destination,
+    // and the server answers it by looking for a single TaxiPath joining the
+    // two - so anything needing an intermediate stop has no such path, gets no
+    // reply, and times out. Stormwind to Westfall is one hop and worked;
+    // everything further did not.
+    if (path.size() > 2) {
+        auto expressPkt =
+            ActivateTaxiExpressPacket::build(taxiNpcGuid_, path);
+        owner_.getSocket()->send(expressPkt);
+        LOG_WARNING("Taxi activate: sent EXPRESS for ", path.size(),
+                    " nodes (a multi-hop route has no single path to ask for)");
+    } else {
+        auto basicPkt = ActivateTaxiPacket::build(taxiNpcGuid_, startNode, destNodeId);
+        owner_.getSocket()->send(basicPkt);
+    }
 
+    // The window closes on the request, not on the reply, and FrameXML's taxi
+    // frame only hides on the event. Clearing the flag alone closes this
+    // client's own map and node list, which poll it, and leaves TaxiFrame up
+    // for the whole flight - the reply's own send of this event cannot cover it,
+    // because its guard reads the flag this line has already cleared.
+    const bool taxiWasOpen = taxiWindowOpen_;
     taxiWindowOpen_ = false;
+    if (taxiWasOpen && owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("TAXIMAP_CLOSED", {});
+    }
     taxiActivatePending_ = true;
     taxiActivateTimer_ = 0.0f;
     // Do NOT mount, set onTaxiFlight_, or activate the client spline here.
@@ -3054,7 +3176,7 @@ void MovementHandler::loadAreaTriggerDbc() {
         GameHandler::AreaTriggerEntry at;
         at.id     = dbc->getUInt32(i, 0);
         at.mapId  = dbc->getUInt32(i, 1);
-        // DBC stores positions in server/wire format (X=west, Y=north) — swap to canonical
+        // DBC stores positions in server/wire format (X=west, Y=north) - swap to canonical
         at.x = dbc->getFloat(i, 3);  // canonical X (north) = DBC field 3 (Y_wire)
         at.y = dbc->getFloat(i, 2);  // canonical Y (west)  = DBC field 2 (X_wire)
         at.z = dbc->getFloat(i, 4);
@@ -3081,13 +3203,12 @@ void MovementHandler::checkAreaTriggers() {
     const float pz = movementInfo.z;
 
     // Sanity: if position is near map origin on Eastern Kingdoms (map 0),
-    // something has corrupted movementInfo — skip area trigger check to
+    // something has corrupted movementInfo - skip area trigger check to
     // avoid firing Alterac/Hillsbrad triggers and causing a rogue teleport.
-    if (owner_.getCurrentMapId() == 0 &&
-        std::abs(px) < 1000.0f && std::abs(py) < 1000.0f) {
+    if (isCorruptOriginPosition(owner_.getCurrentMapId(), px, py, pz)) {
         if (!restoreWorldTransferFallbackIfNearOrigin("checkAreaTriggers")) {
             LOG_WARNING("checkAreaTriggers: position near map origin (", px, ", ", py, ", ", pz,
-                        ") on map 0 — skipping to avoid rogue teleport. onTransport=",
+                        ") on map 0 - skipping to avoid rogue teleport. onTransport=",
                         owner_.isOnTransport(), " transportGuid=0x", std::hex,
                         owner_.playerTransportGuidRef(), std::dec);
             return;
@@ -3100,7 +3221,7 @@ void MovementHandler::checkAreaTriggers() {
 
     // Swept-path samples: also test points between the previous check position
     // and the current one, so fast (mounted) movement cannot step across a
-    // small portal box between 0.25s polls — the Deeprun entrance trigger only
+    // small portal box between 0.25s polls - the Deeprun entrance trigger only
     // fired intermittently when ridden into at mount speed.
     glm::vec3 sweepSamples[10];
     int sweepCount = 0;
@@ -3127,13 +3248,13 @@ void MovementHandler::checkAreaTriggers() {
         lastAreaTriggerCheckValid_ = true;
     }
 
-    // Time-based cooldown after teleport/world entry — suppress ALL trigger
+    // Time-based cooldown after teleport/world entry - suppress ALL trigger
     // firing (not just the first check) to prevent re-entry from immediately
     // sending us to a wrong destination.
     const bool cooldownActive = owner_.areaTriggerCooldownRef() > 0.0f;
 
     // On first check after map transfer, just mark which triggers we're inside
-    // without firing them — prevents exit portal from immediately sending us back
+    // without firing them - prevents exit portal from immediately sending us back
     bool suppressFirst = owner_.areaTriggerSuppressFirstRef();
     if (suppressFirst) {
         owner_.areaTriggerSuppressFirstRef() = false;
@@ -3144,7 +3265,7 @@ void MovementHandler::checkAreaTriggers() {
 
         auto insideTrigger = [&at](float qx, float qy, float qz) -> bool {
             if (at.radius > 0.0f) {
-                // Sphere trigger — use actual DBC radius
+                // Sphere trigger - use actual DBC radius
                 float dx = qx - at.x;
                 float dy = qy - at.y;
                 float dz = qz - at.z;
@@ -3177,6 +3298,59 @@ void MovementHandler::checkAreaTriggers() {
             inside = insideTrigger(sweepSamples[s].x, sweepSamples[s].y, sweepSamples[s].z);
         }
 
+        // Near misses, once per trigger. A trigger that does not fire looks
+        // exactly like a trigger that is not there, and the difference is a
+        // number nobody can see: the sphere test is three-dimensional, so
+        // standing on top of something with the right x and y and the wrong z
+        // is outside it. Quest objectives that complete by walking somewhere
+        // fail this way and say nothing at all.
+        if (!inside && !nearMissLogged_.count(at.id)) {
+            const float dx = checkedPx - at.x;
+            const float dy = checkedPy - at.y;
+            const float dz = checkedPz - at.z;
+            const float flat = std::sqrt(dx * dx + dy * dy);
+            const float extent = (at.radius > 0.0f)
+                ? at.radius
+                : std::max(at.boxLength, at.boxWidth) * 0.5f;
+            // Walked past, not stood on. The margin used to be zero - the
+            // player had to be inside the trigger's own flat extent for this
+            // to say anything - and a portal box is three yards across, so
+            // "I walked into it and nothing happened" was never the case this
+            // reported. A few yards either side is what walking through one
+            // looks like when the test refuses it.
+            constexpr float kNearMissMargin = 5.0f;
+            if (extent > 0.0f && flat <= extent + kNearMissMargin) {
+                nearMissLogged_.insert(at.id);
+                if (at.radius > 0.0f) {
+                    LOG_WARNING("AreaTrigger near miss: AT", at.id,
+                                " sphere r=", at.radius,
+                                " flat=", flat, " dz=", dz,
+                                " dist=", std::sqrt(dx * dx + dy * dy + dz * dz),
+                                " (player=(", checkedPx, ", ", checkedPy, ", ", checkedPz,
+                                ") trigger=(", at.x, ", ", at.y, ", ", at.z, "))");
+                } else {
+                    // The same rotation the test itself makes, so the numbers
+                    // printed are the ones it compared: which of the three
+                    // axes refused it, and by how much.
+                    const float serverDx = checkedPy - at.y;
+                    const float serverDy = checkedPx - at.x;
+                    const float cosYaw = std::cos(-at.boxYaw);
+                    const float sinYaw = std::sin(-at.boxYaw);
+                    const float localX = serverDx * cosYaw - serverDy * sinYaw;
+                    const float localY = serverDx * sinYaw + serverDy * cosYaw;
+                    LOG_WARNING("AreaTrigger near miss: AT", at.id,
+                                " box=(", at.boxLength, ", ", at.boxWidth, ", ", at.boxHeight,
+                                ") yaw=", at.boxYaw,
+                                " |local|=(", std::abs(localX), ", ", std::abs(localY),
+                                ", ", std::abs(dz), ")",
+                                " half=(", at.boxLength * 0.5f, ", ", at.boxWidth * 0.5f,
+                                ", ", at.boxHeight * 0.5f, ")",
+                                " (player=(", checkedPx, ", ", checkedPy, ", ", checkedPz,
+                                ") trigger=(", at.x, ", ", at.y, ", ", at.z, "))");
+                }
+            }
+        }
+
         if (inside) {
             if (owner_.activeAreaTriggersRef().count(at.id) == 0) {
                 const bool suppressCurrentTrigger =
@@ -3206,8 +3380,16 @@ void MovementHandler::checkAreaTriggers() {
                     // Do not mark ordinary cooldown-suppressed triggers active.
                     // If the player walks into a trigger during the cooldown,
                     // it should fire once the grace window ends.
-                    LOG_DEBUG("AreaTrigger cooldown suppressed: AT", at.id,
-                              " cooldown=", owner_.areaTriggerCooldownRef());
+                    //
+                    // Said out loud rather than at debug level. From the chair
+                    // a suppressed portal and a portal that does not work are
+                    // the same thing - the player walks in and nothing
+                    // happens - and the window is ten seconds, which is long
+                    // enough to walk into one after arriving.
+                    LOG_WARNING("AreaTrigger cooldown suppressed: AT", at.id,
+                                " cooldown=", owner_.areaTriggerCooldownRef(),
+                                "s left - the player is inside it and it will "
+                                "not fire until they leave and re-enter");
                 } else {
                     owner_.activeAreaTriggersRef().insert(at.id);
                 }
@@ -3263,7 +3445,20 @@ void MovementHandler::checkAreaTriggers() {
                     continue;
                 }
 
-                if (!postTransferReturnAreaTriggerSawNear_ && distSq > 1000.0f * 1000.0f) {
+                // Only while the post-transfer window is still open. The
+                // distance test alone never expires: a player who has not been
+                // near the portal and is far from it stays that way, so the
+                // guard held for the rest of the session and that portal could
+                // never be used again.
+                //
+                // Dying inside is exactly that shape. The release teleports the
+                // player to a graveyard nowhere near the portal they came
+                // through, without ever standing at it, so walking back as a
+                // ghost was suppressed every time. The cooldown is ten seconds
+                // and a destination position arrives in one, so anything still
+                // far away after it has genuinely left.
+                if (!postTransferReturnAreaTriggerSawNear_ && distSq > 1000.0f * 1000.0f &&
+                    owner_.areaTriggerCooldownRef() > 0.0f) {
                     // During map transfer there can be a tick where the current
                     // map has switched but movementInfo still contains the old
                     // map's coordinates. That looks thousands of yards away
@@ -3283,7 +3478,7 @@ void MovementHandler::checkAreaTriggers() {
                             " dist=", std::sqrt(distSq));
             }
 
-            // Player left the trigger — allow re-fire on re-entry
+            // Player left the trigger - allow re-fire on re-entry
             owner_.activeAreaTriggersRef().erase(at.id);
         }
     }
@@ -3396,13 +3591,13 @@ void MovementHandler::followTarget() {
     }
 
     if (owner_.getTargetGuid() == 0) {
-        owner_.addSystemChatMessage("You must target someone to follow.");
+        owner_.raiseUiError("You must target someone to follow.");
         return;
     }
 
     auto target = owner_.getTarget();
     if (!target) {
-        owner_.addSystemChatMessage("Invalid target.");
+        owner_.raiseUiError("Invalid target.");
         return;
     }
 
@@ -3431,7 +3626,9 @@ void MovementHandler::followTarget() {
 
     owner_.addSystemChatMessage("Now following " + targetName + ".");
     LOG_INFO("Following target: ", targetName, " (GUID: 0x", std::hex, owner_.getTargetGuid(), std::dec, ")");
-    owner_.fireAddonEvent("AUTOFOLLOW_BEGIN", {});
+    // The name goes with it: the status text is formatted from this argument,
+    // and without one it formats a nil.
+    owner_.fireAddonEvent("AUTOFOLLOW_BEGIN", {targetName});
 }
 
 void MovementHandler::cancelFollow() {

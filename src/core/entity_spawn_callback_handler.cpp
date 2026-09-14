@@ -56,7 +56,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         LOG_DEBUG("playerSpawnCallback: guid=0x", std::hex, guid, std::dec,
                     " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId),
                     " pos=(", x, ",", y, ",", z, ")");
-        // Skip local player — already spawned as the main character
+        // Skip local player - already spawned as the main character
         if (isLocalPlayerGuid_(guid)) return;
         if (entitySpawner_.isPlayerSpawned(guid)) return;
         if (entitySpawner_.isPlayerPending(guid)) return;
@@ -67,7 +67,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
     gameHandler_.setPlayerEquipmentCallback([this](uint64_t guid,
                                                   const std::array<uint32_t, 19>& displayInfoIds,
                                                   const std::array<uint8_t, 19>& inventoryTypes) {
-        // Queue equipment compositing instead of doing it immediately —
+        // Queue equipment compositing instead of doing it immediately -
         // compositeWithRegions is expensive (file I/O + CPU blit + GPU upload)
         // and causes frame stutters if multiple players update at once.
         entitySpawner_.queuePlayerEquipment(guid, displayInfoIds, inventoryTypes);
@@ -97,6 +97,12 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         entitySpawner_.despawnGameObject(guid);
     });
 
+    // GameObject metadata arrival - settles the animation policy for models that
+    // spawned before their type was known.
+    gameHandler_.setGameObjectInfoCallback([this](uint32_t entry) {
+        entitySpawner_.onGameObjectInfoReceived(entry);
+    });
+
     // GameObject custom animation callback (e.g. chest opening)
     gameHandler_.setGameObjectCustomAnimCallback([this](uint64_t guid, uint32_t animId) {
         auto& goInstances = entitySpawner_.getGameObjectInstances();
@@ -114,34 +120,11 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         }
     });
 
-    // GameObject state change callback — animate doors/chests opening/closing/destroying
+    // GameObject state change callback: a door, a chest, a destructible is a
+    // pose the server describes, and the spawner holds it - including the one
+    // that arrives before the model does.
     gameHandler_.setGameObjectStateCallback([this](uint64_t guid, uint8_t goState) {
-        auto& goInstances = entitySpawner_.getGameObjectInstances();
-        auto it = goInstances.find(guid);
-        if (it == goInstances.end()) return;
-        auto& info = it->second;
-        if (info.isWmo) return; // WMOs don't have M2 animation sequences
-        auto* m2r = renderer_.getM2Renderer();
-        if (!m2r) return;
-        uint32_t instId = info.instanceId;
-        // Canonical GOState: 0=ACTIVE/open, 1=READY/closed, 2=ACTIVE_ALTERNATIVE.
-        if (goState == 0) {
-            // Opening: play OPEN(148) one-shot, fall back to unfreezing
-            if (m2r->hasAnimation(instId, 148))
-                m2r->setInstanceAnimation(instId, 148, false);
-            else
-                m2r->setInstanceAnimationFrozen(instId, false);
-        } else if (goState == 2) {
-            // Destroyed: play DESTROY(149) one-shot
-            if (m2r->hasAnimation(instId, 149))
-                m2r->setInstanceAnimation(instId, 149, false);
-        } else {
-            // Closed: play CLOSE(146) one-shot, else freeze
-            if (m2r->hasAnimation(instId, 146))
-                m2r->setInstanceAnimation(instId, 146, false);
-            else
-                m2r->setInstanceAnimationFrozen(instId, true);
-        }
+        entitySpawner_.applyGameObjectState(guid, goState);
     });
 
     // Creature move callback (online mode) - update creature positions
@@ -171,7 +154,7 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
             // Don't override Death animation (1). The per-frame sync loop will return to
             // Stand when movement stops.
             if (durationMs > 0) {
-                // Player animation is managed by the local renderer state machine —
+                // Player animation is managed by the local renderer state machine -
                 // don't reset it here or every server movement packet restarts the
                 // run cycle from frame 0, causing visible stutter.
                 if (!isPlayer) {

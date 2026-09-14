@@ -7,11 +7,11 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Trade Skill / Recipe catalog (.wtsk) — novel
+// Wowee Open Trade Skill / Recipe catalog (.wtsk) - novel
 // replacement for Blizzard's SkillLineAbility.dbc plus the
 // recipe portions of SkillLine.dbc plus the AzerothCore
 // trade_skill SQL tables. The 50th open format added to
-// the editor — a milestone format that closes the crafting
+// the editor - a milestone format that closes the crafting
 // gap left by WSKL (which only carries the skill lines
 // themselves, not the recipes that bind to them).
 //
@@ -92,9 +92,9 @@ struct WoweeTradeSkill {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t recipeId) const;
+    [[nodiscard]] const Entry* findById(uint32_t recipeId) const;
 
     static const char* professionName(uint8_t p);
 };
@@ -108,18 +108,18 @@ public:
 
     // Preset emitters used by --gen-tsk* variants.
     //
-    //   makeStarter        — 3 recipes covering the entry-tier
+    //   makeStarter        - 3 recipes covering the entry-tier
     //                         spread (Coarse Sharpening Stone,
     //                         Linen Cloth Bandage, Minor
-    //                         Healing Potion) — one each for
+    //                         Healing Potion) - one each for
     //                         Blacksmithing / First Aid /
     //                         Alchemy.
-    //   makeBlacksmithing  — 5 progression recipes
+    //   makeBlacksmithing  - 5 progression recipes
     //                         (sharpening stone, copper chain
     //                         belt, runed copper bracers,
     //                         ironforge breastplate,
     //                         truesilver champion).
-    //   makeAlchemy        — 5 progression recipes (minor
+    //   makeAlchemy        - 5 progression recipes (minor
     //                         healing, swiftness, lesser
     //                         mana, greater healing,
     //                         flask of titans).

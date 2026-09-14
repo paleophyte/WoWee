@@ -22,6 +22,8 @@ struct RaceVoiceInfo {
 
 const RaceVoiceInfo* raceVoiceInfo(uint8_t raceId) {
     // Race IDs match game::Race. Goblin (9) has no player error voices.
+    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
+    // columns are its field names, with the struct in view directly above.
     switch (raceId) {
         case 1:  { static const RaceVoiceInfo v{"Human",    "",         "Human"};    return &v; }
         case 2:  { static const RaceVoiceInfo v{"Orc",      "Orc",      "Orc"};      return &v; }
@@ -35,6 +37,7 @@ const RaceVoiceInfo* raceVoiceInfo(uint8_t raceId) {
         case 11: { static const RaceVoiceInfo v{"Draenei",  nullptr,    "Draenei"};  return &v; }
         default: return nullptr;
     }
+    // NOLINTEND(modernize-use-designated-initializers)
 }
 
 // File name token for each speech type ({race}{gender}_err_{token}NN.wav)
@@ -156,7 +159,7 @@ void PlayerVoiceManager::ensureLibrary(uint8_t raceId, uint8_t gender) {
     for (PlayerErrorSpeech type : kAllSpeechTypes) {
         const std::string base = dir + info->filePrefix + genderStr + "_err_" + speechToken(type);
         auto& samples = library_[static_cast<uint8_t>(type)];
-        // Variant numbering is sparse (e.g. 02, 04, 06) — probe each slot individually
+        // Variant numbering is sparse (e.g. 02, 04, 06) - probe each slot individually
         for (int n = 1; n <= 8; ++n) {
             char num[8];
             std::snprintf(num, sizeof(num), "%02d", n);

@@ -1,4 +1,5 @@
 #include "pipeline/wowee_crafting_recipes.hpp"
+#include "pipeline/wowee_binary_io.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -11,45 +12,7 @@ namespace {
 
 constexpr char kMagic[4] = {'W', 'C', 'R', 'A'};
 constexpr uint32_t kVersion = 1;
-
-template <typename T>
-void writePOD(std::ofstream& os, const T& v) {
-    os.write(reinterpret_cast<const char*>(&v), sizeof(T));
-}
-
-template <typename T>
-bool readPOD(std::ifstream& is, T& v) {
-    is.read(reinterpret_cast<char*>(&v), sizeof(T));
-    return is.gcount() == static_cast<std::streamsize>(sizeof(T));
-}
-
-void writeStr(std::ofstream& os, const std::string& s) {
-    uint32_t n = static_cast<uint32_t>(s.size());
-    writePOD(os, n);
-    if (n > 0) os.write(s.data(), n);
-}
-
-bool readStr(std::ifstream& is, std::string& s) {
-    uint32_t n = 0;
-    if (!readPOD(is, n)) return false;
-    if (n > (1u << 20)) return false;
-    s.resize(n);
-    if (n > 0) {
-        is.read(s.data(), n);
-        if (is.gcount() != static_cast<std::streamsize>(n)) {
-            s.clear();
-            return false;
-        }
-    }
-    return true;
-}
-
-std::string normalizePath(std::string base) {
-    if (base.size() < 5 || base.substr(base.size() - 5) != ".wcra") {
-        base += ".wcra";
-    }
-    return base;
-}
+constexpr char kExtension[] = ".wcra";
 
 } // namespace
 
@@ -86,14 +49,8 @@ WoweeCraftingRecipes::findByProducedItem(uint32_t itemId) const {
 bool WoweeCraftingRecipesLoader::save(
     const WoweeCraftingRecipes& cat,
     const std::string& basePath) {
-    std::ofstream os(normalizePath(basePath), std::ios::binary);
-    if (!os) return false;
-    os.write(kMagic, 4);
-    writePOD(os, kVersion);
-    writeStr(os, cat.name);
-    uint32_t entryCount = static_cast<uint32_t>(cat.entries.size());
-    writePOD(os, entryCount);
-    for (const auto& e : cat.entries) {
+    return saveCatalog(cat, basePath, kMagic, kVersion, kExtension,
+                       [](std::ofstream& os, const auto& e) {
         writePOD(os, e.recipeId);
         writePOD(os, e.spellId);
         writeStr(os, e.name);
@@ -110,65 +67,39 @@ bool WoweeCraftingRecipesLoader::save(
             writePOD(os, r.itemId);
             writePOD(os, r.count);
         }
-    }
-    return os.good();
+    });
 }
 
 WoweeCraftingRecipes WoweeCraftingRecipesLoader::load(
     const std::string& basePath) {
-    WoweeCraftingRecipes out;
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
-    if (!is) return out;
-    char magic[4];
-    is.read(magic, 4);
-    if (std::memcmp(magic, kMagic, 4) != 0) return out;
-    uint32_t version = 0;
-    if (!readPOD(is, version) || version != kVersion) return out;
-    if (!readStr(is, out.name)) return out;
-    uint32_t entryCount = 0;
-    if (!readPOD(is, entryCount)) return out;
-    if (entryCount > (1u << 20)) return out;
-    out.entries.resize(entryCount);
-    for (auto& e : out.entries) {
+    return loadCatalog<WoweeCraftingRecipes>(basePath, kMagic, kVersion, kExtension,
+                              [](std::ifstream& is, WoweeCraftingRecipes::Entry& e) {
         if (!readPOD(is, e.recipeId) ||
-            !readPOD(is, e.spellId)) {
-            out.entries.clear(); return out;
-        }
-        if (!readStr(is, e.name)) {
-            out.entries.clear(); return out;
-        }
+            !readPOD(is, e.spellId)) { return false; }
+        if (!readStr(is, e.name)) { return false; }
         if (!readPOD(is, e.tradeSkillId) ||
             !readPOD(is, e.requiredSkillLevel) ||
             !readPOD(is, e.producedItemId) ||
             !readPOD(is, e.producedCount) ||
             !readPOD(is, e.categoryId) ||
-            !readPOD(is, e.learnedFromItemId)) {
-            out.entries.clear(); return out;
-        }
+            !readPOD(is, e.learnedFromItemId)) { return false; }
         uint32_t reagentCount = 0;
-        if (!readPOD(is, reagentCount)) {
-            out.entries.clear(); return out;
-        }
-        // Sanity cap — no recipe should have more than
+        if (!readPOD(is, reagentCount)) { return false; }
+        // Sanity cap - no recipe should have more than
         // 32 reagents; vanilla cap is 8.
-        if (reagentCount > 32) {
-            out.entries.clear(); return out;
-        }
+        if (reagentCount > 32) { return false; }
         e.reagents.resize(reagentCount);
         for (auto& r : e.reagents) {
             if (!readPOD(is, r.itemId) ||
-                !readPOD(is, r.count)) {
-                out.entries.clear(); return out;
-            }
+                !readPOD(is, r.count)) { return false; }
         }
-    }
-    return out;
+                                  return true;
+                              });
 }
 
 bool WoweeCraftingRecipesLoader::exists(
     const std::string& basePath) {
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
-    return is.good();
+    return catalogExists(basePath, kExtension);
 }
 
 namespace {
@@ -216,24 +147,24 @@ WoweeCraftingRecipes WoweeCraftingRecipesLoader::makeAlchemyPotions(
     c.entries.push_back(makeRecipe(
         1, 2330, "Minor Healing Potion", kAlchemy, 1,
         118, 1, 1, 0,
-        {{2447, 1}, {765, 1}, {3371, 1}}));
+        {{.itemId = 2447, .count = 1}, {.itemId = 765, .count = 1}, {.itemId = 3371, .count = 1}}));
     // Lesser Mana Potion: Mageroyal + Stranglekelp.
     c.entries.push_back(makeRecipe(
         2, 2331, "Lesser Mana Potion", kAlchemy, 100,
         3385, 1, 1, 0,
-        {{785, 1}, {3820, 1}, {3371, 1}}));
+        {{.itemId = 785, .count = 1}, {.itemId = 3820, .count = 1}, {.itemId = 3371, .count = 1}}));
     // Greater Healing Potion: Liferoot + Khadgar's
     // Whisker.
     c.entries.push_back(makeRecipe(
         3, 11457, "Greater Healing Potion", kAlchemy, 155,
         3928, 1, 1, 0,
-        {{3357, 1}, {3358, 1}, {3371, 1}}));
+        {{.itemId = 3357, .count = 1}, {.itemId = 3358, .count = 1}, {.itemId = 3371, .count = 1}}));
     // Major Mana Potion: Sungrass=8838 + Blindweed
     // =8839 + Crystal Vial=8766 (uses larger vial).
     c.entries.push_back(makeRecipe(
         4, 17580, "Major Mana Potion", kAlchemy, 295,
         13444, 1, 1, 0,
-        {{8838, 3}, {8839, 3}, {8766, 1}}));
+        {{.itemId = 8838, .count = 3}, {.itemId = 8839, .count = 3}, {.itemId = 8766, .count = 1}}));
     return c;
 }
 
@@ -246,20 +177,20 @@ WoweeCraftingRecipes WoweeCraftingRecipesLoader::makeEngineering(
     c.entries.push_back(makeRecipe(
         10, 3918, "Rough Blasting Powder", kEngineering, 1,
         4357, 1, 1, 0,
-        {{2835, 1}}));
+        {{.itemId = 2835, .count = 1}}));
     // Mechanical Squirrel Box: rough copper-bar
-    // recipe — 4 reagents.
+    // recipe - 4 reagents.
     c.entries.push_back(makeRecipe(
         11, 4413, "Mechanical Squirrel Box", kEngineering, 75,
         4401, 1, 1, 0,
-        {{2840, 2}, {4399, 1}, {2589, 1}, {4357, 1}}));
-    // Target Dummy: 5 reagents — demonstrates
+        {{.itemId = 2840, .count = 2}, {.itemId = 4399, .count = 1}, {.itemId = 2589, .count = 1}, {.itemId = 4357, .count = 1}}));
+    // Target Dummy: 5 reagents - demonstrates
     // variable reagent count within the recipe
     // catalog. Blueprint is itemId 4406.
     c.entries.push_back(makeRecipe(
         12, 4079, "Target Dummy", kEngineering, 75,
         2092, 1, 1, 4406,
-        {{2840, 4}, {4361, 2}, {2997, 2}, {2589, 4}, {4357, 1}}));
+        {{.itemId = 2840, .count = 4}, {.itemId = 4361, .count = 2}, {.itemId = 2997, .count = 2}, {.itemId = 2589, .count = 4}, {.itemId = 4357, .count = 1}}));
     return c;
 }
 
@@ -272,19 +203,19 @@ WoweeCraftingRecipes WoweeCraftingRecipesLoader::makeBlacksmithing(
     c.entries.push_back(makeRecipe(
         20, 2660, "Rough Sharpening Stone", kBlacksmithing, 1,
         2862, 1, 1, 0,
-        {{2835, 1}}));
+        {{.itemId = 2835, .count = 1}}));
     // Coarse Grinding Stone: 2 Coarse Stone (2836).
     // Skill 50.
     c.entries.push_back(makeRecipe(
         21, 3326, "Coarse Grinding Stone", kBlacksmithing, 50,
         3486, 1, 1, 0,
-        {{2836, 2}}));
+        {{.itemId = 2836, .count = 2}}));
     // Heavy Mithril Helm: high-skill plate piece
     // requiring multiple bar types. Skill 235.
     c.entries.push_back(makeRecipe(
         22, 9938, "Heavy Mithril Helm", kBlacksmithing, 235,
         7909, 1, 2, 11163,
-        {{3860, 8}, {3859, 1}, {3864, 4}, {3866, 2}}));
+        {{.itemId = 3860, .count = 8}, {.itemId = 3859, .count = 1}, {.itemId = 3864, .count = 4}, {.itemId = 3866, .count = 2}}));
     return c;
 }
 

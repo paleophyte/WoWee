@@ -29,7 +29,7 @@ public:
 
     // --- Entity Manager access ---
     EntityManager& getEntityManager() { return entityManager; }
-    const EntityManager& getEntityManager() const { return entityManager; }
+    [[nodiscard]] const EntityManager& getEntityManager() const { return entityManager; }
 
     // --- Name / info cache queries ---
     void queryPlayerName(uint64_t guid);
@@ -38,36 +38,36 @@ public:
     void cachePlayerName(uint64_t guid, const std::string& name) {
         if (guid != 0 && !name.empty()) playerNameCache[guid] = name;
     }
-    std::string getCachedPlayerName(uint64_t guid) const;
-    std::string getCachedCreatureName(uint32_t entry) const;
+    [[nodiscard]] std::string getCachedPlayerName(uint64_t guid) const;
+    [[nodiscard]] std::string getCachedCreatureName(uint32_t entry) const;
     void invalidatePlayerName(uint64_t guid) { playerNameCache.erase(guid); }
 
     // Read-only cache access for other handlers
-    const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const { return playerNameCache; }
-    const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const { return creatureInfoCache; }
-    std::string getCachedCreatureSubName(uint32_t entry) const {
+    [[nodiscard]] const std::unordered_map<uint64_t, std::string>& getPlayerNameCache() const { return playerNameCache; }
+    [[nodiscard]] const std::unordered_map<uint32_t, CreatureQueryResponseData>& getCreatureInfoCache() const { return creatureInfoCache; }
+    [[nodiscard]] std::string getCachedCreatureSubName(uint32_t entry) const {
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? it->second.subName : "";
     }
-    int getCreatureRank(uint32_t entry) const {
+    [[nodiscard]] int getCreatureRank(uint32_t entry) const {
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? static_cast<int>(it->second.rank) : -1;
     }
-    uint32_t getCreatureType(uint32_t entry) const {
+    [[nodiscard]] uint32_t getCreatureType(uint32_t entry) const {
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? it->second.creatureType : 0;
     }
-    uint32_t getCreatureFamily(uint32_t entry) const {
+    [[nodiscard]] uint32_t getCreatureFamily(uint32_t entry) const {
         auto it = creatureInfoCache.find(entry);
         return (it != creatureInfoCache.end()) ? it->second.family : 0;
     }
-    const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const {
+    [[nodiscard]] const GameObjectQueryResponseData* getCachedGameObjectInfo(uint32_t entry) const {
         auto it = gameObjectInfoCache_.find(entry);
         return (it != gameObjectInfoCache_.end()) ? &it->second : nullptr;
     }
 
     // Name lookup (checks cache then entity manager)
-    const std::string& lookupName(uint64_t guid) const {
+    [[nodiscard]] const std::string& lookupName(uint64_t guid) const {
         static const std::string kEmpty;
         auto it = playerNameCache.find(guid);
         if (it != playerNameCache.end()) return it->second;
@@ -80,24 +80,24 @@ public:
         }
         return kEmpty;
     }
-    uint8_t lookupPlayerClass(uint64_t guid) const {
+    [[nodiscard]] uint8_t lookupPlayerClass(uint64_t guid) const {
         auto it = playerClassRaceCache_.find(guid);
         return it != playerClassRaceCache_.end() ? it->second.classId : 0;
     }
-    uint8_t lookupPlayerRace(uint64_t guid) const {
+    [[nodiscard]] uint8_t lookupPlayerRace(uint64_t guid) const {
         auto it = playerClassRaceCache_.find(guid);
         return it != playerClassRaceCache_.end() ? it->second.raceId : 0;
     }
 
     // --- Transport GUID tracking ---
-    bool isTransportGuid(uint64_t guid) const { return transportGuids_.count(guid) > 0; }
-    bool hasServerTransportUpdate(uint64_t guid) const { return serverUpdatedTransportGuids_.count(guid) > 0; }
+    [[nodiscard]] bool isTransportGuid(uint64_t guid) const { return transportGuids_.count(guid) > 0; }
+    [[nodiscard]] bool hasServerTransportUpdate(uint64_t guid) const { return serverUpdatedTransportGuids_.count(guid) > 0; }
 
     // --- Update object work queue ---
     void enqueueUpdateObjectWork(UpdateObjectData&& data);
     void processPendingUpdateObjectWork(const std::chrono::steady_clock::time_point& start,
                                         float budgetMs);
-    bool hasPendingUpdateObjectWork() const { return !pendingUpdateObjectWork_.empty(); }
+    [[nodiscard]] bool hasPendingUpdateObjectWork() const { return !pendingUpdateObjectWork_.empty(); }
 
     // --- Reset all state (called on disconnect / character switch) ---
     void clearAll();
@@ -117,6 +117,14 @@ private:
     std::unordered_map<uint32_t, CreatureQueryResponseData> creatureInfoCache;
     std::unordered_set<uint32_t> pendingCreatureQueries;
     std::unordered_map<uint32_t, GameObjectQueryResponseData> gameObjectInfoCache_;
+    /// Objects clicked to be read before their metadata arrived.
+    ///
+    /// The page id lives in the query response, so a sign clicked in the first
+    /// moments after it spawns has nothing to read from yet. The click is kept
+    /// here and answered when the response lands, rather than dropped - which
+    /// is a sign that does nothing the first time it is clicked and works the
+    /// second.
+    std::unordered_set<uint64_t> pendingPageTextGuids_;
     std::unordered_set<uint32_t> pendingGameObjectQueries_;
 
     // --- Update Object work queue ---
@@ -140,6 +148,18 @@ private:
     void handleCreatureQueryResponse(network::Packet& packet);
     void handleGameObjectQueryResponse(network::Packet& packet);
     void handleGameObjectPageText(network::Packet& packet);
+
+public:
+    /// Read what is written on a game object: a sign, a plaque, a gravestone.
+    ///
+    /// Public because the click is where this starts. SMSG_GAMEOBJECT_PAGETEXT
+    /// is the server *offering* a page, which not every server sends and no
+    /// server sends for a plain sign - the real client reads the page id out of
+    /// the object's own data and asks for the text itself. Both ends arrive
+    /// here.
+    void showGameObjectPageText(uint64_t guid);
+
+private:
     void handlePageTextQueryResponse(network::Packet& packet);
 
     // --- Entity lifecycle ---
@@ -150,12 +170,28 @@ private:
     bool extractPlayerAppearance(const FlatFieldMap& fields,
                                  uint8_t& outRace, uint8_t& outGender,
                                  uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
+
+public:
+    /// The same, for a player already in the world, read from the fields the
+    /// entity is still holding. The spawn path takes this once and hands it to
+    /// a callback; anything wanting it later - a portrait, an inspect window -
+    /// has nowhere to ask, and the fields are right there.
+    bool getPlayerAppearance(uint64_t guid, uint8_t& outRace, uint8_t& outGender,
+                             uint32_t& outAppearanceBytes, uint8_t& outFacial) const;
+
+private:
     void maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
                                  const FlatFieldMap& newFields);
 
     void handleCreateObject(const UpdateBlock& block, bool& newItemCreated);
     void handleValuesUpdate(const UpdateBlock& block);
     void handleMovementUpdate(const UpdateBlock& block);
+    /// Seed a transport's route phase from the server's own path clock, so the
+    /// client stops animating on a period it invented for itself.
+    void applyTransportRouteClock(const UpdateBlock& block);
+    /// Note which non-combat companion is out and what called it, so casting
+    /// that spell again dismisses instead of summoning another.
+    void trackActiveCritter(const UpdateBlock& block);
 
     // Update transport-relative child attachment (non-player entities).
     //     Consolidates identical logic from CREATE/VALUES/MOVEMENT handlers.
@@ -178,7 +214,19 @@ private:
         uint16_t health, maxHealth, powerBase, maxPowerBase;
         uint16_t level, faction, flags, dynFlags, auraState;
         uint16_t displayId, mountDisplayId, npcFlags, npcEmoteState;
+        /// How wide a unit is and how far it reaches, for edge-to-edge range.
+        uint16_t boundingRadius, combatReach;
         uint16_t bytes0, bytes1;
+        /// A hunter pet carries its own experience, on the pet's unit rather
+        /// than on the player's.
+        uint16_t petXp, petNextLevelXp;
+        /// ...and its own stats and resistances, which the pet paperdoll reads
+        /// through UnitStat("pet") and UnitResistance("pet"). Armor is
+        /// resistances index 0.
+        uint16_t stat0, resistances;
+        /// ...and what it hits for, which the pet tab's damage and
+        /// attack-power lines read.
+        uint16_t attackPower, minDamage, maxDamage;
         static UnitFieldIndices resolve();
     };
     struct PlayerFieldIndices {
@@ -191,32 +239,47 @@ private:
         uint16_t spDmg1, healBonus;
         uint16_t blockPct, dodgePct, parryPct, critPct, rangedCritPct;
         uint16_t sCrit1, rating1;
+        uint16_t expertise, offhandExpertise;
+        uint16_t manaRegen, manaRegenCasting;
         static PlayerFieldIndices resolve();
     };
     struct UnitFieldUpdateResult {
         bool healthChanged = false;
+        /// Separately, because a frame registers for the two apart: the value
+        /// and the scale it is drawn against are different questions.
+        bool maxHealthChanged = false;
         bool powerChanged = false;
+        /// Which power moved, as an index into the power tables, or -1. The
+        /// event a WotLK interface listens for is named after the power, so
+        /// knowing that something changed is not enough to tell it.
+        int  powerTypeChanged = -1;
+        int  maxPowerTypeChanged = -1;
         bool displayIdChanged = false;
         bool npcDeathNotified = false;
         bool npcRespawnNotified = false;
-        // Set when UNIT_DYNFLAG_LOOTABLE went away this update — the corpse has
+        // Set when UNIT_DYNFLAG_LOOTABLE went away this update - the corpse has
         // been looted empty. Acted on after the field loop, never inside it.
         bool lootableCleared = false;
         uint32_t oldDisplayId = 0;
     };
 
-    // Entity factory — creates the correct Entity subclass for the given block.
+    // Entity factory - creates the correct Entity subclass for the given block.
     std::shared_ptr<Entity> createEntityFromBlock(const UpdateBlock& block);
     // Track player-on-transport state from movement blocks.
+    /// Take the server's position for the player when the two have diverged
+    /// beyond anything lag can explain. Does nothing in the ordinary case,
+    /// where the client owns its position and the server echoes it back.
+    void resyncPlayerIfFarFromServer(const glm::vec3& serverCanonicalPos);
+
     void applyPlayerTransportState(const UpdateBlock& block,
                                     const std::shared_ptr<Entity>& entity,
                                     const glm::vec3& canonicalPos, float oCanonical,
                                     bool updateMovementInfoPos);
-    // Apply unit fields during CREATE — returns true if entity is initially dead.
+    // Apply unit fields during CREATE - returns true if entity is initially dead.
     bool applyUnitFieldsOnCreate(const UpdateBlock& block,
                                   std::shared_ptr<Unit>& unit,
                                   const UnitFieldIndices& ufi);
-    // Apply unit fields during VALUES — returns change tracking result.
+    // Apply unit fields during VALUES - returns change tracking result.
     UnitFieldUpdateResult applyUnitFieldsOnUpdate(const UpdateBlock& block,
                                                     const std::shared_ptr<Entity>& entity,
                                                     std::shared_ptr<Unit>& unit,
@@ -224,7 +287,7 @@ private:
     // Apply player stat fields (XP, inventory, skills, etc.). isCreate=true for CREATE path.
     bool applyPlayerStatFields(const FlatFieldMap& fields,
                                 const PlayerFieldIndices& pfi, bool isCreate);
-    // Dispatch spawn callbacks (creature/player) — deduplicates CREATE and VALUES paths.
+    // Dispatch spawn callbacks (creature/player) - deduplicates CREATE and VALUES paths.
     void dispatchEntitySpawn(uint64_t guid, ObjectType objectType,
                               const std::shared_ptr<Entity>& entity,
                               const std::shared_ptr<Unit>& unit, bool isDead);
@@ -249,7 +312,7 @@ private:
     struct CorpseTypeHandler;
     std::unordered_map<uint8_t, std::unique_ptr<IObjectTypeHandler>> typeHandlers_;
     void initTypeHandlers();
-    IObjectTypeHandler* getTypeHandler(ObjectType type) const;
+    [[nodiscard]] IObjectTypeHandler* getTypeHandler(ObjectType type) const;
 
     void onCreateUnit(const UpdateBlock& block, std::shared_ptr<Entity>& entity);
     void onCreatePlayer(const UpdateBlock& block, std::shared_ptr<Entity>& entity);

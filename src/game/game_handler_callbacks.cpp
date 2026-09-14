@@ -1,4 +1,8 @@
 #include "game/game_handler.hpp"
+#include "game/spell_description_eval.hpp"
+#include "game/gather_spells.hpp"
+#include "game/packed_time.hpp"
+#include "game/inventory_slots.hpp"
 #include "game/game_utils.hpp"
 #include "game/chat_handler.hpp"
 #include "game/movement_handler.hpp"
@@ -8,14 +12,15 @@
 #include "game/social_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
-#include "game/packet_parsers.hpp"
-#include "game/transport_manager.hpp"
 #include "game/warden_crypto.hpp"
 #include "game/warden_memory.hpp"
 #include "game/warden_module.hpp"
+#include "game/packet_parsers.hpp"
+#include "game/transport_manager.hpp"
 #include "game/opcodes.hpp"
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
+#include "ui/framexml_takeover.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -53,6 +58,8 @@
 #include <functional>
 #include <array>
 #include <cstdlib>
+#include <cstdio>
+#include <climits>
 #include <cstring>
 #include <limits>
 #include <openssl/sha.h>
@@ -63,24 +70,6 @@ namespace wowee {
 namespace game {
 
 namespace {
-
-const char* worldStateName(WorldState state) {
-    switch (state) {
-        case WorldState::DISCONNECTED: return "DISCONNECTED";
-        case WorldState::CONNECTING: return "CONNECTING";
-        case WorldState::CONNECTED: return "CONNECTED";
-        case WorldState::CHALLENGE_RECEIVED: return "CHALLENGE_RECEIVED";
-        case WorldState::AUTH_SENT: return "AUTH_SENT";
-        case WorldState::AUTHENTICATED: return "AUTHENTICATED";
-        case WorldState::READY: return "READY";
-        case WorldState::CHAR_LIST_REQUESTED: return "CHAR_LIST_REQUESTED";
-        case WorldState::CHAR_LIST_RECEIVED: return "CHAR_LIST_RECEIVED";
-        case WorldState::ENTERING_WORLD: return "ENTERING_WORLD";
-        case WorldState::IN_WORLD: return "IN_WORLD";
-        case WorldState::FAILED: return "FAILED";
-    }
-    return "UNKNOWN";
-}
 
 std::string lowerCopy(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -94,6 +83,13 @@ bool containsAnyTerm(const std::string& haystack, const char* const* terms, size
     }
     return false;
 }
+
+// GAMEOBJECT_TYPE_FISHINGHOLE. A fishing school is not a container: retail
+// gives it no interact cursor at all, and the only way to take from it is to
+// fish in it. Clicking one here sent CMSG_GAMEOBJ_USE and, while its metadata
+// was still pending, a CMSG_LOOT as well - which the server answers with the
+// hole's loot, harvesting the school in one right-click.
+constexpr uint32_t kGoTypeFishingHole = 25;
 
 bool isLootContainerName(const std::string& name) {
     const std::string lower = lowerCopy(name);
@@ -132,9 +128,23 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
 
     auto lockDbc = assets->loadDBC("Lock.dbc");
     auto spellDbc = assets->loadDBC("Spell.dbc");
+    // Which columns hold the spell's effects and their misc values, from the
+    // layout. They were 71 and 110, the WotLK positions, behind a demand that
+    // Spell.dbc have 234 fields - which is the WotLK file and nothing else, so
+    // on Classic (173) and TBC (216) this walked away and every locked chest
+    // went to the server as a bare USE. The effect block starts at 61 on
+    // vanilla and 65 on TBC because both carry an EffectBaseDice this one does
+    // not; the misc values are at 106 there rather than 110.
+    const auto* spellL = pipeline::getActiveDBCLayout()
+        ? pipeline::getActiveDBCLayout()->getLayout("Spell") : nullptr;
+    const uint32_t effect0Field = spellL ? spellL->field("Effect0") : 0xFFFFFFFF;
+    const uint32_t misc0Field   = spellL ? spellL->field("EffectMiscValue0") : 0xFFFFFFFF;
     if (!lockDbc || !spellDbc || !lockDbc->isLoaded() || !spellDbc->isLoaded() ||
-        lockDbc->getFieldCount() < 33 || spellDbc->getFieldCount() < 234) {
-        return plan; // Can't inspect the lock — let the server adjudicate a USE.
+        lockDbc->getFieldCount() < 33 ||
+        effect0Field == 0xFFFFFFFF || misc0Field == 0xFFFFFFFF ||
+        effect0Field + 3 > spellDbc->getFieldCount() ||
+        misc0Field + 3 > spellDbc->getFieldCount()) {
+        return plan; // Can't inspect the lock - let the server adjudicate a USE.
     }
 
     const uint32_t lockId = info->data[0];
@@ -162,8 +172,8 @@ LockOpenPlan planGameObjectOpen(pipeline::AssetManager* assets,
                 if (knownSpells.count(spellId) == 0) continue;
                 for (uint32_t effect = 0; effect < 3; ++effect) {
                     constexpr uint32_t kSpellEffectOpenLock = 33;
-                    if (spellDbc->getUInt32(spellRow, 71 + effect) == kSpellEffectOpenLock &&
-                        spellDbc->getUInt32(spellRow, 110 + effect) == keyIndex) {
+                    if (spellDbc->getUInt32(spellRow, effect0Field + effect) == kSpellEffectOpenLock &&
+                        spellDbc->getUInt32(spellRow, misc0Field + effect) == keyIndex) {
                         plan.method = LockOpenMethod::CastSpell;
                         plan.spellId = spellId;
                         return plan;
@@ -195,32 +205,17 @@ uint32_t gatherSpellForGameObject(const GameObjectQueryResponseData* info, const
         "nightmare vine", "mana thistle"
     };
 
-    if (containsAnyTerm(lower, kMiningTerms, sizeof(kMiningTerms) / sizeof(kMiningTerms[0]))) return 2575; // Mining
-    if (containsAnyTerm(lower, kHerbTerms, sizeof(kHerbTerms) / sizeof(kHerbTerms[0]))) return 2366; // Herb Gathering
+    if (containsAnyTerm(lower, kMiningTerms, sizeof(kMiningTerms) / sizeof(kMiningTerms[0]))) return kMiningBaseSpellId;
+    if (containsAnyTerm(lower, kHerbTerms, sizeof(kHerbTerms) / sizeof(kHerbTerms[0]))) return kHerbBaseSpellId;
     return 0;
 }
 
 uint32_t knownGatherRank(const SpellHandler* spellHandler, uint32_t baseSpellId) {
     if (!spellHandler) return 0;
 
-    static constexpr uint32_t kMiningRanks[] = {
-        2575, 2576, 3564, 10248, 29354
-    };
-    static constexpr uint32_t kHerbRanks[] = {
-        2366, 2368, 3570, 11993, 28695
-    };
-
-    const uint32_t* ranks = nullptr;
     size_t count = 0;
-    if (baseSpellId == kMiningRanks[0]) {
-        ranks = kMiningRanks;
-        count = sizeof(kMiningRanks) / sizeof(kMiningRanks[0]);
-    } else if (baseSpellId == kHerbRanks[0]) {
-        ranks = kHerbRanks;
-        count = sizeof(kHerbRanks) / sizeof(kHerbRanks[0]);
-    } else {
-        return 0;
-    }
+    const uint32_t* ranks = gatherRanksForBase(baseSpellId, count);
+    if (!ranks) return 0;
 
     for (size_t i = count; i > 0; --i) {
         const uint32_t spellId = ranks[i - 1];
@@ -322,12 +317,6 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
 }
 
 void GameHandler::requestCharacterList() {
-    if (requiresWarden_) {
-        // Gate already surfaced via failure callback/chat; avoid per-frame warning spam.
-        wardenCharEnumBlockedLogged_ = true;
-        return;
-    }
-
     if (state == WorldState::FAILED || !socket || !socket->isConnected()) {
         return;
     }
@@ -413,15 +402,6 @@ void GameHandler::createCharacter(const CharCreateData& data) {
         LOG_WARNING("Cannot create character: not connected");
         if (charCreateCallback_) {
             charCreateCallback_(false, "Not connected to server");
-        }
-        return;
-    }
-
-    if (requiresWarden_) {
-        std::string msg = "Server requires anti-cheat/Warden; character creation blocked.";
-        LOG_WARNING("Blocking CMSG_CHAR_CREATE while Warden gate is active");
-        if (charCreateCallback_) {
-            charCreateCallback_(false, msg);
         }
         return;
     }
@@ -525,12 +505,6 @@ const Character* GameHandler::getActiveCharacter() const {
     }
     return nullptr;
 }
-
-const Character* GameHandler::getFirstCharacter() const {
-    if (characters.empty()) return nullptr;
-    return &characters.front();
-}
-
 void GameHandler::playErrorSpeech(audio::PlayerErrorSpeech type) {
     auto* ac = services_.audioCoordinator;
     if (!ac) return;
@@ -578,6 +552,16 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     // This avoids relying on UI/Application ordering for appearance-dependent logic.
     activeCharacterGuid_ = characterGuid;
 
+    // The last character's guild is not this one's.
+    //
+    // The guild name is kept for the character being played and was cleared
+    // only when that character left the guild or it disbanded - so logging out
+    // of a guilded character and into a guildless one left the name behind,
+    // and everything that asks "am I in a guild" answered yes. The guild vault
+    // is where that showed: the click passed the check, the server refused it
+    // with error 9, and an empty vault window was already on screen.
+    if (socialHandler_) socialHandler_->clearGuildMembership();
+
     LOG_INFO("========================================");
     LOG_INFO("   ENTERING WORLD");
     LOG_INFO("========================================");
@@ -624,6 +608,8 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     playerDodgePct_ = -1.0f;
     playerParryPct_ = -1.0f;
     playerBlockPct_ = -1.0f;
+    playerExpertise_ = 0;
+    playerOffhandExpertise_ = 0;
     playerCritPct_  = -1.0f;
     playerRangedCritPct_ = -1.0f;
     std::fill(std::begin(playerSpellCritPct_), std::end(playerSpellCritPct_), -1.0f);
@@ -647,15 +633,16 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     std::fill(playerExploredZones_.begin(), playerExploredZones_.end(), 0u);
     hasPlayerExploredZones_ = false;
     playerSkills_.clear();
-    questLog_.clear();
-    pendingQuestQueryIds_.clear();
+    // The handler's, not this class's same-named members - every reader
+    // forwards there, so clearing the copies here cleared nothing anyone
+    // looks at and the previous character's quests stayed in the log.
+    if (questHandler_) questHandler_->clearQuestStateForCharacterSwitch();
     pendingLoginQuestResync_ = false;
     pendingLoginQuestResyncTimeout_ = 0.0f;
     if (questHandler_) {
         questHandler_->pendingQuestAcceptTimeoutsRef().clear();
         questHandler_->pendingQuestAcceptNpcGuidsRef().clear();
     }
-    npcQuestStatus_.clear();
     if (combatHandler_) combatHandler_->resetAllCombatState();
     // resetCastState() already called inside resetAllState() above
     pendingGameObjectInteractGuid_ = 0;
@@ -684,23 +671,30 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
 
 void GameHandler::handleLoginSetTimeSpeed(network::Packet& packet) {
     // SMSG_LOGIN_SETTIMESPEED (0x042)
-    // Structure: uint32 gameTime, float timeScale
-    // gameTime: Game time in seconds since epoch
-    // timeScale: Time speed multiplier (typically 0.0166 for 1 day = 1 hour)
+    // Structure: PackedTime gameTime, float timeScale
+    //
+    // gameTime is a packed bitfield, not a count of seconds - Player.cpp writes
+    // it with AppendPackedTime. It was being stored raw and then divided by
+    // 86400 to get a time of day, which made the sky's clock a number with no
+    // relation to the hour the server sent.
+    //
+    // timeScale: time speed multiplier (typically 0.0166 for 1 day = 1 hour)
 
     if (packet.getSize() < 8) {
         LOG_WARNING("SMSG_LOGIN_SETTIMESPEED: packet too small (", packet.getSize(), " bytes)");
         return;
     }
 
-    uint32_t gameTimePacked = packet.readUInt32();
+    const WowDate now = unpackWowPackedTime(packet.readUInt32());
     float timeScale = packet.readFloat();
 
-    // Store for celestial/sky system use
-    gameTime_ = static_cast<float>(gameTimePacked);
+    // Hours since midnight, which is what GetGameTime already assumed and what
+    // the sky wants. One meaning for this field, written down here.
+    gameTime_ = static_cast<float>(now.hour) + static_cast<float>(now.minute) / 60.0f;
     timeSpeed_ = timeScale;
 
-    LOG_INFO("Server time: gameTime=", gameTime_, "s, timeSpeed=", timeSpeed_);
+    LOG_INFO("Server time: ", now.hour, ":", now.minute, " (gameTime=", gameTime_,
+             "h), timeSpeed=", timeSpeed_);
     LOG_INFO("  (1 game day = ", (1.0f / timeSpeed_) / 60.0f, " real minutes)");
 }
 
@@ -730,10 +724,34 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Some realms emit a late duplicate LOGIN_VERIFY_WORLD after the client is already
     // in-world. Re-running full world-entry handling here can trigger an expensive
     // same-map reload/reset path and starve networking for tens of seconds.
-    if (!initialWorldEntry && sameMap && distSqCurrent <= (5.0f * 5.0f)) {
+    // The distance test alone is not enough while flying. A taxi carries the
+    // player a long way from where the packet's position points, so a late
+    // duplicate stops looking like a duplicate and is taken for a teleport -
+    // and world entry puts the player back at the position it carries, which
+    // is where they logged in. Any of these arriving mid-flight is a duplicate
+    // whatever the distance says: the server moves a passenger along the
+    // spline, not by sending them into the world again.
+    const bool flying = isOnTaxiFlight();
+    if (!initialWorldEntry && sameMap &&
+        (flying || distSqCurrent <= (5.0f * 5.0f))) {
         LOG_INFO("Ignoring duplicate SMSG_LOGIN_VERIFY_WORLD while already in world: mapId=",
-                 data.mapId, " dist=", std::sqrt(distSqCurrent));
+                 data.mapId, " dist=", std::sqrt(distSqCurrent),
+                 flying ? " (on a taxi flight)" : "");
         return;
+    }
+
+    // Said at warning level when it happens in-world, because from here the
+    // player is moved to the position this packet carries. A duplicate that
+    // slips past the test above is indistinguishable, after the fact, from a
+    // teleport nobody asked for - and one arriving in-world is what puts a
+    // player back where they logged in.
+    if (!initialWorldEntry) {
+        LOG_WARNING("SMSG_LOGIN_VERIFY_WORLD in-world is being treated as a "
+                    "teleport: mapId=", data.mapId, " sameMap=", sameMap,
+                    " dist=", std::sqrt(distSqCurrent),
+                    " onTaxi=", flying,
+                    " - the player is about to be placed at (", data.x, ", ",
+                    data.y, ", ", data.z, ")");
     }
 
     // Successfully entered the world (or teleported)
@@ -781,11 +799,10 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     taxiActivatePending_ = false;
     taxiClientActive_ = false;
     taxiClientPath_.clear();
-    // taxiRecoverPending_ is NOT cleared here — it must survive the general
+    // taxiRecoverPending_ is NOT cleared here - it must survive the general
     // state reset so the recovery check below can detect a mid-flight reconnect.
     taxiStartGrace_ = 0.0f;
     currentMountDisplayId_ = 0;
-    taxiMountDisplayId_ = 0;
     vehicleId_ = 0;
     if (mountCallback_) {
         mountCallback_(0);
@@ -794,7 +811,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Clear boss encounter unit slots and raid marks on world transfer
     if (socialHandler_) socialHandler_->resetTransferState();
 
-    // Suppress area triggers on initial login — prevents exit portals from
+    // Suppress area triggers on initial login - prevents exit portals from
     // immediately firing when spawning inside a dungeon/instance. Deeprun Tram
     // (map 369) needs a shorter window because exits are close to the spawn.
     const bool deeprunTram = data.mapId == 369;
@@ -919,19 +936,83 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     // Spell.dbc cache alone is ~170ms on a cold load).
     if (initialWorldEntry) {
         preloadDBCCaches();
+        // Asked once, read all session: the reply carries how long until the
+        // daily quests reset, which is the only place that figure comes from.
+        // Silently - the announcement belongs to /time.
+        queryServerTime(false);
     }
 
-    // Fire PLAYER_ENTERING_WORLD — THE most important event for addon initialization.
+    // Fire PLAYER_ENTERING_WORLD - THE most important event for addon initialization.
     // Fires on initial login, teleports, instance transitions, and zone changes.
     if (addonEventCallback_) {
         fireAddonEvent("PLAYER_ENTERING_WORLD", {initialWorldEntry ? "1" : "0"});
+        // FrameXML arranges itself from this event, so the interface diagnostics
+        // wait for it rather than describing a layout nobody ever sees.
+        ui::frameXmlNoteWorldEntry();
         // Also fire ZONE_CHANGED_NEW_AREA and UPDATE_WORLD_STATES so map/BG addons refresh
         fireAddonEvent("ZONE_CHANGED_NEW_AREA", {});
         fireAddonEvent("UPDATE_WORLD_STATES", {});
+        // Entering a battleground, told apart by the map itself rather than by
+        // anything the server says about it - BattlemasterList.dbc names the
+        // maps and this client already reads it for the queue list.
+        //
+        // The battleground frame answers this by filtering chat: a battleground
+        // announces every player joining and leaving, and the filter collapses
+        // that into one line that counts them. Without the event the filter is
+        // never installed and all of it goes to the chat window one at a time.
+        if (isBattlegroundMap(getCurrentMapId())) {
+            fireAddonEvent("PLAYER_ENTERING_BATTLEGROUND", {});
+        }
+        // The currencies are known now - CurrencyTypes.dbc is read on demand
+        // and the amounts are item stacks that have just arrived with the
+        // inventory. The main bar builds its token frame on this and had no
+        // reason to, so the frame stayed empty however much was held.
+        //
+        // One event, not two: KNOWN_CURRENCY_TYPES_UPDATE and
+        // CURRENCY_DISPLAY_UPDATE share a branch there, and the branch rebuilds
+        // the whole row either way.
+        fireAddonEvent("KNOWN_CURRENCY_TYPES_UPDATE", {});
         // PLAYER_LOGIN fires only on initial login (not teleports)
         if (initialWorldEntry) {
             fireAddonEvent("PLAYER_LOGIN", {});
         }
+
+        // The player's own values, said again now.
+        //
+        // Every UNIT_ event this client sends is a change notice: it fires when
+        // an update block carries a different number. That is right for keeping
+        // a frame current and useless for filling one in, because a frame built
+        // before the player existed has missed every one of them and nothing
+        // will change health or level just because someone is looking. The
+        // original interface fills its unit frames on PLAYER_ENTERING_WORLD for
+        // exactly this reason, and it reads the current values rather than the
+        // event's - so the event alone is enough, and this is where it belongs.
+        for (const char* what : {"UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_LEVEL",
+                                 "UNIT_DISPLAYPOWER", "UNIT_MANA", "UNIT_MAXMANA",
+                                 "UNIT_RAGE", "UNIT_MAXRAGE", "UNIT_ENERGY",
+                                 "UNIT_MAXENERGY", "UNIT_FOCUS", "UNIT_MAXFOCUS",
+                                 "UNIT_NAME_UPDATE", "UNIT_FACTION"}) {
+            fireAddonEvent(what, {"player"});
+        }
+        fireAddonEvent("PLAYER_XP_UPDATE", {"player"});
+        // Dead on arrival, said now.
+        //
+        // Logging in as a corpse is the one time death is not a transition the
+        // client watches happen - it is the state the player already has when
+        // the world loads, so no health-drop and no flag-flip fires PLAYER_DEAD
+        // and the interface never puts up the release-spirit popup. The player
+        // sits dead, unable to act, until the server tires of waiting and
+        // pulls them to the graveyard. Same reason every UNIT_ value above is
+        // re-sent here: a frame built after the fact has missed the event that
+        // would have filled it in.
+        if (isPlayerDead()) {
+            fireAddonEvent("PLAYER_DEAD", {});
+        }
+        // The durability warnings hide themselves when nothing is damaged, and
+        // this is the event that asks them to look. Without it the frame keeps
+        // the state its XML was written with, which is shown.
+        fireAddonEvent("UPDATE_INVENTORY_ALERTS", {});
+        fireAddonEvent("UPDATE_INVENTORY_DURABILITY", {});
     }
 }
 
@@ -1007,7 +1088,7 @@ void GameHandler::sendPing() {
 
 void GameHandler::sendRequestVehicleExit() {
     if (state != WorldState::IN_WORLD || vehicleId_ == 0) return;
-    // CMSG_REQUEST_VEHICLE_EXIT has no payload — opcode only
+    // CMSG_REQUEST_VEHICLE_EXIT has no payload - opcode only
     network::Packet pkt(wireOpcode(Opcode::CMSG_REQUEST_VEHICLE_EXIT));
     socket->send(pkt);
     vehicleId_ = 0;  // Optimistically clear; server will confirm via SMSG_PLAYER_VEHICLE_DATA(0)
@@ -1017,6 +1098,14 @@ const std::vector<GameHandler::EquipmentSetInfo>& GameHandler::getEquipmentSets(
     if (inventoryHandler_) return inventoryHandler_->getEquipmentSets();
     static const std::vector<EquipmentSetInfo> empty;
     return empty;
+}
+
+const std::array<uint64_t, 19>* GameHandler::getEquipmentSetItems(uint32_t setId) const {
+    return inventoryHandler_ ? inventoryHandler_->getEquipmentSetItems(setId) : nullptr;
+}
+
+uint32_t GameHandler::getEquipmentSetIgnoreMask(uint32_t setId) const {
+    return inventoryHandler_ ? inventoryHandler_->getEquipmentSetIgnoreMask(setId) : 0u;
 }
 
 // Trade state delegation to InventoryHandler (which owns the canonical trade state)
@@ -1140,12 +1229,8 @@ const std::vector<uint64_t>& GameHandler::getMasterLootCandidates() const {
 bool GameHandler::hasMasterLootCandidates() const {
     return inventoryHandler_ ? inventoryHandler_->hasMasterLootCandidates() : !masterLootCandidates_.empty();
 }
-bool GameHandler::hasPendingLootRoll() const {
-    return inventoryHandler_ ? inventoryHandler_->hasPendingLootRoll() : pendingLootRollActive_;
-}
-const LootRollEntry& GameHandler::getPendingLootRoll() const {
-    if (inventoryHandler_) return inventoryHandler_->getPendingLootRoll();
-    return pendingLootRoll_;
+const LootRollEntry* GameHandler::getLootRoll(int rollId) const {
+    return inventoryHandler_ ? inventoryHandler_->getLootRoll(rollId) : nullptr;
 }
 
 // Vendor
@@ -1173,11 +1258,47 @@ uint64_t GameHandler::getVendorGuid() const {
 }
 
 // Mail
+bool GameHandler::isSocketingOpen() const {
+    return inventoryHandler_ && inventoryHandler_->getSocketSession().open;
+}
+
+uint64_t GameHandler::getSocketItemGuid() const {
+    return inventoryHandler_ ? inventoryHandler_->getSocketSession().itemGuid : 0;
+}
+
+uint32_t GameHandler::getSocketItemId() const {
+    return inventoryHandler_ ? inventoryHandler_->getSocketSession().itemId : 0;
+}
+uint32_t GameHandler::getSocketPendingGemItemId(int index) const {
+    if (!inventoryHandler_ || index < 0 || index > 2) return 0;
+    return inventoryHandler_->getSocketSession().newGemItemId[index];
+}
+
+void GameHandler::openSocketing(uint64_t itemGuid) {
+    if (inventoryHandler_) inventoryHandler_->openSocketing(itemGuid);
+}
+
+void GameHandler::closeSocketing() {
+    if (inventoryHandler_) inventoryHandler_->closeSocketing();
+}
+
+bool GameHandler::setSocketGem(int index, uint64_t gemGuid, uint32_t gemItemId) {
+    return inventoryHandler_ && inventoryHandler_->setSocketGem(index, gemGuid, gemItemId);
+}
+
+void GameHandler::acceptSockets() {
+    if (inventoryHandler_) inventoryHandler_->acceptSockets();
+}
+
 bool GameHandler::isMailboxOpen() const {
     return inventoryHandler_ ? inventoryHandler_->isMailboxOpen() : mailboxOpen_;
 }
 const std::vector<MailMessage>& GameHandler::getMailInbox() const {
     if (inventoryHandler_) return inventoryHandler_->getMailInbox();
+    return mailInbox_;
+}
+std::vector<MailMessage>& GameHandler::mailInboxRef() {
+    if (inventoryHandler_) return inventoryHandler_->mailInboxRef();
     return mailInbox_;
 }
 std::string GameHandler::getMailDisplaySubject(const MailMessage& mail) {
@@ -1211,6 +1332,10 @@ void GameHandler::closeMailCompose() {
     if (inventoryHandler_) inventoryHandler_->closeMailCompose();
     else { showMailCompose_ = false; clearMailAttachments(); }
 }
+void GameHandler::setMailComposeShowing(bool showing) {
+    if (inventoryHandler_) inventoryHandler_->setMailComposeShowing(showing);
+    else showMailCompose_ = showing;
+}
 bool GameHandler::hasNewMail() const {
     return inventoryHandler_ ? inventoryHandler_->hasNewMail() : hasNewMail_;
 }
@@ -1221,6 +1346,7 @@ const std::array<GameHandler::MailAttachSlot, 12>& GameHandler::getMailAttachmen
     }
     return mailAttachments_;
 }
+
 
 // Bank
 bool GameHandler::isBankOpen() const {
@@ -1244,6 +1370,10 @@ const GuildBankData& GameHandler::getGuildBankData() const {
     if (inventoryHandler_) return inventoryHandler_->getGuildBankData();
     return guildBankData_;
 }
+void GameHandler::setGuildBankMoney(uint64_t money) {
+    if (inventoryHandler_) inventoryHandler_->setGuildBankMoney(money);
+    else guildBankData_.money = money;
+}
 uint8_t GameHandler::getGuildBankActiveTab() const {
     return inventoryHandler_ ? inventoryHandler_->getGuildBankActiveTab() : guildBankActiveTab_;
 }
@@ -1263,12 +1393,24 @@ const AuctionListResult& GameHandler::getAuctionBrowseResults() const {
     if (inventoryHandler_) return inventoryHandler_->getAuctionBrowseResults();
     return auctionBrowseResults_;
 }
+AuctionListResult& GameHandler::auctionBrowseResultsRef() {
+    if (inventoryHandler_) return inventoryHandler_->auctionBrowseResultsRef();
+    return auctionBrowseResults_;
+}
 const AuctionListResult& GameHandler::getAuctionOwnerResults() const {
     if (inventoryHandler_) return inventoryHandler_->getAuctionOwnerResults();
     return auctionOwnerResults_;
 }
+AuctionListResult& GameHandler::auctionOwnerResultsRef() {
+    if (inventoryHandler_) return inventoryHandler_->auctionOwnerResultsRef();
+    return auctionOwnerResults_;
+}
 const AuctionListResult& GameHandler::getAuctionBidderResults() const {
     if (inventoryHandler_) return inventoryHandler_->getAuctionBidderResults();
+    return auctionBidderResults_;
+}
+AuctionListResult& GameHandler::auctionBidderResultsRef() {
+    if (inventoryHandler_) return inventoryHandler_->auctionBidderResultsRef();
     return auctionBidderResults_;
 }
 int GameHandler::getAuctionActiveTab() const {
@@ -1288,14 +1430,18 @@ bool GameHandler::isTrainerWindowOpen() const {
 }
 const TrainerListData& GameHandler::getTrainerSpells() const {
     if (inventoryHandler_) return inventoryHandler_->getTrainerSpells();
-    return currentTrainerList_;
+    // inventoryHandler_ is always constructed; this is the empty answer for the
+    // theoretical null case, replacing a GameHandler-owned copy nothing wrote.
+    static const TrainerListData kEmpty;
+    return kEmpty;
 }
 const std::vector<GameHandler::TrainerTab>& GameHandler::getTrainerTabs() const {
     if (inventoryHandler_) {
         // Layout-identical structs (InventoryHandler::TrainerTab == GameHandler::TrainerTab)
         return reinterpret_cast<const std::vector<TrainerTab>&>(inventoryHandler_->getTrainerTabs());
     }
-    return trainerTabs_;
+    static const std::vector<TrainerTab> kEmpty;
+    return kEmpty;
 }
 
 void GameHandler::sendMinimapPing(float wowX, float wowY) {
@@ -1358,7 +1504,7 @@ void GameHandler::setOrientation(float orientation) {
 
 // Entity lifecycle methods (handleUpdateObject, processOutOfRangeObjects,
 // applyUpdateObjectBlock, finalizeUpdateObjectBatch, handleCompressedUpdateObject,
-// handleDestroyObject) moved to EntityController — see entity_controller.cpp
+// handleDestroyObject) moved to EntityController - see entity_controller.cpp
 
 void GameHandler::sendChatMessage(ChatType type, const std::string& message, const std::string& target) {
     if (chatHandler_) chatHandler_->sendChatMessage(type, message, target);
@@ -1438,17 +1584,51 @@ void GameHandler::targetEnemy(bool reverse) {
 void GameHandler::targetFriend(bool reverse) {
     if (combatHandler_) combatHandler_->targetFriend(reverse);
 }
+void GameHandler::targetNearestEnemyPlayer(bool reverse) {
+    if (combatHandler_) combatHandler_->targetNearestEnemyPlayer(reverse);
+}
+void GameHandler::targetNearestFriendPlayer(bool reverse) {
+    if (combatHandler_) combatHandler_->targetNearestFriendPlayer(reverse);
+}
+void GameHandler::targetNearestPartyMember(bool reverse) {
+    if (combatHandler_) combatHandler_->targetNearestPartyMember(reverse);
+}
+void GameHandler::targetNearestRaidMember(bool reverse) {
+    if (combatHandler_) combatHandler_->targetNearestRaidMember(reverse);
+}
+void GameHandler::targetLastEnemy() {
+    if (combatHandler_) combatHandler_->targetLastEnemy();
+}
+void GameHandler::targetLastFriend() {
+    if (combatHandler_) combatHandler_->targetLastFriend();
+}
 
 void GameHandler::inspectTarget() {
     if (socialHandler_) socialHandler_->inspectTarget();
+}
+
+void GameHandler::inspectUnit(uint64_t guid) {
+    if (socialHandler_) socialHandler_->inspectUnit(guid);
+}
+
+void GameHandler::requestInspectHonorData(uint64_t guid) {
+    if (socialHandler_) socialHandler_->requestInspectHonorData(guid);
 }
 
 const GameHandler::InspectResult* GameHandler::getInspectResult() const {
     return socialHandler_ ? socialHandler_->getInspectResult() : nullptr;
 }
 
-void GameHandler::queryServerTime() {
-    if (socialHandler_) socialHandler_->queryServerTime();
+void GameHandler::queryServerTime(bool announce) {
+    if (socialHandler_) socialHandler_->queryServerTime(announce);
+}
+
+uint64_t GameHandler::getTalentWipeNpcGuid() const {
+    return spellHandler_ ? spellHandler_->getTalentWipeNpcGuid() : 0u;
+}
+
+uint32_t GameHandler::getSecondsUntilDailyReset() const {
+    return socialHandler_ ? socialHandler_->getSecondsUntilDailyReset() : 0u;
 }
 
 void GameHandler::requestPlayedTime() {
@@ -1483,6 +1663,36 @@ void GameHandler::removeIgnore(const std::string& playerName) {
     if (socialHandler_) socialHandler_->removeIgnore(playerName);
 }
 
+void GameHandler::faceCanonicalYaw(float canonicalYaw) {
+    movementInfo.orientation = canonicalYaw;
+
+    // One-shot check that the renderer's facing round-trips to the same
+    // canonical yaw we just computed from positions. If it does not, the
+    // per-frame resync replaces this with a different heading and the server
+    // re-checks the arc against that instead.
+    if (auto* r = services_.renderer) {
+        const float fromRender = core::coords::characterYawDegToCanonical(r->getCharacterYaw());
+        const float delta = core::coords::normalizeAngleRad(fromRender - canonicalYaw);
+        if (std::abs(delta) > 0.2f) {
+            LOG_WARNING("Facing mismatch: computed canonical=", canonicalYaw,
+                        " but the character's ", r->getCharacterYaw(),
+                        " deg maps to ", fromRender, " (off by ",
+                        delta * 57.2957795f, " deg) - the resync will undo this");
+        }
+    }
+
+    // The renderer owns facing; the game side is downstream of it every frame.
+    if (auto* renderer = services_.renderer) {
+        const float facingDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
+        renderer->setCharacterYaw(facingDeg);
+        if (auto* cc = renderer->getCameraController()) {
+            cc->setFacingYaw(facingDeg);
+        }
+    }
+
+    sendMovement(Opcode::MSG_MOVE_SET_FACING);
+}
+
 void GameHandler::requestLogout(bool exitAfterLogout) {
     if (socialHandler_) socialHandler_->requestLogout(exitAfterLogout);
 }
@@ -1491,8 +1701,8 @@ void GameHandler::cancelLogout() {
     if (socialHandler_) socialHandler_->cancelLogout();
 }
 
-void GameHandler::sendSetDifficulty(uint32_t difficulty) {
-    if (socialHandler_) socialHandler_->sendSetDifficulty(difficulty);
+void GameHandler::sendSetDifficulty(uint32_t difficulty, bool raid) {
+    if (socialHandler_) socialHandler_->sendSetDifficulty(difficulty, raid);
 }
 
 void GameHandler::setStandState(uint8_t standState) {
@@ -1579,6 +1789,21 @@ void GameHandler::replyToLastWhisper(const std::string& message) {
     if (chatHandler_) chatHandler_->replyToLastWhisper(message);
 }
 
+void GameHandler::setGuildBankTabText(uint8_t tab, const std::string& text) {
+    if (socialHandler_) socialHandler_->setGuildBankTabText(tab, text);
+}
+
+void GameHandler::channelModeration(Opcode op, const std::string& channelName,
+                                    const std::string& targetName,
+                                    bool allowEmptyTarget) {
+    if (socialHandler_) socialHandler_->channelModeration(op, channelName, targetName,
+                                                         allowEmptyTarget);
+}
+
+void GameHandler::promoteToLeader(uint64_t guid) {
+    if (socialHandler_) socialHandler_->promoteToLeader(guid);
+}
+
 void GameHandler::uninvitePlayer(const std::string& playerName) {
     if (socialHandler_) socialHandler_->uninvitePlayer(playerName);
 }
@@ -1607,7 +1832,7 @@ void GameHandler::setRaidMark(uint64_t guid, uint8_t icon) {
     if (socialHandler_) socialHandler_->setRaidMark(guid, icon);
 }
 
-// The marks live in SocialHandler — MSG_RAID_TARGET_UPDATE writes them there.
+// The marks live in SocialHandler - MSG_RAID_TARGET_UPDATE writes them there.
 // GameHandler kept a second, identical array that nothing ever wrote, so every
 // caller of these (target frame, nameplates, minimap, social panel) read an
 // array of zeros and no marker icon was ever drawn.
@@ -1621,6 +1846,10 @@ uint8_t GameHandler::getEntityRaidMark(uint64_t guid) const {
 
 void GameHandler::requestRaidInfo() {
     if (socialHandler_) socialHandler_->requestRaidInfo();
+}
+
+void GameHandler::setSavedInstanceExtend(uint32_t mapId, uint32_t difficulty, bool extend) {
+    if (socialHandler_) socialHandler_->setSavedInstanceExtend(mapId, difficulty, extend);
 }
 
 void GameHandler::proposeDuel(uint64_t targetGuid) {
@@ -1697,6 +1926,14 @@ void GameHandler::clearChatHistory() {
     if (chatHandler_) chatHandler_->getChatHistory().clear();
 }
 
+bool GameHandler::ownsChatChannel(const std::string& name) const {
+    return chatHandler_ && chatHandler_->ownsChannel(name);
+}
+
+uint64_t GameHandler::chatLineSender(uint32_t lineId) const {
+    return chatHandler_ ? chatHandler_->chatLineSender(lineId) : 0;
+}
+
 const std::vector<std::string>& GameHandler::getJoinedChannels() const {
     if (chatHandler_) return chatHandler_->getJoinedChannels();
     static const std::vector<std::string> kEmpty;
@@ -1707,12 +1944,67 @@ const std::vector<std::string>& GameHandler::getJoinedChannels() const {
 // Name Queries (delegated to EntityController)
 // ============================================================
 
+// Who a piece of mail is from. The wire gives a player GUID for player mail and
+// an entry for everything else, and nothing resolved either - the inbox showed
+// an empty From line for every message.
+//
+// Resolved on demand rather than stored, so a name that arrives after the inbox
+// was parsed shows up on the next frame instead of staying blank.
+std::string GameHandler::getMailSenderName(const MailMessage& mail) const {
+    switch (mail.messageType) {
+        case 0: {  // from another player
+            // The name-query response backfills senderName, and Reply uses that
+            // field, so prefer it and fall back to the cache for the window
+            // between the inbox arriving and the query returning.
+            if (!mail.senderName.empty()) return mail.senderName;
+            if (mail.senderGuid == 0) break;
+            const std::string& name = lookupName(mail.senderGuid);
+            if (!name.empty()) return name;
+            return "Unknown";
+        }
+        case 2:    // the auction house, which has no creature behind it
+            return "Auction House";
+        case 3: {  // a creature
+            std::string name = getCachedCreatureName(mail.senderEntry);
+            if (!name.empty()) return name;
+            break;
+        }
+        case 4: {  // a game object
+            if (const auto* info = getCachedGameObjectInfo(mail.senderEntry);
+                info && !info->name.empty()) {
+                return info->name;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return "Unknown";
+}
+
 void GameHandler::queryPlayerName(uint64_t guid) {
     if (entityController_) entityController_->queryPlayerName(guid);
 }
 
 void GameHandler::queryCreatureInfo(uint32_t entry, uint64_t guid) {
     if (entityController_) entityController_->queryCreatureInfo(entry, guid);
+}
+
+uint32_t GameHandler::getCreatureDisplayIdForEntry(uint32_t entry) {
+    if (entry == 0) return 0;
+    const auto& cache = getCreatureInfoCache();
+    if (auto it = cache.find(entry); it != cache.end()) {
+        // The first non-zero of the four. A template may carry several models
+        // and the server picks between them per spawn; for a preview any of
+        // them is the creature, and the first is what it looks like by default.
+        for (uint32_t id : it->second.displayId)
+            if (id != 0) return id;
+        return 0;
+    }
+    // Guid zero: this is not about any one spawn. queryCreatureInfo drops a
+    // repeat while one is in flight, so calling every frame sends one query.
+    queryCreatureInfo(entry, 0);
+    return 0;
 }
 
 void GameHandler::queryGameObjectInfo(uint32_t entry, uint64_t guid) {
@@ -1735,10 +2027,6 @@ void GameHandler::queryItemInfo(uint32_t entry, uint64_t guid) {
     if (inventoryHandler_) inventoryHandler_->queryItemInfo(entry, guid);
 }
 
-void GameHandler::handleItemQueryResponse(network::Packet& packet) {
-    if (inventoryHandler_) inventoryHandler_->handleItemQueryResponse(packet);
-}
-
 uint64_t GameHandler::resolveOnlineItemGuid(uint32_t itemId) const {
     return inventoryHandler_ ? inventoryHandler_->resolveOnlineItemGuid(itemId) : 0;
 }
@@ -1749,6 +2037,46 @@ void GameHandler::detectInventorySlotBases(const FlatFieldMap& fields) {
 
 bool GameHandler::applyInventoryFields(const FlatFieldMap& fields) {
     return inventoryHandler_ ? inventoryHandler_->applyInventoryFields(fields) : false;
+}
+
+uint64_t GameHandler::getInteractNpcGuid() const {
+    if (inventoryHandler_) {
+        if (const uint64_t peer = inventoryHandler_->getTradePeerGuid()) return peer;
+        if (const uint64_t vendor = getVendorGuid()) return vendor;
+    }
+    // The trainer, which the list above this function has always named and
+    // this function never asked.
+    //
+    // Nothing else answers for it either: SMSG_TRAINER_LIST closes the gossip
+    // that led to the trainer, so by the time the panel is up the gossip row
+    // below returns 0 as well. With no unit to render, the portrait kept the
+    // stand-in SetPortraitTexture stamps when it cannot get a face - which is
+    // a class circle, and a tailoring trainer was drawn as a warrior's sword.
+    //
+    // Above the gossip for the same reason the vendor is: a trainer is a window
+    // opened from a gossip and covering it.
+    if (isTrainerWindowOpen()) {
+        if (const uint64_t trainer = getTrainerSpells().trainerGuid) return trainer;
+    }
+    // From the movement handler, which owns both. GameHandler kept members of
+    // the same two names that the decomposition left behind unwritten, so this
+    // read false forever and the flight master had no portrait in the taxi
+    // frame.
+    if (movementHandler_ && movementHandler_->isTaxiWindowOpen()) {
+        if (const uint64_t taxiNpc = movementHandler_->getTaxiNpcGuid()) return taxiNpc;
+    }
+    if (questHandler_) {
+        if (const uint64_t gossip = questHandler_->getCurrentGossip().npcGuid) return gossip;
+    }
+    return 0;
+}
+
+bool GameHandler::getOtherPlayerEquipment(uint64_t guid,
+                                          std::array<uint32_t, 19>& displayIds,
+                                          std::array<uint8_t, 19>& invTypes) const {
+    return inventoryHandler_
+        ? inventoryHandler_->resolveOtherPlayerEquipment(guid, displayIds, invTypes)
+        : false;
 }
 
 void GameHandler::extractContainerFields(uint64_t containerGuid, const FlatFieldMap& fields) {
@@ -1866,6 +2194,14 @@ bool GameHandler::isHostileAttacker(uint64_t guid) const {
     return combatHandler_ ? combatHandler_->isHostileAttacker(guid) : false;
 }
 
+void GameHandler::confirmBinder() {
+    if (!isInWorld() || !socket || binderGuid_ == 0) return;
+    auto pkt = BinderActivatePacket::build(binderGuid_);
+    socket->send(pkt);
+    LOG_INFO("Sent CMSG_BINDER_ACTIVATE (confirmed) for npc=0x",
+             std::hex, binderGuid_, std::dec);
+}
+
 void GameHandler::dismount() {
     if (movementHandler_) movementHandler_->dismount();
 }
@@ -1882,6 +2218,79 @@ bool GameHandler::hasPendingBgInvite() const {
     return socialHandler_ && socialHandler_->hasPendingBgInvite();
 }
 
+// Seeds the staging copy from the rank as it stands, so a field the panel never
+// touches goes back to the server unchanged instead of as a zero.
+void GameHandler::setSelectedGuildRank(int index) {
+    selectedGuildRank_ = index;
+    pendingGuildRank_ = PendingGuildRank{};
+    const auto& roster = getGuildRoster();
+    if (index < 1 || index > static_cast<int>(roster.ranks.size())) return;
+    const auto& r = roster.ranks[static_cast<size_t>(index) - 1];
+    pendingGuildRank_.rights    = r.rights;
+    pendingGuildRank_.goldLimit = r.goldLimit;
+    pendingGuildRank_.tabRights = r.bankTabRights;
+    pendingGuildRank_.tabSlots  = r.bankTabSlotsPerDay;
+}
+
+void GameHandler::saveGuildRank(const std::string& rankName) {
+    if (!socialHandler_) return;
+    if (selectedGuildRank_ < 1) return;
+    const auto& p = pendingGuildRank_;
+    // Ranks are zero-based on the wire and one-based in the panel.
+    socialHandler_->saveGuildRank(static_cast<uint32_t>(selectedGuildRank_ - 1),
+                                  p.rights, rankName, p.goldLimit,
+                                  p.tabRights.data(), p.tabSlots.data());
+}
+
+void GameHandler::setGuildInfoText(const std::string& text) {
+    if (socialHandler_) socialHandler_->setGuildInfoText(text);
+}
+
+void GameHandler::takeInboxTextItem(uint32_t mailId) {
+    if (socialHandler_) socialHandler_->takeInboxTextItem(mailId);
+}
+
+uint32_t GameHandler::getPlayerGuildRankRights() const {
+    return socialHandler_ ? socialHandler_->getPlayerGuildRankRights() : 0u;
+}
+
+void GameHandler::delGuildRank() {
+    if (socialHandler_) socialHandler_->delGuildRank();
+}
+
+void GameHandler::setLootMethod(uint8_t method, uint64_t masterGuid, uint8_t threshold) {
+    if (socialHandler_) socialHandler_->setLootMethod(method, masterGuid, threshold);
+}
+
+void GameHandler::setPartyAssignment(uint8_t assignment, uint64_t guid, bool apply) {
+    if (socialHandler_) socialHandler_->setPartyAssignment(assignment, guid, apply);
+}
+
+void GameHandler::setRaidSubgroup(const std::string& playerName, uint8_t group) {
+    if (socialHandler_) socialHandler_->setRaidSubgroup(playerName, group);
+}
+
+void GameHandler::swapRaidSubgroup(const std::string& a, const std::string& b) {
+    if (socialHandler_) socialHandler_->swapRaidSubgroup(a, b);
+}
+
+void GameHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId,
+                                  uint32_t instanceId, bool asGroup) {
+    if (socialHandler_) socialHandler_->joinBattlefield(battlemasterGuid, bgTypeId, instanceId, asGroup);
+}
+
+void GameHandler::leaveBattlefield() {
+    if (socialHandler_) socialHandler_->leaveBattlefield();
+}
+
+void GameHandler::requestBattlefieldList(uint32_t bgTypeId) {
+    if (socialHandler_) socialHandler_->requestBattlefieldList(bgTypeId);
+}
+
+void GameHandler::reportPvpAfk(uint64_t playerGuid) {
+    if (socialHandler_) socialHandler_->reportPvpAfk(playerGuid);
+}
+
 void GameHandler::acceptBattlefield(uint32_t queueSlot) {
     if (socialHandler_) socialHandler_->acceptBattlefield(queueSlot);
 }
@@ -1894,12 +2303,26 @@ void GameHandler::acceptBattlefield(uint32_t queueSlot) {
 // LFG outgoing packets
 // ---------------------------------------------------------------------------
 
-void GameHandler::lfgJoin(uint32_t dungeonId, uint8_t roles) {
-    if (socialHandler_) socialHandler_->lfgJoin(dungeonId, roles);
+void GameHandler::lfgJoin(const std::vector<uint32_t>& dungeonIds, uint8_t roles) {
+    if (socialHandler_) socialHandler_->lfgJoin(dungeonIds, roles);
 }
 
 void GameHandler::lfgLeave() {
     if (socialHandler_) socialHandler_->lfgLeave();
+}
+
+void GameHandler::requestLfgPlayerLockInfo() {
+    if (state != WorldState::IN_WORLD || !socket) return;
+    // Payload-free requests. The dungeon finder's ready popup asks for both in
+    // its OnShow, so the rewards it is about to draw are the current ones.
+    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PLAYER_LOCK_INFO_REQUEST));
+    socket->send(pkt);
+}
+
+void GameHandler::requestLfgPartyLockInfo() {
+    if (state != WorldState::IN_WORLD || !socket) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_LFD_PARTY_LOCK_INFO_REQUEST));
+    socket->send(pkt);
 }
 
 void GameHandler::lfgSetRoles(uint8_t roles) {
@@ -1970,6 +2393,18 @@ void GameHandler::sendPetAction(uint32_t action, uint64_t targetGuid) {
     if (spellHandler_) spellHandler_->sendPetAction(action, targetGuid);
 }
 
+void GameHandler::dismissCritter() {
+    if (activeCritterGuid_ == 0 || !getSocket() || getState() != WorldState::IN_WORLD) return;
+    const uint16_t wire = wireOpcode(Opcode::CMSG_DISMISS_CRITTER);
+    if (wire == 0xFFFF) return;   // expansion has no such opcode
+    auto pkt = DismissCritterPacket::build(activeCritterGuid_);
+    getSocket()->send(pkt);
+    LOG_INFO("Dismissing companion: guid=0x", std::hex, activeCritterGuid_, std::dec,
+             " summonedBy=", activeCritterSpellId_);
+    // The server confirms by clearing the critter field; leave the local state
+    // alone so a refused dismiss does not leave the client thinking it worked.
+}
+
 void GameHandler::dismissPet() {
     if (spellHandler_) spellHandler_->dismissPet();
 }
@@ -1988,6 +2423,35 @@ void GameHandler::requestStabledPetList() {
 
 void GameHandler::stablePet(uint8_t slot) {
     if (spellHandler_) spellHandler_->stablePet(slot);
+}
+
+void GameHandler::buyStableSlot() {
+    if (spellHandler_) spellHandler_->buyStableSlot();
+}
+
+void GameHandler::abandonPet() {
+    if (spellHandler_) spellHandler_->abandonPet();
+}
+
+// CMSG_UNLEARN_SKILL carries the skill line and nothing else.
+// HandleUnlearnSkillOpcode drops anything that is not a primary profession, so
+// a mistaken call costs nothing, but the confirmation dialog in front of it is
+// there because forgetting one is expensive to undo.
+void GameHandler::unlearnSkill(uint32_t skillId) {
+    if (skillId == 0 || getState() != WorldState::IN_WORLD || !getSocket()) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_UNLEARN_SKILL));
+    pkt.writeUInt32(skillId);
+    getSocket()->send(pkt);
+    LOG_INFO("Sent CMSG_UNLEARN_SKILL: skill=", skillId);
+}
+
+// An empty message. The server resets everything the player is saved to, or
+// everything the group is if they lead one, and reads no body at all.
+void GameHandler::resetInstances() {
+    if (getState() != WorldState::IN_WORLD || !getSocket()) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_RESET_INSTANCES));
+    getSocket()->send(pkt);
+    LOG_INFO("Sent CMSG_RESET_INSTANCES");
 }
 
 void GameHandler::unstablePet(uint32_t petNumber) {
@@ -2022,8 +2486,29 @@ void GameHandler::setActionBarSlot(int slot, ActionBarSlot::Type type, uint32_t 
     }
 }
 
+void GameHandler::setGroupAssistant(uint64_t guid, bool apply) {
+    if (socialHandler_) socialHandler_->setGroupAssistant(guid, apply);
+}
+
+void GameHandler::requestBattlefieldPositions() {
+    if (socialHandler_) socialHandler_->requestBattlefieldPositions();
+}
+
+void GameHandler::requestContactList() {
+    if (socialHandler_) socialHandler_->requestContactList();
+}
+
+uint32_t GameHandler::getPlayerGuildRankIndex() const {
+    return socialHandler_ ? socialHandler_->getPlayerGuildRankIndex() : 0xFFFFFFFFu;
+}
+
 float GameHandler::getSpellCooldown(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellCooldown(spellId);
+    return 0;
+}
+
+float GameHandler::getSpellCooldownTotal(uint32_t spellId) const {
+    if (spellHandler_) return spellHandler_->getSpellCooldownTotal(spellId);
     return 0;
 }
 
@@ -2119,12 +2604,38 @@ void GameHandler::submitGmTicket(const std::string& text) {
     if (chatHandler_) chatHandler_->submitGmTicket(text);
 }
 
+void GameHandler::updateGmTicket(const std::string& text) {
+    if (chatHandler_) chatHandler_->updateGmTicket(text);
+}
+
+void GameHandler::destroyTotem(int slot) {
+    // CMSG_TOTEM_DESTROYED carries the slot and nothing else on these
+    // expansions; the guid form arrived a expansion later than any of them.
+    if (slot < 0 || slot > 3 || !isInWorld() || !getSocket()) return;
+    network::Packet pkt(wireOpcode(Opcode::CMSG_TOTEM_DESTROYED));
+    pkt.writeUInt8(static_cast<uint8_t>(slot));
+    getSocket()->send(pkt);
+}
+
 void GameHandler::deleteGmTicket() {
     if (socialHandler_) socialHandler_->deleteGmTicket();
 }
 
 void GameHandler::requestGmTicket() {
     if (socialHandler_) socialHandler_->requestGmTicket();
+}
+
+void GameHandler::requestGmSystemStatus() {
+    if (socialHandler_) socialHandler_->requestGmSystemStatus();
+}
+
+void GameHandler::requestGuildEventLog() {
+    if (socialHandler_) socialHandler_->requestGuildEventLog();
+}
+
+const std::vector<GuildEventLogEntry>& GameHandler::getGuildEventLog() const {
+    static const std::vector<GuildEventLogEntry> empty;
+    return socialHandler_ ? socialHandler_->getGuildEventLog() : empty;
 }
 
 void GameHandler::queryGuildInfo(uint32_t guildId) {
@@ -2158,8 +2669,9 @@ void GameHandler::requestPetitionShowlist(uint64_t npcGuid) {
     if (socialHandler_) socialHandler_->requestPetitionShowlist(npcGuid);
 }
 
-void GameHandler::buyPetition(uint64_t npcGuid, const std::string& guildName) {
-    if (socialHandler_) socialHandler_->buyPetition(npcGuid, guildName);
+void GameHandler::buyPetition(uint64_t npcGuid, const std::string& guildName,
+                              uint32_t clientIndex) {
+    if (socialHandler_) socialHandler_->buyPetition(npcGuid, guildName, clientIndex);
 }
 
 void GameHandler::signPetition(uint64_t petitionGuid) {
@@ -2170,6 +2682,10 @@ void GameHandler::turnInPetition(uint64_t petitionGuid) {
     if (socialHandler_) socialHandler_->turnInPetition(petitionGuid);
 }
 
+void GameHandler::offerPetition(uint64_t petitionGuid, uint64_t targetGuid) {
+    if (socialHandler_) socialHandler_->offerPetition(petitionGuid, targetGuid);
+}
+
 // ============================================================
 // Loot, Gossip, Vendor
 // ============================================================
@@ -2178,8 +2694,24 @@ void GameHandler::lootTarget(uint64_t guid) {
     if (inventoryHandler_) inventoryHandler_->lootTarget(guid);
 }
 
-void GameHandler::lootItem(uint8_t slotIndex) {
-    if (inventoryHandler_) inventoryHandler_->lootItem(slotIndex);
+void GameHandler::lootItem(uint8_t slotIndex, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->lootItem(slotIndex, confirmed);
+}
+
+void GameHandler::confirmPendingLoot() {
+    if (inventoryHandler_) inventoryHandler_->confirmPendingLoot();
+}
+
+void GameHandler::confirmBindOnUse() {
+    if (inventoryHandler_) inventoryHandler_->confirmBindOnUse();
+}
+
+void GameHandler::lootMoney() {
+    if (inventoryHandler_) inventoryHandler_->lootMoney();
+}
+
+void GameHandler::cancelTempEnchantment(uint8_t handIndex) {
+    if (inventoryHandler_) inventoryHandler_->cancelTempEnchantment(handIndex);
 }
 
 void GameHandler::closeLoot() {
@@ -2194,6 +2726,15 @@ void GameHandler::scheduleGameObjectLootOpen(uint64_t guid, float delaySeconds, 
     pending.timer = std::max(0.0f, delaySeconds);
     pending.remainingAttempts = std::max<uint8_t>(attempts, 1);
     pendingGameObjectLootOpens_.push_back(pending);
+}
+
+bool GameHandler::isFishingHoleGameObject(uint64_t guid) const {
+    if (guid == 0 || !entityController_) return false;
+    auto entity = entityController_->getEntityManager().getEntity(guid);
+    if (!entity || entity->getType() != ObjectType::GAMEOBJECT) return false;
+    const auto* info = getCachedGameObjectInfo(
+        std::static_pointer_cast<GameObject>(entity)->getEntry());
+    return info && info->type == kGoTypeFishingHole;
 }
 
 void GameHandler::clearPendingGameObjectLootOpen(uint64_t guid) {
@@ -2265,6 +2806,41 @@ void GameHandler::lootMasterGive(uint8_t lootSlot, uint64_t targetGuid) {
 
 void GameHandler::interactWithNpc(uint64_t guid) {
     if (!isInWorld()) return;
+    // A dead player at an area spirit healer is a different conversation. The
+    // battleground ones do not answer a gossip hello at all - they answer
+    // CMSG_AREA_SPIRIT_HEALER_QUERY with the seconds to the next mass
+    // resurrection, and the client has to ask. Nothing here ever asked, so the
+    // reply never came, the countdown never appeared, and the queue that
+    // actually resurrects anyone was never joined.
+    if (isPlayerDead() || isPlayerGhost()) {
+        auto entity = getEntityManager().getEntity(guid);
+        if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
+            constexpr uint32_t kSpiritFlags = NPC_FLAG_SPIRIT_GUIDE | NPC_FLAG_SPIRIT_HEALER;
+            if (unit->getNpcFlags() & kSpiritFlags) {
+                queryAreaSpiritHealer(guid);
+            }
+        }
+    }
+    // Only to a unit the server says has something to say. UNIT_NPC_FLAGS is
+    // zero for a creature that is not a questgiver, vendor, trainer, healer or
+    // any of the rest, and a hello sent to one of those is answered with the
+    // default gossip text - which is how a dog came to greet the player by
+    // name through a full conversation window with nothing in it but Goodbye.
+    //
+    // Zero is a real answer rather than a missing one: an update block carries
+    // only the fields that are set, so a creature with no NPC flags and one
+    // whose flags have not arrived are the same case and both mean there is
+    // nothing here to talk to.
+    if (auto entity = getEntityManager().getEntity(guid)) {
+        if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
+            if (!unit->isInteractable()) {
+                LOG_DEBUG("interactWithNpc: 0x", std::hex, guid, std::dec,
+                          " has no NPC flags; no gossip hello sent");
+                return;
+            }
+        }
+    }
+
     auto packet = GossipHelloPacket::build(guid);
     socket->send(packet);
 }
@@ -2273,6 +2849,26 @@ void GameHandler::queryTaxiNodes(uint64_t guid) {
     if (!isInWorld()) return;
     auto packet = TaxiQueryAvailableNodesPacket::build(guid);
     socket->send(packet);
+}
+
+void GameHandler::queryAreaSpiritHealer(uint64_t guid) {
+    if (!isInWorld() || !socket) return;
+    areaSpiritHealerGuid_ = guid;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUERY));
+    packet.writeUInt64(guid);
+    socket->send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUERY: 0x", std::hex, guid, std::dec);
+}
+
+void GameHandler::queueAreaSpiritHeal() {
+    // Joining the queue is what resurrects; the query only asks when the next
+    // one is. AzerothCore has no way to be told to leave it again, which is
+    // why CancelAreaSpiritHeal answers with nothing.
+    if (!isInWorld() || !socket || !areaSpiritHealerGuid_) return;
+    network::Packet packet(wireOpcode(Opcode::CMSG_AREA_SPIRIT_HEALER_QUEUE));
+    packet.writeUInt64(areaSpiritHealerGuid_);
+    socket->send(packet);
+    LOG_INFO("CMSG_AREA_SPIRIT_HEALER_QUEUE: 0x", std::hex, areaSpiritHealerGuid_, std::dec);
 }
 
 void GameHandler::interactWithGameObject(uint64_t guid) {
@@ -2290,9 +2886,20 @@ void GameHandler::interactWithGameObject(uint64_t guid) {
     }
     // Always clear melee intent before GO interactions.
     stopAutoAttack();
+    // And get off the mount. Opening a chest, gathering a node or using very
+    // nearly anything else puts a player on foot in WoW, and staying mounted
+    // through it both looks wrong and leaves the server refusing the actions
+    // that check for it.
+    //
+    // Not on a taxi: the flight's mount is not the player's to dismiss, and
+    // there is nothing to interact with mid-flight anyway.
+    if (isMounted() && !isTaxiMountActive()) {
+        LOG_DEBUG("[GO-DIAG] dismounting before interacting");
+        dismount();
+    }
     // Set the pending GO guid so that:
     // 1. cancelCast() won't send CMSG_CANCEL_CAST for GO-triggered casts
-    //    (e.g., "Opening" on a quest chest) — without this, any movement
+    //    (e.g., "Opening" on a quest chest) - without this, any movement
     //    during the cast cancels it server-side and quest credit is lost.
     // 2. The cast-completion fallback in update() can call
     //    performGameObjectInteractionNow after the cast timer expires.
@@ -2333,6 +2940,14 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             goName = go->getName();
             goInfo = getCachedGameObjectInfo(goEntry);
             if (goInfo) goType = goInfo->type;
+            if (goType == kGoTypeFishingHole) {
+                // Nothing sent, and nothing scheduled: the school is fished, not
+                // opened. Silent, because retail does not respond to the click
+                // either.
+                LOG_INFO("GO fishing hole click ignored: guid=0x", std::hex, guid,
+                         std::dec, " entry=", goEntry, " name='", goName, "'");
+                return;
+            }
             if (goType == 5 && !goName.empty()) {
                 std::string lower = lowerCopy(goName);
                 if (lower.rfind("doodad_", 0) != 0) {
@@ -2351,10 +2966,10 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         // Only the owned bobber whose bite we observed gets the extended range.
         const float maxInteractDistance = (guid == hookedFishingBobberGuid_) ? 30.0f : 10.0f;
         if (dist3d > maxInteractDistance) {
-            addSystemChatMessage("Too far away.");
+            raiseUiError("Too far away.");
             return;
         }
-        // Stop movement before interacting — servers may reject GO use or
+        // Stop movement before interacting - servers may reject GO use or
         // immediately cancel the resulting spell cast if the player is moving.
         const uint32_t moveFlags = movementInfo.flags;
         const bool isMoving = (moveFlags & 0x00000001u) || // FORWARD
@@ -2366,14 +2981,15 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             sendMovement(Opcode::MSG_MOVE_STOP);
         }
         if (std::abs(dx) > 0.01f || std::abs(dy) > 0.01f) {
-            movementInfo.orientation = std::atan2(-dy, dx);
-            sendMovement(Opcode::MSG_MOVE_SET_FACING);
+            faceCanonicalYaw(std::atan2(-dy, dx));
         }
         sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     }
 
     // Determine GO type for interaction strategy
     bool isMailbox = false;
+    bool isGuildBank = false;
+    bool isReadable = false;
     bool chestLike = false;
     bool metadataPending = false;
     if (entity && entity->getType() == ObjectType::GAMEOBJECT) {
@@ -2382,8 +2998,15 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         metadataPending = (goInfo == nullptr);
         if (goInfo && goInfo->type == 19) {
             isMailbox = true;
+        } else if (goInfo && goInfo->type == 34) { // GAMEOBJECT_TYPE_GUILD_BANK
+            isGuildBank = true;
         } else if (goInfo && goInfo->type == 3) {
             chestLike = true;
+        } else if (goInfo && (goInfo->type == 9 ||
+                              (goInfo->type == 10 && goInfo->hasData && goInfo->data[7] != 0))) {
+            // 9 is TEXT - a sign - and a GOOBER carries a page of its own in
+            // data[7] when it has one to show.
+            isReadable = true;
         }
     }
     if (!chestLike && !goName.empty()) {
@@ -2403,7 +3026,8 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     if (gatherBaseSpellId != 0) {
         const uint32_t gatherSpellId = knownGatherRank(spellHandler_.get(), gatherBaseSpellId);
         if (gatherSpellId == 0) {
-            addSystemChatMessage(gatherBaseSpellId == 2575 ? "Requires Mining." : "Requires Herbalism.");
+            addSystemChatMessage(gatherBaseSpellId == kMiningBaseSpellId ? "Requires Mining."
+                                                    : "Requires Herbalism.");
             LOG_INFO("GO gather skipped: no known rank for base spell=", gatherBaseSpellId,
                      " guid=0x", std::hex, guid, std::dec, " name='", goName, "'");
             return;
@@ -2438,7 +3062,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             return;
         }
         // Key-item lock: a warrior knows no open-lock spell. Open it by USING the
-        // key item on the chest (CMSG_USE_ITEM targeting the GO) — the server casts
+        // key item on the chest (CMSG_USE_ITEM targeting the GO) - the server casts
         // the key's on-use OPEN_LOCK spell because the player holds the key. A plain
         // USE does not open a locked type-3 chest, and casting the item's spell via
         // CMSG_CAST_SPELL is rejected (the player doesn't "know" it).
@@ -2450,7 +3074,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
                     if (sp.spellTrigger == 0 && sp.spellId != 0 && keyUseSpell == 0)
                         keyUseSpell = sp.spellId;
             } else {
-                ensureItemInfo(plan.keyItemId); // not cached yet — request for next click
+                ensureItemInfo(plan.keyItemId); // not cached yet - request for next click
             }
 
             // Locate the key: wire (bag, slot) + item GUID. Keyring wire slots
@@ -2459,18 +3083,18 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
             uint8_t keyBag = 0xFF, keySlot = 0; uint64_t keyGuid = 0; bool keyFound = false;
             for (int i = 0; i < inv.getBackpackSize() && !keyFound; ++i)
                 if (inv.getBackpackSlot(i).item.itemId == plan.keyItemId) {
-                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(23 + i);
+                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(game::slots::backpackWireSlot(i));
                     keyGuid = inv.getBackpackSlot(i).item.guid; keyFound = true;
                 }
             for (int b = 0; b < Inventory::NUM_BAG_SLOTS && !keyFound; ++b)
                 for (int s = 0; s < inv.getBagSize(b) && !keyFound; ++s)
                     if (inv.getBagSlot(b, s).item.itemId == plan.keyItemId) {
-                        keyBag = static_cast<uint8_t>(19 + b); keySlot = static_cast<uint8_t>(s);
+                        keyBag = static_cast<uint8_t>(game::slots::wornBagContainer(b)); keySlot = static_cast<uint8_t>(s);
                         keyGuid = inv.getBagSlot(b, s).item.guid; keyFound = true;
                     }
             for (int i = 0; i < inv.getKeyringSize() && !keyFound; ++i)
                 if (inv.getKeyringSlot(i).item.itemId == plan.keyItemId) {
-                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(86 + i);
+                    keyBag = 0xFF; keySlot = static_cast<uint8_t>(game::slots::keyringWireSlot(i));
                     keyGuid = inv.getKeyringSlot(i).item.guid; keyFound = true;
                 }
 
@@ -2487,7 +3111,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
                 return;
             }
         }
-        // LockOpenMethod::UseDirect — fall through to CMSG_GAMEOBJ_USE.
+        // LockOpenMethod::UseDirect - fall through to CMSG_GAMEOBJ_USE.
         LOG_INFO("GO chest opens via direct USE: lockId=",
                  goInfo && goInfo->hasData ? goInfo->data[0] : 0,
                  " keyItem=", plan.keyItemId,
@@ -2506,7 +3130,7 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     }
 
     if (chestLike || metadataPending) {
-        // Don't send CMSG_LOOT immediately — the server may start a timed cast
+        // Don't send CMSG_LOOT immediately - the server may start a timed cast
         // (e.g., "Opening") and the GO isn't lootable until the cast finishes.
         // Sending LOOT prematurely gets an empty response or is silently dropped,
         // which can interfere with the server's loot state machine.
@@ -2519,13 +3143,26 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
         scheduleGameObjectLootOpen(guid, 0.35f, 8);
     } else if (isMailbox) {
         openMailbox(guid);
+    } else if (isGuildBank) {
+        // Guild vault: CMSG_GAMEOBJ_USE above is a no-op on the server; the bank
+        // opens via CMSG_GUILD_BANKER_ACTIVATE, which openGuildBank() sends.
+        openGuildBank(guid);
+    } else if (isReadable) {
+        // A sign, a plaque, a gravestone: the client reads it.
+        //
+        // Nothing happened when one was clicked because this waited for
+        // SMSG_GAMEOBJECT_PAGETEXT, which is the server offering a page - and
+        // for a type 9 the server has nothing to offer, the page id being in
+        // the object's own data where the real client reads it from. Stormwind
+        // is full of signs that answered a click with silence.
+        if (entityController_) entityController_->showGameObjectPageText(guid);
     }
 
     // CMSG_GAMEOBJ_REPORT_USE triggers GO AI scripts (SmartAI, ScriptAI) which
     // is where many quest objectives grant credit. Previously this was only sent
     // for non-chest GOs, so chest-type quest objectives (Bundle of Wood, etc.)
     // never triggered the server-side quest credit script.
-    if (!isMailbox) {
+    if (!isMailbox && !isGuildBank) {
         const auto* table = getActiveOpcodeTable();
         if (table && table->hasOpcode(Opcode::CMSG_GAMEOBJ_REPORT_USE)) {
             network::Packet reportUse(wireOpcode(Opcode::CMSG_GAMEOBJ_REPORT_USE));
@@ -2535,8 +3172,8 @@ void GameHandler::performGameObjectInteractionNow(uint64_t guid) {
     }
 }
 
-void GameHandler::selectGossipOption(uint32_t optionId) {
-    if (questHandler_) questHandler_->selectGossipOption(optionId);
+void GameHandler::selectGossipOption(uint32_t optionId, const std::string& code) {
+    if (questHandler_) questHandler_->selectGossipOption(optionId, code);
 }
 
 void GameHandler::selectGossipQuest(uint32_t questId) {
@@ -2553,7 +3190,7 @@ bool GameHandler::hasQuestInLog(uint32_t questId) const {
 
 Unit* GameHandler::getUnitByGuid(uint64_t guid) {
     auto entity = entityController_->getEntityManager().getEntity(guid);
-    // Use the type tag to skip RTTI — both UNIT and PLAYER object types derive from Unit.
+    // Use the type tag to skip RTTI - both UNIT and PLAYER object types derive from Unit.
     if (!entity || !entity->isUnit()) return nullptr;
     return static_cast<Unit*>(entity.get());
 }
@@ -2565,19 +3202,6 @@ std::string GameHandler::guidToUnitId(uint64_t guid) const {
     if (guid == petGuid_)        return "pet";
     return {};
 }
-
-std::string GameHandler::getQuestTitle(uint32_t questId) const {
-    for (const auto& q : questLog_)
-        if (q.questId == questId && !q.title.empty()) return q.title;
-    return {};
-}
-
-const GameHandler::QuestLogEntry* GameHandler::findQuestLogEntry(uint32_t questId) const {
-    for (const auto& q : questLog_)
-        if (q.questId == questId) return &q;
-    return nullptr;
-}
-
 int GameHandler::findQuestLogSlotIndexFromServer(uint32_t questId) const {
     if (questHandler_) return questHandler_->findQuestLogSlotIndexFromServer(questId);
     return 0;
@@ -2617,14 +3241,13 @@ void GameHandler::acceptQuest() {
     if (questHandler_) questHandler_->acceptQuest();
 }
 
-void GameHandler::declineQuest() {
-    if (questHandler_) questHandler_->declineQuest();
+void GameHandler::declineQuest(bool announce) {
+    if (questHandler_) questHandler_->declineQuest(announce);
 }
 
 void GameHandler::abandonQuest(uint32_t questId) {
     if (questHandler_) questHandler_->abandonQuest(questId);
     setQuestTracked(questId, false);
-    setQuestShownOnMap(questId, false);
 }
 
 void GameHandler::shareQuestWithParty(uint32_t questId) {
@@ -2635,16 +3258,16 @@ void GameHandler::completeQuest() {
     if (questHandler_) questHandler_->completeQuest();
 }
 
-void GameHandler::closeQuestRequestItems() {
-    if (questHandler_) questHandler_->closeQuestRequestItems();
+void GameHandler::closeQuestRequestItems(bool announce) {
+    if (questHandler_) questHandler_->closeQuestRequestItems(announce);
 }
 
 void GameHandler::chooseQuestReward(uint32_t rewardIndex) {
     if (questHandler_) questHandler_->chooseQuestReward(rewardIndex);
 }
 
-void GameHandler::closeQuestOfferReward() {
-    if (questHandler_) questHandler_->closeQuestOfferReward();
+void GameHandler::closeQuestOfferReward(bool announce) {
+    if (questHandler_) questHandler_->closeQuestOfferReward(announce);
 }
 
 void GameHandler::closeGossip() {
@@ -2703,12 +3326,32 @@ void GameHandler::sellItemBySlot(int backpackIndex) {
     if (inventoryHandler_) inventoryHandler_->sellItemBySlot(backpackIndex);
 }
 
-void GameHandler::autoEquipItemBySlot(int backpackIndex) {
-    if (inventoryHandler_) inventoryHandler_->autoEquipItemBySlot(backpackIndex);
+void GameHandler::equipItemToSlot(uint64_t itemGuid, uint8_t equipSlot) {
+    if (inventoryHandler_) inventoryHandler_->equipItemToSlot(itemGuid, equipSlot);
 }
 
-void GameHandler::autoEquipItemInBag(int bagIndex, int slotIndex) {
-    if (inventoryHandler_) inventoryHandler_->autoEquipItemInBag(bagIndex, slotIndex);
+void GameHandler::autoEquipItemBySlot(int backpackIndex, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->autoEquipItemBySlot(backpackIndex, confirmed);
+}
+
+bool GameHandler::equipWouldBindFromBackpack(int backpackIndex) const {
+    return inventoryHandler_ && inventoryHandler_->equipWouldBindFromBackpack(backpackIndex);
+}
+
+bool GameHandler::equipWouldBindFromBag(int bagIndex, int slotIndex) const {
+    return inventoryHandler_ && inventoryHandler_->equipWouldBindFromBag(bagIndex, slotIndex);
+}
+
+void GameHandler::equipPendingItem() {
+    if (inventoryHandler_) inventoryHandler_->equipPendingItem();
+}
+
+void GameHandler::cancelPendingEquip() {
+    if (inventoryHandler_) inventoryHandler_->cancelPendingEquip();
+}
+
+void GameHandler::autoEquipItemInBag(int bagIndex, int slotIndex, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->autoEquipItemInBag(bagIndex, slotIndex, confirmed);
 }
 
 void GameHandler::sellItemInBag(int bagIndex, int slotIndex) {
@@ -2719,8 +3362,15 @@ void GameHandler::unequipToBackpack(EquipSlot equipSlot) {
     if (inventoryHandler_) inventoryHandler_->unequipToBackpack(equipSlot);
 }
 
-void GameHandler::swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag, uint8_t dstSlot) {
-    if (inventoryHandler_) inventoryHandler_->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot);
+void GameHandler::swapContainerItems(uint8_t srcBag, uint8_t srcSlot, uint8_t dstBag,
+                                     uint8_t dstSlot, bool applyLocally) {
+    if (inventoryHandler_) {
+        inventoryHandler_->swapContainerItems(srcBag, srcSlot, dstBag, dstSlot, applyLocally);
+    }
+}
+
+void GameHandler::notifyBagsChanged() {
+    if (inventoryHandler_) inventoryHandler_->fireBagUpdates();
 }
 
 void GameHandler::swapBagSlots(int srcBagIndex, int dstBagIndex) {
@@ -2734,17 +3384,51 @@ void GameHandler::destroyItem(uint8_t bag, uint8_t slot, uint8_t count) {
 void GameHandler::splitItem(uint8_t srcBag, uint8_t srcSlot, uint8_t count) {
     if (inventoryHandler_) inventoryHandler_->splitItem(srcBag, srcSlot, count);
 }
-
-void GameHandler::useItemBySlot(int backpackIndex) {
-    if (inventoryHandler_) inventoryHandler_->useItemBySlot(backpackIndex);
+void GameHandler::splitItemTo(uint8_t srcBag, uint8_t srcSlot,
+                              uint8_t dstBag, uint8_t dstSlot, uint8_t count) {
+    if (inventoryHandler_) inventoryHandler_->splitItemTo(srcBag, srcSlot, dstBag, dstSlot, count);
 }
 
-void GameHandler::useItemInBag(int bagIndex, int slotIndex) {
-    if (inventoryHandler_) inventoryHandler_->useItemInBag(bagIndex, slotIndex);
+void GameHandler::useItemBySlot(int backpackIndex, bool confirmed, uint64_t unitTarget) {
+    if (inventoryHandler_) inventoryHandler_->useItemBySlot(backpackIndex, confirmed, unitTarget);
+}
+
+void GameHandler::useKeyringItem(int index, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->useKeyringItem(index, confirmed);
+}
+
+void GameHandler::placeGlyphFromBag(uint8_t wireBag, uint8_t wireSlot, uint32_t socketIndex) {
+    if (inventoryHandler_) inventoryHandler_->placeGlyphFromBag(wireBag, wireSlot, socketIndex);
+}
+
+void GameHandler::useItemInBag(int bagIndex, int slotIndex, bool confirmed,
+                               uint64_t unitTarget) {
+    if (inventoryHandler_) inventoryHandler_->useItemInBag(bagIndex, slotIndex, confirmed,
+                                                           unitTarget);
 }
 
 bool GameHandler::isAwaitingItemTarget() const {
     return inventoryHandler_ && inventoryHandler_->isAwaitingItemTarget();
+}
+
+bool GameHandler::isAwaitingUnitTarget() const {
+    return inventoryHandler_ && inventoryHandler_->isAwaitingUnitTarget();
+}
+
+uint32_t GameHandler::getPendingUnitTargetSourceItemId() const {
+    return inventoryHandler_ ? inventoryHandler_->getPendingUnitTargetSourceItemId() : 0;
+}
+
+void GameHandler::cancelUnitTargeting() {
+    if (inventoryHandler_) inventoryHandler_->cancelUnitTargeting();
+}
+
+void GameHandler::completeItemUseOnUnit(uint64_t targetUnitGuid) {
+    if (inventoryHandler_) inventoryHandler_->completeItemUseOnUnit(targetUnitGuid);
+}
+
+void GameHandler::beginSpellItemTargeting(uint32_t spellId, const std::string& spellName) {
+    if (inventoryHandler_) inventoryHandler_->beginSpellItemTargeting(spellId, spellName);
 }
 
 uint32_t GameHandler::getPendingItemTargetSourceItemId() const {
@@ -2755,8 +3439,19 @@ void GameHandler::cancelItemTargeting() {
     if (inventoryHandler_) inventoryHandler_->cancelItemTargeting();
 }
 
-void GameHandler::completeItemUseOnItem(uint64_t targetItemGuid) {
-    if (inventoryHandler_) inventoryHandler_->completeItemUseOnItem(targetItemGuid);
+void GameHandler::completeItemUseOnItem(uint64_t targetItemGuid, bool confirmed) {
+    if (inventoryHandler_) inventoryHandler_->completeItemUseOnItem(targetItemGuid, confirmed);
+}
+
+int GameHandler::getInstanceBootTimeRemaining() const {
+    if (!instanceBootDeadline_) return 0;
+    const auto left = *instanceBootDeadline_ - std::chrono::steady_clock::now();
+    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(left).count();
+    return secs > 0 ? static_cast<int>(secs) : 0;
+}
+
+void GameHandler::replaceEnchant() {
+    if (inventoryHandler_) inventoryHandler_->replaceEnchant();
 }
 
 void GameHandler::openItemBySlot(int backpackIndex) {
@@ -2775,8 +3470,8 @@ void GameHandler::readItemInBag(int bagIndex, int slotIndex) {
     if (inventoryHandler_) inventoryHandler_->readItemInBag(bagIndex, slotIndex);
 }
 
-void GameHandler::useItemById(uint32_t itemId) {
-    if (inventoryHandler_) inventoryHandler_->useItemById(itemId);
+void GameHandler::useItemById(uint32_t itemId, uint64_t unitTarget) {
+    if (inventoryHandler_) inventoryHandler_->useItemById(itemId, unitTarget);
 }
 
 uint32_t GameHandler::getItemIdForSpell(uint32_t spellId) const {
@@ -2846,7 +3541,7 @@ void GameHandler::preloadDBCCaches() const {
     LOG_INFO("Pre-loading DBC caches during world entry...");
     auto t0 = std::chrono::steady_clock::now();
 
-    loadSpellNameCache();   // Spell.dbc — largest, ~170ms cold
+    loadSpellNameCache();   // Spell.dbc - largest, ~170ms cold
     loadTitleNameCache();   // CharTitles.dbc
     loadFactionNameCache(); // Faction.dbc
     loadAreaNameCache();    // WorldMapArea.dbc
@@ -2878,9 +3573,6 @@ const std::vector<GameHandler::SpellBookTab>& GameHandler::getSpellBookTabs() {
     return kEmpty;
 }
 
-void GameHandler::categorizeTrainerSpells() {
-    if (spellHandler_) spellHandler_->categorizeTrainerSpells();
-}
 
 void GameHandler::loadTalentDbc() {
     if (spellHandler_) spellHandler_->loadTalentDbc();
@@ -2907,6 +3599,18 @@ uint32_t GameHandler::getSpellTargetFlags(uint32_t spellId) const {
     return spellHandler_ ? spellHandler_->getSpellTargetFlags(spellId) : 0;
 }
 
+uint32_t GameHandler::getSpellImplicitTargetA(uint32_t spellId) const {
+    return spellHandler_ ? spellHandler_->getSpellImplicitTargetA(spellId) : 0;
+}
+
+bool GameHandler::isSpellKnownToClient(uint32_t spellId) const {
+    return spellHandler_ && spellHandler_->isSpellKnownToClient(spellId);
+}
+
+uint32_t GameHandler::getSpellTargetAuraState(uint32_t spellId) const {
+    return spellHandler_ ? spellHandler_->getSpellTargetAuraState(spellId) : 0;
+}
+
 const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellRank(spellId);
     return EMPTY_STRING;
@@ -2915,6 +3619,255 @@ const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
 const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellDescription(spellId);
     return EMPTY_STRING;
+}
+
+namespace {
+// Format a duration in seconds the way WoW tooltips do: "12 sec", "5 min", "1 hour".
+std::string formatSpellDurationSec(float sec) {
+    if (sec <= 0.0f) return {};
+    auto trim = [](float v) {
+        char buf[32];
+        if (v == static_cast<float>(static_cast<long>(v)))
+            snprintf(buf, sizeof(buf), "%ld", static_cast<long>(v));
+        else
+            snprintf(buf, sizeof(buf), "%.1f", v);
+        return std::string(buf);
+    };
+    if (sec >= 3600.0f && std::fmod(sec, 3600.0f) == 0.0f) {
+        float h = sec / 3600.0f;
+        return trim(h) + (h == 1.0f ? " hour" : " hours");
+    }
+    if (sec >= 60.0f) return trim(sec / 60.0f) + " min";
+    return trim(sec) + " sec";
+}
+} // namespace
+
+/// The evaluator's window onto this client: what a magnitude is, and which
+/// spells the player knows.
+SpellDescriptionContext GameHandler::descriptionContext(
+        uint32_t spellId, const std::string* declarations) const {
+    SpellDescriptionContext ctx;
+    ctx.declarations = declarations;
+    ctx.magnitude = [this, spellId](int index, double& out) {
+        const int32_t* bp = getSpellEffectBasePoints(spellId);
+        if (!bp || index < 0 || index > 2) return false;
+        out = std::abs(static_cast<double>(bp[index]) + 1.0);
+        return true;
+    };
+    ctx.knowsSpell = [this](uint32_t id) { return isSpellKnownToClient(id); };
+    return ctx;
+}
+
+std::string GameHandler::formatSpellDescription(uint32_t selfSpellId,
+                                                const std::string& raw) const {
+    if (raw.empty()) return raw;
+
+    std::string out;
+    out.reserve(raw.size());
+    const size_t n = raw.size();
+    long lastValue = -1;  // drives $l plural selection
+
+    // Resolve a base-point magnitude ($s/$o/$m/$M) for a spell + effect index.
+    auto basePoints = [&](uint32_t sid, int idx) -> long {
+        const int32_t* bp = getSpellEffectBasePoints(sid);
+        if (!bp || idx < 0 || idx > 2) return LONG_MIN;
+        return std::labs(static_cast<long>(bp[idx]) + 1);  // stored as value-1
+    };
+
+    for (size_t i = 0; i < n; ) {
+        char c = raw[i];
+        if (c != '$') { out += c; ++i; continue; }
+        if (i + 1 >= n) { out += c; ++i; continue; }
+
+        char next = raw[i + 1];
+
+        // Plural "$lsingular:plural;" / gender "$gmale:female;" - emit one branch.
+        if (next == 'l' || next == 'L' || next == 'g' || next == 'G') {
+            size_t semi = raw.find(';', i + 2);
+            if (semi != std::string::npos) {
+                std::string body = raw.substr(i + 2, semi - (i + 2));
+                size_t colon = body.find(':');
+                std::string a = (colon == std::string::npos) ? body : body.substr(0, colon);
+                std::string b = (colon == std::string::npos) ? body : body.substr(colon + 1);
+                bool plural = (next == 'l' || next == 'L') ? (lastValue != 1) : false;
+                out += plural ? b : a;
+                i = semi + 1;
+                continue;
+            }
+        }
+
+        // A named variable "$<percent>", declared in this spell's row of
+        // SpellDescriptionVariables.dbc. Nothing read that table, and the
+        // parser had no branch for '<' - so it dropped the "$<" as an unknown
+        // token and left "percent>" sitting in the sentence.
+        if (next == '<') {
+            const size_t close = raw.find('>', i + 2);
+            if (close != std::string::npos) {
+                const std::string name = raw.substr(i + 2, close - (i + 2));
+                i = close + 1;
+
+                const auto& cache = const_cast<GameHandler*>(this)->spellNameCacheRef();
+                const auto entry = cache.find(selfSpellId);
+                const std::string* decls = nullptr;
+                if (entry != cache.end() && entry->second.descriptionVariableId != 0) {
+                    auto& table = const_cast<GameHandler*>(this)->spellDescriptionVariablesRef();
+                    const auto row = table.find(entry->second.descriptionVariableId);
+                    if (row != table.end()) decls = &row->second;
+                }
+
+                const SpellDescriptionContext ctx = descriptionContext(selfSpellId, decls);
+                std::string decl;
+                double v = 0.0;
+                if (decls && spellDeclarationOf(ctx, name, decl) &&
+                    evaluateSpellExpression(decl, ctx, v)) {
+                    const long rounded = std::lround(v);
+                    out += std::to_string(rounded);
+                    lastValue = rounded;
+                } else if (i < n && raw[i] == '%') {
+                    // Unresolvable: drop the token and the percent sign it
+                    // qualified, rather than leave a bare "%" behind.
+                    ++i;
+                }
+                continue;
+            }
+        }
+
+        // Bracketed math expression "${...}" - evaluate where it can be, strip
+        // it (and a trailing %) where it cannot.
+        if (next == '{') {
+            size_t close = raw.find('}', i + 2);
+            if (close != std::string::npos) {
+                const auto& cache = const_cast<GameHandler*>(this)->spellNameCacheRef();
+                const auto entry = cache.find(selfSpellId);
+                const std::string* decls = nullptr;
+                if (entry != cache.end() && entry->second.descriptionVariableId != 0) {
+                    auto& table = const_cast<GameHandler*>(this)->spellDescriptionVariablesRef();
+                    const auto row = table.find(entry->second.descriptionVariableId);
+                    if (row != table.end()) decls = &row->second;
+                }
+                const SpellDescriptionContext ctx = descriptionContext(selfSpellId, decls);
+                double v = 0.0;
+                if (evaluateSpellExpression(raw.substr(i + 2, close - (i + 2)), ctx, v)) {
+                    const long rounded = std::lround(v);
+                    out += std::to_string(rounded);
+                    lastValue = rounded;
+                    i = close + 1;
+                    continue;
+                }
+                i = close + 1;
+                if (i < n && raw[i] == '%') ++i;
+                continue;
+            }
+        }
+
+        // Division token "$/N;<valueToken>" - e.g. "$/5;s1" is "s1 divided by 5"
+        // (food eat spells: "Restores $/5;s1 health per second").
+        if (next == '/') {
+            size_t k = i + 2;
+            long divisor = 0;
+            while (k < n && raw[k] >= '0' && raw[k] <= '9') { divisor = divisor * 10 + (raw[k] - '0'); ++k; }
+            if (k < n && raw[k] == ';' && divisor != 0) {
+                ++k;  // past ';'
+                uint32_t rid = 0; bool hr = false;
+                while (k < n && raw[k] >= '0' && raw[k] <= '9') { rid = rid * 10 + (raw[k] - '0'); hr = true; ++k; }
+                if (k < n) {
+                    char cd = raw[k++];
+                    int ix = 0;
+                    if (k < n && raw[k] >= '1' && raw[k] <= '3') { ix = raw[k] - '1'; ++k; }
+                    if (cd == 's' || cd == 'S' || cd == 'o' || cd == 'O' || cd == 'm' || cd == 'M') {
+                        long v = basePoints(hr ? rid : selfSpellId, ix);
+                        if (v != LONG_MIN) {
+                            long dv = v / divisor;
+                            out += std::to_string(dv);
+                            lastValue = dv;
+                            i = k;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Unparseable division token - strip through the terminating ';' if present.
+            size_t semi = raw.find(';', i + 2);
+            i = (semi != std::string::npos) ? semi + 1 : i + 2;
+            if (i < n && raw[i] == '%') ++i;
+            continue;
+        }
+
+        // General token: $ [spellId] letter [effectIndex]
+        size_t j = i + 1;
+        uint32_t refId = 0;
+        bool hasRef = false;
+        while (j < n && raw[j] >= '0' && raw[j] <= '9') {
+            refId = refId * 10 + static_cast<uint32_t>(raw[j] - '0');
+            hasRef = true;
+            ++j;
+        }
+        if (j >= n) { out += c; ++i; continue; }
+        char code = raw[j++];
+        int idx = 0;
+        if (j < n && raw[j] >= '1' && raw[j] <= '3') { idx = raw[j] - '1'; ++j; }
+        uint32_t target = hasRef ? refId : selfSpellId;
+
+        bool resolved = false;
+        switch (code) {
+            case 's': case 'S': case 'o': case 'O':
+            case 'm': case 'M': {
+                long v = basePoints(target, idx);
+                if (v != LONG_MIN) { out += std::to_string(v); lastValue = v; resolved = true; }
+                break;
+            }
+            case 'd': {
+                std::string dur = formatSpellDurationSec(getSpellDuration(target));
+                if (!dur.empty()) { out += dur; resolved = true; }
+                break;
+            }
+            case 'z': {
+                // Where the hearthstone sends you. Spell.dbc says "Returns you
+                // to $z.", and with the token dropped the tooltip read
+                // "Returns you to ." - which is the one fact the line exists
+                // to carry. The bind zone comes from SMSG_BINDPOINTUPDATE; the
+                // continent is a poor second but beats a blank.
+                std::string home = getAreaName(getHomeBindZoneId());
+                if (home.empty()) {
+                    uint32_t bindMap = 0;
+                    glm::vec3 bindPos(0.0f);
+                    if (getHomeBind(bindMap, bindPos)) home = getMapName(bindMap);
+                }
+                if (!home.empty()) { out += home; resolved = true; }
+                break;
+            }
+            default: break;  // $h proc chance, $t period, $a radius, ... - not resolvable here
+        }
+
+        if (resolved) {
+            i = j;
+        } else {
+            // Drop the whole token; a value slot immediately followed by '%' drops that too,
+            // so we don't leave a dangling "%".
+            i = j;
+            if (i < n && raw[i] == '%') ++i;
+        }
+    }
+
+    // Collapse whitespace left behind by stripped tokens ("a  chance" -> "a chance").
+    std::string cleaned;
+    cleaned.reserve(out.size());
+    bool prevSpace = false;
+    for (char c : out) {
+        bool isSpace = (c == ' ');
+        if (isSpace && prevSpace) continue;
+        // A token that could not be resolved leaves the space in front of it
+        // sitting against the punctuation that followed it - "Returns you to ."
+        // Drop that space too, so an unresolved token reads as a gap in the
+        // sentence rather than as a typo.
+        if (!cleaned.empty() && prevSpace &&
+            (c == '.' || c == ',' || c == ';' || c == '!' || c == '?' || c == ')')) {
+            cleaned.pop_back();
+        }
+        cleaned += c;
+        prevSpace = isSpace;
+    }
+    return cleaned;
 }
 
 const std::string& GameHandler::getSpellFocusName(uint32_t focusId) const {
@@ -2932,6 +3885,11 @@ std::string GameHandler::getEnchantName(uint32_t enchantId) const {
     return {};
 }
 
+uint32_t GameHandler::getEnchantGemItem(uint32_t enchantId) const {
+    if (spellHandler_) return spellHandler_->getEnchantGemItem(enchantId);
+    return 0;
+}
+
 uint8_t GameHandler::getSpellDispelType(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellDispelType(spellId);
     return 0;
@@ -2942,13 +3900,18 @@ bool GameHandler::isSpellInterruptible(uint32_t spellId) const {
     return true;
 }
 
+bool GameHandler::isSpellPassive(uint32_t spellId) const {
+    if (spellHandler_) return spellHandler_->isSpellPassive(spellId);
+    return false;
+}
+
 uint32_t GameHandler::getSpellSchoolMask(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellSchoolMask(spellId);
     return 0;
 }
 
-const std::string& GameHandler::getSkillLineName(uint32_t spellId) const {
-    if (spellHandler_) return spellHandler_->getSkillLineName(spellId);
+const std::string& GameHandler::getSkillLineName(uint32_t skillLineId) const {
+    if (spellHandler_) return spellHandler_->getSkillLineName(skillLineId);
     return EMPTY_STRING;
 }
 

@@ -1,8 +1,11 @@
 #include "cli_audits.hpp"
+#include "zone_manifest.hpp"
 #include "cli_subprocess.hpp"
 #include "cli_weld.hpp"
 
 #include "pipeline/wowee_model.hpp"
+
+#include "cli_paths.hpp"
 #include "pipeline/wowee_building.hpp"
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
@@ -27,14 +30,7 @@ namespace {
 // zone.json. Used by both --validate-project-packs and
 // --info-project-deps to enumerate zones.
 std::vector<std::string> enumerateZones(const std::string& projectDir) {
-    std::vector<std::string> zones;
-    namespace fs = std::filesystem;
-    for (const auto& entry : fs::directory_iterator(projectDir)) {
-        if (!entry.is_directory()) continue;
-        if (!fs::exists(entry.path() / "zone.json")) continue;
-        zones.push_back(entry.path().string());
-    }
-    std::sort(zones.begin(), zones.end());
+    std::vector<std::string> zones = wowee::editor::projectZoneDirs(projectDir);
     return zones;
 }
 
@@ -80,7 +76,7 @@ int runPerZoneAudit(const std::string& projectDir,
         std::printf("  PROJECT PASS\n");
     } else {
         std::printf("  PROJECT FAIL%s%s\n",
-                    failHint.empty() ? "" : " — ",
+                    failHint.empty() ? "" : " - ",
                     failHint.c_str());
     }
     return failed == 0 ? 0 : 1;
@@ -108,13 +104,9 @@ int handleZoneDeps(int& i, int argc, char** argv) {
     };
     std::vector<DepRef> refs;
     std::error_code ec;
-    for (const auto& e : fs::recursive_directory_iterator(zoneDir, ec)) {
-        if (!e.is_regular_file()) continue;
-        if (e.path().extension() != ".wom") continue;
-        std::string womRel = fs::relative(e.path(), zoneDir).string();
-        std::string base = e.path().string();
-        base = base.substr(0, base.size() - 4);
-        auto wom = wowee::pipeline::WoweeModelLoader::load(base);
+    for (const auto& womFile : findFilesByExtension(zoneDir, ".wom")) {
+        const std::string& womRel = womFile.relative;
+        auto wom = wowee::pipeline::WoweeModelLoader::load(womFile.base);
         for (const auto& tp : wom.texturePaths) {
             if (tp.empty()) continue;
             bool found = false;
@@ -122,7 +114,7 @@ int handleZoneDeps(int& i, int argc, char** argv) {
                 fs::path(tp),
                 fs::path(zoneDir) / tp,
                 fs::path(zoneDir) / "textures" / fs::path(tp).filename(),
-                e.path().parent_path() / fs::path(tp).filename(),
+                womFile.path.parent_path() / fs::path(tp).filename(),
             };
             for (const auto& c : candidates) {
                 if (fs::exists(c, ec) && fs::is_regular_file(c, ec)) {
@@ -174,8 +166,8 @@ int handleZoneDeps(int& i, int argc, char** argv) {
                     r.texPath.c_str());
     }
     std::printf("\n  %s\n", missing == 0
-        ? "PASS — all texture references resolve"
-        : "FAIL — missing references above");
+        ? "PASS - all texture references resolve"
+        : "FAIL - missing references above");
     return missing == 0 ? 0 : 1;
 }
 
@@ -183,7 +175,7 @@ int handleValidateZonePack(int& i, int argc, char** argv) {
     // Audit a zone's open-format asset pack. Reports counts and
     // total bytes per category (textures/, meshes/, audio/) plus
     // any malformed WOMs or invalid WAVs. Exit code 1 if any
-    // check fails — useful in CI to gate that gen-zone-starter-pack
+    // check fails - useful in CI to gate that gen-zone-starter-pack
     // output is healthy.
     std::string zoneDir = argv[++i];
     bool jsonOut = (i + 1 < argc &&
@@ -229,19 +221,15 @@ int handleValidateZonePack(int& i, int argc, char** argv) {
     // Meshes: WOMs under meshes/ (load & sanity check)
     fs::path meshDir = fs::path(zoneDir) / "meshes";
     if (fs::exists(meshDir)) {
-        for (const auto& e : fs::recursive_directory_iterator(meshDir, ec)) {
-            if (!e.is_regular_file()) continue;
-            if (e.path().extension() != ".wom") continue;
+        for (const auto& womFile : findFilesByExtension(meshDir, ".wom")) {
             mesh.count++;
-            mesh.bytes += e.file_size();
-            std::string base = e.path().string();
-            base = base.substr(0, base.size() - 4);
-            auto wom = wowee::pipeline::WoweeModelLoader::load(base);
+            mesh.bytes += womFile.bytes;
+            auto wom = wowee::pipeline::WoweeModelLoader::load(womFile.base);
             if (wom.vertices.empty() || wom.indices.empty() ||
                 wom.batches.empty()) {
                 mesh.invalid++;
                 mesh.invalidPaths.push_back(
-                    fs::relative(e.path(), zoneDir).string());
+                    fs::relative(womFile.path, zoneDir).string());
             }
         }
     }
@@ -317,8 +305,8 @@ int handleValidateZonePack(int& i, int argc, char** argv) {
             std::printf("  INVALID    %s\n", p.c_str());
         }
     }
-    std::printf("\n  %s\n", pass ? "PASS — pack is healthy"
-                                  : "FAIL — see invalid paths above");
+    std::printf("\n  %s\n", pass ? "PASS - pack is healthy"
+                                  : "FAIL - see invalid paths above");
     return pass ? 0 : 1;
 }
 
@@ -350,7 +338,7 @@ bool isWomWatertightAfterWeld(
 int handleAuditWatertight(int& i, int argc, char** argv) {
     // Walk every .wom under <zoneDir|projectDir> and run the
     // welded-watertight check. Reports per-mesh PASS/FAIL plus a
-    // rollup. Exit code is the number of failures, capped at 255 —
+    // rollup. Exit code is the number of failures, capped at 255 -
     // CI-friendly: zero on full success.
     std::string root = argv[++i];
     bool jsonOut = false;
@@ -383,14 +371,10 @@ int handleAuditWatertight(int& i, int argc, char** argv) {
     };
     std::vector<Result> rows;
     std::error_code ec;
-    for (const auto& e : fs::recursive_directory_iterator(root, ec)) {
-        if (!e.is_regular_file()) continue;
-        if (e.path().extension() != ".wom") continue;
-        std::string base = e.path().string();
-        base = base.substr(0, base.size() - 4);
+    for (const auto& womFile : findFilesByExtension(root, ".wom")) {
         Result r;
-        r.rel = fs::relative(e.path(), root).string();
-        r.ok = isWomWatertightAfterWeld(base, weldEps, r.tris,
+        r.rel = womFile.relative;
+        r.ok = isWomWatertightAfterWeld(womFile.base, weldEps, r.tris,
                                          r.boundary, r.nonManifold);
         rows.push_back(std::move(r));
     }
@@ -449,7 +433,7 @@ int handleAuditWatertight(int& i, int argc, char** argv) {
 
 // Welded watertight check on a single WOB. Each group is welded
 // independently (rooms separated by portals must stay distinct
-// collision surfaces). A WOB passes if EVERY group is closed —
+// collision surfaces). A WOB passes if EVERY group is closed -
 // per-group failure breakdowns are returned via the out vectors.
 bool isWobWatertightAfterWeld(
         const std::string& wobBase, float eps,
@@ -490,7 +474,7 @@ bool isWobWatertightAfterWeld(
 int handleAuditWatertightWob(int& i, int argc, char** argv) {
     // Walk every .wob under <root> and run the welded-watertight
     // check on every group. PASS only if all groups in all WOBs
-    // are closed — a real building's interior groups should each
+    // are closed - a real building's interior groups should each
     // be a closed surface even though the building as a whole has
     // intentional portal openings between them.
     std::string root = argv[++i];

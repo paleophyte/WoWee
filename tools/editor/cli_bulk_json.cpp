@@ -1,6 +1,7 @@
 #include "cli_bulk_json.hpp"
 #include "cli_arg_parse.hpp"
 #include "cli_format_table.hpp"
+#include "cli_paths.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -24,41 +25,6 @@ namespace cli {
 namespace {
 
 namespace fs = std::filesystem;
-
-bool peekMagic(const fs::path& path, char magic[4]) {
-    std::ifstream is(path, std::ios::binary);
-    if (!is) return false;
-    if (!is.read(magic, 4) || is.gcount() != 4) return false;
-    return true;
-}
-
-std::string shellQuote(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') out += "'\"'\"'";
-        else out.push_back(c);
-    }
-    out.push_back('\'');
-    return out;
-}
-
-// Derive --export-X-json or --import-X-json from the
-// format table's --info-X flag. Both share the magic
-// suffix (e.g. --info-wsrg -> --export-wsrg-json).
-std::string deriveJsonFlag(const char* infoFlag,
-                            const char* verb /* "export" or "import" */) {
-    if (!infoFlag) return {};
-    std::string s = infoFlag;
-    const std::string prefix = "--info-";
-    if (s.size() < prefix.size() ||
-        s.compare(0, prefix.size(), prefix) != 0) {
-        return {};
-    }
-    return std::string("--") + verb + "-" +
-           s.substr(prefix.size()) + "-json";
-}
 
 int runSubprocessExitCode(const std::string& cmd) {
     int rc = std::system(cmd.c_str());
@@ -90,7 +56,7 @@ int handleExport(int& i, int argc, char** argv) {
     std::vector<JobResult> rows;
     for (const auto& entry : fs::recursive_directory_iterator(dir)) {
         if (!entry.is_regular_file()) continue;
-        // Skip files that are themselves .json sidecars —
+        // Skip files that are themselves .json sidecars -
         // export only operates on binary .w* sources.
         if (entry.path().extension() == ".json") continue;
         char magic[4];
@@ -100,7 +66,9 @@ int handleExport(int& i, int argc, char** argv) {
         JobResult r;
         r.path = entry.path();
         r.fmt = fmt;
-        std::string flag = deriveJsonFlag(fmt->infoFlag, "export");
+        const std::string suffix = formatFlagSuffix(fmt->infoFlag);
+        const std::string flag =
+            suffix.empty() ? std::string() : "--export-" + suffix + "-json";
         if (flag.empty()) {
             r.skipped = true;
             rows.push_back(std::move(r));
@@ -154,7 +122,7 @@ int handleExport(int& i, int argc, char** argv) {
     std::printf("  failed           : %zu\n", failCount);
     std::printf("  skipped (no exp) : %zu\n", skipCount);
     if (ok) {
-        std::printf("  OK — every catalog with an exporter wrote a .json sidecar\n");
+        std::printf("  OK - every catalog with an exporter wrote a .json sidecar\n");
         return 0;
     }
     std::printf("\n  failures:\n");
@@ -209,7 +177,9 @@ int handleImport(int& i, int argc, char** argv) {
         JobResult r;
         r.path = p;
         r.fmt = fmt;
-        std::string flag = deriveJsonFlag(fmt->infoFlag, "import");
+        const std::string suffix = formatFlagSuffix(fmt->infoFlag);
+        const std::string flag =
+            suffix.empty() ? std::string() : "--import-" + suffix + "-json";
         if (flag.empty()) {
             r.skipped = true;
             rows.push_back(std::move(r));
@@ -256,7 +226,7 @@ int handleImport(int& i, int argc, char** argv) {
     std::printf("  failed           : %zu\n", failCount);
     std::printf("  skipped (no imp) : %zu\n", skipCount);
     if (ok) {
-        std::printf("  OK — every .json sidecar was imported back to binary\n");
+        std::printf("  OK - every .json sidecar was imported back to binary\n");
         return 0;
     }
     std::printf("\n  failures:\n");

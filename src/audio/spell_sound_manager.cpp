@@ -1,4 +1,5 @@
 #include "audio/spell_sound_manager.hpp"
+#include "audio/sample_load.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -136,20 +137,8 @@ void SpellSoundManager::shutdown() {
 }
 
 bool SpellSoundManager::loadSound(const std::string& path, SpellSample& sample, pipeline::AssetManager* assets) {
-    sample.path = path;
-    sample.loaded = false;
-
-    try {
-        sample.data = assets->readFile(path);
-        if (!sample.data.empty()) {
-            sample.loaded = true;
-            return true;
-        }
-    } catch (const std::exception& e) {
-        // Silently fail - not all sounds may exist
-    }
-
-    return false;
+    // Quietly: not every sound in this bank ships with every install.
+    return loadSampleFile(path, sample, assets, nullptr);
 }
 
 void SpellSoundManager::playSound(const std::vector<SpellSample>& library, float volumeMultiplier) {
@@ -160,24 +149,13 @@ void SpellSoundManager::playSound(const std::vector<SpellSample>& library, float
 }
 
 void SpellSoundManager::playRandomSound(const std::vector<SpellSample>& library, float volumeMultiplier) {
-    if (!initialized_ || library.empty()) return;
-
-    // Count loaded sounds
-    std::vector<const SpellSample*> loadedSounds;
-    for (const auto& sample : library) {
-        if (sample.loaded) {
-            loadedSounds.push_back(&sample);
-        }
-    }
-
-    if (loadedSounds.empty()) return;
-
-    // Pick random sound
-    std::uniform_int_distribution<size_t> dist(0, loadedSounds.size() - 1);
-    size_t index = dist(gen);
-
-    float volume = 0.75f * volumeScale_ * volumeMultiplier;
-    AudioEngine::instance().playSound2D(loadedSounds[index]->data, volume, 1.0f);
+    if (!initialized_) return;
+    // Among the ones that loaded - see pickLoadedSample. The base volume is
+    // this bank's own and stays here.
+    const SpellSample* chosen = pickLoadedSample(library, gen);
+    if (!chosen) return;
+    const float volume = 0.75f * volumeScale_ * volumeMultiplier;
+    AudioEngine::instance().playSound2D(chosen->data, volume, 1.0f);
 }
 
 void SpellSoundManager::setVolumeScale(float scale) {
@@ -281,26 +259,5 @@ void SpellSoundManager::playImpact(MagicSchool school, SpellPower power) {
             break;
     }
 }
-
-void SpellSoundManager::playFireball() {
-    playPrecast(MagicSchool::FIRE, SpellPower::MEDIUM);
-}
-
-void SpellSoundManager::playFrostbolt() {
-    playPrecast(MagicSchool::FROST, SpellPower::MEDIUM);
-}
-
-void SpellSoundManager::playLightningBolt() {
-    playPrecast(MagicSchool::NATURE, SpellPower::MEDIUM);
-}
-
-void SpellSoundManager::playHeal() {
-    playPrecast(MagicSchool::HOLY, SpellPower::MEDIUM);
-}
-
-void SpellSoundManager::playShadowBolt() {
-    playPrecast(MagicSchool::SHADOW, SpellPower::MEDIUM);
-}
-
 } // namespace audio
 } // namespace wowee

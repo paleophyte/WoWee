@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
@@ -13,10 +14,10 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
-#include "core/profiler.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <set>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -39,13 +40,14 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
 
-    // Save old grid cells
-    GridCell oldMinCell = toCell(inst.worldBoundsMin);
-    GridCell oldMaxCell = toCell(inst.worldBoundsMax);
+    // The box the instance is filed under, which is what it has to be taken
+    // out of once it has moved.
+    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
+    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
 
     inst.position = position;
     inst.updateModelMatrix();
-    // Use cachedModel instead of a fresh models.find() — the pointer was set
+    // Use cachedModel instead of a fresh models.find() - the pointer was set
     // at addInstance and stays valid as long as the instance exists.
     if (inst.cachedModel) {
         glm::vec3 localMin, localMax;
@@ -55,29 +57,21 @@ void M2Renderer::setInstancePosition(uint32_t instanceId, const glm::vec3& posit
     }
 
     // Incrementally update spatial grid
-    GridCell newMinCell = toCell(inst.worldBoundsMin);
-    GridCell newMaxCell = toCell(inst.worldBoundsMax);
-    if (oldMinCell.x != newMinCell.x || oldMinCell.y != newMinCell.y || oldMinCell.z != newMinCell.z ||
-        oldMaxCell.x != newMaxCell.x || oldMaxCell.y != newMaxCell.y || oldMaxCell.z != newMaxCell.z) {
-        for (int z = oldMinCell.z; z <= oldMaxCell.z; z++) {
-            for (int y = oldMinCell.y; y <= oldMaxCell.y; y++) {
-                for (int x = oldMinCell.x; x <= oldMaxCell.x; x++) {
-                    auto it = spatialGrid.find(GridCell{x, y, z});
-                    if (it != spatialGrid.end()) {
-                        auto& vec = it->second;
-                        vec.erase(std::remove(vec.begin(), vec.end(), instanceId), vec.end());
-                    }
-                }
-            }
-        }
-        for (int z = newMinCell.z; z <= newMaxCell.z; z++) {
-            for (int y = newMinCell.y; y <= newMaxCell.y; y++) {
-                for (int x = newMinCell.x; x <= newMaxCell.x; x++) {
-                    spatialGrid[GridCell{x, y, z}].push_back(instanceId);
-                }
-            }
-        }
-    }
+    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+}
+
+void M2Renderer::setInstanceHighlight(uint32_t instanceId, float amount) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    instances[idxIt->second].highlight = amount;
+}
+
+void M2Renderer::clearInstanceHighlights() {
+    // A walk of every instance rather than a record of the lit one, because a
+    // press can end with the instance gone - the object despawned, the tile
+    // unloaded - and a remembered id would then light whatever took its slot.
+    for (auto& inst : instances) inst.highlight = 0.0f;
 }
 
 void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
@@ -85,8 +79,41 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     if (idxIt == instanceIndexById.end()) return;
     auto& inst = instances[idxIt->second];
     inst.animSpeed = frozen ? 0.0f : 1.0f;
+    inst.holdAtEnd = false;
     if (frozen) {
         inst.animTime = 0.0f;  // Reset to bind pose
+    }
+}
+
+std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return std::nullopt;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel || inst.cachedModel->sequences.size() != 1) return std::nullopt;
+    return inst.cachedModel->sequences[0].id;
+}
+
+void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
+                                          bool skipToEnd) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel) return;
+    const auto& seqs = inst.cachedModel->sequences;
+    for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
+        if (seqs[i].id != animationId) continue;
+        inst.currentSequenceIndex = i;
+        inst.animDuration = static_cast<float>(seqs[i].duration);
+        inst.playingVariation = false;   // not a variation: it does not go back
+        inst.holdAtEnd = true;
+        if (skipToEnd) {
+            inst.animTime = inst.animDuration;
+            inst.animSpeed = 0.0f;
+        } else {
+            inst.animTime = 0.0f;
+            inst.animSpeed = 1.0f;
+        }
+        return;
     }
 }
 
@@ -105,6 +132,7 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
             inst.animSpeed = 1.0f;
             // Use playingVariation=true for one-shot (returns to idle when done)
             inst.playingVariation = !loop;
+            inst.holdAtEnd = false;
             return;
         }
     }
@@ -145,7 +173,7 @@ bool M2Renderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, fl
 void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& transform) {
     auto idxIt = instanceIndexById.find(instanceId);
     if (idxIt == instanceIndexById.end()) return;
-    // Reject NaN matrix — would propagate into the model matrix uniform
+    // Reject NaN matrix - would propagate into the model matrix uniform
     // and the spatial-grid bounds, leaving stale grid cells pointing at
     // a NaN-bounded instance.
     for (int c = 0; c < 4; c++)
@@ -154,8 +182,9 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     auto& inst = instances[idxIt->second];
 
     // Remove old grid cells before updating bounds
-    GridCell oldMinCell = toCell(inst.worldBoundsMin);
-    GridCell oldMaxCell = toCell(inst.worldBoundsMax);
+    const glm::vec3 oldBoundsMin = inst.worldBoundsMin;
+    const glm::vec3 oldBoundsMax = inst.worldBoundsMax;
+    const glm::vec3 oldPosition = inst.position;
 
     // Update model matrix directly
     inst.modelMatrix = transform;
@@ -163,6 +192,33 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
 
     // Extract position from transform for bounds
     inst.position = glm::vec3(transform[3]);
+
+    // The dedup map is keyed on position, so it has to move with the instance.
+    // It did not, and only rebuildSpatialIndex ever put it right - which this
+    // path deliberately avoids. A ship's doodads are created at the origin and
+    // moved here a frame later, so the origin key stayed pointing at them and
+    // the next ship of the same class was handed the first ship's sails instead
+    // of its own. Both hulls then wrote their transform to the one instance, so
+    // it rendered at whichever ship updated last, and whichever hull unloaded
+    // first destroyed it for the other.
+    if (!inst.cachedIsGroundDetail) {
+        auto keyFor = [&](const glm::vec3& p) {
+            return DedupKey{.modelId = inst.modelId,
+                            .qx = static_cast<int32_t>(std::round(p.x * 10.0f)),
+                            .qy = static_cast<int32_t>(std::round(p.y * 10.0f)),
+                            .qz = static_cast<int32_t>(std::round(p.z * 10.0f))};
+        };
+        const DedupKey oldKey = keyFor(oldPosition);
+        const DedupKey newKey = keyFor(inst.position);
+        if (!(oldKey == newKey)) {
+            auto oldIt = instanceDedupMap_.find(oldKey);
+            // Only drop the entry if it still names this instance.
+            if (oldIt != instanceDedupMap_.end() && oldIt->second == instanceId) {
+                instanceDedupMap_.erase(oldIt);
+            }
+            instanceDedupMap_.emplace(newKey, instanceId);
+        }
+    }
 
     // Update bounds via the cached model pointer
     if (inst.cachedModel) {
@@ -173,32 +229,9 @@ void M2Renderer::setInstanceTransform(uint32_t instanceId, const glm::mat4& tran
     }
 
     // Incrementally update spatial grid (remove old cells, add new cells)
-    GridCell newMinCell = toCell(inst.worldBoundsMin);
-    GridCell newMaxCell = toCell(inst.worldBoundsMax);
-    if (oldMinCell.x != newMinCell.x || oldMinCell.y != newMinCell.y || oldMinCell.z != newMinCell.z ||
-        oldMaxCell.x != newMaxCell.x || oldMaxCell.y != newMaxCell.y || oldMaxCell.z != newMaxCell.z) {
-        // Remove from old cells
-        for (int z = oldMinCell.z; z <= oldMaxCell.z; z++) {
-            for (int y = oldMinCell.y; y <= oldMaxCell.y; y++) {
-                for (int x = oldMinCell.x; x <= oldMaxCell.x; x++) {
-                    auto it = spatialGrid.find(GridCell{x, y, z});
-                    if (it != spatialGrid.end()) {
-                        auto& vec = it->second;
-                        vec.erase(std::remove(vec.begin(), vec.end(), instanceId), vec.end());
-                    }
-                }
-            }
-        }
-        // Add to new cells
-        for (int z = newMinCell.z; z <= newMaxCell.z; z++) {
-            for (int y = newMinCell.y; y <= newMaxCell.y; y++) {
-                for (int x = newMinCell.x; x <= newMaxCell.x; x++) {
-                    spatialGrid[GridCell{x, y, z}].push_back(instanceId);
-                }
-            }
-        }
-    }
-    // No spatialIndexDirty_ = true — handled incrementally
+    refileBounds(spatialGrid, oldBoundsMin, oldBoundsMax,
+                 inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
+    // No spatialIndexDirty_ = true - handled incrementally
 }
 
 void M2Renderer::removeInstance(uint32_t instanceId) {
@@ -210,26 +243,14 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
     auto& inst = instances[idx];
 
     // Remove from spatial grid incrementally (same pattern as the move-update path)
-    GridCell minCell = toCell(inst.worldBoundsMin);
-    GridCell maxCell = toCell(inst.worldBoundsMax);
-    for (int z = minCell.z; z <= maxCell.z; z++) {
-        for (int y = minCell.y; y <= maxCell.y; y++) {
-            for (int x = minCell.x; x <= maxCell.x; x++) {
-                auto gIt = spatialGrid.find(GridCell{x, y, z});
-                if (gIt != spatialGrid.end()) {
-                    auto& vec = gIt->second;
-                    vec.erase(std::remove(vec.begin(), vec.end(), instanceId), vec.end());
-                }
-            }
-        }
-    }
+    eraseBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, instanceId);
 
     // Remove from dedup map
     if (!inst.cachedIsGroundDetail) {
-        DedupKey dk{inst.modelId,
-                    static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
-                    static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
-                    static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
+        DedupKey dk{.modelId = inst.modelId,
+                    .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
+                    .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
+                    .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
         instanceDedupMap_.erase(dk);
     }
 
@@ -329,15 +350,21 @@ void M2Renderer::clear() {
             vkResetDescriptorPool(device, materialDescPool_, 0);
             // Re-allocate the glow texture descriptor set (pre-allocated during init,
             // invalidated by pool reset).
-            if (glowTexture_ && particleTexLayout_) {
-                VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            // Cleared before the test, not inside it: the pool reset above
+            // invalidated whatever was here, so a run that does not re-allocate
+            // was leaving a dangling set behind to be bound.
+            glowTexDescSet_ = VK_NULL_HANDLE;
+            // Valid, not merely present. A texture whose upload or view
+            // creation failed writes a null view into this set, and the glow
+            // pass samples it - the same shape as the particle and ribbon sets.
+            if (glowTexture_ && glowTexture_->isValid() && particleTexLayout_) {
+                VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
                 ai.descriptorPool = materialDescPool_;
                 ai.descriptorSetCount = 1;
                 ai.pSetLayouts = &particleTexLayout_;
-                glowTexDescSet_ = VK_NULL_HANDLE;
                 if (vkAllocateDescriptorSets(device, &ai, &glowTexDescSet_) == VK_SUCCESS) {
                     VkDescriptorImageInfo imgInfo = glowTexture_->descriptorInfo();
-                    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                     write.dstSet = glowTexDescSet_;
                     write.dstBinding = 0;
                     write.descriptorCount = 1;
@@ -357,7 +384,7 @@ void M2Renderer::clear() {
                 bufInfo.buffer = dummyBoneBuffer_;
                 bufInfo.offset = 0;
                 bufInfo.range = sizeof(glm::mat4);
-                VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 write.dstSet = dummyBoneSet_;
                 write.dstBinding = 0;
                 write.descriptorCount = 1;
@@ -372,8 +399,8 @@ void M2Renderer::clear() {
                     VkDescriptorBufferInfo mbInfo{};
                     mbInfo.buffer = megaBoneBuffer_[i];
                     mbInfo.offset = 0;
-                    mbInfo.range = MEGA_BONE_MAX_INSTANCES * MAX_BONES_PER_INSTANCE * sizeof(glm::mat4);
-                    VkWriteDescriptorSet mw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    mbInfo.range = VkDeviceSize(MEGA_BONE_MATRIX_CAPACITY) * sizeof(glm::mat4);
+                    VkWriteDescriptorSet mw{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                     mw.dstSet = megaBoneSet_[i];
                     mw.dstBinding = 0;
                     mw.descriptorCount = 1;
@@ -389,6 +416,7 @@ void M2Renderer::clear() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
@@ -421,6 +449,7 @@ void M2Renderer::clearInstances() {
     instances.clear();
     spatialGrid.clear();
     instanceIndexById.clear();
+    boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     for (auto& ids : cullSubmittedIds_) ids.clear();
     for (auto& ids : cullReadableIds_) ids.clear();
@@ -434,14 +463,7 @@ void M2Renderer::clearInstances() {
 }
 
 void M2Renderer::setCollisionFocus(const glm::vec3& worldPos, float radius) {
-    collisionFocusEnabled = (radius > 0.0f);
-    collisionFocusPos = worldPos;
-    collisionFocusRadius = std::max(0.0f, radius);
-    collisionFocusRadiusSq = collisionFocusRadius * collisionFocusRadius;
-}
-
-void M2Renderer::clearCollisionFocus() {
-    collisionFocusEnabled = false;
+    collisionFocus.set(worldPos, radius);
 }
 
 void M2Renderer::resetQueryStats() {
@@ -449,17 +471,10 @@ void M2Renderer::resetQueryStats() {
     queryCallCount = 0;
 }
 
-M2Renderer::GridCell M2Renderer::toCell(const glm::vec3& p) const {
-    return GridCell{
-        static_cast<int>(std::floor(p.x / SPATIAL_CELL_SIZE)),
-        static_cast<int>(std::floor(p.y / SPATIAL_CELL_SIZE)),
-        static_cast<int>(std::floor(p.z / SPATIAL_CELL_SIZE))
-    };
-}
-
 void M2Renderer::rebuildSpatialIndex() {
     spatialGrid.clear();
     instanceIndexById.clear();
+    boneSeedInstanceByModel_.clear();
     instanceDedupMap_.clear();
     instanceIndexById.reserve(instances.size());
     smokeInstanceIndices_.clear();
@@ -478,10 +493,10 @@ void M2Renderer::rebuildSpatialIndex() {
 
         // Rebuild dedup map (skip ground detail)
         if (!inst.cachedIsGroundDetail) {
-            DedupKey dk{inst.modelId,
-                        static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
-                        static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
-                        static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
+            DedupKey dk{.modelId = inst.modelId,
+                        .qx = static_cast<int32_t>(std::round(inst.position.x * 10.0f)),
+                        .qy = static_cast<int32_t>(std::round(inst.position.y * 10.0f)),
+                        .qz = static_cast<int32_t>(std::round(inst.position.z * 10.0f))};
             instanceDedupMap_[dk] = inst.id;
         }
 
@@ -500,15 +515,7 @@ void M2Renderer::rebuildSpatialIndex() {
             particleOnlyInstanceIndices_.push_back(i);
         }
 
-        GridCell minCell = toCell(inst.worldBoundsMin);
-        GridCell maxCell = toCell(inst.worldBoundsMax);
-        for (int z = minCell.z; z <= maxCell.z; z++) {
-            for (int y = minCell.y; y <= maxCell.y; y++) {
-                for (int x = minCell.x; x <= maxCell.x; x++) {
-                    spatialGrid[GridCell{x, y, z}].push_back(inst.id);
-                }
-            }
-        }
+        insertBounds(spatialGrid, inst.worldBoundsMin, inst.worldBoundsMax, inst.id);
     }
     spatialIndexDirty_ = false;
 }
@@ -516,25 +523,14 @@ void M2Renderer::rebuildSpatialIndex() {
 void M2Renderer::gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax,
                                   std::vector<size_t>& outIndices) const {
     outIndices.clear();
-    tl_m2_candidateIdScratch.clear();
 
-    GridCell minCell = toCell(queryMin);
-    GridCell maxCell = toCell(queryMax);
-    for (int z = minCell.z; z <= maxCell.z; z++) {
-        for (int y = minCell.y; y <= maxCell.y; y++) {
-            for (int x = minCell.x; x <= maxCell.x; x++) {
-                auto it = spatialGrid.find(GridCell{x, y, z});
-                if (it == spatialGrid.end()) continue;
-                for (uint32_t id : it->second) {
-                    if (!tl_m2_candidateIdScratch.insert(id).second) continue;
-                    auto idxIt = instanceIndexById.find(id);
-                    if (idxIt != instanceIndexById.end()) {
-                        outIndices.push_back(idxIt->second);
-                    }
-                }
-            }
-        }
-    }
+    gatherIds(spatialGrid, queryMin, queryMax, tl_m2_candidateIdScratch,
+              [&](uint32_t id) {
+                  auto idxIt = instanceIndexById.find(id);
+                  if (idxIt != instanceIndexById.end()) {
+                      outIndices.push_back(idxIt->second);
+                  }
+              });
 
     // Safety fallback to preserve collision correctness if the spatial index
     // misses candidates (e.g. during streaming churn).
@@ -567,22 +563,22 @@ void M2Renderer::cleanupUnusedModels() {
 
     // Find models with no instances that have exceeded the grace period.
     // Models that just lost their last instance get tracked but not evicted
-    // immediately — this prevents thrashing when GO models are briefly
+    // immediately - this prevents thrashing when GO models are briefly
     // instance-free between despawn and respawn cycles.
     std::vector<uint32_t> toRemove;
     for (const auto& [id, model] : models) {
         if (usedModelIds.find(id) != usedModelIds.end() ||
             pinnedModelIds_.find(id) != pinnedModelIds_.end()) {
-            // Model still in use or pinned — clear any pending unused timestamp
+            // Model still in use or pinned - clear any pending unused timestamp
             modelUnusedSince_.erase(id);
             continue;
         }
         auto unusedIt = modelUnusedSince_.find(id);
         if (unusedIt == modelUnusedSince_.end()) {
-            // First cycle with no instances — start the grace timer
+            // First cycle with no instances - start the grace timer
             modelUnusedSince_[id] = now;
         } else if (now - unusedIt->second >= kGracePeriod) {
-            // Grace period expired — mark for removal
+            // Grace period expired - mark for removal
             toRemove.push_back(id);
             modelUnusedSince_.erase(unusedIt);
         }
@@ -590,11 +586,11 @@ void M2Renderer::cleanupUnusedModels() {
 
     // Delete GPU resources and remove from map.
     // Wait for the GPU to finish all in-flight frames before destroying any
-    // buffers — the previous frame's command buffer may still be referencing
+    // buffers - the previous frame's command buffer may still be referencing
     // vertex/index buffers that are about to be freed. Without this wait,
     // the GPU reads freed memory, which can cause VK_ERROR_DEVICE_LOST.
     // Suspected (not yet confirmed) contributor to multi-second freezes seen
-    // right after taxi landings — timed here so the next repro pins it down.
+    // right after taxi landings - timed here so the next repro pins it down.
     if (!toRemove.empty() && vkCtx_) {
         const auto waitStart = std::chrono::steady_clock::now();
         vkDeviceWaitIdle(vkCtx_->getDevice());
@@ -636,6 +632,82 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     reapedModelIds_.push_back(modelId);
 }
 
+size_t M2Renderer::evictUnreferencedTextures(size_t bytesNeeded) {
+    if (textureCache.empty() || bytesNeeded == 0) return 0;
+
+    // Free a slab rather than exactly what was asked for.
+    //
+    // Working out what is evictable means walking every loaded model, because
+    // the in-use set is what those models point at. Doing that per texture is
+    // a walk per load for as long as the cache sits at its ceiling - which is
+    // exactly when textures are streaming in fastest. One sweep that frees a
+    // slab serves the next few hundred loads instead.
+    constexpr size_t kEvictionSlab = 64ull * 1024 * 1024;
+    bytesNeeded = std::max(bytesNeeded, kEvictionSlab);
+
+    // What a loaded model still points at. A batch, a particle emitter and a
+    // ribbon each keep a raw pointer into this cache, and the per-frame
+    // particle and ribbon groups are rebuilt from those - so anything a model
+    // refers to is off limits however old it is.
+    std::unordered_set<const VkTexture*> inUse;
+    inUse.reserve(textureCache.size());
+    for (const auto& [modelId, model] : models) {
+        for (const auto& batch : model.batches) {
+            if (batch.texture) inUse.insert(batch.texture);
+        }
+        for (const VkTexture* tex : model.particleTextures) {
+            if (tex) inUse.insert(tex);
+        }
+        for (const VkTexture* tex : model.ribbonTextures) {
+            if (tex) inUse.insert(tex);
+        }
+    }
+
+    std::vector<std::pair<uint64_t, std::string>> candidates;
+    candidates.reserve(textureCache.size());
+    for (const auto& [key, entry] : textureCache) {
+        if (!entry.texture || inUse.count(entry.texture.get()) != 0) continue;
+        candidates.emplace_back(entry.lastUse, key);
+    }
+    if (candidates.empty()) return 0;
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    size_t freed = 0;
+    size_t dropped = 0;
+    for (const auto& [lastUse, key] : candidates) {
+        if (freed >= bytesNeeded) break;
+        auto it = textureCache.find(key);
+        if (it == textureCache.end()) continue;
+        freed += it->second.approxBytes;
+        textureCacheBytes_ -= std::min(textureCacheBytes_, it->second.approxBytes);
+        texturePropsByPtr_.erase(it->second.texture.get());
+        // A command buffer submitted a frame or two ago may still be reading
+        // it, so the texture outlives this call and dies once every frame slot
+        // has fenced. std::function needs a copyable capture, hence the shared
+        // pointer around what was a unique one.
+        auto doomed = std::shared_ptr<VkTexture>(it->second.texture.release());
+        vkCtx_->deferAfterAllFrameFences([doomed]() mutable { doomed.reset(); });
+        textureCache.erase(it);
+        ++dropped;
+    }
+
+    if (freed > 0) {
+        // Whatever was refused while the cache was full can be asked for again
+        // now. Only those: a texture that failed because its file is missing
+        // is not worth retrying every time something else is evicted.
+        for (const auto& key : budgetRejected_) {
+            failedTextureCache_.erase(key);
+            failedTextureRetryAt_.erase(key);
+        }
+        budgetRejected_.clear();
+        LOG_INFO("M2 texture cache: evicted ", dropped, " unreferenced texture(s), freed ",
+                 freed / (1024 * 1024), " MB (now ", textureCacheBytes_ / (1024 * 1024),
+                 " MB / ", textureCacheBudgetBytes_ / (1024 * 1024), " MB)");
+    }
+    return freed;
+}
+
 VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
     constexpr uint64_t kFailedTextureRetryLookups = 512;
     auto normalizeKey = [](std::string key) {
@@ -658,21 +730,15 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         return whiteTexture_.get();
     }
 
-    auto containsToken = [](const std::string& haystack, const char* token) {
-        return haystack.find(token) != std::string::npos;
-    };
-    const bool colorKeyBlackHint =
-        containsToken(key, "candle") ||
-        containsToken(key, "flame") ||
-        containsToken(key, "fire") ||
-        containsToken(key, "torch") ||
-        containsToken(key, "lamp") ||
-        containsToken(key, "lantern") ||
-        containsToken(key, "glow") ||
-        containsToken(key, "flare") ||
-        containsToken(key, "brazier") ||
-        containsToken(key, "campfire") ||
-        containsToken(key, "bonfire");
+    // The black key discards every pixel darker than the threshold, so a
+    // texture it is applied to wrongly loses its dark areas.
+    //
+    // Both the list and what it is matched against now live in
+    // assetNameLooksLikeFlame. This asked the whole path, which is what made
+    // Outland's sky flicker: HellFireSkyNebula01 has "fire" in it, so every
+    // layer of the Hellfire sky was keyed as a flame and lost whichever of its
+    // dark pixels fell under the threshold that frame.
+    const bool colorKeyBlackHint = assetNameLooksLikeFlame(key);
 
     // Check pre-decoded BLP cache first (populated by background worker threads)
     pipeline::BLPImage blp;
@@ -684,7 +750,9 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         }
     }
     if (!blp.isValid()) {
-        blp = assetManager->loadTexture(key);
+        // M2 skins are sampled and their transparency is read from the
+        // blocks, so they need no decode.
+        blp = assetManager->loadTexture(key, true);
     }
     if (!blp.isValid()) {
         // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
@@ -696,10 +764,20 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         return whiteTexture_.get();
     }
 
-    size_t base = static_cast<size_t>(blp.width) * static_cast<size_t>(blp.height) * 4ull;
-    size_t approxBytes = base + (base / 3);
+    const size_t approxBytes = blp.approxUploadBytes();
+    if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
+        // Make room before giving up. lastUse has been recorded on every hit
+        // and every insert since this cache was written and nothing ever read
+        // it: over budget, the newest texture the player looked at was refused
+        // and handed back the white one, permanently, while whatever filled
+        // the cache first kept its place. A tree whose leaf sheet was refused
+        // renders nothing in the main pass and casts the shadow of a solid
+        // quad, and the retry timer below is what made that come and go.
+        evictUnreferencedTextures(approxBytes);
+    }
     if (textureCacheBytes_ + approxBytes > textureCacheBudgetBytes_) {
         static constexpr size_t kMaxFailedTextureCache = 200000;
+        budgetRejected_.insert(key);
         if (failedTextureCache_.size() < kMaxFailedTextureCache) {
             // Cache budget-rejected keys too; without this we repeatedly decode/load
             // the same textures every frame once budget is saturated.
@@ -715,37 +793,56 @@ VkTexture* M2Renderer::loadTexture(const std::string& path, uint32_t texFlags) {
         return whiteTexture_.get();
     }
 
-    // Track whether the texture actually uses alpha (any pixel with alpha < 255).
-    bool hasAlpha = false;
-    for (size_t i = 3; i < blp.data.size(); i += 4) {
-        if (blp.data[i] != 255) {
-            hasAlpha = true;
-            break;
-        }
-    }
+    // Whether the texture actually uses alpha. Reads the DXT blocks when the
+    // loader kept them, and every fourth decoded byte when it did not; the two
+    // agree, which tests/test_blp_alpha_scan.cpp checks against the assets.
+    // This was the only thing forcing M2 textures to be decoded.
+    const bool hasAlpha = blp.hasTransparency();
+
+    // And whether that alpha is a silhouette or an atlas leftover, which is
+    // what an opaque batch has to know before anything keys on it.
+    const bool alphaIsSilhouette = blp.alphaIsSilhouette();
 
     // Create Vulkan texture
     auto tex = std::make_unique<VkTexture>();
-    tex->upload(*vkCtx_, blp.data.data(), blp.width, blp.height, VK_FORMAT_R8G8B8A8_UNORM);
+    tex->uploadBLP(*vkCtx_, blp);
 
     // M2Texture flags: bit 0 = WrapS (1=repeat, 0=clamp), bit 1 = WrapT
     VkSamplerAddressMode wrapS = (texFlags & 0x1) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VkSamplerAddressMode wrapT = (texFlags & 0x2) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT);
+    // WOWEE_SKY_MIP_BIAS pushes the sky's textures toward smaller mips.
+    //
+    // Every per-frame quantity behind the sky has now been measured and holds
+    // still while it flickers: the lighting, the clock, the culling, the frame
+    // time, and every one of the thirty-four batches' material flags. Nothing
+    // is alpha tested, colour keyed, or drawn as a glow card. What is left is
+    // the texture sample, and the sky is the one model where that is loud:
+    // eighteen of its layers are additive, so each layer's sampling noise adds
+    // to the last rather than replacing it, and the dome is at its most
+    // foreshortened exactly where a turn sweeps fastest.
+    //
+    // A knob rather than a fixed value, because if this is the cause the right
+    // amount is a thing to measure and not to guess.
+    static const float skyMipBias = [] {
+        const char* set = std::getenv("WOWEE_SKY_MIP_BIAS");
+        return set ? std::strtof(set, nullptr) : 0.0f;
+    }();
+    tex->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR, wrapS, wrapT,
+                       16.0f, skyMode_ ? skyMipBias : 0.0f);
 
     VkTexture* texPtr = tex.get();
 
     TextureCacheEntry e;
     e.texture = std::move(tex);
     e.approxBytes = approxBytes;
-    e.hasAlpha = hasAlpha;
-    e.colorKeyBlack = colorKeyBlackHint;
     e.lastUse = ++textureCacheCounter_;
     textureCacheBytes_ += e.approxBytes;
     textureCache[key] = std::move(e);
     failedTextureCache_.erase(key);
     failedTextureRetryAt_.erase(key);
-    texturePropsByPtr_[texPtr] = {hasAlpha, colorKeyBlackHint};
+    texturePropsByPtr_[texPtr] = {.hasAlpha = hasAlpha,
+                                  .alphaIsSilhouette = alphaIsSilhouette,
+                                  .colorKeyBlack = colorKeyBlackHint};
     LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
 
     return texPtr;
@@ -761,6 +858,107 @@ uint32_t M2Renderer::getTotalTriangleCount() const {
     return total;
 }
 
+void M2Renderer::debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const {
+    LOG_WARNING("=== M2 Floor Debug at render(", glX, ", ", glY, ", ", glZ, ") ===");
+    glm::vec3 queryMin(glX - 2.0f, glY - 2.0f, glZ - 6.0f);
+    glm::vec3 queryMax(glX + 2.0f, glY + 2.0f, glZ + 8.0f);
+    gatherCandidates(queryMin, queryMax, tl_m2_candidateScratch);
+    int reported = 0;
+    for (size_t idx : tl_m2_candidateScratch) {
+        const auto& instance = instances[idx];
+        const char* rejected = nullptr;
+        if (collisionFocus.excludes(instance.worldBoundsMin, instance.worldBoundsMax)) {
+            rejected = "outside the collision focus";
+        } else if (!instance.cachedModel) {
+            rejected = "no model";
+        } else if (instance.scale <= 0.001f) {
+            rejected = "zero scale";
+        } else if (instance.skipCollision) {
+            rejected = "skipCollision";
+        }
+        const M2ModelGPU* model = instance.cachedModel;
+        const bool authored = model && model->collision.valid();
+        if (!rejected && model) {
+            if ((model->collisionNoBlock && !authored) || model->isInvisibleTrap ||
+                model->isSpellEffect) {
+                rejected = "classified as non-blocking";
+            }
+        }
+        if (++reported > 12) { LOG_WARNING("  ... and more"); break; }
+        LOG_WARNING("  '", model ? model->name : std::string("?"),
+                    "' isGameObject=", instance.isGameObject ? 1 : 0,
+                    " authoredCollision=", authored ? 1 : 0,
+                    " tris=", authored ? model->collision.triCount : 0u,
+                    " bounds z ", instance.worldBoundsMin.z, "..", instance.worldBoundsMax.z,
+                    (rejected ? "  REJECTED: " : "  considered"), (rejected ? rejected : ""));
+    }
+    if (reported == 0) {
+        LOG_WARNING("  nothing at all - no doodad instance overlaps this spot,"
+                    " so a deck underfoot is not in the spatial grid here");
+    }
+    LOG_WARNING("=== Total: ", reported, " M2 candidates ===");
+}
+
+bool M2Renderer::getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin,
+                                        glm::vec3& outMax) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) return false;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel) return false;
+    outMin = inst.worldBoundsMin;
+    outMax = inst.worldBoundsMax;
+    return true;
+}
+
+std::optional<float> M2Renderer::getInstanceFloorHeight(uint32_t instanceId,
+                                                       float glX, float glY,
+                                                       float glZ) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end() || idxIt->second >= instances.size()) {
+        return std::nullopt;
+    }
+    const auto& instance = instances[idxIt->second];
+    if (!instance.cachedModel || instance.scale <= 0.001f) return std::nullopt;
+    const M2ModelGPU& model = *instance.cachedModel;
+    if (!model.collision.valid()) return std::nullopt;
+
+    // Same cast as getFloorHeight: world-down through the instance transform,
+    // so a car placed with any pitch still sees a ray along gravity.
+    const glm::vec3 localRayOrigin = glm::vec3(
+        instance.invModelMatrix * glm::vec4(glX, glY, glZ + 5.0f, 1.0f));
+    const glm::vec3 localRayEnd = glm::vec3(
+        instance.invModelMatrix * glm::vec4(glX, glY, glZ - 10.0f, 1.0f));
+    const glm::vec3 localRayVector = localRayEnd - localRayOrigin;
+    const float localRayLength = glm::length(localRayVector);
+    if (localRayLength <= 1e-5f) return std::nullopt;
+    const glm::vec3 localRayDir = localRayVector / localRayLength;
+
+    model.collision.getFloorTrisInRange(
+        std::min(localRayOrigin.x, localRayEnd.x) - 1.0f,
+        std::min(localRayOrigin.y, localRayEnd.y) - 1.0f,
+        std::max(localRayOrigin.x, localRayEnd.x) + 1.0f,
+        std::max(localRayOrigin.y, localRayEnd.y) + 1.0f,
+        tl_m2_collisionTriScratch);
+
+    std::optional<float> best;
+    for (uint32_t ti : tl_m2_collisionTriScratch) {
+        if (ti >= model.collision.triCount) continue;
+        const auto& verts = model.collision.vertices;
+        const auto& idx = model.collision.indices;
+        const float tHit = rayTriangleIntersect(localRayOrigin, localRayDir,
+                                                verts[idx[ti * 3]],
+                                                verts[idx[ti * 3 + 1]],
+                                                verts[idx[ti * 3 + 2]]);
+        if (tHit < 0.0f || tHit > localRayLength) continue;
+        const glm::vec3 worldHit = glm::vec3(
+            instance.modelMatrix * glm::vec4(localRayOrigin + localRayDir * tHit, 1.0f));
+        // At or under the probe, and the highest such - the deck rather than
+        // whatever structure the car carries beneath it.
+        if (worldHit.z <= glZ && (!best || worldHit.z > *best)) best = worldHit.z;
+    }
+    return best;
+}
+
 std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ, float* outNormalZ) const {
     QueryTimer timer(&queryTimeMs, &queryCallCount);
     std::optional<float> bestFloor;
@@ -772,8 +970,8 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
 
     for (size_t idx : tl_m2_candidateScratch) {
         const auto& instance = instances[idx];
-        if (collisionFocusEnabled &&
-            pointAABBDistanceSq(collisionFocusPos, instance.worldBoundsMin, instance.worldBoundsMax) > collisionFocusRadiusSq) {
+        if (collisionFocus.excludes(instance.worldBoundsMin,
+                                    instance.worldBoundsMax)) {
             continue;
         }
 
@@ -781,7 +979,20 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
         if (instance.scale <= 0.001f) continue;
 
         const M2ModelGPU& model = *instance.cachedModel;
-        if (model.collisionNoBlock || model.isInvisibleTrap || model.isSpellEffect) continue;
+        // A model that ships collision geometry blocks, whatever its name
+        // suggests. collisionNoBlock is a guess from the name and the unscaled
+        // bounds, and it is only there to stop collision being *invented* for
+        // something soft - it has no business discarding what the artist
+        // authored.
+        //
+        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
+        // collision triangles and is 2.87 wide unscaled, so it failed the
+        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
+        // through. Every bush and rug beside it ships zero collision triangles,
+        // so they stay soft on their own evidence and need no rule at all.
+        const bool authoredCollision = model.collision.valid();
+        if ((model.collisionNoBlock && !authoredCollision) ||
+            model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision) continue;
 
         // --- Mesh-based floor: vertical ray vs collision triangles ---
@@ -820,10 +1031,9 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                 const auto& v1 = verts[idx[ti * 3 + 1]];
                 const auto& v2 = verts[idx[ti * 3 + 2]];
 
-                // Two-sided: try both windings
-                float tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v1, v2);
-                if (tHit < 0.0f)
-                    tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v2, v1);
+                // The intersection is already two-sided, so the reversed
+                // winding this used to retry answers the same thing.
+                const float tHit = rayTriangleIntersect(localRayOrigin, localRayDir, v0, v1, v2);
                 if (tHit < 0.0f || tHit > localRayLength) continue;
 
                 const glm::vec3 localHit = localRayOrigin + localRayDir * tHit;
@@ -863,7 +1073,7 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
                 // projection is not a world-vertical intersection.
                 continue;
             }
-            // Fall through to AABB floor — both contribute, highest wins
+            // Fall through to AABB floor - both contribute, highest wins
         }
 
         float zMargin = model.collisionBridge ? 25.0f : 2.0f;
@@ -938,8 +1148,8 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
     // Check against all M2 instances in local space (rotation-aware).
     for (size_t idx : tl_m2_candidateScratch) {
         const auto& instance = instances[idx];
-        if (collisionFocusEnabled &&
-            pointAABBDistanceSq(collisionFocusPos, instance.worldBoundsMin, instance.worldBoundsMax) > collisionFocusRadiusSq) {
+        if (collisionFocus.excludes(instance.worldBoundsMin,
+                                    instance.worldBoundsMax)) {
             continue;
         }
 
@@ -954,7 +1164,20 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
         if (!instance.cachedModel) continue;
 
         const M2ModelGPU& model = *instance.cachedModel;
-        if (model.collisionNoBlock || model.isInvisibleTrap || model.isSpellEffect) continue;
+        // A model that ships collision geometry blocks, whatever its name
+        // suggests. collisionNoBlock is a guess from the name and the unscaled
+        // bounds, and it is only there to stop collision being *invented* for
+        // something soft - it has no business discarding what the artist
+        // authored.
+        //
+        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
+        // collision triangles and is 2.87 wide unscaled, so it failed the
+        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
+        // through. Every bush and rug beside it ships zero collision triangles,
+        // so they stay soft on their own evidence and need no rule at all.
+        const bool authoredCollision = model.collision.valid();
+        if ((model.collisionNoBlock && !authoredCollision) ||
+            model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision || instance.skipWallCollision) continue;
         if (instance.scale <= 0.001f) continue;
 
@@ -1001,7 +1224,7 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 float distXY = std::sqrt(diff.x * diff.x + diff.y * diff.y);
 
                 if (distXY < localRadius && distXY > 1e-4f) {
-                    // Gentle push — very small fraction of penetration
+                    // Gentle push - very small fraction of penetration
                     float penetration = localRadius - distXY;
                     float pushDist = std::clamp(penetration * 0.08f, 0.001f, 0.015f);
                     float dx = (diff.x / distXY) * pushDist;
@@ -1012,7 +1235,7 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                     totalPushY += dy;
                     pushed = true;
                 } else if (distXY < 1e-4f) {
-                    // On the plane — soft push along triangle normal XY
+                    // On the plane - soft push along triangle normal XY
                     glm::vec3 n = glm::cross(v1 - v0, v2 - v0);
                     float nxyLen = std::sqrt(n.x * n.x + n.y * n.y);
                     if (nxyLen > 1e-4f) {
@@ -1033,6 +1256,24 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 adjustedPos.x = worldPos.x;
                 adjustedPos.y = worldPos.y;
                 collided = true;
+                // Which doodad is in the way, once per model.
+                //
+                // A model that blocks and should not is reported as "I am
+                // stuck on this bush", and the one thing needed to fix it -
+                // the model's name - is the one thing nobody can see. The
+                // classifier decides collision from that name, so without it
+                // the only way forward is guessing tokens, which is how the
+                // folder-token regression happened.
+                //
+                // Once per distinct model, not per frame: walking into
+                // something touches it every frame for as long as you lean on
+                // it.
+                static std::set<std::string> saidBlocked;
+                if (!model.name.empty() && saidBlocked.insert(model.name).second) {
+                    LOG_WARNING("Collision: blocked by '", model.name,
+                                "' - if this should be walked through, that is "
+                                "the name the classifier needs");
+                }
             }
             continue;
         }
@@ -1109,6 +1350,20 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
                 adjustedPos.x = worldSafe.x;
                 adjustedPos.y = worldSafe.y;
                 collided = true;
+                // The other way a doodad blocks, and the one that was missing.
+                //
+                // The first of these lines went inside the branch for models
+                // that carry a collision mesh. A model without one is stopped
+                // by its bounding box here instead, so the doodads reported as
+                // wrongly solid - grass among them - were exactly the ones the
+                // diagnostic could not see.
+                static std::set<std::string> saidBoxBlocked;
+                if (!model.name.empty() && saidBoxBlocked.insert(model.name).second) {
+                    LOG_WARNING("Collision: blocked by '", model.name,
+                                "' (bounding box, no collision mesh) - if this "
+                                "should be walked through, that is the name the "
+                                "classifier needs");
+                }
                 continue;
             }
         }
@@ -1178,8 +1433,8 @@ float M2Renderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3&
 
     for (size_t idx : tl_m2_candidateScratch) {
         const auto& instance = instances[idx];
-        if (collisionFocusEnabled &&
-            pointAABBDistanceSq(collisionFocusPos, instance.worldBoundsMin, instance.worldBoundsMax) > collisionFocusRadiusSq) {
+        if (collisionFocus.excludes(instance.worldBoundsMin,
+                                    instance.worldBoundsMax)) {
             continue;
         }
 
@@ -1194,7 +1449,20 @@ float M2Renderer::raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3&
         if (!instance.cachedModel) continue;
 
         const M2ModelGPU& model = *instance.cachedModel;
-        if (model.collisionNoBlock || model.isInvisibleTrap || model.isSpellEffect) continue;
+        // A model that ships collision geometry blocks, whatever its name
+        // suggests. collisionNoBlock is a guess from the name and the unscaled
+        // bounds, and it is only there to stop collision being *invented* for
+        // something soft - it has no business discarding what the artist
+        // authored.
+        //
+        // It was discarding a great deal. hellfiretreethorns03 carries 15,376
+        // collision triangles and is 2.87 wide unscaled, so it failed the
+        // treeWithTrunk gate of horiz > 6, came out a softTree, and was walked
+        // through. Every bush and rug beside it ships zero collision triangles,
+        // so they stay soft on their own evidence and need no rule at all.
+        const bool authoredCollision = model.collision.valid();
+        if ((model.collisionNoBlock && !authoredCollision) ||
+            model.isInvisibleTrap || model.isSpellEffect) continue;
         glm::vec3 localMin, localMax;
         getTightCollisionBounds(model, localMin, localMax);
         // Skip tiny doodads for camera occlusion; they cause jitter and false hits.
@@ -1235,194 +1503,48 @@ void M2Renderer::recreatePipelines() {
     VkDevice device = vkCtx_->getDevice();
 
     // Destroy old main-pass pipelines (NOT shadow, NOT pipeline layouts)
-    if (opaquePipeline_)            { vkDestroyPipeline(device, opaquePipeline_, nullptr); opaquePipeline_ = VK_NULL_HANDLE; }
-    if (alphaTestPipeline_)         { vkDestroyPipeline(device, alphaTestPipeline_, nullptr); alphaTestPipeline_ = VK_NULL_HANDLE; }
-    if (alphaPipeline_)             { vkDestroyPipeline(device, alphaPipeline_, nullptr); alphaPipeline_ = VK_NULL_HANDLE; }
-    if (additivePipeline_)          { vkDestroyPipeline(device, additivePipeline_, nullptr); additivePipeline_ = VK_NULL_HANDLE; }
-    if (particlePipeline_)          { vkDestroyPipeline(device, particlePipeline_, nullptr); particlePipeline_ = VK_NULL_HANDLE; }
-    if (particleAdditivePipeline_)  { vkDestroyPipeline(device, particleAdditivePipeline_, nullptr); particleAdditivePipeline_ = VK_NULL_HANDLE; }
-    if (smokePipeline_)             { vkDestroyPipeline(device, smokePipeline_, nullptr); smokePipeline_ = VK_NULL_HANDLE; }
-    if (ribbonPipeline_)            { vkDestroyPipeline(device, ribbonPipeline_, nullptr); ribbonPipeline_ = VK_NULL_HANDLE; }
-    if (ribbonAdditivePipeline_)    { vkDestroyPipeline(device, ribbonAdditivePipeline_, nullptr); ribbonAdditivePipeline_ = VK_NULL_HANDLE; }
+    destroy(device, opaquePipeline_);
+    destroy(device, cutoutPipeline_);
+    destroy(device, alphaTestPipeline_);
+    destroy(device, alphaPipeline_);
+    destroy(device, additivePipeline_);
+    destroy(device, particlePipeline_);
+    destroy(device, particleAdditivePipeline_);
+    destroy(device, smokePipeline_);
+    destroy(device, ribbonPipeline_);
+    destroy(device, ribbonAdditivePipeline_);
 
-    // --- Load shaders ---
-    rendering::VkShaderModule m2Vert, m2Frag;
-    rendering::VkShaderModule particleVert, particleFrag;
-    rendering::VkShaderModule smokeVert, smokeFrag;
-
-    (void)m2Vert.loadFromFile(device, "assets/shaders/m2.vert.spv");
-    (void)m2Frag.loadFromFile(device, "assets/shaders/m2.frag.spv");
-    (void)particleVert.loadFromFile(device, "assets/shaders/m2_particle.vert.spv");
-    (void)particleFrag.loadFromFile(device, "assets/shaders/m2_particle.frag.spv");
-    (void)smokeVert.loadFromFile(device, "assets/shaders/m2_smoke.vert.spv");
-    (void)smokeFrag.loadFromFile(device, "assets/shaders/m2_smoke.frag.spv");
-
-    if (!m2Vert.isValid() || !m2Frag.isValid()) {
-        LOG_ERROR("M2Renderer::recreatePipelines: missing required shaders");
-        return;
-    }
-
-    VkRenderPass mainPass = vkCtx_->getImGuiRenderPass();
-
-    // --- M2 model vertex input ---
-    VkVertexInputBindingDescription m2Binding{};
-    m2Binding.binding = 0;
-    m2Binding.stride = 18 * sizeof(float);
-    m2Binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::vector<VkVertexInputAttributeDescription> m2Attrs = {
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},                     // position
-        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 3 * sizeof(float)},     // normal
-        {2, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float)},        // texCoord0
-        {5, 0, VK_FORMAT_R32G32_SFLOAT, 8 * sizeof(float)},        // texCoord1
-        {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 10 * sizeof(float)}, // boneWeights
-        {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 14 * sizeof(float)}, // boneIndices (float)
-    };
-
-    // Pipeline derivatives — opaque is the base, others derive from it for shared state optimization
-    auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState, bool depthWrite,
-                               VkPipelineCreateFlags flags = 0, VkPipeline basePipeline = VK_NULL_HANDLE,
-                               bool alphaToCoverage = false) -> VkPipeline {
-        auto builder = PipelineBuilder()
-            .setShaders(m2Vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-            .setVertexInput({m2Binding}, m2Attrs)
-            .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-            .setDepthTest(!skyMode_, skyMode_ ? false : depthWrite,
-                          skyMode_ ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL)
-            .setColorBlendAttachment(blendState)
-            .setMultisample(vkCtx_->getMsaaSamples());
-        // MSAA alpha-to-coverage dithers the shader's sharpened cutout alpha
-        // across samples for smooth foliage/leaf silhouettes.
-        if (alphaToCoverage) builder.setAlphaToCoverage(true);
-        return builder
-            .setLayout(pipelineLayout_)
-            .setRenderPass(mainPass)
-            .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
-            .setFlags(flags)
-            .setBasePipeline(basePipeline)
-            .build(device, vkCtx_->getPipelineCache());
-    };
-
-    opaquePipeline_ = buildM2Pipeline(PipelineBuilder::blendDisabled(), true,
-                                      VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT);
-    alphaTestPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), true,
-                                         VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_,
-                                         /*alphaToCoverage=*/true);
-    alphaPipeline_ = buildM2Pipeline(PipelineBuilder::blendAlpha(), false,
-                                     VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
-    additivePipeline_ = buildM2Pipeline(PipelineBuilder::blendAdditive(), false,
-                                        VK_PIPELINE_CREATE_DERIVATIVE_BIT, opaquePipeline_);
-
-    // --- Particle pipelines ---
-    if (particleVert.isValid() && particleFrag.isValid()) {
-        VkVertexInputBindingDescription pBind{};
-        pBind.binding = 0;
-        pBind.stride = 9 * sizeof(float); // pos3 + color4 + size1 + tile1
-        pBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        std::vector<VkVertexInputAttributeDescription> pAttrs = {
-            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},                    // position
-            {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 3 * sizeof(float)}, // color
-            {2, 0, VK_FORMAT_R32_SFLOAT, 7 * sizeof(float)},          // size
-            {3, 0, VK_FORMAT_R32_SFLOAT, 8 * sizeof(float)},          // tile
-        };
-
-        auto buildParticlePipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
-            return PipelineBuilder()
-                .setShaders(particleVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                            particleFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-                .setVertexInput({pBind}, pAttrs)
-                .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-                .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-                .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-                .setColorBlendAttachment(blend)
-                .setMultisample(vkCtx_->getMsaaSamples())
-                .setLayout(particlePipelineLayout_)
-                .setRenderPass(mainPass)
-                .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
-                .build(device, vkCtx_->getPipelineCache());
-        };
-
-        particlePipeline_ = buildParticlePipeline(PipelineBuilder::blendAlpha());
-        particleAdditivePipeline_ = buildParticlePipeline(PipelineBuilder::blendAdditive());
-    }
-
-    // --- Smoke pipeline ---
-    if (smokeVert.isValid() && smokeFrag.isValid()) {
-        VkVertexInputBindingDescription sBind{};
-        sBind.binding = 0;
-        sBind.stride = 6 * sizeof(float); // pos3 + lifeRatio1 + size1 + isSpark1
-        sBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        std::vector<VkVertexInputAttributeDescription> sAttrs = {
-            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},           // position
-            {1, 0, VK_FORMAT_R32_SFLOAT, 3 * sizeof(float)}, // lifeRatio
-            {2, 0, VK_FORMAT_R32_SFLOAT, 4 * sizeof(float)}, // size
-            {3, 0, VK_FORMAT_R32_SFLOAT, 5 * sizeof(float)}, // isSpark
-        };
-
-        smokePipeline_ = PipelineBuilder()
-            .setShaders(smokeVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        smokeFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-            .setVertexInput({sBind}, sAttrs)
-            .setTopology(VK_PRIMITIVE_TOPOLOGY_POINT_LIST)
-            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-            .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-            .setColorBlendAttachment(PipelineBuilder::blendAlpha())
-            .setMultisample(vkCtx_->getMsaaSamples())
-            .setLayout(smokePipelineLayout_)
-            .setRenderPass(mainPass)
-            .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
-            .build(device, vkCtx_->getPipelineCache());
-    }
-
-    // --- Ribbon pipelines ---
-    {
-        rendering::VkShaderModule ribVert, ribFrag;
-        (void)ribVert.loadFromFile(device, "assets/shaders/m2_ribbon.vert.spv");
-        (void)ribFrag.loadFromFile(device, "assets/shaders/m2_ribbon.frag.spv");
-        if (ribVert.isValid() && ribFrag.isValid()) {
-            VkVertexInputBindingDescription rBind{};
-            rBind.binding = 0;
-            rBind.stride = 9 * sizeof(float);
-            rBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-            std::vector<VkVertexInputAttributeDescription> rAttrs = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 3 * sizeof(float)},
-                {2, 0, VK_FORMAT_R32_SFLOAT,       6 * sizeof(float)},
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    7 * sizeof(float)},
-            };
-
-            auto buildRibbonPipeline = [&](VkPipelineColorBlendAttachmentState blend) -> VkPipeline {
-                return PipelineBuilder()
-                    .setShaders(ribVert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                                ribFrag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-                    .setVertexInput({rBind}, rAttrs)
-                    .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
-                    .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-                    .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-                    .setColorBlendAttachment(blend)
-                    .setMultisample(vkCtx_->getMsaaSamples())
-                    .setLayout(ribbonPipelineLayout_)
-                    .setRenderPass(mainPass)
-                    .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
-                    .build(device, vkCtx_->getPipelineCache());
-            };
-
-            ribbonPipeline_         = buildRibbonPipeline(PipelineBuilder::blendAlpha());
-            ribbonAdditivePipeline_ = buildRibbonPipeline(PipelineBuilder::blendAdditive());
-        }
-        ribVert.destroy(); ribFrag.destroy();
-    }
-
-    m2Vert.destroy(); m2Frag.destroy();
-    particleVert.destroy(); particleFrag.destroy();
-    smokeVert.destroy(); smokeFrag.destroy();
+    // The same ten pipelines initialize() builds, built by the same
+    // function. The layouts are untouched above, so it makes none.
+    buildMainPassPipelines(perFrameLayout_);
 
     core::Logger::getInstance().info("M2Renderer: pipelines recreated");
+}
+
+void M2Renderer::collectGrassClearings(float minX, float minY, float maxX, float maxY,
+                                       std::vector<pipeline::GrassClearingSource>& out) const {
+    constexpr float kEase = 4.0f;
+    for (const auto& inst : instances) {
+        // The ground detail IS the grass's kin - clutter clearing the ground
+        // around clutter would eat the whole field.
+        if (inst.cachedIsGroundDetail) continue;
+
+        // Footprint radius from the horizontal bounds, capped: a fence post
+        // clears its foot, a wagon its wheelbase, and a tree its trunk - not
+        // the shadow of its crown, or every forest would be bald.
+        const float ex = inst.worldBoundsMax.x - inst.worldBoundsMin.x;
+        const float ey = inst.worldBoundsMax.y - inst.worldBoundsMin.y;
+        const float clearing = std::clamp(0.35f * std::max(ex, ey), 0.4f, 3.0f);
+        const float reach = clearing + kEase;
+
+        const float cx = 0.5f * (inst.worldBoundsMin.x + inst.worldBoundsMax.x);
+        const float cy = 0.5f * (inst.worldBoundsMin.y + inst.worldBoundsMax.y);
+        if (cx + reach < minX || cx - reach > maxX ||
+            cy + reach < minY || cy - reach > maxY) {
+            continue;
+        }
+        out.push_back({cx, cy, cx, cy, clearing, kEase});
+    }
 }
 
 } // namespace rendering

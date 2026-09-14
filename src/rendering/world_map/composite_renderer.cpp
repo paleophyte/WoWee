@@ -1,4 +1,4 @@
-// composite_renderer.cpp — Vulkan off-screen composite rendering for the world map.
+// composite_renderer.cpp - Vulkan off-screen composite rendering for the world map.
 // Extracted from WorldMap::initialize, shutdown, compositePass, loadZoneTextures,
 // loadOverlayTextures, destroyZoneTextures (Phase 7 of refactoring plan).
 #include "rendering/world_map/composite_renderer.hpp"
@@ -10,6 +10,9 @@
 #include "rendering/vk_utils.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
+
+#include <algorithm>
+#include <cstddef>
 
 namespace wowee {
 namespace rendering {
@@ -98,14 +101,14 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
     vkAllocateDescriptorSets(device, &allocInfo, allSets.data());
 
     uint32_t si = 0;
-    for (int f = 0; f < 2; f++)
-        for (int t = 0; t < 12; t++)
-            tileDescSets[f][t] = allSets[si++];
+    for (auto& tileRow : tileDescSets)
+        for (auto& tileSet : tileRow)
+            tileSet = allSets[si++];
     imguiDisplaySet = allSets[si++];
     fogDescSet_ = allSets[si++];
-    for (int f = 0; f < 2; f++)
-        for (uint32_t t = 0; t < MAX_OVERLAY_TILES; t++)
-            overlayDescSets_[f][t] = allSets[si++];
+    for (auto& overlayRow : overlayDescSets_)
+        for (auto& overlaySet : overlayRow)
+            overlaySet = allSets[si++];
 
     // --- Write display descriptor set → composite render target ---
     VkDescriptorImageInfo compositeImgInfo = compositeTarget->descriptorInfo();
@@ -132,21 +135,16 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     std::vector<VkVertexInputAttributeDescription> attrs(2);
-    attrs[0] = { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
-    attrs[1] = { 1, 0, VK_FORMAT_R32G32_SFLOAT, 2 * sizeof(float) };
+    attrs[0] = { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 0 };
+    attrs[1] = { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 2 * sizeof(float) };
 
     // --- Load tile shaders and build pipeline ---
     {
-        VkShaderModule vs, fs;
-        if (!vs.loadFromFile(device, "assets/shaders/world_map.vert.spv") ||
-            !fs.loadFromFile(device, "assets/shaders/world_map.frag.spv")) {
-            LOG_ERROR("CompositeRenderer: failed to load tile shaders");
-            return false;
-        }
+        auto shaders = loadShaderPair(device, "assets/shaders/world_map.vert.spv", "assets/shaders/world_map.frag.spv", "world_map tile");
+        if (!shaders) return false;
 
         tilePipeline = PipelineBuilder()
-            .setShaders(vs.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        fs.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setShaders(shaders.vertStage, shaders.fragStage)
             .setVertexInput({ binding }, attrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
             .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
@@ -154,11 +152,9 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
             .setColorBlendAttachment(PipelineBuilder::blendDisabled())
             .setLayout(tilePipelineLayout)
             .setRenderPass(compositeTarget->getRenderPass())
-            .setDynamicStates({ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR })
+            .setDynamicStates(viewportAndScissorDynamic())
             .build(device, vkCtx->getPipelineCache());
 
-        vs.destroy();
-        fs.destroy();
     }
 
     if (!tilePipeline) {
@@ -175,22 +171,17 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
 
         VkPushConstantRange overlayPushFrag{};
         overlayPushFrag.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        overlayPushFrag.offset = 16;
+        overlayPushFrag.offset = offsetof(OverlayPush, tintColor);
         overlayPushFrag.size = sizeof(glm::vec4);
 
         overlayPipelineLayout_ = createPipelineLayout(device, { samplerSetLayout },
                                                        { overlayPushVert, overlayPushFrag });
 
-        VkShaderModule vs, fs;
-        if (!vs.loadFromFile(device, "assets/shaders/world_map.vert.spv") ||
-            !fs.loadFromFile(device, "assets/shaders/world_map_fog.frag.spv")) {
-            LOG_ERROR("CompositeRenderer: failed to load overlay shaders");
-            return false;
-        }
+        auto shaders = loadShaderPair(device, "assets/shaders/world_map.vert.spv", "assets/shaders/world_map_fog.frag.spv", "world_map overlay");
+        if (!shaders) return false;
 
         overlayPipeline_ = PipelineBuilder()
-            .setShaders(vs.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                        fs.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .setShaders(shaders.vertStage, shaders.fragStage)
             .setVertexInput({ binding }, attrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
             .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
@@ -198,11 +189,9 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
             .setColorBlendAttachment(PipelineBuilder::blendAlpha())
             .setLayout(overlayPipelineLayout_)
             .setRenderPass(compositeTarget->getRenderPass())
-            .setDynamicStates({ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR })
+            .setDynamicStates(viewportAndScissorDynamic())
             .build(device, vkCtx->getPipelineCache());
 
-        vs.destroy();
-        fs.destroy();
     }
 
     if (!overlayPipeline_) {
@@ -218,6 +207,15 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
         fogTexture_->createSampler(device, VK_FILTER_NEAREST, VK_FILTER_NEAREST,
                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
 
+        // upload and createSampler both answer nothing, and the image view is
+        // created without being checked either, so a 1x1 texture is not
+        // guaranteed sampleable just because it is tiny. Writing an
+        // unsampleable one into this set costs the device rather than the fog.
+        // See #123.
+        if (!fogTexture_->isValid()) {
+            LOG_ERROR("CompositeRenderer: the fog texture is not sampleable");
+            return false;
+        }
         VkDescriptorImageInfo fogImgInfo = fogTexture_->descriptorInfo();
         VkWriteDescriptorSet fogWrite{};
         fogWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -241,13 +239,13 @@ void CompositeRenderer::shutdown() {
 
     vkDeviceWaitIdle(device);
 
-    if (tilePipeline) { vkDestroyPipeline(device, tilePipeline, nullptr); tilePipeline = VK_NULL_HANDLE; }
-    if (tilePipelineLayout) { vkDestroyPipelineLayout(device, tilePipelineLayout, nullptr); tilePipelineLayout = VK_NULL_HANDLE; }
-    if (overlayPipeline_) { vkDestroyPipeline(device, overlayPipeline_, nullptr); overlayPipeline_ = VK_NULL_HANDLE; }
-    if (overlayPipelineLayout_) { vkDestroyPipelineLayout(device, overlayPipelineLayout_, nullptr); overlayPipelineLayout_ = VK_NULL_HANDLE; }
-    if (descPool) { vkDestroyDescriptorPool(device, descPool, nullptr); descPool = VK_NULL_HANDLE; }
-    if (samplerSetLayout) { vkDestroyDescriptorSetLayout(device, samplerSetLayout, nullptr); samplerSetLayout = VK_NULL_HANDLE; }
-    if (quadVB) { vmaDestroyBuffer(alloc, quadVB, quadVBAlloc); quadVB = VK_NULL_HANDLE; }
+    destroy(device, tilePipeline);
+    destroy(device, tilePipelineLayout);
+    destroy(device, overlayPipeline_);
+    destroy(device, overlayPipelineLayout_);
+    destroy(device, descPool);
+    destroy(device, samplerSetLayout);
+    destroy(alloc, quadVB, quadVBAlloc);
 
     for (auto& tex : zoneTextures) {
         if (tex) tex->destroy(device, alloc);
@@ -260,27 +258,6 @@ void CompositeRenderer::shutdown() {
 
     initialized = false;
     vkCtx = nullptr;
-}
-
-void CompositeRenderer::destroyZoneTextures(std::vector<Zone>& /*zones*/) {
-    if (!vkCtx) return;
-    VkDevice device = vkCtx->getDevice();
-    VmaAllocator alloc = vkCtx->getAllocator();
-
-    for (auto& tex : zoneTextures) {
-        if (tex) tex->destroy(device, alloc);
-    }
-    zoneTextures.clear();
-
-    for (auto& slots : zoneTextureSlots_) {
-        for (auto& tex : slots.tileTextures) tex = nullptr;
-        slots.tilesLoaded = false;
-        for (auto& ov : slots.overlays) {
-            for (auto& t : ov.tiles) t = nullptr;
-            ov.tilesLoaded = false;
-        }
-    }
-    zoneTextureSlots_.clear();
 }
 
 void CompositeRenderer::loadZoneTextures(int zoneIdx, std::vector<Zone>& zones,
@@ -411,8 +388,8 @@ bool CompositeRenderer::hasAnyTile(int zoneIdx) const {
     if (zoneIdx < 0 || zoneIdx >= static_cast<int>(zoneTextureSlots_.size()))
         return false;
     const auto& slots = zoneTextureSlots_[zoneIdx];
-    for (int i = 0; i < 12; i++) {
-        if (slots.tileTextures[i] != nullptr) return true;
+    for (auto tileTexture : slots.tileTextures) {
+        if (tileTexture != nullptr) return true;
     }
     return false;
 }
@@ -516,6 +493,24 @@ void CompositeRenderer::compositePass(VkCommandBuffer cmd,
                 int tileCol = t % ov.tileCols;
                 int tileRow = t / ov.tileCols;
 
+                // An overlay is cut into 256px pieces and the last one in each
+                // direction is only as wide as the overlay has left. Drawing
+                // every piece as a full cell stretched those edges up to 256,
+                // which is why the explored region did not sit at the same
+                // scale as the map under it.
+                const int pieceW = std::min<int>(TILE_PX, ov.texWidth - tileCol * TILE_PX);
+                const int pieceH = std::min<int>(TILE_PX, ov.texHeight - tileRow * TILE_PX);
+                if (pieceW <= 0 || pieceH <= 0) continue;
+
+                // And the file holding a piece is padded out to the next power
+                // of two, so only part of it is the piece. Sixteen is the
+                // smallest the tools emit.
+                auto fileExtent = [](int pixels) {
+                    int e = 16;
+                    while (e < pixels) e *= 2;
+                    return e;
+                };
+
                 float px = static_cast<float>(ov.offsetX + tileCol * TILE_PX);
                 float py = static_cast<float>(ov.offsetY + tileRow * TILE_PX);
 
@@ -524,11 +519,16 @@ void CompositeRenderer::compositePass(VkCommandBuffer cmd,
                                               py / static_cast<float>(TILE_PX));
                 ovPush.gridCols = static_cast<float>(GRID_COLS);
                 ovPush.gridRows = static_cast<float>(GRID_ROWS);
+                ovPush.gridScale = glm::vec2(static_cast<float>(pieceW) / TILE_PX,
+                                             static_cast<float>(pieceH) / TILE_PX);
+                ovPush.uvScale = glm::vec2(static_cast<float>(pieceW) / fileExtent(pieceW),
+                                           static_cast<float>(pieceH) / fileExtent(pieceH));
                 ovPush.tintColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
                 vkCmdPushConstants(cmd, overlayPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                    0, sizeof(WorldMapTilePush), &ovPush);
                 vkCmdPushConstants(cmd, overlayPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   16, sizeof(glm::vec4), &ovPush.tintColor);
+                                   offsetof(OverlayPush, tintColor), sizeof(glm::vec4),
+                                   &ovPush.tintColor);
                 vkCmdDraw(cmd, 6, 1, 0, 0);
 
                 descSlot++;
@@ -556,13 +556,15 @@ void CompositeRenderer::compositePass(VkCommandBuffer cmd,
             vkCmdPushConstants(cmd, overlayPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                0, sizeof(WorldMapTilePush), &fogPush);
             vkCmdPushConstants(cmd, overlayPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               16, sizeof(glm::vec4), &fogPush.tintColor);
+                               offsetof(OverlayPush, tintColor), sizeof(glm::vec4),
+                               &fogPush.tintColor);
             vkCmdDraw(cmd, 6, 1, 0, 0);
         }
     }
 
     compositeTarget->endPass(cmd);
     compositedIdx_ = zoneIdx;
+    everComposited_ = true;
 }
 
 } // namespace world_map

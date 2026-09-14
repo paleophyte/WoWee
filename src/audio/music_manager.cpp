@@ -259,7 +259,7 @@ void MusicManager::crossfadeTo(const std::string& mpqPath, float fadeMs) {
         fadeDuration = fadeMs / 1000.0f;
         AudioEngine::instance().stopMusic();
     } else {
-        playMusic(mpqPath, false);
+        playMusic(mpqPath, loopTracks_);
     }
 }
 
@@ -274,7 +274,7 @@ void MusicManager::crossfadeToFile(const std::string& filePath, float fadeMs) {
         fadeDuration = fadeMs / 1000.0f;
         AudioEngine::instance().stopMusic();
     } else {
-        playFilePath(filePath, false);
+        playFilePath(filePath, loopTracks_);
     }
 }
 
@@ -292,7 +292,7 @@ void MusicManager::update(float deltaTime) {
         float t = std::clamp(1.0f - fadeOutTimer / std::max(fadeOutDuration, 0.001f), 0.0f, 1.0f);
         AudioEngine::instance().setMusicVolume(fadeOutStartVolume * t);
         if (t <= 0.0f) {
-            // Fade complete — stop playback and restore volume for next track
+            // Fade complete - stop playback and restore volume for next track
             fadingOut = false;
             AudioEngine::instance().stopMusic();
             AudioEngine::instance().setMusicVolume(effectiveMusicVolume());
@@ -319,9 +319,9 @@ void MusicManager::update(float deltaTime) {
             // Start new track after brief pause
             crossfading = false;
             if (pendingIsFile) {
-                playFilePath(pendingTrack, false);
+                playFilePath(pendingTrack, loopTracks_);
             } else {
-                playMusic(pendingTrack, false);
+                playMusic(pendingTrack, loopTracks_);
             }
             pendingTrack.clear();
             pendingIsFile = false;

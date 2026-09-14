@@ -21,12 +21,10 @@ TransportCallbackHandler::TransportCallbackHandler(
     EntitySpawner& entitySpawner,
     rendering::Renderer& renderer,
     game::GameHandler& gameHandler,
-    WorldLoader* worldLoader,
     AppearanceComposer* appearanceComposer)
     : entitySpawner_(entitySpawner)
     , renderer_(renderer)
     , gameHandler_(gameHandler)
-    , worldLoader_(worldLoader)
     , appearanceComposer_(appearanceComposer)
 {
 }
@@ -67,8 +65,8 @@ void TransportCallbackHandler::setupCallbacks() {
         for (size_t i = 0; i < path.size(); i += stride) {
             const auto& waypoint = path[i];
             glm::vec3 renderPos = core::coords::canonicalToRender(waypoint);
-            int tileX = static_cast<int>(32 - (renderPos.x / 533.33333f));
-            int tileY = static_cast<int>(32 - (renderPos.y / 533.33333f));
+            int tileX = static_cast<int>(32 - (renderPos.x / core::coords::TILE_SIZE));
+            int tileY = static_cast<int>(32 - (renderPos.y / core::coords::TILE_SIZE));
 
             if (tileX >= 0 && tileX <= 63 && tileY >= 0 && tileY <= 63) {
                 for (int dx = -1; dx <= 1; ++dx) {
@@ -85,8 +83,8 @@ void TransportCallbackHandler::setupCallbacks() {
         // Ensure final destination tile is included.
         if (!path.empty()) {
             glm::vec3 renderPos = core::coords::canonicalToRender(path.back());
-            int tileX = static_cast<int>(32 - (renderPos.x / 533.33333f));
-            int tileY = static_cast<int>(32 - (renderPos.y / 533.33333f));
+            int tileX = static_cast<int>(32 - (renderPos.x / core::coords::TILE_SIZE));
+            int tileY = static_cast<int>(32 - (renderPos.y / core::coords::TILE_SIZE));
             if (tileX >= 0 && tileX <= 63 && tileY >= 0 && tileY <= 63) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     for (int dy = -1; dy <= 1; ++dy) {
@@ -123,7 +121,7 @@ void TransportCallbackHandler::setupCallbacks() {
     // Taxi landing position correction callback - see its declaration comment in
     // game_handler.hpp for why this exists (Application's own per-frame render
     // sync stops as soon as onTaxi goes false, which happens before this fires).
-    gameHandler_.setTaxiLandingPositionCallback([this](float x, float y, float z) {
+    gameHandler_.setPlayerPositionCorrectionCallback([this](float x, float y, float z) {
         glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(x, y, z));
         renderer_.getCharacterPosition() = renderPos;
         if (renderer_.getCameraController()) {
@@ -201,7 +199,8 @@ void TransportCallbackHandler::setupCallbacks() {
                     glm::vec3 canonicalSpawnPos(x, y, z);
                     const bool isM2Transport = !it->second.isWmo;
                     transportManager->resolveAndRegisterSpawn(guid, entry, displayId, canonicalSpawnPos,
-                                                              wmoInstanceId, isM2Transport, preferServerData);
+                                                              wmoInstanceId, isM2Transport, preferServerData,
+                                                              orientation);
                 } else {
                     entitySpawner_.setTransportPendingMove(guid, x, y, z, orientation);
                     LOG_DEBUG("Cannot auto-spawn transport 0x", std::hex, guid, std::dec,

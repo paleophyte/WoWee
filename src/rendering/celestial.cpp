@@ -18,6 +18,30 @@ Celestial::~Celestial() {
     shutdown();
 }
 
+VkPipeline Celestial::buildPipeline(VkDevice device,
+                                    const VkPipelineShaderStageCreateInfo& vertStage,
+                                    const VkPipelineShaderStageCreateInfo& fragStage) {
+    // Vertex: vec3 pos + vec2 texCoord, stride = 20 bytes
+    VkVertexInputBindingDescription binding = tightVertexBinding(5 * sizeof(float));
+    std::vector<VkVertexInputAttributeDescription> attrs = positionPlusUvAttrs();
+    std::vector<VkDynamicState> dynamicStates = viewportAndScissorDynamic();
+
+    return PipelineBuilder()
+        .setShaders(vertStage, fragStage)
+        .setVertexInput({binding}, attrs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        // On the far plane and tested, never written: the ground is drawn before
+        // the sky now, and this is what keeps the sun behind a mountain.
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
+        .setMultisample(vkCtx_->getMsaaSamples())
+        .setLayout(pipelineLayout_)
+        .setRenderPass(vkCtx_->getImGuiRenderPass())
+        .setDynamicStates(dynamicStates)
+        .build(device, vkCtx_->getPipelineCache());
+}
+
 bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     LOG_INFO("Initializing celestial renderer (Vulkan)");
 
@@ -25,20 +49,10 @@ bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
     VkDevice device = vkCtx_->getDevice();
 
     // ------------------------------------------------------------------ shaders
-    VkShaderModule vertModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/celestial.vert.spv")) {
-        LOG_ERROR("Failed to load celestial vertex shader");
-        return false;
-    }
-
-    VkShaderModule fragModule;
-    if (!fragModule.loadFromFile(device, "assets/shaders/celestial.frag.spv")) {
-        LOG_ERROR("Failed to load celestial fragment shader");
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv", "assets/shaders/celestial.frag.spv", "celestial");
+    if (!shaders) return false;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
     // ------------------------------------------------------------------ push constants
     // Layout: mat4(64) + vec4(16) + float*3(12) + pad(4) = 96 bytes
@@ -54,46 +68,9 @@ bool Celestial::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
         return false;
     }
 
-    // ------------------------------------------------------------------ vertex input
-    // Vertex: vec3 pos + vec2 texCoord, stride = 20 bytes
-    VkVertexInputBindingDescription binding{};
-    binding.binding   = 0;
-    binding.stride    = 5 * sizeof(float); // 20 bytes
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding  = 0;
-    posAttr.format   = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset   = 0;
-
-    VkVertexInputAttributeDescription uvAttr{};
-    uvAttr.location = 1;
-    uvAttr.binding  = 0;
-    uvAttr.format   = VK_FORMAT_R32G32_SFLOAT;
-    uvAttr.offset   = 3 * sizeof(float);
-
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
     // ------------------------------------------------------------------ pipeline
-    pipeline_ = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr, uvAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setNoDepthTest() // Sky layer: celestials always render (skybox doesn't write depth)
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
-        .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(pipelineLayout_)
-        .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx_->getPipelineCache());
+    pipeline_ = buildPipeline(device, vertStage, fragStage);
 
-    vertModule.destroy();
-    fragModule.destroy();
 
     if (pipeline_ == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create celestial pipeline");
@@ -111,61 +88,15 @@ void Celestial::recreatePipelines() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
 
-    if (pipeline_ != VK_NULL_HANDLE) { vkDestroyPipeline(device, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
+    destroy(device, pipeline_);
 
-    VkShaderModule vertModule;
-    if (!vertModule.loadFromFile(device, "assets/shaders/celestial.vert.spv")) {
-        LOG_ERROR("Celestial::recreatePipelines: failed to load vertex shader");
-        return;
-    }
-    VkShaderModule fragModule;
-    if (!fragModule.loadFromFile(device, "assets/shaders/celestial.frag.spv")) {
-        LOG_ERROR("Celestial::recreatePipelines: failed to load fragment shader");
-        vertModule.destroy();
-        return;
-    }
+    auto shaders = loadShaderPair(device, "assets/shaders/celestial.vert.spv", "assets/shaders/celestial.frag.spv", "celestial");
+    if (!shaders) return;
+    const auto& vertStage = shaders.vertStage;
+    const auto& fragStage = shaders.fragStage;
 
-    VkPipelineShaderStageCreateInfo vertStage = vertModule.stageInfo(VK_SHADER_STAGE_VERTEX_BIT);
-    VkPipelineShaderStageCreateInfo fragStage = fragModule.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT);
+    pipeline_ = buildPipeline(device, vertStage, fragStage);
 
-    // Vertex input (same as initialize)
-    VkVertexInputBindingDescription binding{};
-    binding.binding   = 0;
-    binding.stride    = 5 * sizeof(float);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription posAttr{};
-    posAttr.location = 0;
-    posAttr.binding  = 0;
-    posAttr.format   = VK_FORMAT_R32G32B32_SFLOAT;
-    posAttr.offset   = 0;
-
-    VkVertexInputAttributeDescription uvAttr{};
-    uvAttr.location = 1;
-    uvAttr.binding  = 0;
-    uvAttr.format   = VK_FORMAT_R32G32_SFLOAT;
-    uvAttr.offset   = 3 * sizeof(float);
-
-    std::vector<VkDynamicState> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-
-    pipeline_ = PipelineBuilder()
-        .setShaders(vertStage, fragStage)
-        .setVertexInput({binding}, {posAttr, uvAttr})
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
-        .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(pipelineLayout_)
-        .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates(dynamicStates)
-        .build(device, vkCtx_->getPipelineCache());
-
-    vertModule.destroy();
-    fragModule.destroy();
 
     if (pipeline_ == VK_NULL_HANDLE) {
         LOG_ERROR("Celestial::recreatePipelines: failed to create pipeline");
@@ -175,17 +106,7 @@ void Celestial::recreatePipelines() {
 void Celestial::shutdown() {
     destroyQuad();
 
-    if (vkCtx_) {
-        VkDevice device = vkCtx_->getDevice();
-        if (pipeline_ != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, pipeline_, nullptr);
-            pipeline_ = VK_NULL_HANDLE;
-        }
-        if (pipelineLayout_ != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipelineLayout_, nullptr);
-            pipelineLayout_ = VK_NULL_HANDLE;
-        }
-    }
+    if (vkCtx_) destroyPipeline(vkCtx_->getDevice(), pipeline_, pipelineLayout_);
 
     vkCtx_ = nullptr;
 }
@@ -207,7 +128,7 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         updatePhasesFromGameTime(gameTime);
     }
 
-    // Bind pipeline and per-frame descriptor set once — reused for all draws
+    // Bind pipeline and per-frame descriptor set once - reused for all draws
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
         0, 1, &perFrameSet, 0, nullptr);
@@ -217,7 +138,7 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer_, &offset);
     vkCmdBindIndexBuffer(cmd, indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
 
-    // Draw sun, then moon(s) — each call pushes different constants
+    // Draw sun, then moon(s) - each call pushes different constants
     renderSun(cmd, perFrameSet, timeOfDay, sunDir, sunColor);
     renderMoon(cmd, perFrameSet, timeOfDay, nightFactor);
     if (dualMoonMode_) {
@@ -237,7 +158,7 @@ void Celestial::renderSun(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
         return;
     }
 
-    // Resolve sun direction — prefer opposite of incoming light ray, clamp below horizon
+    // Resolve sun direction - prefer opposite of incoming light ray, clamp below horizon
     glm::vec3 lightDir = sunDir ? glm::normalize(*sunDir) : glm::vec3(0.0f, 0.0f, -1.0f);
     glm::vec3 dir = -lightDir;
     if (dir.z < 0.0f) {
@@ -276,7 +197,7 @@ void Celestial::renderMoon(VkCommandBuffer cmd, VkDescriptorSet /*perFrameSet*/,
     if (timeOfDay >= 5.0f && timeOfDay < 19.0f) {
         return;
     }
-    // Scale by actual sky darkness — the DBC sky can stay daylight-bright
+    // Scale by actual sky darkness - the DBC sky can stay daylight-bright
     // well past 19:00, and a full-brightness moon on a blue sky reads as a
     // second sun.
     if (nightFactor < 0.01f) {
@@ -382,29 +303,32 @@ glm::vec3 Celestial::getMoonPosition(float timeOfDay) const {
 glm::vec3 Celestial::getSunColor(float timeOfDay) const {
     if (timeOfDay >= 5.0f && timeOfDay < 7.0f) {
         return glm::vec3(1.0f, 0.6f, 0.2f); // Sunrise orange
-    } else if (timeOfDay >= 7.0f && timeOfDay < 9.0f) {
+    }
+    if (timeOfDay >= 7.0f && timeOfDay < 9.0f) {
         float t = (timeOfDay - 7.0f) / 2.0f;
         return glm::mix(glm::vec3(1.0f, 0.6f, 0.2f), glm::vec3(1.0f, 1.0f, 0.9f), t);
-    } else if (timeOfDay >= 9.0f && timeOfDay < 16.0f) {
+    }
+    if (timeOfDay >= 9.0f && timeOfDay < 16.0f) {
         return glm::vec3(1.0f, 1.0f, 0.9f); // Day yellow-white
-    } else if (timeOfDay >= 16.0f && timeOfDay < 18.0f) {
+    }
+    if (timeOfDay >= 16.0f && timeOfDay < 18.0f) {
         float t = (timeOfDay - 16.0f) / 2.0f;
         return glm::mix(glm::vec3(1.0f, 1.0f, 0.9f), glm::vec3(1.0f, 0.5f, 0.1f), t);
-    } else {
-        return glm::vec3(1.0f, 0.4f, 0.1f); // Sunset orange
     }
+    return glm::vec3(1.0f, 0.4f, 0.1f); // Sunset orange
 }
 
 float Celestial::getSunIntensity(float timeOfDay) const {
     if (timeOfDay >= 5.0f && timeOfDay < 6.0f) {
         return timeOfDay - 5.0f;          // Fade in
-    } else if (timeOfDay >= 6.0f && timeOfDay < 18.0f) {
-        return 1.0f;                       // Full day
-    } else if (timeOfDay >= 18.0f && timeOfDay < 19.0f) {
-        return 1.0f - (timeOfDay - 18.0f); // Fade out
-    } else {
-        return 0.0f;
     }
+    if (timeOfDay >= 6.0f && timeOfDay < 18.0f) {
+        return 1.0f;                       // Full day
+    }
+    if (timeOfDay >= 18.0f && timeOfDay < 19.0f) {
+        return 1.0f - (timeOfDay - 18.0f); // Fade out
+    }
+    return 0.0f;
 }
 
 float Celestial::calculateCelestialAngle(float timeOfDay, float riseTime, float setTime) const {
@@ -437,12 +361,6 @@ void Celestial::update(float deltaTime) {
     constexpr float BLUE_CHILD_CYCLE = 210.0f; // Slightly faster: 3.5 minutes
     blueChildPhase_ = std::fmod(moonPhaseTimer_ / BLUE_CHILD_CYCLE, 1.0f);
 }
-
-void Celestial::setMoonPhase(float phase) {
-    whiteLadyPhase_ = glm::clamp(phase, 0.0f, 1.0f);
-    moonPhaseTimer_ = whiteLadyPhase_ * MOON_CYCLE_DURATION;
-}
-
 void Celestial::setBlueChildPhase(float phase) {
     blueChildPhase_ = glm::clamp(phase, 0.0f, 1.0f);
 }
@@ -494,16 +412,8 @@ void Celestial::destroyQuad() {
 
     VmaAllocator allocator = vkCtx_->getAllocator();
 
-    if (vertexBuffer_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(allocator, vertexBuffer_, vertexAlloc_);
-        vertexBuffer_ = VK_NULL_HANDLE;
-        vertexAlloc_  = VK_NULL_HANDLE;
-    }
-    if (indexBuffer_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(allocator, indexBuffer_, indexAlloc_);
-        indexBuffer_ = VK_NULL_HANDLE;
-        indexAlloc_  = VK_NULL_HANDLE;
-    }
+    destroy(allocator, vertexBuffer_, vertexAlloc_);
+    destroy(allocator, indexBuffer_, indexAlloc_);
 }
 
 } // namespace rendering

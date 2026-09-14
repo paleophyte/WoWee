@@ -319,7 +319,7 @@ TEST_CASE("Vanilla auction list parses id-only enchant, no flags, no delay", "[a
     packet.writeUInt32(2);
     writeAuctionEntry(packet, 301, 1, true);
     writeAuctionEntry(packet, 302, 1, true);
-    packet.writeUInt32(5);  // total count — vanilla sends no search delay
+    packet.writeUInt32(5);  // total count - vanilla sends no search delay
 
     AuctionListResult result;
     REQUIRE(AuctionListResultParser::parse(packet, result, 1));
@@ -329,4 +329,171 @@ TEST_CASE("Vanilla auction list parses id-only enchant, no flags, no delay", "[a
     CHECK(result.totalCount == 5);
     CHECK(result.searchDelay == 0);
     CHECK(packet.getRemainingSize() == 0);
+}
+
+// SMSG_ITEM_QUERY_SINGLE_RESPONSE comes in two shapes: some servers send
+// BuyCount between Flags2 and BuyPrice, some do not, and the client has to work
+// out which from the bytes. Guessing from InventoryType alone does not work - on
+// a server without BuyCount that read lands on AllowableClass, and a
+// class-restricted item's mask is a small, plausible-looking number. Priest-only
+// is 16, which is INVTYPE_CLOAK, so a priest robe claimed to be a cloak.
+namespace {
+
+// Everything up to and including Quality; identical in both layouts.
+void writeItemHeader(wowee::network::Packet& p, uint32_t entry) {
+    p.writeUInt32(entry);
+    p.writeUInt32(4);     // Class: Armor
+    p.writeUInt32(1);     // SubClass: Cloth
+    p.writeUInt32(0xFFFFFFFF);  // SoundOverrideSubclass
+    p.writeString("Friar's Robes of the Light");
+    p.writeString("");
+    p.writeString("");
+    p.writeString("");
+    p.writeUInt32(12345); // DisplayInfoID
+    p.writeUInt32(2);     // Quality: Uncommon
+}
+
+// The fields after InventoryType, which is what makes a wrong guess detectable.
+void writeItemTail(wowee::network::Packet& p, uint32_t allowableClass) {
+    p.writeUInt32(allowableClass);
+    p.writeUInt32(0xFFFFFFFF);  // AllowableRace: all
+    p.writeUInt32(29);          // ItemLevel
+    p.writeUInt32(24);          // RequiredLevel
+    for (int i = 0; i < 10; ++i) p.writeUInt32(0);  // skill..containerSlots
+    p.writeUInt32(0);           // statsCount
+}
+
+} // namespace
+
+TEST_CASE("item query detects the BuyCount layout from more than one field",
+          "[packet][item]") {
+    using namespace wowee::game;
+
+    constexpr uint32_t kPriestOnly = 16;   // the mask that reads as INVTYPE_CLOAK
+    constexpr uint32_t kRobe = 20;
+
+    SECTION("server without BuyCount, class-restricted item") {
+        wowee::network::Packet p;
+        writeItemHeader(p, 7048);
+        p.writeUInt32(0);        // Flags
+        p.writeUInt32(0);        // Flags2
+        p.writeUInt32(1000);     // BuyPrice   (no BuyCount on this server)
+        p.writeUInt32(250);      // SellPrice
+        p.writeUInt32(kRobe);    // InventoryType
+        writeItemTail(p, kPriestOnly);
+
+        ItemQueryResponseData data;
+        REQUIRE(ItemQueryResponseParser::parse(p, data));
+        CHECK(data.inventoryType == kRobe);          // not 16
+        CHECK(data.allowableClass == kPriestOnly);
+        CHECK(data.itemLevel == 29);
+        CHECK(data.requiredLevel == 24);
+    }
+
+    SECTION("server with BuyCount, same item") {
+        wowee::network::Packet p;
+        writeItemHeader(p, 7048);
+        p.writeUInt32(0);        // Flags
+        p.writeUInt32(0);        // Flags2
+        p.writeUInt32(1);        // BuyCount
+        p.writeUInt32(1000);     // BuyPrice
+        p.writeUInt32(250);      // SellPrice
+        p.writeUInt32(kRobe);    // InventoryType
+        writeItemTail(p, kPriestOnly);
+
+        ItemQueryResponseData data;
+        REQUIRE(ItemQueryResponseParser::parse(p, data));
+        CHECK(data.inventoryType == kRobe);
+        CHECK(data.allowableClass == kPriestOnly);
+        CHECK(data.itemLevel == 29);
+    }
+
+    SECTION("an item usable by every class still resolves either way") {
+        for (bool withBuyCount : {false, true}) {
+            wowee::network::Packet p;
+            writeItemHeader(p, 7049);
+            p.writeUInt32(0);
+            p.writeUInt32(0);
+            if (withBuyCount) p.writeUInt32(1);
+            p.writeUInt32(1000);
+            p.writeUInt32(250);
+            p.writeUInt32(5);            // InventoryType: Chest
+            writeItemTail(p, 0xFFFFFFFF);  // all classes
+
+            ItemQueryResponseData data;
+            INFO("withBuyCount: " << withBuyCount);
+            REQUIRE(ItemQueryResponseParser::parse(p, data));
+            CHECK(data.inventoryType == 5);
+        }
+    }
+}
+
+// ── The invoice body ────────────────────────────────────────────────────────
+//
+// The auction house writes the figures of a sale into the mail body as a
+// colon-separated string the retail client never prints verbatim: it draws a
+// breakdown from it instead. This client parsed it all along and only its own
+// mail window read the result, so handing mail over to FrameXML left the
+// breakdown behind - a sale arrived as a letter with the raw string in it.
+//
+// Now that GetInboxInvoiceInfo answers from this, the shapes below are a
+// contract rather than an internal detail. In particular the binding decides
+// which of two entirely different panels FrameXML draws - the buyer's or the
+// seller's - from whether a deposit and a cut are present, so the difference
+// between a three-field body and a five-field one is load-bearing.
+
+TEST_CASE("A won auction's invoice carries the guid and the two prices",
+          "[mail][auction][invoice]") {
+    AuctionMailInvoice invoice;
+    // Field zero is the other party's guid low in hex; the rest are copper.
+    REQUIRE(parseAuctionMailBody("1a2b:5000:12000", invoice));
+    CHECK(invoice.ownerGuidLow == 0x1a2b);
+    CHECK(invoice.bid == 5000);
+    CHECK(invoice.buyout == 12000);
+    // No deposit and no cut: this is what tells the buyer's panel from the
+    // seller's, so it has to be zero rather than merely absent.
+    CHECK(invoice.deposit == 0);
+    CHECK(invoice.consignment == 0);
+}
+
+TEST_CASE("A completed sale adds the deposit and the house's cut",
+          "[mail][auction][invoice]") {
+    AuctionMailInvoice invoice;
+    REQUIRE(parseAuctionMailBody("ff:9000:9000:250:450", invoice));
+    CHECK(invoice.ownerGuidLow == 0xff);
+    CHECK(invoice.bid == 9000);
+    CHECK(invoice.buyout == 9000);
+    CHECK(invoice.deposit == 250);
+    CHECK(invoice.consignment == 450);
+}
+
+TEST_CASE("The guid field is padded on the wire and read anyway",
+          "[mail][auction][invoice]") {
+    AuctionMailInvoice invoice;
+    // AzerothCore writes that field to width sixteen, space padded.
+    REQUIRE(parseAuctionMailBody("            1a2b:5000:12000", invoice));
+    CHECK(invoice.ownerGuidLow == 0x1a2b);
+}
+
+TEST_CASE("Fields past the fifth are ignored rather than refused",
+          "[mail][auction][invoice]") {
+    AuctionMailInvoice invoice;
+    // Some cores append a money delay and an eta. Refusing the body for them
+    // would lose the figures that are there.
+    REQUIRE(parseAuctionMailBody("ff:9000:9000:250:450:3600:7", invoice));
+    CHECK(invoice.consignment == 450);
+}
+
+TEST_CASE("A body that is not an invoice is refused", "[mail][auction][invoice]") {
+    AuctionMailInvoice invoice;
+    // An ordinary letter. Refusing is what keeps isInvoice false for it, and
+    // with it the whole invoice panel shut.
+    CHECK_FALSE(parseAuctionMailBody("Thanks for the help yesterday!", invoice));
+    // Too few fields to be one.
+    CHECK_FALSE(parseAuctionMailBody("1a2b:5000", invoice));
+    // An empty field is not a zero.
+    CHECK_FALSE(parseAuctionMailBody("1a2b::12000", invoice));
+    CHECK_FALSE(parseAuctionMailBody("", invoice));
+    // Decimal fields are decimal: hex only applies to the guid.
+    CHECK_FALSE(parseAuctionMailBody("1a2b:5000:1f", invoice));
 }

@@ -39,7 +39,7 @@ struct WardenFuncList {
  * IMPLEMENTATION STATUS:
  * ✅ Module metadata parsing and validation
  * ✅ RC4 decryption (WardenCrypto)
- * ✅ RSA-2048 signature verification (OpenSSL EVP — real Blizzard modulus)
+ * ✅ RSA-2048 signature verification (OpenSSL EVP - real Blizzard modulus)
  * ✅ zlib decompression
  * ✅ Custom executable format parsing (3 pair-format variants)
  * ✅ Address relocation (delta-encoded fixups)
@@ -51,6 +51,26 @@ struct WardenFuncList {
  * Non-fatal verification: RSA mismatch logs warning but continues loading,
  * so private-server modules signed with custom keys still work.
  */
+/// Where an absolute relocation entry points, and whether that target admits
+/// the four-byte write the relocation makes.
+///
+/// Free functions because both were wrong inside the loop that used them and
+/// neither needs a module to be true. The first kept the form flag in the
+/// value, so every absolute entry landed at or above 0x80000000 and the second
+/// rejected all of them. The second added four to a uint32 target taken
+/// straight from module bytes, so FF FF FF FF wrapped to 3, passed, and wrote
+/// at image + 0xFFFFFFFF. Both are reachable from a hostile server.
+inline constexpr uint32_t wardenAbsoluteRelocTarget(uint8_t first, uint8_t b1,
+                                                    uint8_t b2, uint8_t b3) {
+    return (static_cast<uint32_t>(first & 0x7Fu) << 24) |
+           (static_cast<uint32_t>(b1) << 16) |
+           (static_cast<uint32_t>(b2) << 8) | b3;
+}
+
+inline constexpr bool wardenRelocTargetFits(uint32_t target, size_t moduleSize) {
+    return static_cast<size_t>(target) + 4u <= moduleSize;
+}
+
 class WardenModule {
 public:
     WardenModule();
@@ -81,12 +101,12 @@ public:
     /**
      * Check if module is loaded and ready
      */
-    bool isLoaded() const { return loaded_; }
+    [[nodiscard]] bool isLoaded() const { return loaded_; }
 
     /**
      * Get module MD5 identifier
      */
-    const std::vector<uint8_t>& getMD5Hash() const { return md5Hash_; }
+    [[nodiscard]] const std::vector<uint8_t>& getMD5Hash() const { return md5Hash_; }
 
     /**
      * Process check request packet via module's PacketHandler
@@ -124,9 +144,17 @@ public:
      */
     void unload();
 
-    const void* getModuleMemory() const { return moduleMemory_; }
-    size_t getModuleSize() const { return moduleSize_; }
-    const std::vector<uint8_t>& getDecompressedData() const { return decompressedData_; }
+    /// The RSA public key this module's signature is checked against.
+    ///
+    /// Must be 256 bytes; anything else is ignored and Blizzard's own key is
+    /// used, which is what a server running a genuine module wants. A server
+    /// that builds its own module signs it with its own key and names that
+    /// key in its expansion profile.
+    void setRsaModulus(std::vector<uint8_t> modulus);
+
+    [[nodiscard]] const void* getModuleMemory() const { return moduleMemory_; }
+    [[nodiscard]] size_t getModuleSize() const { return moduleSize_; }
+    [[nodiscard]] const std::vector<uint8_t>& getDecompressedData() const { return decompressedData_; }
 
     // Inject dependencies for module callbacks (sendPacket, generateRC4).
     // Must be called before initializeModule() so callbacks can reach the
@@ -135,8 +163,9 @@ public:
     void setCallbackDependencies(WardenCrypto* crypto, SendPacketFunc sendFunc);
 
 private:
-    bool loaded_;                          // Module successfully loaded
-    // False when the module did not unpack into a real code image — typically because
+    std::vector<uint8_t> rsaModulus_;              // Empty or 256 bytes; see setRsaModulus
+    bool loaded_ = false;                          // Module successfully loaded
+    // False when the module did not unpack into a real code image - typically because
     // the server sent something other than a genuine Blizzard Warden module, which is
     // normal on private servers. Running the emulator over that image just executes
     // garbage, so we go straight to the stub callbacks instead.
@@ -147,16 +176,28 @@ private:
     std::vector<uint8_t> decompressedData_; // zlib decompressed data
 
     // Module execution context
-    void* moduleMemory_;                   // Allocated executable memory region
-    size_t moduleSize_;                    // Size of loaded code
-    uint32_t moduleBase_;                  // Module base address (for emulator)
+    void* moduleMemory_ = nullptr;                   // Allocated executable memory region
+    size_t moduleSize_ = 0;                // Size of loaded code
+    // 0x400000 is the default PE image base for 32-bit Windows executables.
+    // Warden modules are loaded as if they were PE DLLs at this base address.
+    uint32_t moduleBase_ = 0x400000;       // Module base address (for emulator)
+    // Native Warden-image header fields. Private-server modules place these
+    // tables inside the mapped image rather than after the copy stream.
+    uint32_t relocOffset_ = 0;
+    uint32_t relocCount_ = 0;
+    uint32_t exportTableOffset_ = 0;
+    uint32_t exportCount_ = 0;
+    uint32_t exportBaseIndex_ = 0;
+    uint32_t importTableOffset_ = 0;
+    uint32_t importCount_ = 0;
+    uint32_t sectionCount_ = 0;
     size_t relocDataOffset_ = 0;           // Offset into decompressedData_ where relocation data starts
     WardenFuncList funcList_;              // Callback functions
     std::unique_ptr<WardenEmulator> emulator_; // Cross-platform x86 emulator
     uint32_t emulatedPacketHandlerAddr_ = 0;   // Raw emulated VA for 4-arg PacketHandler call
 
     // Dependencies injected via setCallbackDependencies() for module callbacks.
-    // These are NOT owned — the handler owns the crypto and socket lifetime.
+    // These are NOT owned - the handler owns the crypto and socket lifetime.
     WardenCrypto* callbackCrypto_ = nullptr;
     SendPacketFunc callbackSendPacket_;
 
@@ -166,6 +207,16 @@ private:
     bool decryptRC4(const std::vector<uint8_t>& encrypted,
                     const std::vector<uint8_t>& key,
                     std::vector<uint8_t>& decryptedOut);
+    /// Whether the module's signature actually matched Blizzard's key.
+    ///
+    /// verifyRSASignature answers true either way on purpose, so a private
+    /// server's module - signed with a key that is not Blizzard's, or not
+    /// signed at all - still gets a chance to run. This records what it really
+    /// found, because a module that did not verify and then fails to execute
+    /// has failed exactly as expected, and saying so at error level makes a
+    /// working client look broken.
+    bool signatureVerified_ = false;
+
     bool verifyRSASignature(const std::vector<uint8_t>& data);
     bool decompressZlib(const std::vector<uint8_t>& compressed,
                         std::vector<uint8_t>& decompressedOut);
@@ -173,72 +224,9 @@ private:
     bool applyRelocations();
     bool bindAPIs();
     bool initializeModule();
+    uint32_t resolveExport(uint32_t ordinal) const;
 };
 
-/**
- * Warden module manager
- *
- * Handles multiple module downloads and lifecycle.
- * Servers can send different modules per session.
- */
-class WardenModuleManager {
-public:
-    WardenModuleManager();
-    ~WardenModuleManager();
-
-    /**
-     * Check if we have module cached locally
-     *
-     * @param md5Hash Module identifier
-     * @return true if module is cached
-     */
-    bool hasModule(const std::vector<uint8_t>& md5Hash);
-
-    /**
-     * Get or create module instance
-     *
-     * @param md5Hash Module identifier
-     * @return Module instance (may not be loaded yet)
-     */
-    std::shared_ptr<WardenModule> getModule(const std::vector<uint8_t>& md5Hash);
-
-    /**
-     * Receive module data chunk from server
-     *
-     * Modules may be sent in multiple SMSG_WARDEN_DATA packets.
-     * This accumulates chunks until complete.
-     *
-     * @param md5Hash Module identifier
-     * @param chunkData Data chunk
-     * @param isComplete true if this is the last chunk
-     * @return true if chunk accepted
-     */
-    bool receiveModuleChunk(const std::vector<uint8_t>& md5Hash,
-                           const std::vector<uint8_t>& chunkData,
-                           bool isComplete);
-
-    /**
-     * Save module to disk cache
-     *
-     * Cached modules skip re-download on reconnect.
-     * Cache directory: ~/.local/share/wowee/warden_cache/
-     */
-    bool cacheModule(const std::vector<uint8_t>& md5Hash,
-                     const std::vector<uint8_t>& moduleData);
-
-    /**
-     * Load module from disk cache
-     */
-    bool loadCachedModule(const std::vector<uint8_t>& md5Hash,
-                         std::vector<uint8_t>& moduleDataOut);
-
-private:
-    std::map<std::vector<uint8_t>, std::shared_ptr<WardenModule>> modules_;
-    std::map<std::vector<uint8_t>, std::vector<uint8_t>> downloadBuffer_; // Partial downloads
-    std::string cacheDirectory_;
-
-    std::string getCachePath(const std::vector<uint8_t>& md5Hash);
-};
 
 } // namespace game
 } // namespace wowee

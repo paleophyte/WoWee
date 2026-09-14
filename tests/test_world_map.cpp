@@ -150,24 +150,6 @@ TEST_CASE("UV projection: continent mode applies vertical offset", "[world_map]"
     REQUIRE(uvCont.y == Catch::Approx(uvZone.y - 0.15f).margin(0.001f));
 }
 
-// ── Expansion level derivation ───────────────────────────────
-// Replicate the expansion detection logic from getExpansionLevel.
-
-static int deriveExpansionLevel(int maxLevel) {
-    if (maxLevel <= 60) return 0;   // vanilla
-    if (maxLevel <= 70) return 1;   // TBC
-    return 2;                        // WotLK
-}
-
-TEST_CASE("Expansion level from maxLevel", "[world_map]") {
-    REQUIRE(deriveExpansionLevel(60) == 0);   // vanilla
-    REQUIRE(deriveExpansionLevel(58) == 0);   // below vanilla cap
-    REQUIRE(deriveExpansionLevel(70) == 1);   // TBC
-    REQUIRE(deriveExpansionLevel(65) == 1);   // mid TBC range
-    REQUIRE(deriveExpansionLevel(80) == 2);   // WotLK
-    REQUIRE(deriveExpansionLevel(75) == 2);   // mid WotLK range
-}
-
 // ── Expansion continent filtering ────────────────────────────
 
 static std::vector<uint32_t> filterContinentsByExpansion(
@@ -246,7 +228,7 @@ TEST_CASE("ZMP grid lookup resolves mouse UV to zone", "[world_map]") {
     // Simulate a 128x128 ZMP grid with a zone at a known cell
     std::array<uint32_t, 128 * 128> grid{};
     uint32_t testAreaId = 42;
-    // Place area ID at grid cell (64, 64) — center of map
+    // Place area ID at grid cell (64, 64) - center of map
     grid[64 * 128 + 64] = testAreaId;
 
     // Mouse at UV (0.5, 0.5) → col=64, row=64
@@ -260,7 +242,7 @@ TEST_CASE("ZMP grid lookup resolves mouse UV to zone", "[world_map]") {
 
 TEST_CASE("ZMP grid returns 0 for empty cells", "[world_map]") {
     std::array<uint32_t, 128 * 128> grid{};
-    // Empty grid — all cells zero (ocean/no zone)
+    // Empty grid - all cells zero (ocean/no zone)
     constexpr int ZMP_SIZE = 128;
     int col = 10, row = 10;
     REQUIRE(grid[row * ZMP_SIZE + col] == 0);
@@ -323,7 +305,7 @@ TEST_CASE("HitRect with zero values falls back to offset AABB", "[world_map]") {
 }
 
 TEST_CASE("Subzone hover with HitRect picks smallest overlay", "[world_map]") {
-    // Simulate two overlays — one large with HitRect, one small with HitRect
+    // Simulate two overlays - one large with HitRect, one small with HitRect
     struct TestHitOverlay {
         float hitLeft, hitRight, hitTop, hitBottom;
         float texW, texH;

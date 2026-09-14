@@ -1,11 +1,14 @@
 // ============================================================
-// CombatUI — extracted from GameScreen
+// CombatUI - extracted from GameScreen
 // Owns all combat-related UI rendering: cast bar, cooldown tracker,
 // raid warning overlay, combat text, DPS meter, buff bar,
 // battleground score HUD, combat log, threat window, BG scoreboard.
 // ============================================================
+#include "core/local_time.hpp"
 #include "ui/combat_ui.hpp"
+#include "addons/lua_api_registrations.hpp"
 #include "ui/buff_bar_layout.hpp"
+#include "ui/framexml_takeover.hpp"
 #include "ui/settings_panel.hpp"
 #include "ui/spellbook_screen.hpp"
 #include "ui/inventory_screen.hpp"
@@ -17,6 +20,7 @@
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
 #include "game/game_handler.hpp"
+#include "game/bg_score_defs.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"
@@ -45,117 +49,14 @@ namespace ui {
 // Cast Bar
 // ============================================================
 
-void CombatUI::renderCastBar(game::GameHandler& gameHandler, SpellIconFn getSpellIcon) {
-    if (!gameHandler.isCasting()) return;
-
-    auto* assetMgr = services_.assetManager;
-
-    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    float screenW = displaySize.x > 0.0f ? displaySize.x : 1280.0f;
-    float screenH = displaySize.y > 0.0f ? displaySize.y : 720.0f;
-
-    uint32_t currentSpellId = gameHandler.getCurrentCastSpellId();
-    VkDescriptorSet iconTex = (currentSpellId != 0 && assetMgr)
-        ? getSpellIcon(currentSpellId, assetMgr) : VK_NULL_HANDLE;
-
-    float barW = 300.0f;
-    float barX = (screenW - barW) / 2.0f;
-    float barY = screenH - 120.0f;
-
-    ImGui::SetNextWindowPos(ImVec2(barX, barY), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(barW, 40), ImGuiCond_Always);
-
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize |
-                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
-                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
-                             ImGuiWindowFlags_NoFocusOnAppearing;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 0.9f));
-
-    if (ImGui::Begin("##CastBar", nullptr, flags)) {
-        const bool channeling = gameHandler.isChanneling();
-        // Channels drain right-to-left; regular casts fill left-to-right
-        float progress = channeling
-            ? (1.0f - gameHandler.getCastProgress())
-            : gameHandler.getCastProgress();
-
-        // Color by spell school for cast identification; channels always blue
-        ImVec4 barColor;
-        if (channeling) {
-            barColor = ImVec4(0.3f, 0.6f, 0.9f, 1.0f);  // blue for channels
-        } else {
-            uint32_t school = (currentSpellId != 0) ? gameHandler.getSpellSchoolMask(currentSpellId) : 0;
-            if      (school & 0x04) barColor = ImVec4(0.95f, 0.40f, 0.10f, 1.0f);  // Fire: orange-red
-            else if (school & 0x10) barColor = ImVec4(0.30f, 0.65f, 0.95f, 1.0f);  // Frost: icy blue
-            else if (school & 0x20) barColor = ImVec4(0.55f, 0.15f, 0.70f, 1.0f);  // Shadow: purple
-            else if (school & 0x40) barColor = ImVec4(0.65f, 0.30f, 0.85f, 1.0f);  // Arcane: violet
-            else if (school & 0x08) barColor = ImVec4(0.20f, 0.75f, 0.25f, 1.0f);  // Nature: green
-            else if (school & 0x02) barColor = ImVec4(0.90f, 0.80f, 0.30f, 1.0f);  // Holy: golden
-            else                    barColor = ImVec4(0.80f, 0.60f, 0.20f, 1.0f);  // Physical/default: gold
-        }
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
-
-        char overlay[96];
-        if (currentSpellId == 0) {
-            snprintf(overlay, sizeof(overlay), "Opening... (%.1fs)", gameHandler.getCastTimeRemaining());
-        } else {
-            const std::string& spellName = gameHandler.getSpellName(currentSpellId);
-            const char* verb = channeling ? "Channeling" : "Casting";
-            int queueLeft = gameHandler.getCraftQueueRemaining();
-            if (!spellName.empty()) {
-                if (queueLeft > 0)
-                    snprintf(overlay, sizeof(overlay), "%s (%.1fs) [%d left]", spellName.c_str(), gameHandler.getCastTimeRemaining(), queueLeft);
-                else
-                    snprintf(overlay, sizeof(overlay), "%s (%.1fs)", spellName.c_str(), gameHandler.getCastTimeRemaining());
-            } else {
-                snprintf(overlay, sizeof(overlay), "%s... (%.1fs)", verb, gameHandler.getCastTimeRemaining());
-            }
-        }
-
-        // Queued spell icon (right edge): the next spell queued to fire within 400ms.
-        uint32_t queuedId = gameHandler.getQueuedSpellId();
-        VkDescriptorSet queuedTex = (queuedId != 0 && assetMgr)
-            ? getSpellIcon(queuedId, assetMgr) : VK_NULL_HANDLE;
-
-        const float iconSz = 20.0f;
-        const float reservedRight = (queuedTex) ? (iconSz + 4.0f) : 0.0f;
-
-        if (iconTex) {
-            // Spell icon to the left of the progress bar
-            ImGui::Image((ImTextureID)(uintptr_t)iconTex, ImVec2(iconSz, iconSz));
-            ImGui::SameLine(0, 4);
-            ImGui::ProgressBar(progress, ImVec2(-reservedRight - 1.0f, iconSz), overlay);
-        } else {
-            ImGui::ProgressBar(progress, ImVec2(-reservedRight - 1.0f, iconSz), overlay);
-        }
-        // Draw queued-spell icon on the right with a ">" arrow prefix tooltip.
-        if (queuedTex) {
-            ImGui::SameLine(0, 4);
-            ImGui::Image((ImTextureID)(uintptr_t)queuedTex, ImVec2(iconSz, iconSz),
-                         ImVec2(0,0), ImVec2(1,1),
-                         ImVec4(1,1,1,0.8f), ImVec4(0,0,0,0));  // slightly dimmed
-            if (ImGui::IsItemHovered()) {
-                const std::string& qn = gameHandler.getSpellName(queuedId);
-                ImGui::SetTooltip("Queued: %s", qn.empty() ? "Unknown" : qn.c_str());
-            }
-        }
-        ImGui::PopStyleColor();
-    }
-    ImGui::End();
-
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
-}
-
 
 // ============================================================
-// Cooldown Tracker — floating panel showing all active spell CDs
+// Cooldown Tracker - floating panel showing all active spell CDs
 // ============================================================
 
 void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
                                      const SettingsPanel& settings,
-                                     SpellIconFn getSpellIcon) {
+                                     const SpellIconFn& getSpellIcon) {
     if (!settings.showCooldownTracker_) return;
 
     const auto& cooldowns = gameHandler.getSpellCooldowns();
@@ -166,7 +67,7 @@ void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
     std::vector<CDEntry> active;
     active.reserve(16);
     for (const auto& [sid, rem] : cooldowns) {
-        if (rem > 0.5f) active.push_back({sid, rem});
+        if (rem > 0.5f) active.push_back({.spellId = sid, .remaining = rem});
     }
     if (active.empty()) return;
 
@@ -248,97 +149,26 @@ void CombatUI::renderCooldownTracker(game::GameHandler& gameHandler,
 // Raid Warning / Boss Emote Center-Screen Overlay
 // ============================================================
 
-void CombatUI::renderRaidWarningOverlay(game::GameHandler& gameHandler) {
-    // Scan chat history for new RAID_WARNING / RAID_BOSS_EMOTE messages
+// ============================================================================
+// The sound a whisper makes
+// ============================================================================
+//
+// What is left of the raid warning overlay. RaidWarningFrame is FrameXML's and
+// answers CHAT_MSG_RAID_WARNING itself, so the banner went; the walk through
+// new chat lines stayed, because the whisper sound was being played from
+// inside it and belongs to no element - FrameXML plays none for a whisper.
+void CombatUI::playSoundsForNewChat(game::GameHandler& gameHandler) {
     const auto& chatHistory = gameHandler.getChatHistory();
-    size_t newCount = chatHistory.size();
-    if (newCount > raidWarnChatSeenCount_) {
-        // Walk only the new messages (deque — iterate from back by skipping old ones)
-        size_t toScan = newCount - raidWarnChatSeenCount_;
-        size_t startIdx = newCount > toScan ? newCount - toScan : 0;
-        for (size_t i = startIdx; i < newCount; ++i) {
-            const auto& msg = chatHistory[i];
-            if (msg.type == game::ChatType::RAID_WARNING ||
-                msg.type == game::ChatType::RAID_BOSS_EMOTE ||
-                msg.type == game::ChatType::MONSTER_EMOTE) {
-                bool isBoss = (msg.type != game::ChatType::RAID_WARNING);
-                // Limit display text length to avoid giant overlay
-                std::string text = msg.message;
-                if (text.size() > 200) text = text.substr(0, 200) + "...";
-                raidWarnEntries_.push_back({text, 0.0f, isBoss});
-                if (raidWarnEntries_.size() > 3)
-                    raidWarnEntries_.erase(raidWarnEntries_.begin());
-            }
-            // Whisper audio notification
-            if (msg.type == game::ChatType::WHISPER) {
-                if (auto* ac = services_.audioCoordinator) {
-                    if (auto* ui = ac->getUiSoundManager())
-                        ui->playWhisperReceived();
-                }
-            }
+    const size_t newCount = chatHistory.size();
+    if (newCount <= raidWarnChatSeenCount_) return;
+
+    for (size_t i = raidWarnChatSeenCount_; i < newCount; ++i) {
+        if (chatHistory[i].type != game::ChatType::WHISPER) continue;
+        if (auto* ac = services_.audioCoordinator) {
+            if (auto* ui = ac->getUiSoundManager()) ui->playWhisperReceived();
         }
-        raidWarnChatSeenCount_ = newCount;
     }
-
-    // Age and remove expired entries
-    float dt = ImGui::GetIO().DeltaTime;
-    for (auto& e : raidWarnEntries_) e.age += dt;
-    raidWarnEntries_.erase(
-        std::remove_if(raidWarnEntries_.begin(), raidWarnEntries_.end(),
-            [](const RaidWarnEntry& e){ return e.age >= RaidWarnEntry::LIFETIME; }),
-        raidWarnEntries_.end());
-
-    if (raidWarnEntries_.empty()) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    float screenW = io.DisplaySize.x;
-    float screenH = io.DisplaySize.y;
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
-
-    // Stack entries vertically near upper-center (below target frame area)
-    float baseY = screenH * 0.28f;
-    for (const auto& e : raidWarnEntries_) {
-        float alpha = std::clamp(1.0f - (e.age / RaidWarnEntry::LIFETIME), 0.0f, 1.0f);
-        // Fade in quickly, hold, then fade out last 20%
-        if (e.age < 0.3f) alpha = e.age / 0.3f;
-
-        // Truncate to fit screen width reasonably
-        const char* txt = e.text.c_str();
-        const float fontSize = 22.0f;
-        ImFont* font = ImGui::GetFont();
-
-        // Word-wrap manually: compute text size, center horizontally
-        float maxW = screenW * 0.7f;
-        ImVec2 textSz = font->CalcTextSizeA(fontSize, maxW, maxW, txt);
-        float tx = (screenW - textSz.x) * 0.5f;
-
-        ImU32 shadowCol = IM_COL32(0, 0, 0, static_cast<int>(alpha * 200));
-        ImU32 mainCol;
-        if (e.isBossEmote) {
-            mainCol = IM_COL32(255, 185, 60, static_cast<int>(alpha * 255));   // amber
-        } else {
-            // Raid warning: alternating red/yellow flash during first second
-            float flashT = std::fmod(e.age * 4.0f, 1.0f);
-            if (flashT < 0.5f)
-                mainCol = IM_COL32(255, 50, 50, static_cast<int>(alpha * 255));
-            else
-                mainCol = IM_COL32(255, 220, 50, static_cast<int>(alpha * 255));
-        }
-
-        // Background dim box for readability
-        float pad = 8.0f;
-        fg->AddRectFilled(ImVec2(tx - pad, baseY - pad),
-                           ImVec2(tx + textSz.x + pad, baseY + textSz.y + pad),
-                           IM_COL32(0, 0, 0, static_cast<int>(alpha * 120)), 4.0f);
-
-        // Shadow + main text
-        fg->AddText(font, fontSize, ImVec2(tx + 2.0f, baseY + 2.0f), shadowCol, txt,
-                    nullptr, maxW);
-        fg->AddText(font, fontSize, ImVec2(tx,         baseY),         mainCol,  txt,
-                    nullptr, maxW);
-
-        baseY += textSz.y + 6.0f;
-    }
+    raidWarnChatSeenCount_ = newCount;
 }
 
 
@@ -346,6 +176,17 @@ void CombatUI::renderRaidWarningOverlay(game::GameHandler& gameHandler) {
 // Floating Combat Text
 // ============================================================
 
+// Not gated, and there is no element to gate it on.
+//
+// FrameXML's own floating combat text lives in Blizzard_CombatText, which is
+// load-on-demand and reached from exactly one place: the float-mode dropdown in
+// the Interface Options combat panel, which calls UIParentLoadAddOn for it. So
+// it is absent until a player touches that setting, and drawing beside it after
+// that is a latent double rather than a live one.
+//
+// Left alone deliberately. Covering it means a new UiElement and a suppression
+// entry, which is a decision about what this interface owns rather than a fix
+// to something broken - and the client's combat text is the one on screen today.
 void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
     const auto& entries = gameHandler.getCombatText();
     if (entries.empty()) return;
@@ -372,7 +213,45 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler) {
     int hudInIdx = 0, hudOutIdx = 0;
     bool needsHudWindow = false;
 
+    // What kind of number the player asked to see.
+    //
+    // The interface offers eighteen of these and read none of them, so every
+    // kind was drawn together. Three cover what this client actually produces;
+    // the rest name things it does not draw at all - reputation changes, aura
+    // gains, combo points - and there is nothing yet for them to filter.
+    //
+    // Read once for the frame rather than per entry: a busy fight puts dozens
+    // through this loop and the answer cannot change inside it.
+    const bool showDamage =
+        addons::storedCVarValue("fctDamage", "1") != "0";
+    const bool showHealing =
+        addons::storedCVarValue("fctHealing", "1") != "0";
+    const bool showMisses =
+        addons::storedCVarValue("fctDodgeParryMiss", "1") != "0";
+
+    const auto wanted = [&](game::CombatTextEntry::Type t) {
+        using T = game::CombatTextEntry;
+        switch (t) {
+            case T::MELEE_DAMAGE: case T::SPELL_DAMAGE: case T::CRIT_DAMAGE:
+            case T::PERIODIC_DAMAGE: case T::ENVIRONMENTAL: case T::GLANCING:
+            case T::CRUSHING:
+                return showDamage;
+            case T::HEAL: case T::CRIT_HEAL: case T::PERIODIC_HEAL:
+                return showHealing;
+            case T::MISS: case T::DODGE: case T::PARRY: case T::BLOCK:
+            case T::EVADE: case T::IMMUNE: case T::DEFLECT: case T::REFLECT:
+            case T::RESIST: case T::ABSORB:
+                return showMisses;
+            default:
+                // Everything else - energy, experience, honour, dispels - has
+                // no switch of its own here and is left alone rather than
+                // hidden by somebody else's.
+                return true;
+        }
+    };
+
     for (const auto& entry : entries) {
+        if (!wanted(entry.type)) continue;
         const float alpha = 1.0f - (entry.age / game::CombatTextEntry::LIFETIME);
         const bool outgoing = entry.isPlayerSource;
 
@@ -694,7 +573,7 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
     // Track combat duration for accurate DPS denominator in short fights
     bool inCombat = gameHandler.isInCombat();
     if (inCombat && !dpsWasInCombat_) {
-        // Just entered combat — reset encounter accumulators
+        // Just entered combat - reset encounter accumulators
         dpsEncounterDamage_ = 0.0f;
         dpsEncounterHeal_   = 0.0f;
         dpsLogSeenCount_    = gameHandler.getCombatLog().size();
@@ -725,7 +604,7 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
             }
         }
     } else if (dpsWasInCombat_) {
-        // Just left combat — keep encounter totals but stop accumulating
+        // Just left combat - keep encounter totals but stop accumulating
     }
     dpsWasInCombat_ = inCombat;
 
@@ -868,7 +747,7 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
             dpsMeterPos_ = ImVec2(-1.0f, -1.0f);
         }
         if (ImGui::IsWindowHovered()) {
-            ImGui::SetTooltip("Drag to move — right-click to reset position");
+            ImGui::SetTooltip("Drag to move - right-click to reset position");
         }
     }
     ImGui::End();
@@ -881,495 +760,6 @@ void CombatUI::renderDPSMeter(game::GameHandler& gameHandler,
 // ============================================================
 // Buff/Debuff Bar
 // ============================================================
-
-void CombatUI::renderBuffBar(game::GameHandler& gameHandler,
-                             SpellbookScreen& spellbookScreen,
-                             InventoryScreen& inventoryScreen,
-                             const SettingsPanel& settings,
-                             SpellIconFn getSpellIcon) {
-    const auto& auras = gameHandler.getPlayerAuras();
-
-    // Count non-empty auras
-    int activeCount = 0;
-    for (const auto& a : auras) {
-        if (!a.isEmpty()) activeCount++;
-    }
-
-    // Temporary weapon enchants (sharpening stones, poisons, imbues) share the row with
-    // the auras, so they have to be counted before the row is sized and positioned.
-    const uint64_t nowMsForWidth = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    int enchantCount = 0;
-    for (const auto& t : gameHandler.getTempEnchantTimers()) {
-        if (t.slot > 2) continue;
-        if (t.expireMs > nowMsForWidth) enchantCount++;
-    }
-
-    if (activeCount == 0 && enchantCount == 0 && !gameHandler.hasPet()) return;
-
-    auto* assetMgr = services_.assetManager;
-
-    // Layout arithmetic lives in buff_bar_layout.hpp so it can be tested.
-    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    const float screenW = displaySize.x > 0.0f ? displaySize.x : 1280.0f;
-    const float screenH = displaySize.y > 0.0f ? displaySize.y : 720.0f;
-    const BuffBarLayout layout = computeBuffBarLayout(
-        screenW, screenH, settings.pendingBuffBarScale, activeCount, enchantCount);
-
-    const float uiScale = buffBarScale(screenH, settings.pendingBuffBarScale);
-    const float ICON_SIZE = layout.iconSize;
-    const float ICON_SPACING = layout.iconSpacing;
-    const int enchantShown = layout.enchantShown;
-    const int auraShown = layout.auraShown;
-
-    ImGui::SetNextWindowPos(ImVec2(layout.barX, layout.barY), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(layout.barWidth, 0), ImGuiCond_Always);
-
-    // No AlwaysAutoResize: the width is computed above so the row can be right-aligned.
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
-                             ImGuiWindowFlags_NoScrollbar;
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ICON_SPACING, ICON_SPACING));
-
-    if (ImGui::Begin("##BuffBar", nullptr, flags)) {
-        // Pre-sort auras: buffs first, then debuffs; within each group, shorter remaining first
-        uint64_t buffNowMs = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
-        std::vector<size_t> buffSortedIdx;
-        buffSortedIdx.reserve(auras.size());
-        for (size_t i = 0; i < auras.size(); ++i)
-            if (!auras[i].isEmpty()) buffSortedIdx.push_back(i);
-        std::sort(buffSortedIdx.begin(), buffSortedIdx.end(), [&](size_t a, size_t b) {
-            const auto& aa = auras[a]; const auto& ab = auras[b];
-            bool aDebuff = (aa.flags & 0x80) != 0;
-            bool bDebuff = (ab.flags & 0x80) != 0;
-            if (aDebuff != bDebuff) return aDebuff < bDebuff; // buffs (0) first
-            int32_t ra = aa.getRemainingMs(buffNowMs);
-            int32_t rb = ab.getRemainingMs(buffNowMs);
-            if (ra < 0 && rb < 0) return false;
-            if (ra < 0) return false;
-            if (rb < 0) return true;
-            return ra < rb;
-        });
-
-        // Render one pass for buffs, one for debuffs — both on a single continuous row.
-        int shown = 0;
-        for (int pass = 0; pass < 2; ++pass) {
-            bool wantBuff = (pass == 0);
-            bool firstOfPass = true;
-        for (size_t si = 0; si < buffSortedIdx.size() && shown < auraShown; ++si) {
-            size_t i = buffSortedIdx[si];
-            const auto& aura = auras[i];
-            if (aura.isEmpty()) continue;
-
-            bool isBuff = (aura.flags & 0x80) == 0;  // 0x80 = negative/debuff flag
-            if (isBuff != wantBuff) continue;  // only render matching pass
-
-            // Stay on one row; widen the gap where the debuff group begins.
-            if (shown > 0) {
-                ImGui::SameLine(0.0f, (pass == 1 && firstOfPass) ? 10.0f * uiScale : ICON_SPACING);
-            }
-            firstOfPass = false;
-
-            ImGui::PushID(static_cast<int>(i) + (pass * 256));
-
-            // Determine border color: buffs = green; debuffs use WoW dispel-type colors
-            ImVec4 borderColor;
-            if (isBuff) {
-                borderColor = ImVec4(0.2f, 0.8f, 0.2f, 0.9f);  // green
-            } else {
-                // Debuff: color by dispel type (0=none/red, 1=magic/blue, 2=curse/purple,
-                //         3=disease/brown, 4=poison/green, other=dark-red)
-                uint8_t dt = gameHandler.getSpellDispelType(aura.spellId);
-                switch (dt) {
-                    case 1:  borderColor = ImVec4(0.15f, 0.50f, 1.00f, 0.9f); break;  // magic: blue
-                    case 2:  borderColor = ImVec4(0.70f, 0.20f, 0.90f, 0.9f); break;  // curse: purple
-                    case 3:  borderColor = ImVec4(0.55f, 0.30f, 0.10f, 0.9f); break;  // disease: brown
-                    case 4:  borderColor = ImVec4(0.10f, 0.70f, 0.10f, 0.9f); break;  // poison: green
-                    default: borderColor = ImVec4(0.80f, 0.20f, 0.20f, 0.9f); break;  // other: red
-                }
-            }
-
-            // Try to get spell icon
-            VkDescriptorSet iconTex = VK_NULL_HANDLE;
-            if (assetMgr) {
-                iconTex = getSpellIcon(aura.spellId, assetMgr);
-            }
-
-            if (iconTex) {
-                ImGui::PushStyleColor(ImGuiCol_Button, borderColor);
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
-                ImGui::ImageButton("##aura",
-                    (ImTextureID)(uintptr_t)iconTex,
-                    ImVec2(ICON_SIZE - 4, ICON_SIZE - 4));
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor();
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, borderColor);
-                const std::string& pAuraName = gameHandler.getSpellName(aura.spellId);
-                char label[32];
-                if (!pAuraName.empty())
-                    snprintf(label, sizeof(label), "%.6s", pAuraName.c_str());
-                else
-                    snprintf(label, sizeof(label), "%u", aura.spellId);
-                ImGui::Button(label, ImVec2(ICON_SIZE, ICON_SIZE));
-                ImGui::PopStyleColor();
-            }
-
-            // Compute remaining duration once (shared by overlay and tooltip)
-            uint64_t nowMs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count());
-            int32_t remainMs = aura.getRemainingMs(nowMs);
-
-            // Clock-sweep overlay: dark fan shows elapsed time (WoW style)
-            if (remainMs > 0 && aura.maxDurationMs > 0) {
-                ImVec2 iconMin2 = ImGui::GetItemRectMin();
-                ImVec2 iconMax2 = ImGui::GetItemRectMax();
-                float cx2 = (iconMin2.x + iconMax2.x) * 0.5f;
-                float cy2 = (iconMin2.y + iconMax2.y) * 0.5f;
-                float fanR2 = (iconMax2.x - iconMin2.x) * 0.5f;
-                float total2 = static_cast<float>(aura.maxDurationMs);
-                float elapsedFrac2 = std::clamp(
-                    1.0f - static_cast<float>(remainMs) / total2, 0.0f, 1.0f);
-                if (elapsedFrac2 > 0.005f) {
-                    constexpr int SWEEP_SEGS = 24;
-                    float sa = -IM_PI * 0.5f;
-                    float ea = sa + elapsedFrac2 * 2.0f * IM_PI;
-                    ImVec2 pts[SWEEP_SEGS + 2];
-                    pts[0] = ImVec2(cx2, cy2);
-                    for (int s = 0; s <= SWEEP_SEGS; ++s) {
-                        float a = sa + (ea - sa) * s / static_cast<float>(SWEEP_SEGS);
-                        pts[s + 1] = ImVec2(cx2 + std::cos(a) * fanR2,
-                                            cy2 + std::sin(a) * fanR2);
-                    }
-                    ImGui::GetWindowDrawList()->AddConvexPolyFilled(
-                        pts, SWEEP_SEGS + 2, IM_COL32(0, 0, 0, 145));
-                }
-            }
-
-            // Duration countdown overlay — always visible on the icon bottom
-            if (remainMs > 0) {
-                ImVec2 iconMin = ImGui::GetItemRectMin();
-                ImVec2 iconMax = ImGui::GetItemRectMax();
-                char timeStr[12];
-                int secs = (remainMs + 999) / 1000;  // ceiling seconds
-                if (secs >= 3600)
-                    snprintf(timeStr, sizeof(timeStr), "%dh", secs / 3600);
-                else if (secs >= 60)
-                    snprintf(timeStr, sizeof(timeStr), "%d:%02d", secs / 60, secs % 60);
-                else
-                    snprintf(timeStr, sizeof(timeStr), "%d", secs);
-                ImVec2 textSize = ImGui::CalcTextSize(timeStr);
-                float cx = iconMin.x + (iconMax.x - iconMin.x - textSize.x) * 0.5f;
-                float cy = iconMax.y - textSize.y - 2.0f;
-                // Choose timer color based on urgency
-                ImU32 timerColor;
-                if (remainMs < 10000) {
-                    // < 10s: pulse red
-                    float pulse = 0.7f + 0.3f * std::sin(
-                        static_cast<float>(ImGui::GetTime()) * 6.0f);
-                    timerColor = IM_COL32(
-                        static_cast<int>(255 * pulse),
-                        static_cast<int>(80 * pulse),
-                        static_cast<int>(60 * pulse), 255);
-                } else if (remainMs < 30000) {
-                    timerColor = IM_COL32(255, 165, 0, 255); // orange
-                } else {
-                    timerColor = IM_COL32(255, 255, 255, 255); // white
-                }
-                // Drop shadow for readability over any icon colour
-                ImGui::GetWindowDrawList()->AddText(ImVec2(cx + 1, cy + 1),
-                    IM_COL32(0, 0, 0, 200), timeStr);
-                ImGui::GetWindowDrawList()->AddText(ImVec2(cx, cy),
-                    timerColor, timeStr);
-            }
-
-            // Stack / charge count overlay — upper-left corner of the icon
-            if (aura.charges > 1) {
-                ImVec2 iconMin = ImGui::GetItemRectMin();
-                char chargeStr[8];
-                snprintf(chargeStr, sizeof(chargeStr), "%u", static_cast<unsigned>(aura.charges));
-                // Drop shadow then bright yellow text
-                ImGui::GetWindowDrawList()->AddText(ImVec2(iconMin.x + 3, iconMin.y + 3),
-                    IM_COL32(0, 0, 0, 200), chargeStr);
-                ImGui::GetWindowDrawList()->AddText(ImVec2(iconMin.x + 2, iconMin.y + 2),
-                    IM_COL32(255, 220, 50, 255), chargeStr);
-            }
-
-            // Right-click to cancel buffs / dismount
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                if (gameHandler.isMounted()) {
-                    gameHandler.dismount();
-                } else if (isBuff) {
-                    gameHandler.cancelAura(aura.spellId);
-                }
-            }
-
-            // Tooltip: rich spell info + remaining duration
-            if (ImGui::IsItemHovered()) {
-                ImGui::BeginTooltip();
-                bool richOk = spellbookScreen.renderSpellInfoTooltip(aura.spellId, gameHandler, assetMgr);
-                if (!richOk) {
-                    std::string name = spellbookScreen.lookupSpellName(aura.spellId, assetMgr);
-                    if (name.empty()) name = "Spell #" + std::to_string(aura.spellId);
-                    ImGui::Text("%s", name.c_str());
-                }
-                renderAuraRemaining(remainMs);
-                ImGui::EndTooltip();
-            }
-
-            ImGui::PopID();
-            shown++;
-        }  // end aura loop
-        }  // end pass loop
-        // The buff/debuff gap is horizontal now (see SameLine above) — a vertical
-        // Spacing() here would push debuffs onto a second row.
-
-        // Temporary weapon enchant timers (Shaman imbues, Rogue poisons, sharpening
-        // stones, oils). Shown as the enchanted weapon's icon with its remaining time
-        // beneath, the way the retail client does — not as a labelled bar.
-        {
-            const auto& timers = gameHandler.getTempEnchantTimers();
-            if (!timers.empty()) {
-                // Continue the aura row rather than starting a second one — a Spacing()
-                // or Separator() here is what used to push these onto their own line.
-                static constexpr game::EquipSlot kWeaponEquipSlots[] = {
-                    game::EquipSlot::MAIN_HAND, game::EquipSlot::OFF_HAND, game::EquipSlot::RANGED
-                };
-                static constexpr ImVec4 kEnchantSlotColors[] = {
-                    colors::kOrange,                 // main-hand: gold
-                    ImVec4(0.5f, 0.8f, 0.9f, 1.0f),  // off-hand:  teal
-                    ImVec4(0.7f, 0.5f, 0.9f, 1.0f),  // ranged:    purple
-                };
-                uint64_t enchNowMs = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
-
-                const auto& inventory = gameHandler.getInventory();
-                int enchantsShown = 0;
-
-                for (const auto& t : timers) {
-                    if (t.slot > 2) continue;
-                    uint64_t remMs = (t.expireMs > enchNowMs) ? (t.expireMs - enchNowMs) : 0;
-                    if (remMs == 0) continue;
-
-                    ImVec4 col = kEnchantSlotColors[t.slot];
-                    // Flash red when < 60s remaining
-                    if (remMs < 60000) {
-                        float pulse = 0.6f + 0.4f * std::sin(
-                            static_cast<float>(ImGui::GetTime()) * 4.0f);
-                        col = ImVec4(pulse, 0.2f, 0.1f, 1.0f);
-                    }
-
-                    // Format remaining time
-                    uint32_t secs = static_cast<uint32_t>((remMs + 999) / 1000);
-                    char timeStr[16];
-                    if (secs >= 3600)
-                        snprintf(timeStr, sizeof(timeStr), "%dh%02dm", secs / 3600, (secs % 3600) / 60);
-                    else if (secs >= 60)
-                        snprintf(timeStr, sizeof(timeStr), "%d:%02d", secs / 60, secs % 60);
-                    else
-                        snprintf(timeStr, sizeof(timeStr), "%ds", secs);
-
-                    const game::EquipSlot equipSlot = kWeaponEquipSlots[t.slot];
-                    const auto& weapon = inventory.getEquipSlot(equipSlot);
-
-                    if (enchantsShown >= enchantShown) break;
-                    // Stay on the shared row; widen the gap where the enchants begin.
-                    if (shown > 0) {
-                        ImGui::SameLine(0.0f, (enchantsShown == 0) ? 10.0f * uiScale : ICON_SPACING);
-                    }
-                    ImGui::PushID(static_cast<int>(t.slot) + 5000);
-
-                    ImVec2 iconPos = ImGui::GetCursorScreenPos();
-                    VkDescriptorSet iconTex = (!weapon.empty() && weapon.item.displayInfoId != 0)
-                        ? inventoryScreen.getItemIcon(weapon.item.displayInfoId)
-                        : VK_NULL_HANDLE;
-
-                    ImGui::PushStyleColor(ImGuiCol_Button, col);
-                    if (iconTex) {
-                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
-                        ImGui::ImageButton("##tempEnchant",
-                            (ImTextureID)(uintptr_t)iconTex,
-                            ImVec2(ICON_SIZE - 4, ICON_SIZE - 4));
-                        ImGui::PopStyleVar();
-                    } else {
-                        // No weapon icon (unknown display info): fall back to the slot initial.
-                        char fallback[8];
-                        snprintf(fallback, sizeof(fallback), "%.2s",
-                                 game::GameHandler::kTempEnchantSlotNames[t.slot]);
-                        ImGui::Button(fallback, ImVec2(ICON_SIZE, ICON_SIZE));
-                    }
-                    ImGui::PopStyleColor();
-
-                    // Remaining time across the bottom of the icon
-                    {
-                        ImDrawList* dl = ImGui::GetWindowDrawList();
-                        ImVec2 textSize = ImGui::CalcTextSize(timeStr);
-                        ImVec2 textPos(iconPos.x + (ICON_SIZE - textSize.x) * 0.5f,
-                                       iconPos.y + ICON_SIZE - textSize.y - 1.0f);
-                        dl->AddRectFilled(ImVec2(textPos.x - 2.0f, textPos.y),
-                                          ImVec2(textPos.x + textSize.x + 2.0f,
-                                                 textPos.y + textSize.y),
-                                          IM_COL32(0, 0, 0, 160));
-                        dl->AddText(textPos, ImGui::ColorConvertFloat4ToU32(col), timeStr);
-                    }
-
-                    if (ImGui::IsItemHovered()) {
-                        std::string enchantName;
-                        uint64_t weaponGuid = gameHandler.getEquipSlotGuid(static_cast<int>(equipSlot));
-                        if (weaponGuid != 0) {
-                            auto [permEnchantId, tempEnchantId] = gameHandler.getItemEnchantIds(weaponGuid);
-                            if (tempEnchantId != 0) enchantName = gameHandler.getEnchantName(tempEnchantId);
-                        }
-                        ImGui::SetTooltip("%s (%s)\n%s\nRemaining: %s",
-                                          enchantName.empty() ? "Temporary weapon enchant"
-                                                              : enchantName.c_str(),
-                                          game::GameHandler::kTempEnchantSlotNames[t.slot],
-                                          weapon.empty() ? "" : weapon.item.name.c_str(),
-                                          timeStr);
-                    }
-                    ImGui::PopID();
-                    ++enchantsShown;
-                    ++shown;  // shared row counter — drives the SameLine above
-                }
-            }
-        }
-        // Dismiss Pet button
-        if (gameHandler.hasPet()) {
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 0.9f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
-            if (ImGui::Button("Dismiss Pet", ImVec2(-1, 0))) {
-                gameHandler.dismissPet();
-            }
-            ImGui::PopStyleColor(2);
-        }
-
-    }
-    ImGui::End();
-
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-}
-
-//   WSG  489 – Alliance / Horde flag captures (max 3)
-//   AB   529 – Alliance / Horde resource scores (max 1600)
-//   AV    30 – Alliance / Horde reinforcements
-//   EotS 566 – Alliance / Horde resource scores (max 1600)
-// ============================================================================
-void CombatUI::renderBattlegroundScore(game::GameHandler& gameHandler) {
-    // Only show when in a recognised battleground map
-    uint32_t mapId = gameHandler.getWorldStateMapId();
-
-    // World state key sets per battleground
-    // Keys from the WoW 3.3.5a WorldState.dbc / client source
-    struct BgScoreDef {
-        uint32_t mapId;
-        const char* name;
-        uint32_t allianceKey;   // world state key for Alliance value
-        uint32_t hordeKey;      // world state key for Horde value
-        uint32_t maxKey;        // max score world state key (0 = use hardcoded)
-        uint32_t hardcodedMax;  // used when maxKey == 0
-        const char* unit;       // suffix label (e.g. "flags", "resources")
-    };
-
-    static constexpr BgScoreDef kBgDefs[] = {
-        // Warsong Gulch: 3 flag captures wins
-        { 489, "Warsong Gulch", 1581, 1582, 0, 3, "flags" },
-        // Arathi Basin: 1600 resources wins
-        { 529, "Arathi Basin",  1218, 1219, 0, 1600, "resources" },
-        // Alterac Valley: reinforcements count down from 600 / 800 etc.
-        {  30, "Alterac Valley", 1322, 1323, 0, 600, "reinforcements" },
-        // Eye of the Storm: 1600 resources wins
-        { 566, "Eye of the Storm", 2757, 2758, 0, 1600, "resources" },
-        // Strand of the Ancients (WotLK)
-        { 607, "Strand of the Ancients", 3476, 3477, 0, 4, "" },
-        // Isle of Conquest (WotLK): reinforcements (300 default)
-        { 628, "Isle of Conquest", 4221, 4222, 0, 300, "reinforcements" },
-    };
-
-    const BgScoreDef* def = nullptr;
-    for (const auto& d : kBgDefs) {
-        if (d.mapId == mapId) { def = &d; break; }
-    }
-    if (!def) return;
-
-    auto allianceOpt = gameHandler.getWorldState(def->allianceKey);
-    auto hordeOpt    = gameHandler.getWorldState(def->hordeKey);
-    if (!allianceOpt && !hordeOpt) return;
-
-    uint32_t allianceScore = allianceOpt.value_or(0);
-    uint32_t hordeScore    = hordeOpt.value_or(0);
-    uint32_t maxScore      = def->hardcodedMax;
-    if (def->maxKey != 0) {
-        if (auto mv = gameHandler.getWorldState(def->maxKey)) maxScore = *mv;
-    }
-
-    auto* window = services_.window;
-    float screenW = window ? static_cast<float>(window->getWidth())  : 1280.0f;
-
-    // Width scales with screen but stays reasonable
-    float frameW = 260.0f;
-    float frameH = 60.0f;
-    float posX   = screenW / 2.0f - frameW / 2.0f;
-    float posY   = 4.0f;
-
-    ImGui::SetNextWindowPos(ImVec2(posX, posY), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(frameW, frameH), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.75f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(6.0f, 4.0f));
-
-    if (ImGui::Begin("##BGScore", nullptr,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoSavedSettings)) {
-
-        // BG name centred at top
-        float nameW = ImGui::CalcTextSize(def->name).x;
-        ImGui::SetCursorPosX((frameW - nameW) / 2.0f);
-        ImGui::TextColored(colors::kBrightGold, "%s", def->name);
-
-        // Alliance score | separator | Horde score
-        float innerW  = frameW - 12.0f;
-        float halfW   = innerW / 2.0f - 4.0f;
-
-        ImGui::SetCursorPosX(6.0f);
-        ImGui::BeginGroup();
-        {
-            // Alliance (blue)
-            char aBuf[32];
-            if (maxScore > 0 && strlen(def->unit) > 0)
-                snprintf(aBuf, sizeof(aBuf), "\xF0\x9F\x94\xB5 %u / %u", allianceScore, maxScore);
-            else
-                snprintf(aBuf, sizeof(aBuf), "\xF0\x9F\x94\xB5 %u", allianceScore);
-            ImGui::TextColored(colors::kLightBlue, "%s", aBuf);
-        }
-        ImGui::EndGroup();
-
-        ImGui::SameLine(halfW + 16.0f);
-
-        ImGui::BeginGroup();
-        {
-            // Horde (red)
-            char hBuf[32];
-            if (maxScore > 0 && strlen(def->unit) > 0)
-                snprintf(hBuf, sizeof(hBuf), "\xF0\x9F\x94\xB4 %u / %u", hordeScore, maxScore);
-            else
-                snprintf(hBuf, sizeof(hBuf), "\xF0\x9F\x94\xB4 %u", hordeScore);
-            ImGui::TextColored(colors::kHostileRed, "%s", hBuf);
-        }
-        ImGui::EndGroup();
-    }
-    ImGui::End();
-    ImGui::PopStyleVar(2);
-}
 
 
 // ─── Combat Log Window ────────────────────────────────────────────────────────
@@ -1439,12 +829,9 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
             // Format timestamp as HH:MM:SS
             char timeBuf[10];
             {
-                struct tm* tm_info = std::localtime(&e.timestamp);
-                if (tm_info)
-                    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d",
-                             tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
-                else
-                    snprintf(timeBuf, sizeof(timeBuf), "--:--:--");
+                const std::tm tm_info = core::localTime(e.timestamp);
+                snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d",
+                         tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
             }
 
             // Build event description and choose color
@@ -1593,15 +980,8 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
                     break;
                 }
                 case T::ENERGIZE: {
-                    const char* pwrName = "power";
-                    switch (e.powerType) {
-                        case 0: pwrName = "Mana"; break;
-                        case 1: pwrName = "Rage"; break;
-                        case 2: pwrName = "Focus"; break;
-                        case 3: pwrName = "Energy"; break;
-                        case 4: pwrName = "Happiness"; break;
-                        case 6: pwrName = "Runic Power"; break;
-                    }
+                    const char* pwrName = game::powerTypeName(e.powerType);
+                    if (!pwrName) pwrName = "power";
                     if (spell)
                         snprintf(desc, sizeof(desc), "%s gains %d %s (%s)", tgt, e.amount, pwrName, spell);
                     else
@@ -1610,15 +990,8 @@ void CombatUI::renderCombatLog(game::GameHandler& gameHandler,
                     break;
                 }
                 case T::POWER_DRAIN: {
-                    const char* drainName = "power";
-                    switch (e.powerType) {
-                        case 0: drainName = "Mana"; break;
-                        case 1: drainName = "Rage"; break;
-                        case 2: drainName = "Focus"; break;
-                        case 3: drainName = "Energy"; break;
-                        case 4: drainName = "Happiness"; break;
-                        case 6: drainName = "Runic Power"; break;
-                    }
+                    const char* drainName = game::powerTypeName(e.powerType);
+                    if (!drainName) drainName = "power";
                     if (spell)
                         snprintf(desc, sizeof(desc), "%s loses %d %s to %s's %s", tgt, e.amount, drainName, src, spell);
                     else
@@ -1772,10 +1145,10 @@ void CombatUI::renderThreatWindow(game::GameHandler& gameHandler) {
 
     // Status bar: aggro alert or rank summary
     if (playerRank == 1) {
-        // Player has aggro — persistent red warning
+        // Player has aggro - persistent red warning
         ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "!! YOU HAVE AGGRO !!");
     } else if (playerRank > 1 && playerPct >= 0.8f) {
-        // Close to pulling — pulsing warning
+        // Close to pulling - pulsing warning
         float pulse = 0.55f + 0.45f * sinf(static_cast<float>(ImGui::GetTime()) * 5.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.1f, pulse), "! PULLING AGGRO (%.0f%%) !", playerPct * 100.0f);
     } else if (playerRank > 0) {
@@ -1810,7 +1183,7 @@ void CombatUI::renderThreatWindow(game::GameHandler& gameHandler) {
         // Colour: gold for #1 (tank), red if player is highest, white otherwise
         ImVec4 col = ui::colors::kWhite;
         if (rank == 1) col = ui::colors::kTooltipGold;      // gold
-        if (isPlayer && rank == 1) col = kColorRed; // red — you have aggro
+        if (isPlayer && rank == 1) col = kColorRed; // red - you have aggro
 
         // Threat bar
         float pct = (maxThreat > 0) ? static_cast<float>(entry.threat) / static_cast<float>(maxThreat) : 0.0f;
@@ -1830,170 +1203,6 @@ void CombatUI::renderThreatWindow(game::GameHandler& gameHandler) {
     ImGui::End();
 }
 
-
-// ─── BG Scoreboard ────────────────────────────────────────────────────────────
-void CombatUI::renderBgScoreboard(game::GameHandler& gameHandler) {
-    if (!showBgScoreboard_) return;
-
-    const game::GameHandler::BgScoreboardData* data = gameHandler.getBgScoreboard();
-
-    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(150, 100), ImGuiCond_FirstUseEver);
-
-    const char* title = data && data->isArena ? "Arena Score###BgScore"
-                                              : "Battleground Score###BgScore";
-    if (!ImGui::Begin(title, &showBgScoreboard_, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::End();
-        return;
-    }
-
-    if (!data) {
-        ImGui::TextDisabled("No score data yet.");
-        ImGui::TextDisabled("Use /score to request the scoreboard while in a battleground or arena.");
-        ImGui::End();
-        return;
-    }
-
-    // Arena team rating banner (shown only for arenas)
-    if (data->isArena) {
-        for (int t = 0; t < 2; ++t) {
-            const auto& at = data->arenaTeams[t];
-            if (at.teamName.empty()) continue;
-            int32_t ratingDelta = static_cast<int32_t>(at.ratingChange);
-            ImVec4 teamCol = (t == 0) ? colors::kHostileRed   // team 0: red
-                                      : colors::kLightBlue;    // team 1: blue
-            ImGui::TextColored(teamCol, "%s", at.teamName.c_str());
-            ImGui::SameLine();
-            char ratingBuf[32];
-            if (ratingDelta >= 0)
-                std::snprintf(ratingBuf, sizeof(ratingBuf), "Rating: %u (+%d)", at.newRating, ratingDelta);
-            else
-                std::snprintf(ratingBuf, sizeof(ratingBuf), "Rating: %u (%d)", at.newRating, ratingDelta);
-            ImGui::TextDisabled("%s", ratingBuf);
-        }
-        ImGui::Separator();
-    }
-
-    // Winner banner
-    if (data->hasWinner) {
-        const char* winnerStr;
-        ImVec4 winnerColor;
-        if (data->isArena) {
-            // For arenas, winner byte 0/1 refers to team index in arenaTeams[]
-            const auto& winTeam = data->arenaTeams[data->winner & 1];
-            winnerStr  = winTeam.teamName.empty() ? "Team 1" : winTeam.teamName.c_str();
-            winnerColor = (data->winner == 0) ? colors::kHostileRed
-                                              : colors::kLightBlue;
-        } else {
-            winnerStr  = (data->winner == 1) ? "Alliance" : "Horde";
-            winnerColor = (data->winner == 1) ? colors::kLightBlue
-                                              : colors::kHostileRed;
-        }
-        float textW = ImGui::CalcTextSize(winnerStr).x + ImGui::CalcTextSize("  Victory!").x;
-        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - textW) * 0.5f);
-        ImGui::TextColored(winnerColor, "%s", winnerStr);
-        ImGui::SameLine(0, 4);
-        ImGui::TextColored(colors::kBrightGold, "Victory!");
-        ImGui::Separator();
-    }
-
-    // Refresh button
-    if (ImGui::SmallButton("Refresh")) {
-        gameHandler.requestPvpLog();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%zu players", data->players.size());
-
-    // Score table
-    constexpr ImGuiTableFlags kTableFlags =
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
-        ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
-        ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Sortable;
-
-    // Build dynamic column count based on what BG-specific stats are present
-    int numBgCols = 0;
-    std::vector<std::string> bgColNames;
-    for (const auto& ps : data->players) {
-        for (const auto& [fieldName, val] : ps.bgStats) {
-            // Extract short name after last '.' (e.g. "BattlegroundAB.AbFlagCaptures" → "Caps")
-            std::string shortName = fieldName;
-            auto dotPos = fieldName.rfind('.');
-            if (dotPos != std::string::npos) shortName = fieldName.substr(dotPos + 1);
-            bool found = false;
-            for (const auto& n : bgColNames) { if (n == shortName) { found = true; break; } }
-            if (!found) bgColNames.push_back(shortName);
-        }
-    }
-    numBgCols = static_cast<int>(bgColNames.size());
-
-    // Fixed cols: Team | Name | KB | Deaths | HKs | Honor; then BG-specific
-    int totalCols = 6 + numBgCols;
-    float tableH = ImGui::GetContentRegionAvail().y;
-    if (ImGui::BeginTable("##BgScoreTable", totalCols, kTableFlags, ImVec2(0.0f, tableH))) {
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Team",   ImGuiTableColumnFlags_WidthFixed,   56.0f);
-        ImGui::TableSetupColumn("Name",   ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("KB",     ImGuiTableColumnFlags_WidthFixed,   38.0f);
-        ImGui::TableSetupColumn("Deaths", ImGuiTableColumnFlags_WidthFixed,   52.0f);
-        ImGui::TableSetupColumn("HKs",    ImGuiTableColumnFlags_WidthFixed,   38.0f);
-        ImGui::TableSetupColumn("Honor",  ImGuiTableColumnFlags_WidthFixed,   52.0f);
-        for (const auto& col : bgColNames)
-            ImGui::TableSetupColumn(col.c_str(), ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        ImGui::TableHeadersRow();
-
-        // Sort: Alliance first, then Horde; within each team by KB desc
-        std::vector<const game::GameHandler::BgPlayerScore*> sorted;
-        sorted.reserve(data->players.size());
-        for (const auto& ps : data->players) sorted.push_back(&ps);
-        std::stable_sort(sorted.begin(), sorted.end(),
-            [](const game::GameHandler::BgPlayerScore* a,
-               const game::GameHandler::BgPlayerScore* b) {
-                if (a->team != b->team) return a->team > b->team;  // Alliance(1) first
-                return a->killingBlows > b->killingBlows;
-            });
-
-        uint64_t playerGuid = gameHandler.getPlayerGuid();
-        for (const auto* ps : sorted) {
-            ImGui::TableNextRow();
-
-            // Team
-            ImGui::TableNextColumn();
-            if (ps->team == 1)
-                ImGui::TextColored(colors::kLightBlue, "Alliance");
-            else
-                ImGui::TextColored(colors::kHostileRed, "Horde");
-
-            // Name (highlight player's own row)
-            ImGui::TableNextColumn();
-            bool isSelf = (ps->guid == playerGuid);
-            if (isSelf) ImGui::PushStyleColor(ImGuiCol_Text, colors::kBrightGold);
-            const char* nameStr = ps->name.empty() ? "Unknown" : ps->name.c_str();
-            ImGui::TextUnformatted(nameStr);
-            if (isSelf) ImGui::PopStyleColor();
-
-            ImGui::TableNextColumn(); ImGui::Text("%u", ps->killingBlows);
-            ImGui::TableNextColumn(); ImGui::Text("%u", ps->deaths);
-            ImGui::TableNextColumn(); ImGui::Text("%u", ps->honorableKills);
-            ImGui::TableNextColumn(); ImGui::Text("%u", ps->bonusHonor);
-
-            for (const auto& col : bgColNames) {
-                ImGui::TableNextColumn();
-                uint32_t val = 0;
-                for (const auto& [fieldName, fval] : ps->bgStats) {
-                    std::string shortName = fieldName;
-                    auto dotPos = fieldName.rfind('.');
-                    if (dotPos != std::string::npos) shortName = fieldName.substr(dotPos + 1);
-                    if (shortName == col) { val = fval; break; }
-                }
-                if (val > 0) ImGui::Text("%u", val);
-                else ImGui::TextDisabled("-");
-            }
-        }
-        ImGui::EndTable();
-    }
-
-    ImGui::End();
-}
 
 
 } // namespace ui

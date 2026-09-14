@@ -1,9 +1,12 @@
 #include "game/transport_manager.hpp"
+
+#include <set>
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_animator.hpp"
 #include "game/game_utils.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
+#include "rendering/movement_limits.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -134,7 +137,8 @@ void TransportManager::registerTransport(uint64_t guid,
                                          const glm::vec3& spawnWorldPos,
                                          uint32_t entry,
                                          uint32_t displayId,
-                                         bool isM2) {
+                                         bool isM2,
+                                         float spawnOrientation) {
     auto* pathEntry = pathRepo_.findPath(pathId);
     if (!pathEntry) {
         LOG_ERROR("TransportManager: Path ", pathId, " not found for transport ", guid);
@@ -157,10 +161,31 @@ void TransportManager::registerTransport(uint64_t guid,
     transport.worldCoords = pathEntry->worldCoords;
     transport.allowBootstrapVelocity = false;
 
+    // A moving path registered under someone else's entry is a borrowed route.
+    //
+    // Marked here rather than where the borrowing is decided, because it is
+    // decided in more than one place: the Tirisfal zeppelin was flagged on its
+    // first spawn and then respawned unflagged on the far side of a world
+    // transfer, so the arrival-side instance went back to flying the wrong
+    // route with a passenger aboard. Every registration comes through here.
+    if (!isM2 && !pathEntry->worldCoords && spline.durationMs() > 0 &&
+        spline.keyCount() > 1 && pathId != entry) {
+        transport.borrowedPath = true;
+        static std::set<uint32_t> saidBorrow;
+        if (saidBorrow.insert(entry).second) {
+            LOG_WARNING("Transport entry=", entry, " is flying path ", pathId,
+                        ", which is not its own - following server position "
+                        "updates instead of animating it");
+        }
+    }
+
     // CRITICAL: Set basePosition from spawn position and t=0 offset
     // For stationary paths (1 waypoint), just use spawn position directly
-    if (spline.durationMs() == 0 || spline.keyCount() <= 1) {
-        // Stationary transport - no path animation
+    if (spline.durationMs() == 0 || spline.keyCount() <= 1 || transport.borrowedPath) {
+        // Stationary transport, or one on a borrowed route it will not fly -
+        // either way the spawn position is where it is, not an offset into a
+        // path. Inferring a base from the borrowed spline's first waypoint put
+        // the hull a whole route away from the dock the server spawned it at.
         transport.basePosition = spawnWorldPos;
         transport.position = spawnWorldPos;
     } else if (pathEntry->worldCoords) {
@@ -183,7 +208,18 @@ void TransportManager::registerTransport(uint64_t guid,
         }
     }
 
-    transport.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);  // Identity quaternion
+    // The authored yaw, carrying the same offset the spawner applies for this
+    // model kind: an M2's default facing is +renderX and every M2 game object
+    // is turned 90° for it (renderYawM2go), while a WMO is placed unturned.
+    // The transform below is rebuilt from scratch every frame, so a rotation
+    // that skips the offset puts the model at right angles to where it was
+    // placed. Only route-less transports read this - a tangent-derived heading
+    // carries its own convention and is left alone.
+    transport.spawnYaw = spawnOrientation +
+        (isM2 ? glm::half_pi<float>() : 0.0f);
+    // Identity discarded the authored placement, so every transport started
+    // life facing the same way whatever the server said.
+    transport.rotation = glm::angleAxis(transport.spawnYaw, glm::vec3(0.0f, 0.0f, 1.0f));
     transport.playerOnBoard = false;
     transport.playerLocalOffset = glm::vec3(0.0f);
     transport.hasDeckBounds = false;
@@ -194,7 +230,12 @@ void TransportManager::registerTransport(uint64_t guid,
     // If the server sends actual position updates, updateServerTransport() will switch
     // to server-driven mode. This ensures transports like trams (which the server doesn't
     // stream updates for) still animate, while ships/zeppelins switch to server authority.
-    transport.useClientAnimation = (pathEntry->fromDBC && spline.durationMs() > 0);
+    // The borrowed-path test above turned this off and this line turned it back
+    // on, sixty lines later and out of sight: the zeppelin flew the borrowed
+    // route under client animation while the server drove it somewhere else, so
+    // it played both journeys at once and read as two hulls.
+    transport.useClientAnimation =
+        (pathEntry->fromDBC && spline.durationMs() > 0 && !transport.borrowedPath);
     transport.clientAnimationReverse = false;
     transport.serverYaw = 0.0f;
     transport.hasServerYaw = false;
@@ -232,6 +273,14 @@ void TransportManager::registerTransport(uint64_t guid,
 
     transports_[guid] = transport;
 
+    // A route phase the server published before this was registered.
+    if (auto pendingClock = pendingRouteClocks_.find(guid);
+        pendingClock != pendingRouteClocks_.end()) {
+        const auto [phase, periodMs] = pendingClock->second;
+        pendingRouteClocks_.erase(pendingClock);
+        applyServerRouteClock(guid, phase, periodMs);
+    }
+
     glm::vec3 renderPos = core::coords::canonicalToRender(transport.position);
     LOG_INFO("TransportManager: Registered transport 0x", std::hex, guid, std::dec,
              " at path ", pathId, " with ", (pathEntry ? pathEntry->spline.keyCount() : 0u), " waypoints",
@@ -255,15 +304,12 @@ void TransportManager::registerTransport(uint64_t guid,
                     " base=(", transport.basePosition.x, ",", transport.basePosition.y, ",", transport.basePosition.z, ")");
     }
 }
-
-void TransportManager::unregisterTransport(uint64_t guid) {
-    transports_.erase(guid);
-    LOG_INFO("TransportManager: Unregistered transport ", guid);
-}
-
 void TransportManager::clearTransports() {
     const size_t count = transports_.size();
     transports_.clear();
+    // Held phases belong to the map that published them; a reused GUID on the
+    // next map must not inherit one.
+    pendingRouteClocks_.clear();
     if (count != 0) {
         LOG_INFO("TransportManager: Cleared ", count, " transports for map transition");
     }
@@ -275,15 +321,17 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
                                                const glm::vec3& canonicalSpawnPos,
                                                uint32_t wmoInstanceId,
                                                bool isM2,
-                                               bool preferServerData) {
+                                               bool preferServerData,
+                                               float spawnOrientation) {
     // TransportAnimation.dbc is indexed by GameObject entry.
     uint32_t pathId = entry;
 
     // Check if we have a real usable path, otherwise remap/infer/fall back to stationary.
-    const bool shipOrZeppelinDisplay =
-        (displayId == 3015 || displayId == 3031 || displayId == 7546 ||
-         displayId == 7446 || displayId == 1587 || displayId == 2454 ||
-         displayId == 807 || displayId == 808);
+    // Elevators used to be in this list - 807, 808, 2454 and 1587 are lifts,
+    // not airships - and the stricter "must travel 25 units" check below then
+    // rejected their short vertical path, dropping them into the inference
+    // that borrows a nearby route.
+    const bool shipOrZeppelinDisplay = isVehicleTransportDisplay(displayId);
     bool hasUsablePath = hasPathForEntry(entry);
     if (shipOrZeppelinDisplay) {
         hasUsablePath = hasUsableMovingPathForEntry(entry, 25.0f);
@@ -306,12 +354,10 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
         // template data[0]), assigned by the GO-query hook. They must NOT infer a
         // nearby TransportAnimation.dbc path at spawn: a ship spawned in a harbour
         // can otherwise borrow an unrelated local animation loop (e.g. an elevator)
-        // and circle in place until — or unless — its taxi path arrives. The ship
+        // and circle in place until - or unless - its taxi path arrives. The ship
         // guard in pickFallbackMovingPath already returns 0 for these displays; skip
         // inference too so the same guard actually holds, leaving the ship docked.
-        const bool looksLikeShip =
-            (displayId == 3015u || displayId == 2454u || displayId == 7446u ||
-             displayId == 7087u);
+        const bool looksLikeShip = isOceanGoingTransportDisplay(displayId);
         uint32_t inferredPath =
             looksLikeShip ? 0u : inferDbcPathForSpawn(canonicalSpawnPos, 1200.0f, allowZOnly);
         if (inferredPath != 0) {
@@ -338,7 +384,8 @@ void TransportManager::resolveAndRegisterSpawn(uint64_t guid,
                  " displayId=", displayId, " wmoInstance=", wmoInstanceId);
     }
 
-    registerTransport(guid, wmoInstanceId, pathId, canonicalSpawnPos, entry, displayId, isM2);
+    registerTransport(guid, wmoInstanceId, pathId, canonicalSpawnPos, entry, displayId,
+                      isM2, spawnOrientation);
 
     if (displayId == 3831u) {
         if (auto* tr = getTransport(guid)) {
@@ -364,7 +411,7 @@ glm::vec3 TransportManager::getPlayerWorldPosition(uint64_t transportGuid, const
     auto* transport = getTransport(transportGuid);
     if (!transport) {
         LOG_WARNING("getPlayerWorldPosition: transport 0x", std::hex, transportGuid, std::dec,
-                    " not found — returning localOffset as-is (callers should guard)");
+                    " not found - returning localOffset as-is (callers should guard)");
         return localOffset;
     }
 
@@ -406,6 +453,102 @@ bool TransportManager::isPointOnTransportDeck(uint64_t transportGuid,
     return floorDelta >= -0.35f && floorDelta <= maxFloorDelta;
 }
 
+void TransportManager::applyServerRouteClock(uint64_t transportGuid, float phase,
+                                             uint32_t periodMs) {
+    if (periodMs == 0) return;
+    if (!(phase >= 0.0f) || phase >= 1.0f) return;   // also rejects NaN
+
+    auto* transport = getTransport(transportGuid);
+    if (!transport) {
+        // The create block carries this, and a transport is not registered
+        // when it arrives - registration waits on the model loading, which
+        // takes several frames. The server publishes the phase when the object
+        // is created and rarely again, so dropping it here meant a hull that
+        // never adopted the server's clock at all and invented one from
+        // distance over speed instead. Held until registerTransport asks.
+        pendingRouteClocks_[transportGuid] = {phase, periodMs};
+        return;
+    }
+
+    const bool firstSample = !transport->hasServerRouteClock;
+    transport->hasServerRouteClock = true;
+    transport->routePhase = phase;
+    transport->routePeriodMs = periodMs;
+    transport->routePhaseAtTime = elapsedTime_;
+
+    if (firstSample) {
+        LOG_WARNING("Transport 0x", std::hex, transportGuid, std::dec,
+                 " adopted server route clock: period=", periodMs, "ms phase=", phase,
+                 " (client period was ", [&]() -> uint32_t {
+                     const auto* p = pathRepo_.findPath(transport->pathId);
+                     return p ? p->spline.durationMs() : 0u;
+                 }(), "ms)");
+    }
+}
+
+void TransportManager::applyDoodadMotionState(ActiveTransport& transport, bool moving) {
+    if (transport.isM2 || !wmoRenderer_ || transport.wmoInstanceId == 0) return;
+
+    // 163 = ShipMoving, 164 = ShipStop. Stopping is a one-shot that settles into
+    // the model's idle pose; running is a loop.
+    constexpr uint32_t kShipMoving = 163u;
+    constexpr uint32_t kShipStop = 164u;
+    const uint32_t want = moving ? kShipMoving : kShipStop;
+
+    const bool sameState = (transport.appliedDoodadAnim == static_cast<int>(want));
+    if (sameState && transport.appliedDoodadCount != 0) return;
+
+    const size_t touched =
+        wmoRenderer_->setInstanceDoodadAnimation(transport.wmoInstanceId, want, moving);
+    transport.appliedDoodadAnim = static_cast<int>(want);
+    transport.appliedDoodadCount = touched;
+}
+
+bool TransportManager::isTransportCollisionReady(uint64_t transportGuid) const {
+    if (!wmoRenderer_) return false;
+    const auto it = transports_.find(transportGuid);
+    if (it == transports_.end() || it->second.isM2 || it->second.wmoInstanceId == 0) {
+        return false;
+    }
+    return wmoRenderer_->instanceHasCollisionGeometry(it->second.wmoInstanceId);
+}
+
+std::optional<bool> TransportManager::isPointOverM2Footprint(
+    uint64_t transportGuid, const glm::vec3& canonicalPosition) const {
+    if (!m2Renderer_) return std::nullopt;
+    const auto it = transports_.find(transportGuid);
+    if (it == transports_.end() || !it->second.isM2 || it->second.wmoInstanceId == 0) {
+        return std::nullopt;
+    }
+    glm::vec3 boundsMin, boundsMax;
+    if (!m2Renderer_->getInstanceWorldBounds(it->second.wmoInstanceId, boundsMin, boundsMax)) {
+        return std::nullopt;
+    }
+    // The bounds are the renderer's, so the point has to be too.
+    const glm::vec3 render = core::coords::canonicalToRender(canonicalPosition);
+
+    // The box is only a cheap first pass. It cannot be the answer on its own:
+    // it is axis-aligned around the whole car, so it covers the doorway and the
+    // ground just outside it, and a car is as tall as it is wide - which is how
+    // standing outside a lift's door at the top of the shaft still pulled the
+    // player down with it.
+    if (render.x < boundsMin.x || render.x > boundsMax.x ||
+        render.y < boundsMin.y || render.y > boundsMax.y ||
+        render.z < boundsMin.z - 2.0f || render.z > boundsMax.z + 2.0f) {
+        return false;
+    }
+
+    // The answer is whether the car's own floor is under the feet. Outside the
+    // door there is nothing below but shaft, so the ray finds nothing and the
+    // board is refused; on the deck it lands within a step and it is allowed.
+    const auto deck = m2Renderer_->getInstanceFloorHeight(
+        it->second.wmoInstanceId, render.x, render.y,
+        render.z + rendering::movement::kMaxStepUp);
+    if (!deck) return false;
+    const float delta = render.z - *deck;
+    return delta >= -rendering::movement::kMaxStepUp && delta <= 2.0f;
+}
+
 std::optional<float> TransportManager::getTransportDeckFloorHeight(
     uint64_t transportGuid,
     const glm::vec3& canonicalPosition) const {
@@ -424,15 +567,6 @@ std::optional<float> TransportManager::getTransportDeckFloorHeight(
     if (!floor || normalZ < 0.55f) return std::nullopt;
     return floor;
 }
-
-glm::mat4 TransportManager::getTransportInvTransform(uint64_t transportGuid) {
-    auto* transport = getTransport(transportGuid);
-    if (!transport) {
-        return glm::mat4(1.0f);  // Identity fallback
-    }
-    return transport->invTransform;
-}
-
 void TransportManager::loadPathFromNodes(uint32_t pathId, const std::vector<glm::vec3>& waypoints, bool looping, float speed) {
     pathRepo_.loadPathFromNodes(pathId, waypoints, looping, speed);
 }
@@ -455,6 +589,16 @@ void TransportManager::updateTransportMovement(ActiveTransport& transport, float
         return;
     }
 
+    // A borrowed route belongs to another transport. Its position comes from
+    // updateServerTransport and nowhere else; evaluating the spline here is
+    // what carried a rider along a journey the hull was not making.
+    if (transport.borrowedPath) {
+        updateTransformMatrices(transport);
+        pushTransform(transport);
+        applyDoodadMotionState(transport, /*moving=*/transport.hasServerVelocity);
+        return;
+    }
+
     const auto& spline = pathEntry->spline;
     if (spline.keyCount() == 0) {
         return;
@@ -465,6 +609,7 @@ void TransportManager::updateTransportMovement(ActiveTransport& transport, float
         // Just update transform (position already set)
         updateTransformMatrices(transport);
         pushTransform(transport);
+        applyDoodadMotionState(transport, /*moving=*/false);
         return;
     }
 
@@ -477,12 +622,39 @@ void TransportManager::updateTransportMovement(ActiveTransport& transport, float
         return;
     }
 
+    // A cross-continent route spends part of its cycle on the other map. The
+    // slice holds the hull still there rather than sweeping it across, and
+    // there is nothing here to draw, stand on, or board until it returns.
+    //
+    // Not while someone is standing on it. Hiding the hull and skipping the
+    // pose below takes the deck out from under a rider and freezes them at a
+    // position the world has already streamed away from - the client has no
+    // authority to carry them across a map boundary, only the server does, and
+    // until it says so the honest thing is to keep the deck where it is. The
+    // slice holds the hull at its last dock through the off-map stretch, so
+    // this parks the rider at the pier rather than dropping them mid-ocean.
+    const bool carryingRider = riderTransportGuid_ != 0 && transport.guid == riderTransportGuid_;
+    const bool presentNow = pathEntry->presentAt(pathTimeMs) || carryingRider;
+    if (presentNow != transport.onThisMap) {
+        transport.onThisMap = presentNow;
+        LOG_INFO("Transport 0x", std::hex, transport.guid, std::dec,
+                 " entry=", transport.entry,
+                 (presentNow ? " arrived on this map" : " left for the other map"),
+                 " at route time ", pathTimeMs, "ms");
+    }
+    if (!presentNow) {
+        setInstanceHidden(transport, true);
+        applyDoodadMotionState(transport, /*moving=*/false);
+        return;
+    }
+
     // Evaluate position + rotation via Animator
     animator_.evaluateAndApply(transport, *pathEntry, pathTimeMs);
 
     // Update transform matrices
     updateTransformMatrices(transport);
     pushTransform(transport);
+    applyDoodadMotionState(transport, /*moving=*/!transport.atDockDwell);
 
     // Debug logging every 600 frames (~10 seconds at 60fps)
     static int debugFrameCount = 0;
@@ -496,11 +668,28 @@ void TransportManager::updateTransportMovement(ActiveTransport& transport, float
 }
 
 // Push transform to the appropriate renderer (WMO or M2).
+void TransportManager::setInstanceHidden(const ActiveTransport& transport, bool hidden) {
+    // Only WMO hulls. An M2 transport is a tram car or a lift, which never
+    // leaves its map, so onThisMap is always true for one and this is never
+    // asked to hide it.
+    if (!transport.isM2 && wmoRenderer_) {
+        wmoRenderer_->setInstanceHidden(transport.wmoInstanceId, hidden);
+    }
+}
+
 void TransportManager::pushTransform(ActiveTransport& transport) {
+    setInstanceHidden(transport, !transport.onThisMap);
     if (transport.isM2) {
         if (m2Renderer_) m2Renderer_->setInstanceTransform(transport.wmoInstanceId, transport.transform);
     } else {
-        if (wmoRenderer_) wmoRenderer_->setInstanceTransform(transport.wmoInstanceId, transport.transform);
+        if (wmoRenderer_) {
+            wmoRenderer_->setInstanceTransform(transport.wmoInstanceId, transport.transform);
+            // Tell the static-world floor query this deck is in motion, so it
+            // only counts as a floor when it is underfoot. Set here rather than
+            // once at register so it survives an instance rebuild from
+            // streaming - the call is idempotent and cheap.
+            wmoRenderer_->setInstanceIsTransport(transport.wmoInstanceId, true);
+        }
     }
 }
 
@@ -516,6 +705,7 @@ void TransportManager::updateTransformMatrices(ActiveTransport& transport) {
     glm::quat basisRotation = glm::angleAxis(glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
     glm::quat basisInverse = glm::conjugate(basisRotation);
     glm::quat renderRot = basisRotation * transport.rotation * basisInverse;
+
 
     // Build transform matrix: translate * rotate * scale
     glm::mat4 translation = glm::translate(glm::mat4(1.0f), renderPos);
@@ -545,7 +735,7 @@ void TransportManager::updateServerTransport(uint64_t guid, const glm::vec3& pos
     }
 
     if (!pathEntry || pathEntry->spline.durationMs() == 0) {
-        // No path or stationary — handle directly before delegating to ClockSync.
+        // No path or stationary - handle directly before delegating to ClockSync.
         // Still track update count so future path assignments work.
         transport->serverUpdateCount++;
         transport->lastServerUpdate = elapsedTime_;
@@ -592,7 +782,12 @@ void TransportManager::updateServerTransport(uint64_t guid, const glm::vec3& pos
     }
 
     // Delegate clock sync, yaw correction, and velocity bootstrap to ClockSync.
-    clockSync_.processServerUpdate(*transport, pathEntry, position, orientation, elapsedTime_);
+    // A borrowed-route transport is handed no path at all: it still gets the
+    // server's position and the heading-vs-velocity yaw correction, and none of
+    // the phase seeding that would put it back on someone else's route.
+    clockSync_.processServerUpdate(*transport,
+                                   transport->borrowedPath ? nullptr : pathEntry,
+                                   position, orientation, elapsedTime_);
 
     updateTransformMatrices(*transport);
     pushTransform(*transport);
@@ -662,9 +857,35 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         // made its visual arrival unrelated to the server's map-transfer time.
         const glm::vec3 serverSpawnPosition = transport.position;
 
-        // Copy the taxi path into the main paths (indexed by GO entry for this transport)
+        // Copy the taxi path into the main paths (indexed by GO entry for this
+        // transport), rebuilt at this hull's own speed when the server has
+        // published a period to solve it from.
+        //
+        // The shared slice is timed at a nominal speed, and the authored dock
+        // dwells do not scale with it. So a wrong speed does not merely make
+        // the cycle the wrong length - the dwell lands in the wrong part of it,
+        // and a phase the server publishes maps onto the wrong stretch of
+        // route. Solved, the two timelines are proportional and the phase means
+        // the same thing on both ends.
+        const TaxiRoute* route = pathRepo_.findTaxiRoute(taxiPathId);
         PathEntry copied(taxiEntry->spline, entry, taxiEntry->zOnly,
-                         /*fromDBC=*/false, taxiEntry->worldCoords);
+                         /*dbc=*/false, taxiEntry->worldCoords);
+        copied.presentMs = taxiEntry->presentMs;
+        if (route && transport.hasServerRouteClock) {
+            const float speed =
+                TransportPathRepository::taxiRouteSpeedFor(*route, transport.routePeriodMs);
+            if (speed > 0.0f) {
+                PathEntry retimed =
+                    TransportPathRepository::buildTaxiRouteSlice(*route, mapId, speed);
+                if (retimed.spline.keyCount() >= 2) {
+                    retimed.pathId = entry;
+                    LOG_INFO("Transport entry=", entry, " route ", taxiPathId,
+                             " retimed to the server's ", transport.routePeriodMs,
+                             "ms period at ", speed, " yd/s");
+                    copied = std::move(retimed);
+                }
+            }
+        }
         pathRepo_.storePath(entry, std::move(copied));
 
         auto* storedEntry = pathRepo_.findPath(entry);
@@ -672,6 +893,7 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         // Update transport to use the new path
         transport.pathId = entry;
         transport.worldCoords = true;
+        transport.borrowedPath = false;  // This route is its own now.
         transport.basePosition = glm::vec3(0.0f);  // World-coordinate path, no base offset
         transport.useClientAnimation = true;  // Server won't send position updates
 
@@ -680,15 +902,24 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         // server-authored spawn location; otherwise it can still be approaching
         // Borean Tundra when the server correctly transfers the rider back to map 0.
         if (storedEntry && storedEntry->spline.durationMs() > 0) {
-            if (entry == 190536u && !storedEntry->spline.keys().empty()) {
+            // Where the server says this hull is, not what time it happens to
+            // be. A wall-clock modulo put the phase somewhere unrelated to the
+            // route, so the zeppelin was departing its tower while the server
+            // had it arriving at the other one. The server's own published
+            // phase overrides this the moment it lands; this is what the hull
+            // does until then, and the position the server spawned it at is
+            // the only evidence there is.
+            if (!transport.hasServerRouteClock && transport.serverUpdateCount > 0 &&
+                !storedEntry->spline.keys().empty()) {
                 const size_t nearest = storedEntry->spline.findNearestKey(serverSpawnPosition);
                 transport.localClockMs = storedEntry->spline.keys()[nearest].timeMs;
-            } else {
+            } else if (!transport.hasServerRouteClock) {
                 transport.localClockMs = static_cast<uint32_t>(
                     nowEpochMs() % storedEntry->spline.durationMs());
             }
-            transport.position = storedEntry->spline.evaluatePosition(
-                transport.localClockMs % storedEntry->spline.durationMs());
+            transport.localClockMs %= storedEntry->spline.durationMs();
+            transport.position = storedEntry->spline.evaluatePosition(transport.localClockMs);
+            transport.onThisMap = storedEntry->presentAt(transport.localClockMs);
         }
 
         updateTransformMatrices(transport);

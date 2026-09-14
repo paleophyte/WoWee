@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Hunter Stable Slot catalog (.wstc) — novel
+// Wowee Open Hunter Stable Slot catalog (.wstc) - novel
 // replacement for the hardcoded hunter pet stable slot
 // progression. Defines each stable slot's display order
 // in the stable UI, the character level at which the
@@ -23,7 +23,7 @@ namespace pipeline {
 // editing engine source.
 //
 // Cross-references with previously-added formats:
-//   None — this catalog is consumed directly by the
+//   None - this catalog is consumed directly by the
 //   stable master service in WBKD entries with
 //   serviceKind=StableMaster.
 //
@@ -56,14 +56,14 @@ struct WoweeStableSlot {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t slotId) const;
+    [[nodiscard]] const Entry* findById(uint32_t slotId) const;
 
     // Returns the count of slots a hunter at the given
     // character level has unlocked. Used by the stable
     // master frame to decide how many slot tabs to render.
-    int unlockedSlotCount(uint8_t characterLevel) const;
+    [[nodiscard]] int unlockedSlotCount(uint8_t characterLevel) const;
 };
 
 class WoweeStableSlotLoader {
@@ -75,14 +75,14 @@ public:
 
     // Preset emitters used by --gen-stc* variants.
     //
-    //   makeStandard — 5 canonical slots matching WoW
+    //   makeStandard - 5 canonical slots matching WoW
     //                   3.3.5a (Active + 4 stabled,
     //                   unlocking at lvl 10/20/30/40 with
     //                   10s/50s/2g/10g costs).
-    //   makeCata     — 6 Cata-style slots (Active + 5
+    //   makeCata     - 6 Cata-style slots (Active + 5
     //                   stabled with later unlock at
     //                   lvl 50, 25g cost for slot 5).
-    //   makePremium  — 4 server-custom premium slots
+    //   makePremium  - 4 server-custom premium slots
     //                   (donator-only, marked premium=1,
     //                   no level gate, no gold cost).
     static WoweeStableSlot makeStandard(const std::string& catalogName);

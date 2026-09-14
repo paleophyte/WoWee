@@ -1,4 +1,6 @@
 #include "pipeline/wowee_spawns.hpp"
+#include "core/coordinates.hpp"
+#include "pipeline/wowee_binary_io.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -12,45 +14,7 @@ namespace {
 
 constexpr char kMagic[4] = {'W', 'S', 'P', 'N'};
 constexpr uint32_t kVersion = 1;
-
-template <typename T>
-void writePOD(std::ofstream& os, const T& v) {
-    os.write(reinterpret_cast<const char*>(&v), sizeof(T));
-}
-
-template <typename T>
-bool readPOD(std::ifstream& is, T& v) {
-    is.read(reinterpret_cast<char*>(&v), sizeof(T));
-    return is.gcount() == static_cast<std::streamsize>(sizeof(T));
-}
-
-void writeStr(std::ofstream& os, const std::string& s) {
-    uint32_t n = static_cast<uint32_t>(s.size());
-    writePOD(os, n);
-    if (n > 0) os.write(s.data(), n);
-}
-
-bool readStr(std::ifstream& is, std::string& s) {
-    uint32_t n = 0;
-    if (!readPOD(is, n)) return false;
-    if (n > (1u << 20)) return false;  // 1 MiB sanity cap
-    s.resize(n);
-    if (n > 0) {
-        is.read(s.data(), n);
-        if (is.gcount() != static_cast<std::streamsize>(n)) {
-            s.clear();
-            return false;
-        }
-    }
-    return true;
-}
-
-std::string normalizePath(std::string base) {
-    if (base.size() < 5 || base.substr(base.size() - 5) != ".wspn") {
-        base += ".wspn";
-    }
-    return base;
-}
+constexpr char kExtension[] = ".wspn";
 
 } // namespace
 
@@ -70,18 +34,11 @@ const char* WoweeSpawns::kindName(uint8_t k) {
 }
 
 bool WoweeSpawnsLoader::save(const WoweeSpawns& cat,
-                             const std::string& basePath) {
-    std::ofstream os(normalizePath(basePath), std::ios::binary);
-    if (!os) return false;
-    os.write(kMagic, 4);
-    writePOD(os, kVersion);
-    writeStr(os, cat.name);
-    uint32_t entryCount = static_cast<uint32_t>(cat.entries.size());
-    writePOD(os, entryCount);
-    for (const auto& e : cat.entries) {
+                     const std::string& basePath) {
+    return saveCatalog(cat, basePath, kMagic, kVersion, kExtension,
+                       [](std::ofstream& os, const WoweeSpawns::Entry& e) {
         writePOD(os, e.kind);
-        uint8_t pad[3] = {0, 0, 0};
-        os.write(reinterpret_cast<const char*>(pad), 3);
+        writePadding(os, 3);
         writePOD(os, e.entryId);
         writePOD(os, e.position.x);
         writePOD(os, e.position.y);
@@ -96,30 +53,16 @@ bool WoweeSpawnsLoader::save(const WoweeSpawns& cat,
         writePOD(os, e.questIdRequired);
         writePOD(os, e.wanderRadius);
         writeStr(os, e.label);
-    }
-    return os.good();
+                       });
 }
 
-WoweeSpawns WoweeSpawnsLoader::load(const std::string& basePath) {
-    WoweeSpawns out;
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
-    if (!is) return out;
-    char magic[4];
-    is.read(magic, 4);
-    if (std::memcmp(magic, kMagic, 4) != 0) return out;
-    uint32_t version = 0;
-    if (!readPOD(is, version) || version != kVersion) return out;
-    if (!readStr(is, out.name)) return out;
-    uint32_t entryCount = 0;
-    if (!readPOD(is, entryCount)) return out;
-    if (entryCount > (1u << 20)) return out;  // 1M cap
-    out.entries.resize(entryCount);
-    for (auto& e : out.entries) {
-        if (!readPOD(is, e.kind)) { out.entries.clear(); return out; }
-        uint8_t pad[3];
-        is.read(reinterpret_cast<char*>(pad), 3);
-        if (is.gcount() != 3) { out.entries.clear(); return out; }
-        if (!readPOD(is, e.entryId)) { out.entries.clear(); return out; }
+WoweeSpawns WoweeSpawnsLoader::load(
+    const std::string& basePath) {
+    return loadCatalog<WoweeSpawns>(basePath, kMagic, kVersion, kExtension,
+                              [](std::ifstream& is, WoweeSpawns::Entry& e) {
+        if (!readPOD(is, e.kind)) { return false; }
+        if (!skipPadding(is, 3)) { return false; }
+        if (!readPOD(is, e.entryId)) { return false; }
         if (!readPOD(is, e.position.x) ||
             !readPOD(is, e.position.y) ||
             !readPOD(is, e.position.z) ||
@@ -131,18 +74,14 @@ WoweeSpawns WoweeSpawnsLoader::load(const std::string& basePath) {
             !readPOD(is, e.respawnSec) ||
             !readPOD(is, e.factionId) ||
             !readPOD(is, e.questIdRequired) ||
-            !readPOD(is, e.wanderRadius)) {
-            out.entries.clear();
-            return out;
-        }
-        if (!readStr(is, e.label)) { out.entries.clear(); return out; }
-    }
-    return out;
+            !readPOD(is, e.wanderRadius)) { return false; }
+        if (!readStr(is, e.label)) { return false; }
+                                  return true;
+                              });
 }
 
 bool WoweeSpawnsLoader::exists(const std::string& basePath) {
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
-    return is.good();
+    return catalogExists(basePath, kExtension);
 }
 
 WoweeSpawns WoweeSpawnsLoader::makeStarter(const std::string& catalogName) {
@@ -189,7 +128,7 @@ WoweeSpawns WoweeSpawnsLoader::makeCamp(const std::string& catalogName) {
         e.kind = WoweeSpawns::Creature;
         e.entryId = 1000;
         e.position = {std::cos(a) * ringR, 0.0f, std::sin(a) * ringR};
-        e.rotation = {0.0f, a + 3.14159265f, 0.0f};   // facing inward
+        e.rotation = {0.0f, a + core::coords::PI, 0.0f};   // facing inward
         e.factionId = 14;       // hostile
         e.respawnSec = 240;
         e.wanderRadius = 3.0f;
@@ -235,6 +174,8 @@ WoweeSpawns WoweeSpawnsLoader::makeVillage(const std::string& catalogName) {
     // 6 friendly NPCs (different roles) spread over a ~30 m
     // square plus 2 signpost game objects + 4 tree doodads.
     struct Npc { float x; float z; uint32_t id; const char* label; };
+    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
+    // columns are its field names, with the struct in view directly above.
     Npc npcs[6] = {
         {  0.0f,   0.0f, 4001, "innkeeper" },
         { 12.0f,  -5.0f, 4002, "smith" },
@@ -243,6 +184,7 @@ WoweeSpawns WoweeSpawnsLoader::makeVillage(const std::string& catalogName) {
         { -8.0f,  -7.0f, 4005, "guard captain" },
         { 15.0f,   3.0f, 4006, "stable master" },
     };
+    // NOLINTEND(modernize-use-designated-initializers)
     for (const auto& n : npcs) {
         WoweeSpawns::Entry e;
         e.kind = WoweeSpawns::Creature;
@@ -265,10 +207,13 @@ WoweeSpawns WoweeSpawnsLoader::makeVillage(const std::string& catalogName) {
         c.entries.push_back(e);
     }
     struct Tree { float x; float z; };
+    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
+    // columns are its field names, with the struct in view directly above.
     Tree trees[4] = {
         { -18.0f, -12.0f }, { 18.0f, -12.0f },
         { -18.0f,  12.0f }, { 18.0f,  12.0f },
     };
+    // NOLINTEND(modernize-use-designated-initializers)
     for (const auto& t : trees) {
         WoweeSpawns::Entry e;
         e.kind = WoweeSpawns::Doodad;

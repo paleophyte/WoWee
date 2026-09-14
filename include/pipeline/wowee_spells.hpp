@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Spell Catalog (.wspl) — novel replacement for
+// Wowee Open Spell Catalog (.wspl) - novel replacement for
 // Blizzard's Spell.dbc + SpellEffect.dbc + the AzerothCore-
 // style spell_dbc / spell_proc tables. The 20th open format
 // added to the editor.
@@ -116,10 +116,10 @@ struct WoweeSpell {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    // Lookup by spellId — nullptr if not present.
-    const Entry* findById(uint32_t spellId) const;
+    // Lookup by spellId - nullptr if not present.
+    [[nodiscard]] const Entry* findById(uint32_t spellId) const;
 
     static const char* schoolName(uint8_t s);
     static const char* targetTypeName(uint8_t t);
@@ -135,12 +135,12 @@ public:
 
     // Preset emitters used by --gen-spells* variants.
     //
-    //   makeStarter — 4 demo spells covering damage / heal /
+    //   makeStarter - 4 demo spells covering damage / heal /
     //                  buff / teleport effect kinds.
-    //   makeMage    — frost bolt + fireball + arcane intellect
-    //                  + blink — classic mage starter rotation.
-    //   makeWarrior — mortal strike + shield bash + battle shout
-    //                  + heroic strike — classic warrior toolkit.
+    //   makeMage    - frost bolt + fireball + arcane intellect
+    //                  + blink - classic mage starter rotation.
+    //   makeWarrior - mortal strike + shield bash + battle shout
+    //                  + heroic strike - classic warrior toolkit.
     static WoweeSpell makeStarter(const std::string& catalogName);
     static WoweeSpell makeMage(const std::string& catalogName);
     static WoweeSpell makeWarrior(const std::string& catalogName);

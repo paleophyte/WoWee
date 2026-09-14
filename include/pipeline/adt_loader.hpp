@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -23,8 +24,8 @@ struct HeightMap {
     std::array<float, 145> heights;  // 9x9 outer + 8x8 inner vertices
     bool loaded = false;
 
-    float getHeight(int x, int y) const;
-    bool isLoaded() const { return loaded; }
+    [[nodiscard]] float getHeight(int x, int y) const;
+    [[nodiscard]] bool isLoaded() const { return loaded; }
 };
 
 /**
@@ -36,8 +37,8 @@ struct TextureLayer {
     uint32_t offsetMCAL;     // Offset to alpha map in MCAL chunk
     uint32_t effectId;       // Effect ID (optional)
 
-    bool useAlpha() const { return (flags & 0x100) != 0; }
-    bool compressedAlpha() const { return (flags & 0x200) != 0; }
+    [[nodiscard]] bool useAlpha() const { return (flags & 0x100) != 0; }
+    [[nodiscard]] bool compressedAlpha() const { return (flags & 0x200) != 0; }
 };
 
 /**
@@ -49,6 +50,12 @@ struct MapChunk {
     uint32_t indexY = 0;
     uint32_t areaId = 0;     // AreaTable ID for this precise terrain chunk
     uint16_t holes = 0;      // 4x4 bitmask for terrain holes (cave entrances, etc.)
+    uint64_t noEffectDoodad = 0;  // 8x8 quad bitmask: 1 = no ground effect doodads
+    // 2 bits per quad of the 8x8 grid: which of the four texture layers this
+    // quad takes its ground effect from. A quad whose dominant paint is dirt
+    // points at the dirt layer, and grows what dirt grows - nothing - even
+    // where a grassy layer's alpha bleeds a few faint texels across it.
+    std::array<uint8_t, 16> doodadMapping{};
     float position[3] = {};  // World position (X, Y, Z)
 
     HeightMap heightMap;
@@ -58,15 +65,31 @@ struct MapChunk {
     // Normals (compressed)
     std::array<int8_t, 145 * 3> normals;  // X, Y, Z per vertex
 
-    bool hasHeightMap() const { return heightMap.isLoaded(); }
-    bool hasLayers() const { return !layers.empty(); }
+    [[nodiscard]] bool hasHeightMap() const { return heightMap.isLoaded(); }
+    [[nodiscard]] bool hasLayers() const { return !layers.empty(); }
 
     // Check if a quad has a hole (y and x are quad indices 0-7)
-    bool isHole(int y, int x) const {
+    [[nodiscard]] bool isHole(int y, int x) const {
         int column = y / 2;
         int row = x / 2;
         int bit = 1 << (column * 4 + row);
         return (bit & holes) != 0;
+    }
+
+    // Whether the map forbids ground effect doodads on a quad (indices 0-7).
+    // This is how the data keeps clutter off tilled fields, building
+    // footprints and interior floors: the ground there is often painted with
+    // a texture whose effect grows, and only this mask says not to.
+    // Bit order matches isHole's: y-major, x fastest.
+    [[nodiscard]] bool isEffectDisabled(int y, int x) const {
+        return (noEffectDoodad >> (y * 8 + x)) & 1u;
+    }
+
+    // Which layer (0-3) a quad takes its ground effect from. Same y-major
+    // order as the masks above, two bits per quad.
+    [[nodiscard]] uint32_t effectLayerFor(int y, int x) const {
+        const int quad = y * 8 + x;
+        return (doodadMapping[quad / 4] >> ((quad % 4) * 2)) & 3u;
     }
 };
 
@@ -135,16 +158,16 @@ struct ADTTerrain {
 
     struct ChunkWater {
         std::vector<WaterLayer> layers;
-        bool hasWater() const { return !layers.empty(); }
+        [[nodiscard]] bool hasWater() const { return !layers.empty(); }
     };
 
     std::array<ChunkWater, 256> waterData;  // Water for each chunk
 
     MapChunk& getChunk(int x, int y) { return chunks[y * 16 + x]; }
-    const MapChunk& getChunk(int x, int y) const { return chunks[y * 16 + x]; }
+    [[nodiscard]] const MapChunk& getChunk(int x, int y) const { return chunks[y * 16 + x]; }
 
-    bool isLoaded() const { return loaded; }
-    size_t getTextureCount() const { return textures.size(); }
+    [[nodiscard]] bool isLoaded() const { return loaded; }
+    [[nodiscard]] size_t getTextureCount() const { return textures.size(); }
 };
 
 /**
@@ -191,25 +214,25 @@ private:
         uint32_t size;
     };
 
-    static bool readChunkHeader(const uint8_t* data, size_t offset, size_t dataSize, ChunkHeader& header);
-    static uint32_t readUInt32(const uint8_t* data, size_t offset);
-    static uint16_t readUInt16(const uint8_t* data, size_t offset);
-    static float readFloat(const uint8_t* data, size_t offset);
+    static bool readChunkHeader(std::span<const uint8_t> data, size_t offset, ChunkHeader& header);
+    static uint32_t readUInt32(std::span<const uint8_t> data, size_t offset);
+    static uint16_t readUInt16(std::span<const uint8_t> data, size_t offset);
+    static float readFloat(std::span<const uint8_t> data, size_t offset);
 
-    static void parseMVER(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMTEX(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMMDX(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMWMO(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMDDF(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMODF(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMCNK(const uint8_t* data, size_t size, int chunkIndex, ADTTerrain& terrain);
+    static void parseMVER(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMTEX(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMMDX(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMWMO(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMDDF(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMODF(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMCNK(std::span<const uint8_t> data, int chunkIndex, ADTTerrain& terrain);
 
-    static void parseMCVT(const uint8_t* data, size_t size, MapChunk& chunk);
-    static void parseMCNR(const uint8_t* data, size_t size, MapChunk& chunk);
-    static void parseMCLY(const uint8_t* data, size_t size, MapChunk& chunk);
-    static void parseMCAL(const uint8_t* data, size_t size, MapChunk& chunk);
-    static void parseMH2O(const uint8_t* data, size_t size, ADTTerrain& terrain);
-    static void parseMCLQ(const uint8_t* data, size_t size, int chunkIndex,
+    static void parseMCVT(std::span<const uint8_t> data, MapChunk& chunk);
+    static void parseMCNR(std::span<const uint8_t> data, MapChunk& chunk);
+    static void parseMCLY(std::span<const uint8_t> data, MapChunk& chunk);
+    static void parseMCAL(std::span<const uint8_t> data, MapChunk& chunk);
+    static void parseMH2O(std::span<const uint8_t> data, ADTTerrain& terrain);
+    static void parseMCLQ(std::span<const uint8_t> data, int chunkIndex,
                           uint32_t mcnkFlags, ADTTerrain& terrain);
 };
 

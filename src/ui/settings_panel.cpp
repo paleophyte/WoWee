@@ -1,22 +1,37 @@
 // ============================================================
-// SettingsPanel — extracted from GameScreen
+// SettingsPanel - extracted from GameScreen
 // Owns all settings UI rendering, settings state, and
 // graphics preset logic.
 // ============================================================
+#include "addons/addon_lua_snippets.hpp"
+#include "ui/graphics_choices.hpp"
+#include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
+#include "addons/addon_manager.hpp"
+#include "ui/settings_schema.hpp"
+#include "addons/lua_api_registrations.hpp"
+#include "ui/display_modes.hpp"
 #include "ui/inventory_screen.hpp"
 #include "ui/chat_panel.hpp"
+#include "ui/chat/chat_settings.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "core/application.hpp"
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
 #include "core/version.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/lens_flare.hpp"
 #include "rendering/post_process_pipeline.hpp"
+#include "rendering/lighting_manager.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/terrain_manager.hpp"
+// The four the moved graphics settings reach into: doodads and particles,
+// the weather, and the sampler the texture filtering level sets.
+#include "rendering/m2_renderer.hpp"
+#include "rendering/weather.hpp"
+#include "rendering/vk_context.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/character_renderer.hpp"
 #include "game/zone_manager.hpp"
@@ -46,393 +61,120 @@
 
 namespace wowee { namespace ui {
 
-void SettingsPanel::renderSettingsInterfaceTab(std::function<void()> saveCallback) {
-ImGui::Spacing();
-ImGui::BeginChild("InterfaceSettings", ImVec2(0, -1), true);
-
-ImGui::SeparatorText("Window UI");
-ImGui::Spacing();
-ImGui::SetNextItemWidth(200.0f);
-ImGui::SliderFloat("Window UI Scale", &pendingWindowUiScale, 0.75f, 1.5f, "%.2fx");
-if (ImGui::IsItemActive()) {
-    // Keep the window and slider stationary while the pointer is dragging.
-    windowUiScaleEditing_ = true;
-}
-if (ImGui::IsItemDeactivatedAfterEdit()) {
-    windowUiScaleEditing_ = false;
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(fonts, controls, and spacing)");
-ImGui::Spacing();
-
-ImGui::SeparatorText("Buff Bar");
-ImGui::Spacing();
-ImGui::SetNextItemWidth(200.0f);
-if (ImGui::SliderFloat("Buff Bar Scale", &pendingBuffBarScale, 0.75f, 1.5f, "%.2fx")) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(on top of automatic resolution scaling)");
-ImGui::Spacing();
-
-ImGui::SeparatorText("Action Bars");
-ImGui::Spacing();
-ImGui::SetNextItemWidth(200.0f);
-if (ImGui::SliderFloat("Action Bar Scale", &pendingActionBarScale, 0.5f, 1.5f, "%.2fx")) {
-    saveCallback();
-}
-ImGui::Spacing();
-
-if (ImGui::Checkbox("Show Bottom Left Bar", &pendingShowActionBar2)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(client action page 6)");
-
-if (pendingShowActionBar2) {
+// The interface tab: the client's own windows, its bars, and what it draws
+// over the world.
+//
+// Three schema categories drawn in order, and one button. Every control here
+// used to be written out - a slider, an apply, a saveCallback and a greyed
+// note beside it, sixty lines of them - with the note saying something the
+// options panel on the other side of the bridge said differently or not at
+// all. Both windows read the same rows now.
+void SettingsPanel::renderSettingsInterfaceTab(const std::function<void()>& saveCallback) {
     ImGui::Spacing();
-    ImGui::TextUnformatted("Bottom Left Bar Position Offset");
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::SliderFloat("Horizontal##bar2x", &pendingActionBar2OffsetX, -600.0f, 600.0f, "%.0f px")) {
-        saveCallback();
-    }
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::SliderFloat("Vertical##bar2y", &pendingActionBar2OffsetY, -400.0f, 400.0f, "%.0f px")) {
-        saveCallback();
-    }
-    if (ImGui::Button("Reset Position##bar2")) {
+    ImGui::BeginChild("InterfaceSettings", ImVec2(0, -1), true);
+
+    ImGui::SeparatorText("Interface");
+    drawSchemaCategory("Interface", saveCallback);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Action Bars");
+    drawSchemaCategory("Action Bars", saveCallback);
+    // Not a setting: the two offsets are, and this is the way back to where
+    // they started without dragging both sliders to zero by eye.
+    if (ImGui::Button("Reset Bottom Left Position")) {
         pendingActionBar2OffsetX = 0.0f;
         pendingActionBar2OffsetY = 0.0f;
         saveCallback();
     }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("HUD");
+    drawSchemaCategory("HUD", saveCallback);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Names");
+    drawSchemaCategory("Names", saveCallback);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Combat");
+    drawSchemaCategory("Combat", saveCallback);
+
+    ImGui::EndChild();
 }
 
-ImGui::Spacing();
-if (ImGui::Checkbox("Show Right Side Bar", &pendingShowRightBar)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(client action page 3)");
-if (pendingShowRightBar) {
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::SliderFloat("Vertical Offset##rbar", &pendingRightBarOffsetY, -400.0f, 400.0f, "%.0f px")) {
-        saveCallback();
-    }
-}
-
-ImGui::Spacing();
-if (ImGui::Checkbox("Show Left Side Bar", &pendingShowLeftBar)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(client action page 4)");
-if (pendingShowLeftBar) {
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::SliderFloat("Vertical Offset##lbar", &pendingLeftBarOffsetY, -400.0f, 400.0f, "%.0f px")) {
-        saveCallback();
-    }
-}
-
-ImGui::Spacing();
-if (ImGui::Checkbox("Show Micro Menu Buttons", &pendingShowMicroMenu)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(bottom-left window shortcuts)");
-
-ImGui::Spacing();
-ImGui::SeparatorText("Nameplates");
-ImGui::Spacing();
-ImGui::SetNextItemWidth(200.0f);
-if (ImGui::SliderFloat("Nameplate Scale", &nameplateScale_, 0.5f, 2.0f, "%.2fx")) {
-    saveCallback();
-}
-
-ImGui::Spacing();
-ImGui::SeparatorText("Network");
-ImGui::Spacing();
-if (ImGui::Checkbox("Show Latency Meter", &pendingShowLatencyMeter)) {
-    showLatencyMeter_ = pendingShowLatencyMeter;
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(ms indicator near minimap)");
-
-if (ImGui::Checkbox("Show DPS/HPS Meter", &showDPSMeter_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(damage/healing per second above action bar)");
-
-if (ImGui::Checkbox("Show Cooldown Tracker", &showCooldownTracker_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(active spell cooldowns near action bar)");
-
-if (ImGui::Checkbox("Show Rare Tracker", &showRareTracker_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(mark nearby spawned rares on the world map and minimap)");
-
-if (ImGui::Checkbox("Show Chest Tracker", &showChestTracker_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(mark nearby spawned loot chests on the world map and minimap)");
-
-ImGui::Spacing();
-ImGui::SeparatorText("Screen Effects");
-ImGui::Spacing();
-if (ImGui::Checkbox("Damage Flash", &damageFlashEnabled_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(red vignette on taking damage)");
-
-if (ImGui::Checkbox("Low Health Vignette", &lowHealthVignetteEnabled_)) {
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(pulsing red edges below 20%% HP)");
-
-ImGui::EndChild();
-}
-
-void SettingsPanel::renderSettingsGameplayTab(InventoryScreen& inventoryScreen,
-                                                  std::function<void()> saveCallback) {
+// The gameplay tab: the camera, the minimap, and what the client does for you
+// at a corpse or a vendor.
+//
+// The mouse-look speed is drawn from the schema like the rest even though the
+// game's own Interface panel drives it too - it is a control this window has
+// always had, and both write the same value through the same setter, so they
+// cannot disagree.
+void SettingsPanel::renderSettingsGameplayTab(const std::function<void()>& saveCallback) {
     auto* renderer = services_.renderer;
-ImGui::Spacing();
-ImGui::BeginChild("GameplaySettings", ImVec2(0, -1), true);
+    ImGui::Spacing();
+    ImGui::BeginChild("GameplaySettings", ImVec2(0, -1), true);
 
-ImGui::Text("Controls");
-ImGui::Separator();
-if (ImGui::SliderFloat("Mouse Sensitivity", &pendingMouseSensitivity, 0.05f, 1.0f, "%.2f")) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setMouseSensitivity(pendingMouseSensitivity);
-        }
+    ImGui::SeparatorText("Camera");
+    ImGui::SetNextItemWidth(200.0f);
+    if (ImGui::SliderFloat("Mouse Sensitivity", &pendingMouseSensitivity, 0.05f, 1.0f, "%.2f")) {
+        applySettingSideEffects("mousespeed");
+        saveCallback();
     }
-    saveCallback();
-}
-if (ImGui::Checkbox("Invert Mouse", &pendingInvertMouse)) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setInvertMouse(pendingInvertMouse);
-        }
-    }
-    saveCallback();
-}
-if (ImGui::Checkbox("Extended Camera Zoom", &pendingExtendedZoom)) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setExtendedZoom(pendingExtendedZoom);
-        }
-    }
-    saveCallback();
-}
-if (ImGui::SliderFloat("Camera Stiffness", &pendingCameraStiffness, 5.0f, 100.0f, "%.0f")) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
-        }
-    }
-    saveCallback();
-}
-ImGui::SetItemTooltip("Higher = tighter camera with less sway. Default: 30");
-if (ImGui::Checkbox("Smooth Camera Follow", &pendingSmoothCameraFollow)) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
-        }
-    }
-    saveCallback();
-}
-ImGui::SetItemTooltip("Camera keeps drifting toward its position even while turning,\n"
-                      "for a floaty, slightly detached follow. Off = turning moves the\n"
-                      "camera 1:1 with your input.");
-if (ImGui::SliderFloat("Camera Pivot Height", &pendingPivotHeight, 0.0f, 3.0f, "%.1f")) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setPivotHeight(pendingPivotHeight);
-        }
-    }
-    saveCallback();
-}
-ImGui::SetItemTooltip("Height of camera orbit point above feet. Lower = less detached feel. Default: 1.8");
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Allow the camera to zoom out further than normal");
+    drawSchemaCategory("Camera", saveCallback);
 
-if (ImGui::Checkbox("Idle Camera Orbit", &pendingIdleCameraOrbit)) {
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setIdleOrbitEnabled(pendingIdleCameraOrbit);
+    ImGui::Spacing();
+    ImGui::SeparatorText("Minimap");
+    drawSchemaCategory("Minimap", saveCallback);
+    // Not settings: the zoom is the minimap's own state, stepped rather than
+    // chosen, and there is no value to store for it.
+    ImGui::Text("Zoom:");
+    ImGui::SameLine();
+    if (ImGui::Button("  -  ")) {
+        if (renderer) {
+            if (auto* minimap = renderer->getMinimap()) { minimap->zoomOut(); saveCallback(); }
         }
     }
-    saveCallback();
+    ImGui::SameLine();
+    if (ImGui::Button("  +  ")) {
+        if (renderer) {
+            if (auto* minimap = renderer->getMinimap()) { minimap->zoomIn(); saveCallback(); }
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Gameplay");
+    drawSchemaCategory("Gameplay", saveCallback);
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Chat");
+    drawSchemaCategory("Chat", saveCallback);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
+        for (const char* category : {"Camera", "Interface", "Minimap",
+                                     "Action Bars", "Combat & HUD",
+                                     "Gameplay", "Chat"}) {
+            restoreSchemaDefaults(category);
+        }
+        // Two the schema cannot hold. Mouse look speed belongs to the game's
+        // own Interface panel, and the bag scale's default depends on the
+        // display it is being shown on - a constant would make the bags small
+        // on a large screen, which is what the recommendation exists to avoid.
+        pendingMouseSensitivity = 0.2f;
+        applySettingSideEffects("mousespeed");
+        pendingBagScale =
+            recommendedPixelScale(ImGui::GetIO().DisplaySize.y, 0.75f, 1.5f);
+        applySettingSideEffects("bagscale");
+        saveCallback();
+    }
+
+    ImGui::EndChild();
 }
 
-if (ImGui::SliderFloat("Field of View", &pendingFov, 45.0f, 110.0f, "%.0f°")) {
-    if (renderer) {
-        if (auto* camera = renderer->getCamera()) {
-            camera->setFov(pendingFov);
-        }
-    }
-    saveCallback();
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Camera field of view in degrees (default: 70)");
-
-ImGui::Spacing();
-ImGui::Spacing();
-
-ImGui::Text("Interface");
-ImGui::Separator();
-if (ImGui::SliderInt("UI Opacity", &pendingUiOpacity, 20, 100, "%d%%")) {
-    uiOpacity_ = static_cast<float>(pendingUiOpacity) / 100.0f;
-    saveCallback();
-}
-if (ImGui::Checkbox("Rotate Minimap", &pendingMinimapRotate)) {
-    // Force north-up minimap.
-    minimapRotate_ = false;
-    pendingMinimapRotate = false;
-    if (renderer) {
-        if (auto* minimap = renderer->getMinimap()) {
-            minimap->setRotateWithCamera(false);
-        }
-    }
-    saveCallback();
-}
-if (ImGui::Checkbox("Square Minimap", &pendingMinimapSquare)) {
-    minimapSquare_ = pendingMinimapSquare;
-    if (renderer) {
-        if (auto* minimap = renderer->getMinimap()) {
-            minimap->setSquareShape(minimapSquare_);
-        }
-    }
-    saveCallback();
-}
-if (ImGui::Checkbox("Show Nearby NPC Dots", &pendingMinimapNpcDots)) {
-    minimapNpcDots_ = pendingMinimapNpcDots;
-    saveCallback();
-}
-if (ImGui::Checkbox("Show Minimap Clock", &pendingShowMinimapClock)) {
-    showMinimapClock_ = pendingShowMinimapClock;
-    saveCallback();
-}
-if (ImGui::Checkbox("Show Minimap Coordinates", &pendingShowMinimapCoordinates)) {
-    showMinimapCoordinates_ = pendingShowMinimapCoordinates;
-    saveCallback();
-}
-// Zoom controls
-ImGui::Text("Minimap Zoom:");
-ImGui::SameLine();
-if (ImGui::Button("  -  ")) {
-    if (renderer) {
-        if (auto* minimap = renderer->getMinimap()) {
-            minimap->zoomOut();
-            saveCallback();
-        }
-    }
-}
-ImGui::SameLine();
-if (ImGui::Button("  +  ")) {
-    if (renderer) {
-        if (auto* minimap = renderer->getMinimap()) {
-            minimap->zoomIn();
-            saveCallback();
-        }
-    }
-}
-
-ImGui::Spacing();
-ImGui::Text("Loot");
-ImGui::Separator();
-if (ImGui::Checkbox("Auto Loot", &pendingAutoLoot)) {
-    saveCallback();  // per-frame sync applies pendingAutoLoot to gameHandler
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Automatically pick up all items when looting");
-if (ImGui::Checkbox("Auto Sell Greys", &pendingAutoSellGrey)) {
-    saveCallback();
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Automatically sell all grey (poor quality) items when opening a vendor");
-if (ImGui::Checkbox("Auto Repair", &pendingAutoRepair)) {
-    saveCallback();
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Automatically repair all damaged equipment when opening an armorer vendor");
-
-ImGui::Spacing();
-ImGui::Text("Bags");
-ImGui::Separator();
-ImGui::SetNextItemWidth(200.0f);
-if (ImGui::SliderFloat("Bag & Window Scale", &pendingBagScale, 0.75f, 1.5f, "%.2fx")) {
-    inventoryScreen.setBagScale(pendingBagScale);
-    saveCallback();
-}
-ImGui::SameLine();
-ImGui::TextDisabled("(high-resolution default is larger)");
-if (ImGui::Checkbox("Separate Bag Windows", &pendingSeparateBags)) {
-    inventoryScreen.setSeparateBags(pendingSeparateBags);
-    saveCallback();
-}
-if (ImGui::Checkbox("Show Key Ring", &pendingShowKeyring)) {
-    inventoryScreen.setShowKeyring(pendingShowKeyring);
-    saveCallback();
-}
-
-ImGui::Spacing();
-ImGui::Separator();
-ImGui::Spacing();
-
-if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
-    pendingMouseSensitivity = 0.2f;
-    pendingInvertMouse = false;
-    pendingExtendedZoom = false;
-    pendingSmoothCameraFollow = false;
-    pendingUiOpacity = 65;
-    pendingMinimapRotate = false;
-    pendingMinimapSquare = false;
-    pendingMinimapNpcDots = false;
-    pendingShowMinimapClock = false;
-    pendingShowMinimapCoordinates = false;
-    pendingSeparateBags = true;
-    inventoryScreen.setSeparateBags(true);
-    pendingShowKeyring = true;
-    inventoryScreen.setShowKeyring(true);
-    pendingBagScale = InventoryScreen::recommendedBagScale(ImGui::GetIO().DisplaySize.y);
-    inventoryScreen.setBagScale(pendingBagScale);
-    pendingShowMicroMenu = false;
-    uiOpacity_ = 0.65f;
-    minimapRotate_ = false;
-    minimapSquare_ = false;
-    minimapNpcDots_ = false;
-    showMinimapClock_ = false;
-    showMinimapCoordinates_ = false;
-    if (renderer) {
-        if (auto* cameraController = renderer->getCameraController()) {
-            cameraController->setMouseSensitivity(pendingMouseSensitivity);
-            cameraController->setInvertMouse(pendingInvertMouse);
-            cameraController->setExtendedZoom(pendingExtendedZoom);
-            cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
-        }
-        if (auto* minimap = renderer->getMinimap()) {
-            minimap->setRotateWithCamera(minimapRotate_);
-            minimap->setSquareShape(minimapSquare_);
-        }
-    }
-    saveCallback();
-}
-
-ImGui::EndChild();
-
-}
-
-void SettingsPanel::renderSettingsControlsTab(std::function<void()> saveCallback) {
+void SettingsPanel::renderSettingsControlsTab(const std::function<void()>& saveCallback) {
 ImGui::Spacing();
 
 ImGui::Text("Keybindings");
@@ -531,134 +273,26 @@ if (ImGui::Button("Reset to Defaults", ImVec2(-1, 0))) {
 }
 
 void SettingsPanel::renderSettingsAudioTab(std::function<void()> saveCallback) {
-    auto* renderer = services_.renderer;
 ImGui::Spacing();
 ImGui::BeginChild("AudioSettings", ImVec2(0, -1), true);
 
-// Helper lambda to apply audio settings
-auto applyAudioSettings = [&]() {
-    applyAudioVolumes(services_.audioCoordinator);
-    saveCallback();
-};
-
-ImGui::Text("Master Volume");
-if (ImGui::SliderInt("##MasterVolume", &pendingMasterVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::Separator();
-
-if (ImGui::Checkbox("Enable WoWee Music", &pendingUseOriginalSoundtrack)) {
-    if (renderer) {
-        if (auto* zm = renderer->getZoneManager()) {
-            zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
-            if (!pendingUseOriginalSoundtrack) {
-                if (auto* ac = renderer->getAudioCoordinator()) {
-                    ac->onOriginalSoundtrackDisabled(zm);
-                }
-            }
-        }
-    }
-    saveCallback();
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Include WoWee music tracks in zone music rotation");
-ImGui::Separator();
-
-ImGui::Text("Music");
-if (ImGui::SliderInt("##MusicVolume", &pendingMusicVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
+// Mute, master volume and the effects scale were written out here and driven
+// by the game's own Sound panel as well - one value with two controls, each
+// describing it differently. They are schema rows now, like everything else
+// on this tab, so both surfaces read the one description.
+drawSchemaCategory("Sound", saveCallback);
 
 ImGui::Spacing();
-ImGui::Text("Ambient Sounds");
-if (ImGui::SliderInt("##AmbientVolume", &pendingAmbientVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Weather, zones, cities, emitters");
-
-ImGui::Spacing();
-ImGui::Text("Capital City Bells");
-if (ImGui::SliderInt("##BellVolume", &pendingBellVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-
-ImGui::Spacing();
-ImGui::Text("UI Sounds");
-if (ImGui::SliderInt("##UiVolume", &pendingUiVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Buttons, loot, quest complete");
-
-ImGui::Spacing();
-ImGui::Text("Combat Sounds");
-if (ImGui::SliderInt("##CombatVolume", &pendingCombatVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Weapon swings, impacts, grunts");
-
-ImGui::Spacing();
-ImGui::Text("Spell Sounds");
-if (ImGui::SliderInt("##SpellVolume", &pendingSpellVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Magic casting and impacts");
-
-ImGui::Spacing();
-ImGui::Text("Movement Sounds");
-if (ImGui::SliderInt("##MovementVolume", &pendingMovementVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Water splashes, jump/land");
-
-ImGui::Spacing();
-ImGui::Text("Footsteps");
-if (ImGui::SliderInt("##FootstepVolume", &pendingFootstepVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-
-ImGui::Spacing();
-ImGui::Text("NPC Voices");
-if (ImGui::SliderInt("##NpcVoiceVolume", &pendingNpcVoiceVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-
-ImGui::Spacing();
-if (ImGui::Checkbox("Character Speech", &pendingCharacterSpeech)) {
-    applyAudioSettings();
-}
-if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Your character speaks error responses (\"I can't do that\", \"Not enough mana\")");
-
-ImGui::Spacing();
-ImGui::Text("Mount Sounds");
-if (ImGui::SliderInt("##MountVolume", &pendingMountVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-
-ImGui::Spacing();
-ImGui::Text("Activity Sounds");
-if (ImGui::SliderInt("##ActivityVolume", &pendingActivityVolume, 0, 100, "%d%%")) {
-    applyAudioSettings();
-}
-ImGui::TextWrapped("Swimming, eating, drinking");
+ImGui::SeparatorText("Sound Effects");
+drawSchemaCategory("Sound Effects", saveCallback);
 
 ImGui::EndChild();
 
 if (ImGui::Button("Restore Audio Defaults", ImVec2(-1, 0))) {
-    pendingMasterVolume = 100;
-    pendingMusicVolume = 30; // default music volume
-    pendingAmbientVolume = 100;
-    pendingBellVolume = 50;
-    pendingUiVolume = 100;
-    pendingCombatVolume = 100;
-    pendingSpellVolume = 100;
-    pendingMovementVolume = 100;
-    pendingFootstepVolume = 100;
-    pendingNpcVoiceVolume = 100;
-    pendingMountVolume = 70;
-    pendingActivityVolume = 100;
-    pendingCharacterSpeech = true;
-    applyAudioSettings();
+    restoreSchemaDefaults("Sound");
+    restoreSchemaDefaults("Sound Effects");
+    applyAudioVolumes(services_.audioCoordinator);
+    saveCallback();
 }
 
 }
@@ -713,28 +347,23 @@ ImGui::TextDisabled("Built with Vulkan, SDL2, and ImGui");
 
 }
 
-void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatPanel& chatPanel,
-                                             std::function<void()> saveCallback) {
+void SettingsPanel::renderSettingsWindow(ChatPanel& chatPanel,
+                                             const std::function<void()>& saveCallback) {
     if (!showSettingsWindow) return;
 
     auto* window = services_.window;
     auto* renderer = services_.renderer;
     if (!window) return;
 
-    static constexpr int kResolutions[][2] = {
-        {1280, 720},
-        {1600, 900},
-        {1920, 1080},
-        {2560, 1440},
-        {3840, 2160},
-    };
-    static constexpr int kResCount = sizeof(kResolutions) / sizeof(kResolutions[0]);
+    // Shared with the interface's own video panel, whose dropdown carries a
+    // position in this list rather than a size - see ui/display_modes.hpp.
+    const auto& kResolutions = kDisplayResolutions;
+    constexpr int kResCount = kNumDisplayResolutions;
     constexpr int kDefaultResW = 1920;
     constexpr int kDefaultResH = 1080;
-    constexpr bool kDefaultFullscreen = false;
-    constexpr bool kDefaultVsync = true;
-    constexpr bool kDefaultShadows = true;
-    constexpr int kDefaultGroundClutterDensity = 100;
+    // Fullscreen, vsync, shadows and ground clutter had constants here too.
+    // All of them are schema rows now, so the schema carries their defaults
+    // and the restore button reads them from there.
 
     int defaultResIndex = 0;
     for (int i = 0; i < kResCount; i++) {
@@ -754,11 +383,11 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             if (auto* cameraController = renderer->getCameraController()) {
                 cameraController->setMouseSensitivity(pendingMouseSensitivity);
                 cameraController->setInvertMouse(pendingInvertMouse);
-                cameraController->setExtendedZoom(pendingExtendedZoom);
                 cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
                 cameraController->setPivotHeight(pendingPivotHeight);
                 cameraController->setIdleOrbitEnabled(pendingIdleCameraOrbit);
                 cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
+                cameraController->setMaxDistanceFactor(cameraDistanceFactor(pendingCameraMaxDistance));
             }
         }
         pendingResIndex = 0;
@@ -790,9 +419,12 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                 minimap->setRotateWithCamera(minimapRotate_);
                 minimap->setSquareShape(minimapSquare_);
             }
-            if (auto* zm = renderer->getZoneManager()) {
-                pendingUseOriginalSoundtrack = zm->getUseOriginalSoundtrack();
-            }
+            // Deliberately NOT read back from the zone manager here. This
+            // block runs when the panel first opens, which can be before the
+            // saved settings have been applied to the runtime - reading the
+            // runtime's default into pending overwrote the player's saved
+            // choice, and the next save wrote the default back to disk. The
+            // file is authoritative; the runtime catches up, not the reverse.
         }
         settingsInit = true;
     }
@@ -827,274 +459,112 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
         // visible regardless of which tab or section is active.
         const float footerHeight = ImGui::GetFrameHeightWithSpacing() + 18.0f;
         ImGui::BeginChild("SettingsTabRegion", ImVec2(0, -footerHeight), false);
+        // A tab named by whoever opened the window wins for exactly one frame.
+        // FrameXML's game menu asks for Video, Audio or Interface depending on
+        // which of its three buttons was pressed.
+        auto tabFlagFor = [this](const char* name) -> ImGuiTabItemFlags {
+            if (requestedTab_.empty() || requestedTab_ != name) return ImGuiTabItemFlags_None;
+            requestedTab_.clear();
+            return ImGuiTabItemFlags_SetSelected;
+        };
         if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_None)) {
             // ============================================================
             // VIDEO TAB
             // ============================================================
-            if (ImGui::BeginTabItem("Video")) {
+            if (ImGui::BeginTabItem("Video", nullptr, tabFlagFor("Video"))) {
                 ImGui::Spacing();
 
-                // Graphics Quality Presets
+                // What follows is three schema categories and the four controls
+                // that are not settings of ours: the resolution and the two the
+                // game's own Video panel drives, and the button that puts them
+                // all back.
+                //
+                // It was written out control by control before - a hundred and
+                // sixty lines of combo, apply, preset-check, saveCallback -
+                // with each dependent control wrapped in an `if` that the
+                // options panels on the other side of the bridge had no way to
+                // know about. Those dependencies are in the schema now, so both
+                // windows grey out the same things at the same times.
+
+                ImGui::SeparatorText("Display");
+                drawSchemaCategory("Display", saveCallback);
                 {
-                    const char* presetLabels[] = { "Custom", "Low", "Medium", "High", "Ultra" };
-                    int presetIdx = static_cast<int>(pendingGraphicsPreset);
-                    if (ImGui::Combo("Quality Preset", &presetIdx, presetLabels, 5)) {
-                        pendingGraphicsPreset = static_cast<GraphicsPreset>(presetIdx);
-                        if (pendingGraphicsPreset != GraphicsPreset::CUSTOM) {
-                            applyGraphicsPreset(pendingGraphicsPreset);
-                            saveCallback();
-                        }
+                    const char* resItems[kResCount];
+                    char resBuf[kResCount][16];
+                    for (int i = 0; i < kResCount; i++) {
+                        snprintf(resBuf[i], sizeof(resBuf[i]), "%dx%d",
+                                 kResolutions[i][0], kResolutions[i][1]);
+                        resItems[i] = resBuf[i];
                     }
-                    ImGui::TextDisabled("Adjust these for custom settings");
+                    if (ImGui::Combo("Resolution", &pendingResIndex, resItems, kResCount)) {
+                        window->applyResolution(kResolutions[pendingResIndex][0],
+                                                kResolutions[pendingResIndex][1]);
+                        // Read back rather than assumed. A window cannot be
+                        // larger than the space the desktop has for it, so a
+                        // choice above that is granted smaller - and storing
+                        // the choice instead left the dropdown naming a size
+                        // the window never had, with every larger entry
+                        // looking like it did nothing.
+                        pendingResolutionWidth = window->getWidth();
+                        pendingResolutionHeight = window->getHeight();
+                        pendingResIndex = ui::displayResolutionIndexFor(
+                            pendingResolutionWidth, pendingResolutionHeight);
+                        saveCallback();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("The size of the window, or of the picture in fullscreen.\n"
+                                          "Applies at once, and settles on the largest size the display\n"
+                                          "has room for. To draw the world smaller than the window\n"
+                                          "and scale it up, use Upscaling below instead.");
+                    }
                 }
 
                 ImGui::Spacing();
-                ImGui::Separator();
+                ImGui::SeparatorText("Graphics");
+                drawSchemaCategory("Graphics", saveCallback);
+                // View distance moved into the schema, so it is drawn by
+                // drawSchemaCategory above rather than here - the options
+                // panels the FrameXML interface builds are generated from the
+                // schema and nothing else, and that is the screen it was
+                // missing from. Ground clutter followed it there.
                 ImGui::Spacing();
+                ImGui::SeparatorText("Detail");
+                drawSchemaCategory("Detail", saveCallback);
 
-                if (ImGui::Checkbox("Fullscreen", &pendingFullscreen)) {
-                    window->setFullscreen(pendingFullscreen);
-                    if (pendingFullscreen) {
-                        window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
-                    }
-                    updateGraphicsPresetFromCurrentSettings();
-                    saveCallback();
-                }
-                if (ImGui::Checkbox("VSync", &pendingVsync)) {
-                    window->setVsync(pendingVsync);
-                    updateGraphicsPresetFromCurrentSettings();
-                    saveCallback();
-                }
-                ImGui::SetNextItemWidth(240.0f);
-                if (ImGui::SliderFloat("View Distance", &pendingViewDistance,
-                                       400.0f, 2400.0f, "%.0f")) {
-                    if (renderer) renderer->setViewDistance(pendingViewDistance);
-                    updateGraphicsPresetFromCurrentSettings();
-                    saveCallback();
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Controls terrain, world-object, and doodad draw distance.");
-                }
-                if (ImGui::Checkbox("Shadows", &pendingShadows)) {
-                    if (renderer) renderer->setShadowsEnabled(pendingShadows);
-                    updateGraphicsPresetFromCurrentSettings();
-                    saveCallback();
-                }
-                if (pendingShadows) {
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(150.0f);
-                    if (ImGui::SliderFloat("Distance##shadow", &pendingShadowDistance, 40.0f, 500.0f, "%.0f")) {
-                        if (renderer) renderer->setShadowDistance(pendingShadowDistance);
-                        updateGraphicsPresetFromCurrentSettings();
-                        saveCallback();
-                    }
-                }
-                {
-                    if (ImGui::Checkbox("Water Refraction", &pendingWaterRefraction)) {
-                        if (renderer) renderer->setWaterRefractionEnabled(pendingWaterRefraction);
-                        updateGraphicsPresetFromCurrentSettings();
-                        saveCallback();
-                    }
-                }
-                {
-                    const char* aaLabels[] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
-                    bool fsr2Active = renderer && renderer->getPostProcessPipeline()->isFSR2Enabled();
-                    if (fsr2Active) {
-                        ImGui::BeginDisabled();
-                        int disabled = 0;
-                        ImGui::Combo("Anti-Aliasing (FSR3)", &disabled, "Off (FSR3 active)\0", 1);
-                        ImGui::EndDisabled();
-                    } else if (ImGui::Combo("Anti-Aliasing", &pendingAntiAliasing, aaLabels, 4)) {
-                        static const VkSampleCountFlagBits aaSamples[] = {
-                            VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_2_BIT,
-                            VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_8_BIT
-                        };
-                        if (renderer) renderer->setMsaaSamples(aaSamples[pendingAntiAliasing]);
-                        updateGraphicsPresetFromCurrentSettings();
-                        saveCallback();
-                    }
-                    // FXAA — post-process, combinable with MSAA or FSR3
-                    {
-                        if (ImGui::Checkbox("FXAA (post-process)", &pendingFXAA)) {
-                            if (renderer) renderer->getPostProcessPipeline()->setFXAAEnabled(pendingFXAA);
-                            updateGraphicsPresetFromCurrentSettings();
-                            saveCallback();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            if (fsr2Active)
-                                ImGui::SetTooltip("FXAA applies spatial anti-aliasing after FSR3 upscaling.\nFSR3 + FXAA is the recommended ultra-quality combination.");
-                            else
-                                ImGui::SetTooltip("FXAA smooths jagged edges as a post-process pass.\nCan be combined with MSAA for extra quality.");
-                        }
-                    }
-                }
-                // AMD FidelityFX is not exposed on macOS/MoltenVK. Keep the
-                // controls and experimental frame-generation path off that
-                // platform rather than advertising unsupported settings.
-#ifndef __APPLE__
-                // FSR Upscaling
-                {
-                    // FSR mode selection: Off, FSR 1.0 (Spatial), FSR 3.x (Temporal)
-                    const char* fsrModeLabels[] = { "Off", "FSR 1.0 (Spatial)", "FSR 3.x (Temporal)" };
-                    int fsrMode = pendingUpscalingMode;
-                    if (ImGui::Combo("Upscaling", &fsrMode, fsrModeLabels, 3)) {
-                        pendingUpscalingMode = fsrMode;
-                        pendingFSR = (fsrMode == 1);
-                        if (renderer) {
-                            renderer->setFSREnabled(fsrMode == 1);
-                            renderer->setFSR2Enabled(fsrMode == 2);
-                        }
-                        saveCallback();
-                    }
-                    if (fsrMode > 0) {
-                        if (fsrMode == 2 && renderer) {
-                            ImGui::TextDisabled("FSR3 backend: %s",
-                                renderer->getPostProcessPipeline()->isAmdFsr2SdkAvailable() ? "AMD FidelityFX SDK" : "Internal fallback");
-                            if (renderer->getPostProcessPipeline()->isAmdFsr3FramegenSdkAvailable()) {
-                                if (ImGui::Checkbox("AMD FSR3 Frame Generation (Experimental)", &pendingAMDFramegen)) {
-                                    renderer->getPostProcessPipeline()->setAmdFsr3FramegenEnabled(pendingAMDFramegen);
-                                    saveCallback();
-                                }
-                                const char* runtimeStatus = "Unavailable";
-                                if (renderer->getPostProcessPipeline()->isAmdFsr3FramegenRuntimeActive()) {
-                                    runtimeStatus = "Active";
-                                } else if (renderer->getPostProcessPipeline()->isAmdFsr3FramegenRuntimeReady()) {
-                                    runtimeStatus = "Ready";
-                                } else {
-                                    runtimeStatus = "Unavailable";
-                                }
-                                ImGui::TextDisabled("Runtime: %s (%s)",
-                                    runtimeStatus, renderer->getPostProcessPipeline()->getAmdFsr3FramegenRuntimePath());
-                                if (!renderer->getPostProcessPipeline()->isAmdFsr3FramegenRuntimeReady()) {
-                                    const std::string& runtimeErr = renderer->getPostProcessPipeline()->getAmdFsr3FramegenRuntimeError();
-                                    if (!runtimeErr.empty()) {
-                                        ImGui::TextDisabled("Reason: %s", runtimeErr.c_str());
-                                    }
-                                }
-                            } else {
-                                ImGui::BeginDisabled();
-                                bool disabledFg = false;
-                                ImGui::Checkbox("AMD FSR3 Frame Generation (Experimental)", &disabledFg);
-                                ImGui::EndDisabled();
-                                ImGui::TextDisabled("Requires FidelityFX-SDK framegen headers.");
-                            }
-                        }
-                        const char* fsrQualityLabels[] = { "Native (100%)", "Ultra Quality (77%)", "Quality (67%)", "Balanced (59%)" };
-                        static constexpr float fsrScaleFactors[] = { 0.77f, 0.67f, 0.59f, 1.00f };
-                        static constexpr int displayToInternal[] = { 3, 0, 1, 2 };
-                        pendingFSRQuality = std::clamp(pendingFSRQuality, 0, 3);
-                        int fsrQualityDisplay = 0;
-                        for (int i = 0; i < 4; ++i) {
-                            if (displayToInternal[i] == pendingFSRQuality) {
-                                fsrQualityDisplay = i;
-                                break;
-                            }
-                        }
-                        if (ImGui::Combo("FSR Quality", &fsrQualityDisplay, fsrQualityLabels, 4)) {
-                            pendingFSRQuality = displayToInternal[fsrQualityDisplay];
-                            if (renderer) renderer->getPostProcessPipeline()->setFSRQuality(fsrScaleFactors[pendingFSRQuality]);
-                            saveCallback();
-                        }
-                        if (ImGui::SliderFloat("FSR Sharpness", &pendingFSRSharpness, 0.0f, 2.0f, "%.1f")) {
-                            if (renderer) renderer->getPostProcessPipeline()->setFSRSharpness(pendingFSRSharpness);
-                            saveCallback();
-                        }
-                        if (fsrMode == 2) {
-                            ImGui::SeparatorText("FSR3 Tuning");
-                            if (ImGui::SliderFloat("Jitter Sign", &pendingFSR2JitterSign, -2.0f, 2.0f, "%.2f")) {
-                                if (renderer) {
-                                    renderer->getPostProcessPipeline()->setFSR2DebugTuning(
-                                        pendingFSR2JitterSign,
-                                        pendingFSR2MotionVecScaleX,
-                                        pendingFSR2MotionVecScaleY);
-                                }
-                                saveCallback();
-                            }
-                            ImGui::TextDisabled("Tip: 0.38 is the current recommended default.");
-                        }
-                    }
-                }
-#endif
-                if (ImGui::SliderInt("Ground Clutter Density", &pendingGroundClutterDensity, 0, 150, "%d%%")) {
-                    if (renderer) {
-                        if (auto* tm = renderer->getTerrainManager()) {
-                            tm->setGroundClutterDensityScale(static_cast<float>(pendingGroundClutterDensity) / 100.0f);
-                        }
-                    }
-                    saveCallback();
-                }
-                if (ImGui::Checkbox("Normal Mapping", &pendingNormalMapping)) {
-                    if (renderer) {
-                        if (auto* wr = renderer->getWMORenderer()) {
-                            wr->setNormalMappingEnabled(pendingNormalMapping);
-                        }
-                        if (auto* cr = renderer->getCharacterRenderer()) {
-                            cr->setNormalMappingEnabled(pendingNormalMapping);
-                        }
-                    }
-                    saveCallback();
-                }
-                if (pendingNormalMapping) {
-                    if (ImGui::SliderFloat("Normal Map Strength", &pendingNormalMapStrength, 0.0f, 2.0f, "%.1f")) {
-                        if (renderer) {
-                            if (auto* wr = renderer->getWMORenderer()) {
-                                wr->setNormalMapStrength(pendingNormalMapStrength);
-                            }
-                            if (auto* cr = renderer->getCharacterRenderer()) {
-                                cr->setNormalMapStrength(pendingNormalMapStrength);
-                            }
-                        }
-                        saveCallback();
-                    }
-                }
-                if (ImGui::Checkbox("Parallax Mapping", &pendingPOM)) {
-                    if (renderer) {
-                        if (auto* wr = renderer->getWMORenderer()) {
-                            wr->setPOMEnabled(pendingPOM);
-                        }
-                        if (auto* cr = renderer->getCharacterRenderer()) {
-                            cr->setPOMEnabled(pendingPOM);
-                        }
-                    }
-                    saveCallback();
-                }
-                if (pendingPOM) {
-                    const char* pomLabels[] = { "Low", "Medium", "High" };
-                    if (ImGui::Combo("Parallax Quality", &pendingPOMQuality, pomLabels, 3)) {
-                        if (renderer) {
-                            if (auto* wr = renderer->getWMORenderer()) {
-                                wr->setPOMQuality(pendingPOMQuality);
-                            }
-                            if (auto* cr = renderer->getCharacterRenderer()) {
-                                cr->setPOMQuality(pendingPOMQuality);
-                            }
-                        }
-                        saveCallback();
-                    }
-                }
-
-                const char* resLabel = "Resolution";
-                const char* resItems[kResCount];
-                char resBuf[kResCount][16];
-                for (int i = 0; i < kResCount; i++) {
-                    snprintf(resBuf[i], sizeof(resBuf[i]), "%dx%d", kResolutions[i][0], kResolutions[i][1]);
-                    resItems[i] = resBuf[i];
-                }
-                if (ImGui::Combo(resLabel, &pendingResIndex, resItems, kResCount)) {
-                    pendingResolutionWidth = kResolutions[pendingResIndex][0];
-                    pendingResolutionHeight = kResolutions[pendingResIndex][1];
-                    window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
-                    saveCallback();
-                }
+                // From the schema, like everything else on this tab: the four
+                // grass controls were drawn by hand here with labels and a lone
+                // tooltip of their own, so the interface's options page and this
+                // window explained the same sliders differently, and three of
+                // them not at all. The schema's own heading follows.
+                ImGui::Spacing();
+                ImGui::SeparatorText("Grass");
+                drawSchemaCategory("Grass", saveCallback);
 
                 ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::SetNextItemWidth(200.0f);
-                if (ImGui::SliderInt("Brightness", &pendingBrightness, 0, 100, "%d%%")) {
-                    if (renderer) renderer->getPostProcessPipeline()->setBrightness(static_cast<float>(pendingBrightness) / 50.0f);
-                    saveCallback();
+                ImGui::SeparatorText("Upscaling");
+                drawSchemaCategory("Upscaling", saveCallback);
+                // Not settings: what the machine can actually do, which is the
+                // half of frame generation no preference can decide.
+                if (pendingUpscalingMode == 2 && renderer) {
+                    auto* post = renderer->getPostProcessPipeline();
+                    ImGui::TextDisabled("FSR3 backend: %s",
+                        post->isAmdFsr2SdkAvailable() ? "AMD FidelityFX SDK"
+                                                      : "Internal fallback");
+                    if (!post->isAmdFsr3FramegenSdkAvailable()) {
+                        ImGui::TextDisabled("Frame generation requires FidelityFX-SDK "
+                                            "framegen headers.");
+                    } else {
+                        const char* runtimeStatus =
+                            post->isAmdFsr3FramegenRuntimeActive()  ? "Active"
+                            : post->isAmdFsr3FramegenRuntimeReady() ? "Ready"
+                                                                    : "Unavailable";
+                        ImGui::TextDisabled("Frame generation runtime: %s (%s)",
+                            runtimeStatus, post->getAmdFsr3FramegenRuntimePath());
+                        const std::string& runtimeErr = post->getAmdFsr3FramegenRuntimeError();
+                        if (!post->isAmdFsr3FramegenRuntimeReady() && !runtimeErr.empty()) {
+                            ImGui::TextDisabled("Reason: %s", runtimeErr.c_str());
+                        }
+                    }
                 }
 
                 ImGui::Spacing();
@@ -1102,60 +572,26 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
                 ImGui::Spacing();
 
                 if (ImGui::Button("Restore Video Defaults", ImVec2(-1, 0))) {
-                    pendingFullscreen = kDefaultFullscreen;
-                    pendingVsync = kDefaultVsync;
-                    pendingShadows = kDefaultShadows;
-                    pendingShadowDistance = 300.0f;
-                    pendingGroundClutterDensity = kDefaultGroundClutterDensity;
-                    pendingAntiAliasing = 0;
-                    pendingNormalMapping = true;
-                    pendingNormalMapStrength = 0.8f;
-                    pendingPOM = true;
-                    pendingPOMQuality = 1;
+                    // Three categories, because the settings window puts on one
+                    // tab what the options panels put on three.
+                    for (const char* category : {"Graphics", "Detail", "Upscaling", "Display"}) {
+                        restoreSchemaDefaults(category);
+                    }
+                    // Only the resolution is outside the schema now: it is the
+                    // window's size rather than a quality setting, and applying
+                    // it goes through the window rather than the renderer.
                     pendingResIndex = defaultResIndex;
                     pendingResolutionWidth = kDefaultResW;
                     pendingResolutionHeight = kDefaultResH;
-                    pendingBrightness = 50;
-                    window->setFullscreen(pendingFullscreen);
-                    window->setVsync(pendingVsync);
                     window->applyResolution(pendingResolutionWidth, pendingResolutionHeight);
-                    if (renderer) renderer->getPostProcessPipeline()->setBrightness(1.0f);
-                    pendingWaterRefraction = false;
-                    if (renderer) {
-                        renderer->setShadowsEnabled(pendingShadows);
-                        renderer->setShadowDistance(pendingShadowDistance);
-                    }
-                    if (renderer) renderer->setWaterRefractionEnabled(pendingWaterRefraction);
-                    if (renderer) renderer->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
-                    if (renderer) {
-                        if (auto* tm = renderer->getTerrainManager()) {
-                            tm->setGroundClutterDensityScale(static_cast<float>(pendingGroundClutterDensity) / 100.0f);
-                        }
-                    }
-                    if (renderer) {
-                        if (auto* wr = renderer->getWMORenderer()) {
-                            wr->setNormalMappingEnabled(pendingNormalMapping);
-                            wr->setNormalMapStrength(pendingNormalMapStrength);
-                            wr->setPOMEnabled(pendingPOM);
-                            wr->setPOMQuality(pendingPOMQuality);
-                        }
-                        if (auto* cr = renderer->getCharacterRenderer()) {
-                            cr->setNormalMappingEnabled(pendingNormalMapping);
-                            cr->setNormalMapStrength(pendingNormalMapStrength);
-                            cr->setPOMEnabled(pendingPOM);
-                            cr->setPOMQuality(pendingPOMQuality);
-                        }
-                    }
+                    updateGraphicsPresetFromCurrentSettings();
                     saveCallback();
                 }
 
                 ImGui::EndTabItem();
             }
 
-            // ============================================================
-            // INTERFACE TAB
-            // ============================================================
-            if (ImGui::BeginTabItem("Interface")) {
+            if (ImGui::BeginTabItem("Interface", nullptr, tabFlagFor("Interface"))) {
                 renderSettingsInterfaceTab(saveCallback);
                 ImGui::EndTabItem();
             }
@@ -1163,7 +599,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             // ============================================================
             // AUDIO TAB
             // ============================================================
-            if (ImGui::BeginTabItem("Audio")) {
+            if (ImGui::BeginTabItem("Audio", nullptr, tabFlagFor("Audio"))) {
                 renderSettingsAudioTab(saveCallback);
                 ImGui::EndTabItem();
             }
@@ -1171,15 +607,15 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             // ============================================================
             // GAMEPLAY TAB
             // ============================================================
-            if (ImGui::BeginTabItem("Gameplay")) {
-                renderSettingsGameplayTab(inventoryScreen, saveCallback);
+            if (ImGui::BeginTabItem("Gameplay", nullptr, tabFlagFor("Gameplay"))) {
+                renderSettingsGameplayTab(saveCallback);
                 ImGui::EndTabItem();
             }
 
             // ============================================================
             // CONTROLS TAB
             // ============================================================
-            if (ImGui::BeginTabItem("Controls")) {
+            if (ImGui::BeginTabItem("Controls", nullptr, tabFlagFor("Controls"))) {
                 renderSettingsControlsTab(saveCallback);
                 ImGui::EndTabItem();
             }
@@ -1187,7 +623,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             // ============================================================
             // CHAT TAB
             // ============================================================
-            if (ImGui::BeginTabItem("Chat")) {
+            if (ImGui::BeginTabItem("Chat", nullptr, tabFlagFor("Chat"))) {
                 chatPanel.renderSettingsTab(saveCallback);
                 ImGui::EndTabItem();
             }
@@ -1195,7 +631,7 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
             // ============================================================
             // ABOUT TAB
             // ============================================================
-            if (ImGui::BeginTabItem("About")) {
+            if (ImGui::BeginTabItem("About", nullptr, tabFlagFor("About"))) {
                 renderSettingsAboutTab();
                 ImGui::EndTabItem();
             }
@@ -1219,10 +655,116 @@ void SettingsPanel::renderSettingsWindow(InventoryScreen& inventoryScreen, ChatP
     ImGui::End();
 }
 
+void SettingsPanel::drawSchemaCategory(const char* category,
+                                       const std::function<void()>& saveCallback) {
+    std::size_t count = 0;
+    const auto* schema = clientSettingsSchema(count);
+    std::string heading;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& d = schema[i];
+        if (std::string(d.category) != category) continue;
+        // A row on the game's own store is the interface's to show; this
+        // window has no CVar to read and is not on screen while it is.
+        if (d.store[0] != '\0') continue;
+        if (d.section[0] != '\0' && d.section != heading) {
+            heading = d.section;
+            ImGui::SeparatorText(d.section);
+        }
+
+        // Read, draw, and write back only if it moved. The value lives in a
+        // field somewhere, but which field is the binding table's business -
+        // this side only ever sees the key.
+        const std::string current = settingValue(d.key);
+        bool changed = false;
+        // Greyed rather than hidden, so the panel keeps its shape and a player
+        // can see both that the setting exists and what it waits on.
+        const bool enabled =
+            settingEnabled(d, [this](const std::string& key) { return settingValue(key); });
+        if (!enabled) ImGui::BeginDisabled();
+        switch (d.kind) {
+            case SettingKind::Bool: {
+                bool v = settingIsOn(current);
+                if (ImGui::Checkbox(d.label, &v)) {
+                    changed = setSettingValue(d.key, v ? "1" : "0");
+                }
+                break;
+            }
+            case SettingKind::Int: {
+                int v = std::atoi(current.c_str());
+                if (ImGui::SliderInt(d.label, &v, static_cast<int>(d.minValue),
+                                     static_cast<int>(d.maxValue))) {
+                    changed = setSettingValue(d.key, std::to_string(v));
+                }
+                break;
+            }
+            case SettingKind::Float: {
+                float v = static_cast<float>(std::atof(current.c_str()));
+                // Whole-number steps read as whole numbers: a shadow distance of
+                // "300.00" yards or a field of view of "70.00" degrees is noise.
+                const char* format = d.step >= 1.0f ? "%.0f" : "%.2f";
+                if (ImGui::SliderFloat(d.label, &v, d.minValue, d.maxValue, format)) {
+                    changed = setSettingValue(d.key, settingNumberText(v));
+                }
+                break;
+            }
+            case SettingKind::Enum: {
+                // The choices are one string separated by bars, because that is
+                // what crosses to Lua; ImGui wants them as an array.
+                std::vector<std::string> labels;
+                std::string choices = d.choices;
+                for (std::size_t at = 0; at != std::string::npos;) {
+                    const std::size_t bar = choices.find('|', at);
+                    labels.push_back(choices.substr(
+                        at, bar == std::string::npos ? bar : bar - at));
+                    at = (bar == std::string::npos) ? bar : bar + 1;
+                }
+                std::vector<const char*> items;
+                items.reserve(labels.size());
+                for (const auto& label : labels) items.push_back(label.c_str());
+                int v = std::atoi(current.c_str());
+                if (ImGui::Combo(d.label, &v, items.data(),
+                                 static_cast<int>(items.size()))) {
+                    changed = setSettingValue(d.key, std::to_string(v));
+                }
+                break;
+            }
+        }
+        // The one setting whose control cannot simply apply as it moves: the
+        // window scale resizes the window the slider is in, so applying it
+        // per frame walks the slider out from under the pointer. The flag is
+        // what applyWindowUiScale waits on, and it is read every frame from
+        // GameScreen rather than called from here.
+        if (std::string(d.key) == "windowuiscale") {
+            if (ImGui::IsItemActive()) windowUiScaleEditing_ = true;
+            if (ImGui::IsItemDeactivatedAfterEdit()) windowUiScaleEditing_ = false;
+        }
+        if (d.tooltip[0] != '\0' && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", d.tooltip);
+        }
+        if (!enabled) ImGui::EndDisabled();
+        if (changed && saveCallback) saveCallback();
+    }
+}
+
+void SettingsPanel::restoreSchemaDefaults(const char* category) {
+    std::size_t count = 0;
+    const auto* schema = clientSettingsSchema(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& d = schema[i];
+        if (category && std::string(d.category) != category) continue;
+        if (d.store[0] != '\0') continue;
+        setSettingValue(d.key, settingNumberText(d.defaultValue));
+    }
+}
+
 void SettingsPanel::applyWindowUiScale() {
     if (!ImGui::GetCurrentContext()) return;
 
-    pendingWindowUiScale = std::clamp(pendingWindowUiScale, 0.75f, 1.5f);
+    // From the row, not from a copy of its numbers: the two drifted once
+    // already and the setting snapped back on the next start.
+    float lo = 0.75f, hi = 3.0f;
+    settingRange("windowuiscale", lo, hi);
+    pendingWindowUiScale = std::clamp(pendingWindowUiScale, lo, hi);
     if (windowUiScaleEditing_) return;
     if (std::abs(appliedWindowUiScale_ - pendingWindowUiScale) < 0.0001f) {
         ImGui::GetIO().FontGlobalScale = pendingWindowUiScale;
@@ -1237,140 +779,94 @@ void SettingsPanel::applyWindowUiScale() {
     appliedWindowUiScale_ = pendingWindowUiScale;
 }
 
-void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
-    auto* renderer = services_.renderer;
+namespace {
 
-    // Define preset values based on quality level
-    switch (preset) {
-        case GraphicsPreset::LOW: {
-            pendingViewDistance = 600.0f;
-            pendingShadows = false;
-            pendingShadowDistance = 100.0f;
-            pendingAntiAliasing = 0;  // Off
-            pendingNormalMapping = false;
-            pendingPOM = false;
-            pendingGroundClutterDensity = 25;
-            if (renderer) {
-                renderer->setViewDistance(pendingViewDistance);
-                renderer->setShadowsEnabled(false);
-                renderer->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
-                if (auto* wr = renderer->getWMORenderer()) {
-                    wr->setNormalMappingEnabled(false);
-                    wr->setPOMEnabled(false);
-                }
-                if (auto* cr = renderer->getCharacterRenderer()) {
-                    cr->setNormalMappingEnabled(false);
-                    cr->setPOMEnabled(false);
-                }
-                if (auto* tm = renderer->getTerrainManager()) {
-                    tm->setGroundClutterDensityScale(0.25f);
-                }
-            }
-            break;
-        }
-        case GraphicsPreset::MEDIUM: {
-            pendingViewDistance = 1000.0f;
-            pendingShadows = true;
-            pendingShadowDistance = 200.0f;
-            pendingAntiAliasing = 1;  // 2x MSAA
-            pendingNormalMapping = true;
-            pendingNormalMapStrength = 0.6f;
-            pendingPOM = true;
-            pendingPOMQuality = 0;  // Low
-            pendingGroundClutterDensity = 60;
-            if (renderer) {
-                renderer->setViewDistance(pendingViewDistance);
-                renderer->setShadowsEnabled(true);
-                renderer->setShadowDistance(200.0f);
-                renderer->setMsaaSamples(VK_SAMPLE_COUNT_2_BIT);
-                if (auto* wr = renderer->getWMORenderer()) {
-                    wr->setNormalMappingEnabled(true);
-                    wr->setNormalMapStrength(0.6f);
-                    wr->setPOMEnabled(true);
-                    wr->setPOMQuality(0);
-                }
-                if (auto* cr = renderer->getCharacterRenderer()) {
-                    cr->setNormalMappingEnabled(true);
-                    cr->setNormalMapStrength(0.6f);
-                    cr->setPOMEnabled(true);
-                    cr->setPOMQuality(0);
-                }
-                if (auto* tm = renderer->getTerrainManager()) {
-                    tm->setGroundClutterDensityScale(0.60f);
-                }
-            }
-            break;
-        }
-        case GraphicsPreset::HIGH: {
-            pendingViewDistance = 1600.0f;
-            pendingShadows = true;
-            pendingShadowDistance = 350.0f;
-            pendingAntiAliasing = 2;  // 4x MSAA
-            pendingNormalMapping = true;
-            pendingNormalMapStrength = 0.8f;
-            pendingPOM = true;
-            pendingPOMQuality = 1;  // Medium
-            pendingGroundClutterDensity = 100;
-            if (renderer) {
-                renderer->setViewDistance(pendingViewDistance);
-                renderer->setShadowsEnabled(true);
-                renderer->setShadowDistance(350.0f);
-                renderer->setMsaaSamples(VK_SAMPLE_COUNT_4_BIT);
-                if (auto* wr = renderer->getWMORenderer()) {
-                    wr->setNormalMappingEnabled(true);
-                    wr->setNormalMapStrength(0.8f);
-                    wr->setPOMEnabled(true);
-                    wr->setPOMQuality(1);
-                }
-                if (auto* cr = renderer->getCharacterRenderer()) {
-                    cr->setNormalMappingEnabled(true);
-                    cr->setNormalMapStrength(0.8f);
-                    cr->setPOMEnabled(true);
-                    cr->setPOMQuality(1);
-                }
-                if (auto* tm = renderer->getTerrainManager()) {
-                    tm->setGroundClutterDensityScale(1.0f);
-                }
-            }
-            break;
-        }
-        case GraphicsPreset::ULTRA: {
-            pendingViewDistance = 2400.0f;
-            pendingShadows = true;
-            pendingShadowDistance = 500.0f;
-            pendingAntiAliasing = 3;  // 8x MSAA
-            pendingFXAA = true;       // FXAA on top of MSAA for maximum smoothness
-            pendingNormalMapping = true;
-            pendingNormalMapStrength = 1.2f;
-            pendingPOM = true;
-            pendingPOMQuality = 2;  // High
-            pendingGroundClutterDensity = 150;
-            if (renderer) {
-                renderer->setViewDistance(pendingViewDistance);
-                renderer->setShadowsEnabled(true);
-                renderer->setShadowDistance(500.0f);
-                renderer->setMsaaSamples(VK_SAMPLE_COUNT_8_BIT);
-                renderer->getPostProcessPipeline()->setFXAAEnabled(true);
-                if (auto* wr = renderer->getWMORenderer()) {
-                    wr->setNormalMappingEnabled(true);
-                    wr->setNormalMapStrength(1.2f);
-                    wr->setPOMEnabled(true);
-                    wr->setPOMQuality(2);
-                }
-                if (auto* cr = renderer->getCharacterRenderer()) {
-                    cr->setNormalMappingEnabled(true);
-                    cr->setNormalMapStrength(1.2f);
-                    cr->setPOMEnabled(true);
-                    cr->setPOMQuality(2);
-                }
-                if (auto* tm = renderer->getTerrainManager()) {
-                    tm->setGroundClutterDensityScale(1.5f);
-                }
-            }
-            break;
-        }
-        default:
-            break;
+
+/// The settings a preset has an opinion about, in the order it sets them.
+constexpr const char* kGraphicsPresetKeys[] = {
+    "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
+    "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
+    "groundclutter",
+    "grassenabled", "grassdensity", "grassheight", "grassdistance",
+};
+
+/// Every graphics setting that has to reach something when it is loaded.
+///
+/// A value read from the config file only lands in a pending field. Until one
+/// of these is applied it is a number the panel displays and nothing else,
+/// which is why the graphics settings saved from the login screen did nothing
+/// until a slider was touched.
+// The cameramaxdistance row stops at 50 yards, which has to be where the
+// camera itself stops; see cameraDistanceFactor in the header.
+static_assert(cameraDistanceFactor(50) - rendering::CameraController::kMaxDistanceFactorLimit < 0.001f &&
+              rendering::CameraController::kMaxDistanceFactorLimit - cameraDistanceFactor(50) < 0.001f,
+              "the cameramaxdistance row's 50 yards is not the camera's own limit");
+
+constexpr const char* kGraphicsApplyKeys[] = {
+    "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
+    "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
+    "groundclutter", "grassenabled", "grassdensity", "grassheight",
+    "grassdistance", "waterrefraction", "upscaling", "fsrquality",
+    "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
+    "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
+    "fogskyblend", "fogstrength", "sharpstars",
+    // Moved off the game's own Effects panel, so this list is now what
+    // applies them at startup; the cvar store used to do it.
+    "groundclutterdistance", "particledensity", "weatherdetail",
+    "environmentdetail", "texturefiltering",
+    // The sound switches off the game's own panel. The stored cvars are
+    // replayed at startup and reach them that way too, but a setting whose
+    // only route in is the cvar behind it is one rename away from silence.
+    "soundinbackground", "enablemusic", "loopmusic", "enableambience",
+    "errorspeech", "enablesoundeffects",
+};
+
+/// Whether a quality preset has an opinion about this setting.
+///
+/// Changing one of these by hand means the settings are no longer that preset,
+/// and the dropdown has to say Custom. Each of the video tab's controls used to
+/// call for that itself, which is why the ones that were never given the call -
+/// and every control on the interface's own options panel - could turn shadows
+/// off under a preset that says they are on.
+bool isGraphicsPresetKey(const std::string& key) {
+    for (const char* k : kGraphicsPresetKeys) {
+        if (key == k) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+void SettingsPanel::applyLoadedSettings() {
+    // Everything the config file just filled in, handed to the thing it
+    // affects. Same route the sliders and the presets take.
+    for (const char* key : kGraphicsApplyKeys) applySettingSideEffects(key);
+}
+
+void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
+    // Custom is not a set of values - it is the name for "these are whatever
+    // you made them", so it changes nothing but the marker.
+    const int index = static_cast<int>(preset) - 1;
+    if (index >= 0 && index < static_cast<int>(std::size(kGraphicsPresets))) {
+        const auto& p = kGraphicsPresets[index];
+        pendingViewDistance      = p.viewDistance;
+        pendingShadows           = p.shadows;
+        pendingShadowDistance    = p.shadowDistance;
+        pendingAntiAliasing      = p.antiAliasing;
+        pendingFXAA              = p.fxaa;
+        pendingNormalMapping     = p.normalMapping;
+        pendingNormalMapStrength = p.normalMapStrength;
+        pendingPOM               = p.parallax;
+        pendingPOMQuality        = p.parallaxQuality;
+        pendingGroundClutterDensity = p.groundClutter;
+        pendingGrassEnabled      = p.grass;
+        pendingGrassDensity      = p.grassDensity;
+        pendingGrassHeight       = p.grassHeight;
+        pendingGrassDistance     = p.grassDistance;
+        // Each one goes to the thing it affects through the one function that
+        // knows where that is, rather than through a second copy of the same
+        // renderer calls written out here.
+        for (const char* key : kGraphicsPresetKeys) applySettingSideEffects(key);
     }
 
     currentGraphicsPreset = preset;
@@ -1378,54 +874,635 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
 }
 
 void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
-    // Check if current settings match any preset, otherwise mark as CUSTOM
-    // This is a simplified check; could be enhanced with more detailed matching
-
-    auto matchesPreset = [this](GraphicsPreset preset) -> bool {
-        switch (preset) {
-            case GraphicsPreset::LOW:
-                return pendingViewDistance >= 580.0f && pendingViewDistance <= 620.0f &&
-                       !pendingShadows && pendingAntiAliasing == 0 && !pendingNormalMapping && !pendingPOM &&
-                       pendingGroundClutterDensity <= 30;
-            case GraphicsPreset::MEDIUM:
-                return pendingViewDistance >= 980.0f && pendingViewDistance <= 1020.0f &&
-                       pendingShadows && pendingShadowDistance >= 180 && pendingShadowDistance <= 220 &&
-                       pendingAntiAliasing == 1 && pendingNormalMapping && pendingPOM &&
-                       pendingGroundClutterDensity >= 50 && pendingGroundClutterDensity <= 70;
-            case GraphicsPreset::HIGH:
-                return pendingViewDistance >= 1580.0f && pendingViewDistance <= 1620.0f &&
-                       pendingShadows && pendingShadowDistance >= 330 && pendingShadowDistance <= 370 &&
-                       pendingAntiAliasing == 2 && pendingNormalMapping && pendingPOM &&
-                       pendingGroundClutterDensity >= 90 && pendingGroundClutterDensity <= 110;
-            case GraphicsPreset::ULTRA:
-                return pendingViewDistance >= 2380.0f && pendingShadows &&
-                       pendingShadowDistance >= 480 && pendingAntiAliasing == 3 &&
-                       pendingFXAA && pendingNormalMapping && pendingPOM && pendingGroundClutterDensity >= 140;
-            default:
-                return false;
+    // A preset is the current one when the settings are what it sets. The
+    // floats are compared with a little room because they arrive off sliders.
+    //
+    // This was a second copy of the table above, written as a range per field
+    // per preset - the same numbers again, plus or minus twenty. A preset whose
+    // values were changed in one place and not the other would have stopped
+    // recognising itself and read as Custom for good.
+    for (int i = 0; i < static_cast<int>(std::size(kGraphicsPresets)); ++i) {
+        const auto& p = kGraphicsPresets[i];
+        const bool matches =
+            std::abs(pendingViewDistance - p.viewDistance) <= 20.0f &&
+            pendingShadows == p.shadows &&
+            // A preset with shadows off says nothing about how far they reach.
+            (!p.shadows || std::abs(pendingShadowDistance - p.shadowDistance) <= 20.0f) &&
+            pendingAntiAliasing == p.antiAliasing &&
+            pendingFXAA == p.fxaa &&
+            pendingNormalMapping == p.normalMapping &&
+            pendingPOM == p.parallax &&
+            std::abs(pendingGroundClutterDensity - p.groundClutter) <= 10 &&
+            pendingGrassEnabled == p.grass &&
+            // As with shadows: a preset that grows no grass says nothing about
+            // how dense, how tall or how far it would have been.
+            (!p.grass || (std::abs(pendingGrassDensity - p.grassDensity) <= 5 &&
+                          std::abs(pendingGrassHeight - p.grassHeight) <= 5 &&
+                          std::abs(pendingGrassDistance - p.grassDistance) <= 10));
+        if (matches) {
+            pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
+            return;
         }
-    };
-
-    // Try to match a preset, otherwise mark as custom
-    if (matchesPreset(GraphicsPreset::LOW)) {
-        pendingGraphicsPreset = GraphicsPreset::LOW;
-    } else if (matchesPreset(GraphicsPreset::MEDIUM)) {
-        pendingGraphicsPreset = GraphicsPreset::MEDIUM;
-    } else if (matchesPreset(GraphicsPreset::HIGH)) {
-        pendingGraphicsPreset = GraphicsPreset::HIGH;
-    } else if (matchesPreset(GraphicsPreset::ULTRA)) {
-        pendingGraphicsPreset = GraphicsPreset::ULTRA;
-    } else {
-        pendingGraphicsPreset = GraphicsPreset::CUSTOM;
     }
+    pendingGraphicsPreset = GraphicsPreset::CUSTOM;
 }
 
 std::string SettingsPanel::getSettingsPath() {
     return core::getConfigRoot() + "/settings.cfg";
 }
 
+
+namespace {
+
+/// Which field a setting key names.
+///
+/// settingValue and setSettingValue used to spell this out separately - one
+/// chain of branches reading the fields, another writing them, and nothing at
+/// all to say when the two stopped agreeing about which key meant which field.
+/// Adding a setting meant remembering both. This is the fact once; both
+/// directions read it.
+///
+/// Exactly one of the three pointers is set.
+///
+/// There was a `fraction` flag here for the two settings that crossed the
+/// bridge as 0-1 while their field held 0-100. Both are schema rows now and
+/// travel in the units their slider declares; the cvar keeps its own through
+/// the scale in kClientCVars, which is the one place that conversion lives.
+struct FieldBinding {
+    const char* key;
+    bool  SettingsPanel::* asBool  = nullptr;
+    int   SettingsPanel::* asInt   = nullptr;
+    float SettingsPanel::* asFloat = nullptr;
+};
+
+constexpr FieldBinding kFieldBindings[] = {
+    // Bound to a Blizzard control as well, through kClientCVars. These are the
+    // six the game's own Video, Sound and Interface panels drive, so they are
+    // not in the schema - but they still have to be readable and writable,
+    // because that is how those panels reach them.
+    {.key = "viewdistance",   .asFloat = &SettingsPanel::pendingViewDistance},
+    {.key = "fogskyblend",    .asFloat = &SettingsPanel::pendingFogSkyBlend},
+    {.key = "fogstrength",    .asFloat = &SettingsPanel::pendingFogStrength},
+    {.key = "mousespeed",     .asFloat = &SettingsPanel::pendingMouseSensitivity},
+    {.key = "minimapclock",   .asBool  = &SettingsPanel::pendingShowMinimapClock},
+    {.key = "friendlyplates", .asBool  = &SettingsPanel::showFriendlyNameplates_},
+    {.key = "enemyplates",    .asBool  = &SettingsPanel::showEnemyNameplates_},
+    {.key = "grassenabled",   .asBool  = &SettingsPanel::pendingGrassEnabled},
+    {.key = "grassdensity",   .asInt   = &SettingsPanel::pendingGrassDensity},
+    {.key = "grassheight",    .asInt   = &SettingsPanel::pendingGrassHeight},
+    {.key = "grassdistance",  .asInt   = &SettingsPanel::pendingGrassDistance},
+    // Not a fraction any more. These two crossed the bridge as 0-1.5 and 0-1
+    // while their fields held 0-150 and 0-100, which was invisible while the
+    // only control for them was drawn here from the field. They are schema
+    // rows now, and a schema row is read and written through the bridge - so
+    // a slider declared 0-150 was showing 0.7 and writing a value the field
+    // then multiplied by a hundred and clamped. The cvar keeps its own units
+    // through the scale in kClientCVars, which is where that conversion
+    // belongs: one place, named, rather than two that have to agree.
+    {.key = "groundclutter",  .asInt   = &SettingsPanel::pendingGroundClutterDensity},
+    {.key = "groundclutterdistance", .asInt = &SettingsPanel::pendingGroundClutterDistance},
+    {.key = "particledensity",   .asInt = &SettingsPanel::pendingParticleDensity},
+    {.key = "weatherdetail",     .asInt = &SettingsPanel::pendingWeatherDetail},
+    {.key = "environmentdetail", .asInt = &SettingsPanel::pendingEnvironmentDetail},
+    {.key = "texturefiltering",  .asInt = &SettingsPanel::pendingTextureFiltering},
+    {.key = "effectsvolume",  .asInt   = &SettingsPanel::pendingEffectsVolume},
+    {.key = "mastervolume",  .asInt  = &SettingsPanel::pendingMasterVolume},
+    {.key = "mutesound",     .asBool = &SettingsPanel::soundMuted_},
+    {.key = "soundinbackground",  .asBool = &SettingsPanel::pendingSoundInBackground},
+    {.key = "enablemusic",        .asBool = &SettingsPanel::pendingEnableMusic},
+    {.key = "loopmusic",          .asBool = &SettingsPanel::pendingLoopMusic},
+    {.key = "enableambience",     .asBool = &SettingsPanel::pendingEnableAmbience},
+    {.key = "errorspeech",        .asBool = &SettingsPanel::pendingErrorSpeech},
+    {.key = "enablesoundeffects", .asBool = &SettingsPanel::pendingEnableSoundEffects},
+
+    // --- Graphics ---
+    {.key = "shadows",           .asBool  = &SettingsPanel::pendingShadows},
+    {.key = "shadowdistance",    .asFloat = &SettingsPanel::pendingShadowDistance},
+    {.key = "waterrefraction",   .asBool  = &SettingsPanel::pendingWaterRefraction},
+    {.key = "antialiasing",      .asInt   = &SettingsPanel::pendingAntiAliasing},
+    {.key = "fxaa",              .asBool  = &SettingsPanel::pendingFXAA},
+    {.key = "normalmapping",     .asBool  = &SettingsPanel::pendingNormalMapping},
+    {.key = "normalmapstrength", .asFloat = &SettingsPanel::pendingNormalMapStrength},
+    {.key = "lensflare",         .asFloat = &SettingsPanel::pendingLensFlare},
+    {.key = "framecap",          .asInt   = &SettingsPanel::pendingFrameCap},
+    {.key = "parallax",          .asBool  = &SettingsPanel::pendingPOM},
+    {.key = "sharpstars",        .asBool  = &SettingsPanel::pendingSharpStars},
+    {.key = "parallaxquality",   .asInt   = &SettingsPanel::pendingPOMQuality},
+
+    // --- Upscaling ---
+    {.key = "upscaling",     .asInt   = &SettingsPanel::pendingUpscalingMode},
+    {.key = "fsrquality",    .asInt   = &SettingsPanel::pendingFSRQuality},
+    {.key = "fsrsharpness",  .asFloat = &SettingsPanel::pendingFSRSharpness},
+    {.key = "framegen",      .asBool  = &SettingsPanel::pendingAMDFramegen},
+    {.key = "fsrjittersign", .asFloat = &SettingsPanel::pendingFSR2JitterSign},
+
+    // --- Display ---
+    {.key = "fullscreen", .asBool = &SettingsPanel::pendingFullscreen},
+    {.key = "vsync",      .asBool = &SettingsPanel::pendingVsync},
+    {.key = "brightness", .asInt  = &SettingsPanel::pendingBrightness},
+
+    // --- Camera ---
+    {.key = "fov",             .asFloat = &SettingsPanel::pendingFov},
+    {.key = "camerashake",     .asFloat = &SettingsPanel::pendingCameraShake},
+    {.key = "camerastiffness", .asFloat = &SettingsPanel::pendingCameraStiffness},
+    {.key = "cameramaxdistance", .asInt = &SettingsPanel::pendingCameraMaxDistance},
+    {.key = "pivotheight",     .asFloat = &SettingsPanel::pendingPivotHeight},
+    {.key = "smoothfollow",    .asBool  = &SettingsPanel::pendingSmoothCameraFollow},
+    {.key = "idleorbit",       .asBool  = &SettingsPanel::pendingIdleCameraOrbit},
+    {.key = "invertmouse",     .asBool  = &SettingsPanel::pendingInvertMouse},
+
+    // --- Interface ---
+    {.key = "uiopacity",     .asInt   = &SettingsPanel::pendingUiOpacity},
+    {.key = "windowuiscale", .asFloat = &SettingsPanel::pendingWindowUiScale},
+    {.key = "latencymeter",  .asBool  = &SettingsPanel::pendingShowLatencyMeter},
+    {.key = "micromenu",     .asBool  = &SettingsPanel::pendingShowMicroMenu},
+    {.key = "chatboxvisible", .asBool = &SettingsPanel::pendingChatBoxVisible},
+    {.key = "bagscale",      .asFloat = &SettingsPanel::pendingBagScale},
+    {.key = "separatebags",  .asBool  = &SettingsPanel::pendingSeparateBags},
+    {.key = "showkeyring",   .asBool  = &SettingsPanel::pendingShowKeyring},
+
+    // --- Minimap ---
+    {.key = "minimapsquare",  .asBool = &SettingsPanel::pendingMinimapSquare},
+    {.key = "minimapnpcdots", .asBool = &SettingsPanel::pendingMinimapNpcDots},
+    {.key = "minimapcoords",  .asBool = &SettingsPanel::pendingShowMinimapCoordinates},
+    {.key = "minimaprotate",  .asBool  = &SettingsPanel::pendingMinimapRotate},
+
+    // --- Action bars ---
+    {.key = "actionbarscale",  .asFloat = &SettingsPanel::pendingActionBarScale},
+    {.key = "buffbarscale",    .asFloat = &SettingsPanel::pendingBuffBarScale},
+    {.key = "showbar2",        .asBool  = &SettingsPanel::pendingShowActionBar2},
+    {.key = "bar2offsetx",     .asFloat = &SettingsPanel::pendingActionBar2OffsetX},
+    {.key = "bar2offsety",     .asFloat = &SettingsPanel::pendingActionBar2OffsetY},
+    {.key = "showrightbar",    .asBool  = &SettingsPanel::pendingShowRightBar},
+    {.key = "rightbaroffsety", .asFloat = &SettingsPanel::pendingRightBarOffsetY},
+    {.key = "showleftbar",     .asBool  = &SettingsPanel::pendingShowLeftBar},
+    {.key = "leftbaroffsety",  .asFloat = &SettingsPanel::pendingLeftBarOffsetY},
+
+    // --- Combat and HUD ---
+    {.key = "nameplatescale",     .asFloat = &SettingsPanel::nameplateScale_},
+    {.key = "dpsmeter",           .asBool  = &SettingsPanel::showDPSMeter_},
+    {.key = "cooldowntracker",    .asBool  = &SettingsPanel::showCooldownTracker_},
+    {.key = "raretracker",        .asBool  = &SettingsPanel::showRareTracker_},
+    {.key = "chesttracker",       .asBool  = &SettingsPanel::showChestTracker_},
+    {.key = "damageflash",        .asBool  = &SettingsPanel::damageFlashEnabled_},
+    {.key = "lowhealthvignette",  .asBool  = &SettingsPanel::lowHealthVignetteEnabled_},
+
+    // --- Sound ---
+    {.key = "musicvolume",     .asInt  = &SettingsPanel::pendingMusicVolume},
+    {.key = "ambientvolume",   .asInt  = &SettingsPanel::pendingAmbientVolume},
+    {.key = "bellvolume",      .asInt  = &SettingsPanel::pendingBellVolume},
+    {.key = "uivolume",        .asInt  = &SettingsPanel::pendingUiVolume},
+    {.key = "combatvolume",    .asInt  = &SettingsPanel::pendingCombatVolume},
+    {.key = "spellvolume",     .asInt  = &SettingsPanel::pendingSpellVolume},
+    {.key = "movementvolume",  .asInt  = &SettingsPanel::pendingMovementVolume},
+    {.key = "footstepvolume",  .asInt  = &SettingsPanel::pendingFootstepVolume},
+    {.key = "mountvolume",     .asInt  = &SettingsPanel::pendingMountVolume},
+    {.key = "activityvolume",  .asInt  = &SettingsPanel::pendingActivityVolume},
+    {.key = "npcvoicevolume",  .asInt  = &SettingsPanel::pendingNpcVoiceVolume},
+    {.key = "characterspeech", .asBool = &SettingsPanel::pendingCharacterSpeech},
+    {.key = "woweemusic",      .asBool = &SettingsPanel::pendingUseOriginalSoundtrack},
+
+    // --- Gameplay ---
+    {.key = "autoloot",     .asBool = &SettingsPanel::pendingAutoLoot},
+    {.key = "autosellgrey", .asBool = &SettingsPanel::pendingAutoSellGrey},
+    {.key = "autorepair",   .asBool = &SettingsPanel::pendingAutoRepair},
+    {.key = "secureabilitytoggle", .asBool = &SettingsPanel::pendingSecureAbilityToggle},
+};
+
+/// The same, for the settings that belong to the chat panel rather than to
+/// this one.
+///
+/// A separate table because they are fields of a different struct, not because
+/// they are a different kind of setting: one lookup tries both, and a caller
+/// asking for a setting by name never learns which side answered.
+struct ChatFieldBinding {
+    const char* key;
+    bool ChatSettings::* asBool;
+};
+
+constexpr ChatFieldBinding kChatFieldBindings[] = {
+    {"joingeneral",      &ChatSettings::autoJoinGeneral},
+    {"jointrade",        &ChatSettings::autoJoinTrade},
+    {"joinlocaldefense", &ChatSettings::autoJoinLocalDefense},
+    {"joinlfg",          &ChatSettings::autoJoinLFG},
+    {"joinlocal",        &ChatSettings::autoJoinLocal},
+    {"chatbubbles",      &ChatSettings::showBubbles},
+    {"chatbubblesparty", &ChatSettings::partyBubbles},
+    // Chat's appearance is deliberately absent. Timestamps, the font size, the
+    // background and the fade are all fields of this struct too, and all four
+    // drive the chat panel this client draws - which is not drawn at all while
+    // FrameXML owns chat. The interface has its own controls for each of them,
+    // and the timestamp one already reaches the value the chat frame reads.
+};
+
+const ChatFieldBinding* findChatFieldBinding(const std::string& key) {
+    for (const auto& b : kChatFieldBindings) {
+        if (key == b.key) return &b;
+    }
+    return nullptr;
+}
+
+const FieldBinding* findFieldBinding(const std::string& key) {
+    for (const auto& b : kFieldBindings) {
+        if (key == b.key) return &b;
+    }
+    return nullptr;
+}
+
+/// Whether changing this setting means the audio coordinator has to work the
+/// volumes out again.
+///
+/// Every one of them does, including the two that are not volumes: character
+/// speech switches the player voice manager on and off inside the same call,
+/// and the effects slider scales seven of the others.
+bool isVolumeKey(const std::string& key) {
+    return key == "mastervolume" || key == "mutesound" ||
+           key == "effectsvolume" || key == "musicvolume" || key == "ambientvolume" ||
+           key == "bellvolume" || key == "uivolume" || key == "combatvolume" ||
+           key == "spellvolume" || key == "movementvolume" || key == "footstepvolume" ||
+           key == "mountvolume" || key == "activityvolume" || key == "npcvoicevolume" ||
+           key == "characterspeech";
+}
+
+}  // namespace
+
+void SettingsPanel::applySettingSideEffects(const std::string& key) {
+    // The settings window applies each value where its slider is, so a change
+    // made through FrameXML or the Wowee options panel used to update the number
+    // and save it and nothing else - the option looked dead until the client was
+    // restarted or the same slider was touched in the other window.
+    //
+    // These are the same calls the sliders make, and nothing more: a setting
+    // whose only effect is to be read later, like auto-repair, has no line here
+    // and needs none.
+    auto* renderer = services_.renderer;
+    auto* camera = renderer ? renderer->getCamera() : nullptr;
+    auto* cameraController = renderer ? renderer->getCameraController() : nullptr;
+    auto* post = renderer ? renderer->getPostProcessPipeline() : nullptr;
+    auto* wmo = renderer ? renderer->getWMORenderer() : nullptr;
+    auto* chars = renderer ? renderer->getCharacterRenderer() : nullptr;
+
+    // The switches the game's own Sound panel used to own. Writing the setting
+    // has already written the cvar behind it - see noteClientSettingChanged -
+    // and this is what re-reads them. applySoundCVars is where the knowledge
+    // of what each one silences lives, so it stays the only copy.
+    if (key == "soundinbackground" || key == "enablemusic" || key == "loopmusic" ||
+        key == "enableambience" || key == "errorspeech" || key == "enablesoundeffects") {
+        if (services_.addonManager) {
+            if (auto* engine = services_.addonManager->getLuaEngine()) {
+                if (auto* L = engine->getState()) addons::applySoundCVarSideEffects(L);
+            }
+        }
+        return;
+    }
+    if (key == "viewdistance") {
+        if (renderer) renderer->setViewDistance(pendingViewDistance);
+    } else if (key == "shadows") {
+        if (renderer) renderer->setShadowsEnabled(pendingShadows);
+    } else if (key == "shadowdistance") {
+        if (renderer) renderer->setShadowDistance(pendingShadowDistance);
+    } else if (key == "waterrefraction") {
+        if (renderer) renderer->setWaterRefractionEnabled(pendingWaterRefraction);
+    } else if (key == "groundclutter") {
+        if (renderer) {
+            if (auto* tm = renderer->getTerrainManager()) {
+                tm->setGroundClutterDensityScale(
+                    static_cast<float>(pendingGroundClutterDensity) / 100.0f);
+            }
+        }
+    } else if (key == "groundclutterdistance") {
+        // The five below reach the same code the game's own Effects panel
+        // reached through LuaServices. They are settings rather than cvars
+        // now; kClientCVars keeps the cvar pointing at the same value.
+        if (renderer) {
+            if (auto* m2 = renderer->getM2Renderer())
+                m2->setGroundDetailDistance(static_cast<float>(pendingGroundClutterDistance));
+        }
+    } else if (key == "particledensity") {
+        if (renderer) {
+            if (auto* m2 = renderer->getM2Renderer())
+                m2->setParticleDensity(static_cast<float>(pendingParticleDensity) / 100.0f);
+        }
+    } else if (key == "weatherdetail") {
+        // Offered as four steps and passed on as a fraction of the full
+        // amount, which is what the weather system takes. Off is no weather.
+        if (renderer) {
+            constexpr float kWeatherSteps = 3.0f;
+            if (auto* w = renderer->getWeather())
+                w->setDensityScale(static_cast<float>(pendingWeatherDetail) / kWeatherSteps);
+        }
+    } else if (key == "environmentdetail") {
+        if (renderer) {
+            if (auto* m2 = renderer->getM2Renderer())
+                m2->setEnvironmentDetail(static_cast<float>(pendingEnvironmentDetail) / 100.0f);
+        }
+    } else if (key == "texturefiltering") {
+        // Levels rather than a sample count, each step doubling: 0 is off
+        // and 4 is the 16x every desktop card stops at.
+        if (services_.window) {
+            if (auto* ctx = services_.window->getVkContext()) {
+                const int level = std::clamp(pendingTextureFiltering, 0, 4);
+                ctx->setAnisotropyLimit(static_cast<float>(std::min(1 << level, 16)));
+            }
+        }
+    } else if (key == "framecap") {
+        if (services_.window) services_.window->setFrameCap(frameCapFpsForChoice(pendingFrameCap));
+    } else if (key == "lensflare") {
+        if (renderer) {
+            if (auto* lf = renderer->getLensFlare()) lf->setIntensity(pendingLensFlare);
+        }
+    } else if (key == "fov") {
+        if (camera) camera->setFov(pendingFov);
+    } else if (key == "camerashake") {
+        if (cameraController) cameraController->setShakeScale(pendingCameraShake);
+    } else if (key == "mousespeed") {
+        if (cameraController) cameraController->setMouseSensitivity(pendingMouseSensitivity);
+    } else if (key == "camerastiffness") {
+        if (cameraController) cameraController->setCameraSmoothSpeed(pendingCameraStiffness);
+    } else if (key == "cameramaxdistance") {
+        if (cameraController) {
+            cameraController->setMaxDistanceFactor(cameraDistanceFactor(pendingCameraMaxDistance));
+        }
+    } else if (key == "smoothfollow") {
+        if (cameraController) cameraController->setSmoothCameraFollow(pendingSmoothCameraFollow);
+    } else if (key == "pivotheight") {
+        if (cameraController) cameraController->setPivotHeight(pendingPivotHeight);
+    } else if (key == "idleorbit") {
+        if (cameraController) cameraController->setIdleOrbitEnabled(pendingIdleCameraOrbit);
+    } else if (key == "uiopacity") {
+        uiOpacity_ = static_cast<float>(pendingUiOpacity) / 100.0f;
+    } else if (key == "minimaprotate") {
+        minimapRotate_ = pendingMinimapRotate;
+        if (renderer) {
+            if (auto* mm = renderer->getMinimap()) mm->setRotateWithCamera(pendingMinimapRotate);
+        }
+    } else if (key == "minimapsquare") {
+        minimapSquare_ = pendingMinimapSquare;
+        if (renderer) {
+            if (auto* mm = renderer->getMinimap()) mm->setSquareShape(pendingMinimapSquare);
+        }
+    } else if (key == "invertmouse") {
+        if (cameraController) cameraController->setInvertMouse(pendingInvertMouse);
+    } else if (key == "graphicspreset") {
+        applyGraphicsPreset(pendingGraphicsPreset);
+    } else if (key == "antialiasing") {
+        if (renderer) {
+            // Clamped here as well as inside the renderer, so the control ends
+            // up showing what is actually in force.
+            //
+            // Apple silicon stops at 4x. Choosing 8x was clamped silently and,
+            // when 4x was already running, changed nothing at all - so the
+            // dropdown sat on a mode the client was not using and reads as a
+            // setting that does nothing. The same is true of any device whose
+            // ceiling is below the four this offers.
+            const VkSampleCountFlagBits want = msaaSamplesForChoice(pendingAntiAliasing);
+            VkSampleCountFlagBits allowed = want;
+            if (auto* ctx = renderer->getVkContext()) {
+                allowed = std::min(want, ctx->getMaxUsableSampleCount());
+            }
+            if (allowed != want) {
+                const int granted = msaaChoiceForSamples(allowed);
+                LOG_WARNING("Anti-aliasing ", static_cast<int>(want),
+                            "x is more than this GPU offers; using ",
+                            static_cast<int>(allowed), "x");
+                pendingAntiAliasing = granted;
+            }
+            renderer->setMsaaSamples(allowed);
+        }
+    } else if (key == "fxaa") {
+        if (post) post->setFXAAEnabled(pendingFXAA);
+    } else if (key == "normalmapping") {
+        if (wmo) wmo->setNormalMappingEnabled(pendingNormalMapping);
+        if (chars) chars->setNormalMappingEnabled(pendingNormalMapping);
+    } else if (key == "normalmapstrength") {
+        if (wmo) wmo->setNormalMapStrength(pendingNormalMapStrength);
+        if (chars) chars->setNormalMapStrength(pendingNormalMapStrength);
+    } else if (key == "parallax") {
+        if (wmo) wmo->setPOMEnabled(pendingPOM);
+        if (chars) chars->setPOMEnabled(pendingPOM);
+    } else if (key == "sharpstars") {
+        if (renderer) renderer->setSharpStars(pendingSharpStars);
+    } else if (key == "parallaxquality") {
+        if (wmo) wmo->setPOMQuality(pendingPOMQuality);
+        if (chars) chars->setPOMQuality(pendingPOMQuality);
+    } else if (key == "upscaling") {
+        // pendingFSR is the older flag for "FSR 1 is on" and is what the saved
+        // settings still carry, so the mode and the flag are set together
+        // rather than left to disagree.
+        pendingFSR = (pendingUpscalingMode == 1);
+        if (renderer) {
+            renderer->setFSREnabled(pendingUpscalingMode == 1);
+            renderer->setFSR2Enabled(pendingUpscalingMode == 2);
+            // Multisampling is the player's own setting and survives the
+            // upscaler either way: re-asserted here so a device that had to
+            // give it up while upscaling gets it back the moment upscaling is
+            // off, rather than at the next touch of that control. A no-op
+            // where nothing changed.
+            renderer->setMsaaSamples(msaaSamplesForChoice(pendingAntiAliasing));
+        }
+    } else if (key == "fsrquality") {
+        // How far below the display resolution the world is drawn, in the same
+        // order the schema lists the choices.
+        if (post) post->setFSRQuality(fsrScaleForChoice(pendingFSRQuality));
+    } else if (key == "fsrsharpness") {
+        if (post) post->setFSRSharpness(pendingFSRSharpness);
+    } else if (key == "fogstrength") {
+        if (renderer) {
+            if (auto* lighting = renderer->getLightingManager()) {
+                lighting->setFogStrength(pendingFogStrength);
+            }
+        }
+    } else if (key == "fogskyblend") {
+        if (renderer) {
+            if (auto* lighting = renderer->getLightingManager()) {
+                lighting->setFogSkyBlend(pendingFogSkyBlend);
+            }
+        }
+    } else if (key == "framegen") {
+        if (post) post->setAmdFsr3FramegenEnabled(pendingAMDFramegen);
+    } else if (key == "fsrjittersign") {
+        if (post) {
+            post->setFSR2DebugTuning(pendingFSR2JitterSign, pendingFSR2MotionVecScaleX,
+                                     pendingFSR2MotionVecScaleY);
+        }
+    } else if (key == "brightness") {
+        // 50 is neutral, so the field is twice the multiplier the pipeline wants.
+        if (post) post->setBrightness(static_cast<float>(pendingBrightness) / 50.0f);
+    } else if (key == "fullscreen") {
+        if (services_.window) {
+            services_.window->setFullscreen(pendingFullscreen);
+            if (pendingFullscreen) {
+                services_.window->applyResolution(pendingResolutionWidth,
+                                                  pendingResolutionHeight);
+            }
+        }
+    } else if (key == "vsync") {
+        if (services_.window) services_.window->setVsync(pendingVsync);
+    } else if (key == "windowuiscale") {
+        applyWindowUiScale();
+    } else if (key == "minimapnpcdots") {
+        minimapNpcDots_ = pendingMinimapNpcDots;
+    } else if (key == "minimapclock") {
+        showMinimapClock_ = pendingShowMinimapClock;
+    } else if (key == "minimapcoords") {
+        showMinimapCoordinates_ = pendingShowMinimapCoordinates;
+    } else if (key == "latencymeter") {
+        showLatencyMeter_ = pendingShowLatencyMeter;
+    } else if (key == "woweemusic") {
+        // Not a volume: it changes which tracks the zone rotation can pick, and
+        // switching it off has to stop whichever of ours is playing now - the
+        // rotation would otherwise honour it only at the next zone change.
+        //
+        // The interface's options panel has offered this since the schema grew
+        // and it did nothing but store the answer, because the only copy of
+        // this lived beside the checkbox in the settings window.
+        if (renderer) {
+            if (auto* zm = renderer->getZoneManager()) {
+                zm->setUseOriginalSoundtrack(pendingUseOriginalSoundtrack);
+                if (!pendingUseOriginalSoundtrack) {
+                    if (auto* ac = renderer->getAudioCoordinator()) {
+                        ac->onOriginalSoundtrackDisabled(zm);
+                    }
+                }
+            }
+        }
+    } else if (key == "grassenabled" || key == "grassdensity" || key == "grassheight" ||
+               key == "grassdistance") {
+        // Grass belonged in its own branch all along. These calls were sitting
+        // inside the soundtrack's, so changing the soundtrack applied the grass
+        // settings and changing a grass setting did nothing at all - the key
+        // matched no branch and fell out of the bottom.
+        if (renderer) {
+            renderer->setGrassEnabled(pendingGrassEnabled);
+            renderer->setGrassScales(static_cast<float>(pendingGrassDensity) / 100.0f,
+                                     static_cast<float>(pendingGrassHeight) / 100.0f);
+            renderer->setGrassDistance(static_cast<float>(pendingGrassDistance));
+        }
+    } else if (key == "chatboxvisible") {
+        // Applied by deactivating every box that is not being typed in - see
+        // kChatBoxVisibilityLua, which is where the script lives so that
+        // something parses it before a player does.
+        if (services_.gameHandler) {
+            services_.gameHandler->runInterfaceCommand(
+                wowee::addons::kChatBoxVisibilityLua);
+        }
+    } else if (isVolumeKey(key)) {
+        // Every volume goes through one call, because each of them is a balance
+        // against the others and the coordinator works them all out together.
+        applyAudioVolumes(services_.audioCoordinator);
+    }
+
+    // And say so, for the settings whose effect is not this client's to apply.
+    //
+    // Interface > Bags is three of them: the bag window they describe is drawn
+    // by the bundled all-bags addon now, which reads them through
+    // WoweeGetSetting. Reading is not enough on its own - a checkbox has to
+    // work when it is clicked, not at the next reload - and an addon has no way
+    // to notice a value it is not told about. So every applied setting names
+    // itself here, and anything that cares registers for it.
+    if (services_.addonManager) {
+        services_.addonManager->fireEvent("WOWEE_SETTING_CHANGED", {key});
+    }
+}
+
+
+std::string SettingsPanel::settingValue(const std::string& key) const {
+    // The graphics preset is an enum class rather than one of the three field
+    // types, and it is the only setting whose value is derived: touching any of
+    // the settings it covers moves it to Custom, so what it reads is whatever
+    // the others currently amount to.
+    if (key == "graphicspreset") {
+        return settingNumberText(static_cast<int>(pendingGraphicsPreset));
+    }
+    if (const ChatFieldBinding* c = findChatFieldBinding(key)) {
+        if (!chatSettings_) return {};
+        return chatSettings_->*(c->asBool) ? "1" : "0";
+    }
+    const FieldBinding* b = findFieldBinding(key);
+    if (!b) return {};
+    if (b->asBool)  return this->*(b->asBool) ? "1" : "0";
+    if (b->asInt) {
+        const int v = this->*(b->asInt);
+        return settingNumberText(static_cast<double>(v));
+    }
+    const float v = this->*(b->asFloat);
+    return settingNumberText(v);
+}
+
+namespace {
+
+/// A value held to the range its schema row declares.
+///
+/// The sliders are built from that range and the config loader clamps to it, so
+/// the one way past it was the one nothing bounded: setSettingValue, which is
+/// what FrameXML's panels and any addon calling WoweeSetSetting go through. It
+/// took whatever it was handed - a field of view of 500, a nameplate scale of
+/// -40, an interface opacity of 1000 - stored it, showed it on the control and
+/// wrote it to the config, where the loader clamped it on the way back in next
+/// time. The consumers that clamp for themselves, like the multisampling table,
+/// were what kept it from being worse than wrong.
+///
+/// Keys with no schema row are returned untouched.
+double clampedToSchema(const std::string& key, double value) {
+    std::size_t count = 0;
+    const SettingDesc* schema = clientSettingsSchema(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (key != schema[i].key) continue;
+        if (schema[i].kind == SettingKind::Bool) return value;
+        return std::clamp(value, static_cast<double>(schema[i].minValue),
+                          static_cast<double>(schema[i].maxValue));
+    }
+    return value;
+}
+
+}  // namespace
+
+bool SettingsPanel::setSettingValue(const std::string& key, const std::string& value) {
+    const double v = std::atof(value.c_str());
+    const bool on = settingIsOn(value);
+
+    if (key == "graphicspreset") {
+        const int idx = std::clamp(static_cast<int>(v + 0.5), 0, 4);
+        pendingGraphicsPreset = static_cast<GraphicsPreset>(idx);
+        applySettingSideEffects(key);
+        return true;
+    }
+    if (const ChatFieldBinding* c = findChatFieldBinding(key)) {
+        if (!chatSettings_) return false;
+        chatSettings_->*(c->asBool) = on;
+        // The store too, as below: the speech-bubble rows are bound to the
+        // CVars the Social page's boxes wrote, and returned early past the
+        // write-back until the control check said a change here was undone
+        // at the next start.
+        addons::noteClientSettingChanged(key, settingValue(key));
+        return true;
+    }
+    const FieldBinding* b = findFieldBinding(key);
+    if (!b) return false;
+    if (b->asBool) {
+        this->*(b->asBool) = on;
+    } else if (b->asInt) {
+        this->*(b->asInt) = static_cast<int>(clampedToSchema(key, v) + 0.5);
+    } else {
+        this->*(b->asFloat) = static_cast<float>(clampedToSchema(key, v));
+    }
+    applySettingSideEffects(key);
+    // And the CVar store, for the settings a Blizzard control also drives. It
+    // is applied over the settings file at start-up, so without this a change
+    // made here was undone at the next start by a CVar nobody had touched.
+    addons::noteClientSettingChanged(key, settingValue(key));
+    // Anything a preset covers, changed by hand, means these settings are no
+    // longer that preset. applyGraphicsPreset does not come through here - it
+    // assigns the fields itself - so there is nothing for this to fight with.
+    if (isGraphicsPresetKey(key)) updateGraphicsPresetFromCurrentSettings();
+    return true;
+}
+
 void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
     if (!ac) return;
+    // Every effect volume is its own balance; this is the one slider over them,
+    // which is what Blizzard's Sound Effects control drives.
+    const float fx = static_cast<float>(pendingEffectsVolume) / 100.0f;
     float masterScale = soundMuted_ ? 0.0f : static_cast<float>(pendingMasterVolume) / 100.0f;
     audio::AudioEngine::instance().setMasterVolume(masterScale);
     if (auto* music = ac->getMusicManager())
@@ -1436,23 +1513,29 @@ void SettingsPanel::applyAudioVolumes(audio::AudioCoordinator* ac) {
         ambient->setBellVolumeScale(pendingBellVolume / 100.0f);
     }
     if (auto* ui = ac->getUiSoundManager())
-        ui->setVolumeScale(pendingUiVolume / 100.0f);
+        ui->setVolumeScale(fx * pendingUiVolume / 100.0f);
     if (auto* combat = ac->getCombatSoundManager())
-        combat->setVolumeScale(pendingCombatVolume / 100.0f);
+        combat->setVolumeScale(fx * pendingCombatVolume / 100.0f);
     if (auto* spell = ac->getSpellSoundManager())
-        spell->setVolumeScale(pendingSpellVolume / 100.0f);
+        spell->setVolumeScale(fx * pendingSpellVolume / 100.0f);
     if (auto* movement = ac->getMovementSoundManager())
-        movement->setVolumeScale(pendingMovementVolume / 100.0f);
+        movement->setVolumeScale(fx * pendingMovementVolume / 100.0f);
     if (auto* footstep = ac->getFootstepManager())
-        footstep->setVolumeScale(pendingFootstepVolume / 100.0f);
+        footstep->setVolumeScale(fx * pendingFootstepVolume / 100.0f);
     if (auto* npcVoice = ac->getNpcVoiceManager())
-        npcVoice->setVolumeScale(pendingNpcVoiceVolume / 100.0f);
-    if (auto* playerVoice = ac->getPlayerVoiceManager())
+        npcVoice->setVolumeScale(fx * pendingNpcVoiceVolume / 100.0f);
+    if (auto* playerVoice = ac->getPlayerVoiceManager()) {
         playerVoice->setEnabled(pendingCharacterSpeech);
+        // And its volume, which has no slider of its own but is an effect
+        // channel like the eight above. The interface's Sound Effects switch
+        // zeroes this scale along with theirs; restoring only `enabled` left
+        // the character silent for good once that switch had been off.
+        playerVoice->setVolumeScale(fx);
+    }
     if (auto* mount = ac->getMountSoundManager())
-        mount->setVolumeScale(pendingMountVolume / 100.0f);
+        mount->setVolumeScale(fx * pendingMountVolume / 100.0f);
     if (auto* activity = ac->getActivitySoundManager())
-        activity->setVolumeScale(pendingActivityVolume / 100.0f);
+        activity->setVolumeScale(fx * pendingActivityVolume / 100.0f);
 }
 
 

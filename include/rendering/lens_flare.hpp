@@ -40,6 +40,11 @@ public:
     void shutdown();
 
     void recreatePipelines();
+    /// The pipeline state both initialize() and
+    /// recreatePipelines() need, described once.
+    void buildPipelines(VkDevice device,
+                        const VkPipelineShaderStageCreateInfo& vertStage,
+                        const VkPipelineShaderStageCreateInfo& fragStage);
 
     /**
      * @brief Render lens flare effect
@@ -50,22 +55,26 @@ public:
      * @param fogDensity Fog density 0-1 (attenuates flare)
      * @param cloudDensity Cloud density 0-1 (attenuates flare)
      * @param weatherIntensity Weather intensity 0-1 (rain/snow attenuates flare)
+     * @param sunOcclusion How much of the line to the sun is blocked, 0-1.
+     *        A flare is light scattering inside the lens, so it needs light to
+     *        arrive: with a hillside or a roof in the way there is none, and
+     *        this used to draw one anyway.
      */
     void render(VkCommandBuffer cmd, const Camera& camera, const glm::vec3& sunPosition,
                 float timeOfDay, float fogDensity = 0.0f, float cloudDensity = 0.0f,
-                float weatherIntensity = 0.0f);
+                float weatherIntensity = 0.0f, float sunOcclusion = 0.0f);
 
     /**
      * @brief Enable or disable lens flare rendering
      */
     void setEnabled(bool enabled) { this->enabled = enabled; }
-    bool isEnabled() const { return enabled; }
+    [[nodiscard]] bool isEnabled() const { return enabled; }
 
     /**
      * @brief Set flare intensity multiplier
      */
     void setIntensity(float intensity);
-    float getIntensity() const { return intensityMultiplier; }
+    [[nodiscard]] float getIntensity() const { return intensityMultiplier; }
 
 private:
     struct FlareElement {
@@ -83,8 +92,8 @@ private:
     };
 
     void generateFlareElements();
-    float calculateSunVisibility(const Camera& camera, const glm::vec3& sunPosition) const;
-    glm::vec2 worldToScreen(const Camera& camera, const glm::vec3& worldPos) const;
+    [[nodiscard]] float calculateSunVisibility(const Camera& camera, const glm::vec3& sunPosition) const;
+    [[nodiscard]] glm::vec2 worldToScreen(const Camera& camera, const glm::vec3& worldPos) const;
 
     VkContext* vkCtx = nullptr;
 

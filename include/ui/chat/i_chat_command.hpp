@@ -1,4 +1,4 @@
-// IChatCommand — interface for all slash commands.
+// IChatCommand - interface for all slash commands.
 // Phase 3.1 of chat_panel_ref.md.
 #pragma once
 
@@ -47,10 +47,10 @@ public:
     virtual ChatCommandResult execute(ChatCommandContext& ctx) = 0;
 
     /** Return all aliases for this command (e.g. {"w", "whisper", "tell", "t"}). */
-    virtual std::vector<std::string> aliases() const = 0;
+    [[nodiscard]] virtual std::vector<std::string> aliases() const = 0;
 
     /** Optional help text shown by /help. */
-    virtual std::string helpText() const { return ""; }
+    [[nodiscard]] virtual std::string helpText() const { return ""; }
 };
 
 } // namespace ui

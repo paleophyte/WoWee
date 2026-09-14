@@ -1,24 +1,45 @@
 #include "core/application.hpp"
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
+#include "core/version.hpp"
 #include <exception>
 #include <csignal>
 #include <cstdlib>
+#include "core/env.hpp"
 #include <cctype>
 #include <filesystem>
+
+#include "core/data_paths.hpp"
 #include <string>
 #include <SDL2/SDL.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
-#include <libgen.h>
-#include <unistd.h>
 #endif
-#ifdef __linux__
-#include <X11/Xlib.h>
-#include <execinfo.h>
+
+// backtrace(3) and friends live in libSystem on macOS and in glibc on Linux, so
+// the useful crash report - faulting address, symbolized frames, a copy in the
+// crash log - works the same on both. It used to be guarded on __linux__ alone,
+// which left a macOS crash with no backtrace and no log at all. Only the X11
+// mouse ungrab below is genuinely Linux-specific.
+#if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #include <libgen.h>
+#include <cstdio>
 #include <cstring>
+// Bionic ships execinfo.h but declares backtrace() only from API 33, and this
+// build targets lower. The crash log keeps everything but its stack section on
+// Android, where logcat carries a native trace anyway.
+#if !defined(__ANDROID__)
+#define WOWEE_HAS_BACKTRACE 1
+#include <execinfo.h>
+#endif
+#endif
+
+// Android defines __linux__ and has no X11, so the mouse-ungrab path is gated
+// on both. The other Linux branches in this file - /proc/self/exe, the
+// backtrace - are correct there and are left alone.
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <X11/Xlib.h>
 
 // Keep a persistent X11 connection for emergency mouse release in signal handlers.
 // XOpenDisplay inside a signal handler is unreliable, so we open it once at startup.
@@ -35,7 +56,7 @@ static void releaseMouseGrab() {
 static void releaseMouseGrab() {}
 #endif
 
-#ifdef __linux__
+#ifdef WOWEE_HAS_BACKTRACE
 static void crashHandlerSigaction(int sig, siginfo_t* info, void* /*ucontext*/) {
     releaseMouseGrab();
     void* frames[64];
@@ -83,37 +104,49 @@ static wowee::core::LogLevel readLogLevelFromEnv() {
     return wowee::core::LogLevel::WARNING;
 }
 
-#ifdef __APPLE__
-static void selectMacUserDataPath() {
+/// Point the client at the per-user data directory, if an extraction is there.
+///
+/// Only when nobody has said otherwise, and only when that directory actually
+/// holds an extraction - so a first run with nothing installed still falls
+/// through to Data/ beside the executable, which is what a development tree
+/// and a portable install both want.
+///
+/// This was macOS only, which left the asset manager and the client with no
+/// agreed destination on Linux or Windows at all: the manager wrote wherever
+/// the terminal was and the client looked beside itself.
+static void selectUserDataPath() {
     if (std::getenv("WOW_DATA_PATH")) return;
 
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) return;
+    const std::filesystem::path dataRoot = wowee::core::userDataRoot();
+    if (!wowee::core::holdsExtraction(dataRoot)) return;
 
-    namespace fs = std::filesystem;
-    const fs::path dataRoot = fs::path(home) / "Library/Application Support/Wowee/Data";
-    std::error_code ec;
-    bool hasManifest = fs::is_regular_file(dataRoot / "manifest.json", ec);
-
-    const fs::path expansions = dataRoot / "expansions";
-    if (!hasManifest && fs::is_directory(expansions, ec)) {
-        for (fs::directory_iterator it(expansions, ec), end; it != end && !ec; it.increment(ec)) {
-            if (fs::is_regular_file(it->path() / "manifest.json", ec)) {
-                hasManifest = true;
-                break;
-            }
-        }
-    }
-
-    if (hasManifest) {
-        setenv("WOW_DATA_PATH", dataRoot.c_str(), 0);
-    }
+    wowee::core::setEnvVar("WOW_DATA_PATH", dataRoot.string().c_str(), /*overwrite=*/false);
 }
-#endif
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
-#ifdef __linux__
+#ifdef __ANDROID__
+    // Everything after this opens its files relative to the working directory,
+    // which on Android is not a directory that holds any of them.
+    wowee::core::enterResourceRoot();
+#endif
+#ifndef _WIN32
+    // Writing to a socket the server has already closed raises SIGPIPE, whose
+    // default action is to terminate - the client would vanish mid-frame with
+    // no log line and no crash report, because SIGPIPE is not one of the
+    // signals handled below. Ignoring it makes send() answer EPIPE instead,
+    // which the send paths already handle: they log the failure and stop
+    // writing, and the recv side sees the closed connection and disconnects.
+    //
+    // Done process-wide rather than per-socket: the flag that suppresses this
+    // at the call site is spelled differently on each platform (MSG_NOSIGNAL
+    // on Linux, the SO_NOSIGPIPE socket option on macOS/BSD), and nothing here
+    // wants SIGPIPE for anything.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
     g_emergencyDisplay = XOpenDisplay(nullptr);
+#endif
+#ifdef WOWEE_HAS_BACKTRACE
     // Use sigaction for SIGSEGV/SIGABRT/SIGFPE to get si_addr (faulting address)
     {
         struct sigaction sa;
@@ -126,6 +159,13 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     }
     std::signal(SIGTERM, [](int) { std::_Exit(1); });
     std::signal(SIGINT,  [](int) { std::_Exit(1); });
+#elif defined(__ANDROID__)
+    // Android already has a crash reporter, and it is a far better one than
+    // this: debuggerd writes a symbolised tombstone and the abort message to
+    // logcat. Ours writes a backtrace to stderr, which on Android goes nowhere,
+    // and installing it costs the tombstone. So only the two exit signals here.
+    std::signal(SIGTERM, crashHandler);
+    std::signal(SIGINT,  crashHandler);
 #else
     std::signal(SIGSEGV, crashHandler);
     std::signal(SIGABRT, crashHandler);
@@ -152,7 +192,6 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
                 : executableDir;
         if (chdir(runtimeDir.c_str()) != 0) {}
     }
-    selectMacUserDataPath();
 #elif defined(__linux__)
     {
         char buf[4096];
@@ -161,9 +200,39 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     }
 #endif
 
+    // After the working directory is settled, and on every platform: this used
+    // to sit inside the macOS branch above, so Linux and Windows went on
+    // looking beside the executable for assets the asset manager had written
+    // to their own per-user directory.
+    selectUserDataPath();
+
     try {
         wowee::core::Logger::getInstance().setLogLevel(readLogLevelFromEnv());
         LOG_INFO("=== Wowee Native Client ===");
+        // At warning level, with the platform, because a log sent in after a
+        // crash is filtered to warnings and errors. Which build produced it is
+        // the first question asked of any report and the log did not answer it:
+        // a device loss on a version predating the fix for that very loss reads
+        // exactly like a new one.
+#if defined(_WIN32)
+        constexpr const char* kPlatform = "windows";
+#elif defined(__ANDROID__)
+        constexpr const char* kPlatform = "android";
+#elif defined(__APPLE__)
+        constexpr const char* kPlatform = "macos";
+#elif defined(__linux__)
+        constexpr const char* kPlatform = "linux";
+#else
+        constexpr const char* kPlatform = "unknown-platform";
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+        constexpr const char* kArch = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+        constexpr const char* kArch = "x86-64";
+#else
+        constexpr const char* kArch = "unknown-arch";
+#endif
+        LOG_WARNING("Wowee ", wowee::core::kVersionString, " ", kPlatform, " ", kArch);
         LOG_INFO("Starting application...");
 
         // Seed portable config from the per-user location on first portable launch.
@@ -180,7 +249,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         app.shutdown();
 
         LOG_INFO("Application exited successfully");
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
         if (g_emergencyDisplay) { XCloseDisplay(g_emergencyDisplay); g_emergencyDisplay = nullptr; }
 #endif
         return 0;

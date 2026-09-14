@@ -50,6 +50,12 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
     // 0x40 = HAS_POSITION (stationary)
     const uint8_t UPDATEFLAG_LIVING              = 0x20;
     const uint8_t UPDATEFLAG_HAS_POSITION        = 0x40;
+    // These bits are NOT the same as the other expansions' and must not be
+    // merged with them. 1.12 assigns HIGHGUID 0x8 and ALL 0x10; 2.4.3 moved
+    // HIGHGUID to 0x10 and put LOWGUID at 0x8, and 0x4 means MELEE_ATTACKING
+    // here and HAS_TARGET there. Three tables that look like three copies of
+    // one, and reading a stationary object's position off the wrong bit is a
+    // misparse of everything after it.
     const uint8_t UPDATEFLAG_HAS_TARGET          = 0x04;
     const uint8_t UPDATEFLAG_TRANSPORT           = 0x02;
     const uint8_t UPDATEFLAG_LOWGUID             = 0x08;
@@ -116,7 +122,7 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
             /*float splineElevation =*/ packet.readFloat();
         }
 
-        // Speeds (TBC: 8 values — walk, run, runBack, swim, swimBack, fly, flyBack, turn)
+        // Speeds (TBC: 8 values - walk, run, runBack, swim, swimBack, fly, flyBack, turn)
         if (rem() < 32) return false;
         block.walkSpeed       = packet.readFloat();
         block.runSpeed        = packet.readFloat();
@@ -181,7 +187,7 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
         LOG_DEBUG("  [TBC] STATIONARY: (", block.x, ", ", block.y, ", ", block.z, ")");
     }
 
-    // LOWGUID (0x08) — CMaNGOS TBC writes one uint32.
+    // LOWGUID (0x08) - CMaNGOS TBC writes one uint32.
     if (updateFlags & UPDATEFLAG_LOWGUID) {
         if (rem() < 4) return false;
         /*uint32_t lowGuidOrTypeMarker =*/ packet.readUInt32();
@@ -235,20 +241,7 @@ void TbcPacketParsers::writeMovementPayload(network::Packet& packet, const Movem
     // Transport data (TBC ON_TRANSPORT = 0x200, same bit as WotLK)
     if (info.flags & TbcMoveFlags::ON_TRANSPORT) {
         // Packed transport GUID
-        uint8_t transMask = 0;
-        uint8_t transGuidBytes[8];
-        int transGuidByteCount = 0;
-        for (int i = 0; i < 8; i++) {
-            uint8_t byte = static_cast<uint8_t>((info.transportGuid >> (i * 8)) & 0xFF);
-            if (byte != 0) {
-                transMask |= (1 << i);
-                transGuidBytes[transGuidByteCount++] = byte;
-            }
-        }
-        packet.writeUInt8(transMask);
-        for (int i = 0; i < transGuidByteCount; i++) {
-            packet.writeUInt8(transGuidBytes[i]);
-        }
+        packet.writePackedGuid(info.transportGuid);
 
         // Transport local position
         packet.writeFloat(info.transportX);
@@ -305,100 +298,9 @@ network::Packet TbcPacketParsers::buildMovementPacket(LogicalOpcode opcode,
 // - Equipment: 20 items (not 23)
 // ============================================================================
 bool TbcPacketParsers::parseCharEnum(network::Packet& packet, CharEnumResponse& response) {
-    // Validate minimum packet size for count byte
-    if (packet.getSize() < 1) {
-        LOG_ERROR("[TBC] SMSG_CHAR_ENUM packet too small: ", packet.getSize(), " bytes");
-        return false;
-    }
-
-    uint8_t count = packet.readUInt8();
-
-    // Cap count to prevent excessive memory allocation
-    constexpr uint8_t kMaxCharacters = 32;
-    if (count > kMaxCharacters) {
-        LOG_WARNING("[TBC] Character count ", static_cast<int>(count), " exceeds max ", static_cast<int>(kMaxCharacters),
-                    ", capping");
-        count = kMaxCharacters;
-    }
-
-    LOG_INFO("[TBC] Parsing SMSG_CHAR_ENUM: ", static_cast<int>(count), " characters");
-
-    response.characters.clear();
-    response.characters.reserve(count);
-
-    for (uint8_t i = 0; i < count; ++i) {
-        // Sanity check: ensure we have at least minimal data before reading next character
-        // Minimum: guid(8) + name(1) + race(1) + class(1) + gender(1) + appearance(4)
-        //          + facialFeatures(1) + level(1) + zone(4) + map(4) + pos(12) + guild(4)
-        //          + flags(4) + firstLogin(1) + pet(12) + equipment(20*9)
-        constexpr size_t kMinCharacterSize = 8 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 4 + 4 + 12 + 4 + 4 + 1 + 12 + 180;
-        if (!packet.hasRemaining(kMinCharacterSize)) {
-            LOG_WARNING("[TBC] Character enum packet truncated at character ", static_cast<int>(i + 1),
-                        ", pos=", packet.getReadPos(), " needed=", kMinCharacterSize,
-                        " size=", packet.getSize());
-            break;
-        }
-
-        Character character;
-
-        // GUID (8 bytes)
-        character.guid = packet.readUInt64();
-
-        // Name (null-terminated string)
-        character.name = packet.readString();
-
-        // Race, class, gender
-        character.race = static_cast<Race>(packet.readUInt8());
-        character.characterClass = static_cast<Class>(packet.readUInt8());
-        character.gender = static_cast<Gender>(packet.readUInt8());
-
-        // Appearance (5 bytes: skin, face, hairStyle, hairColor packed + facialFeatures)
-        character.appearanceBytes = packet.readUInt32();
-        character.facialFeatures = packet.readUInt8();
-
-        // Level
-        character.level = packet.readUInt8();
-
-        // Location
-        character.zoneId = packet.readUInt32();
-        character.mapId = packet.readUInt32();
-        character.x = packet.readFloat();
-        character.y = packet.readFloat();
-        character.z = packet.readFloat();
-
-        // Guild ID
-        character.guildId = packet.readUInt32();
-
-        // Flags
-        character.flags = packet.readUInt32();
-
-        // TBC: uint8 firstLogin (WotLK: uint32 customization + uint8 unknown)
-        /*uint8_t firstLogin =*/ packet.readUInt8();
-
-        // Pet data (always present)
-        character.pet.displayModel = packet.readUInt32();
-        character.pet.level = packet.readUInt32();
-        character.pet.family = packet.readUInt32();
-
-        // Equipment (TBC: 20 items, WotLK: 23 items)
-        character.equipment.reserve(20);
-        for (int j = 0; j < 20; ++j) {
-            EquipmentItem item;
-            item.displayModel = packet.readUInt32();
-            item.inventoryType = packet.readUInt8();
-            item.enchantment = packet.readUInt32();
-            character.equipment.push_back(item);
-        }
-
-        LOG_DEBUG("  Character ", static_cast<int>(i + 1), ": ", character.name,
-                  " (", getRaceName(character.race), " ", getClassName(character.characterClass),
-                  " level ", static_cast<int>(character.level), " zone ", character.zoneId, ")");
-
-        response.characters.push_back(character);
-    }
-
-    LOG_INFO("[TBC] Parsed ", response.characters.size(), " characters");
-    return true;
+    // TBC equipment entries carry an enchantment; the rest is shared with
+    // Classic.
+    return parseCharEnumPreWotlk(packet, response, /*hasEnchantment=*/true, "[TBC]");
 }
 
 // ============================================================================
@@ -596,7 +498,7 @@ bool TbcPacketParsers::parseGossipMessage(network::Packet& packet, GossipMessage
     size_t remaining = packet.getRemainingSize();
     if (remaining < 4) {
         LOG_WARNING("[TBC] SMSG_GOSSIP_MESSAGE truncated before questCount");
-        return data.options.size() > 0;  // Return true if we got at least some options
+        return !data.options.empty();  // Return true if we got at least some options
     }
 
     uint32_t questCount = packet.readUInt32();
@@ -625,7 +527,7 @@ bool TbcPacketParsers::parseGossipMessage(network::Packet& packet, GossipMessage
         quest.questIcon = packet.readUInt32();
         quest.questLevel = static_cast<int32_t>(packet.readUInt32());
         // TBC 2.4.3: NO questFlags(u32) and NO isRepeatable(u8) here
-        // WotLK adds these 5 bytes — reading them from TBC garbles the quest title
+        // WotLK adds these 5 bytes - reading them from TBC garbles the quest title
         quest.questFlags = 0;
         quest.isRepeatable = 0;
         quest.title = normalizeWowTextTokens(packet.readString());
@@ -657,25 +559,10 @@ bool TbcPacketParsers::parseMonsterMove(network::Packet& packet, MonsterMoveData
     packet.readUInt32(); // splineId
 
     if (packet.getReadPos() >= packet.getSize()) return false;
-    data.moveType = packet.readUInt8();
-
-    if (data.moveType == 1) {
-        data.destX = data.x;
-        data.destY = data.y;
-        data.destZ = data.z;
-        data.hasDest = false;
-        return true;
-    }
-
-    if (data.moveType == 2) {
-        if (!packet.hasRemaining(12)) return false;
-        packet.readFloat(); packet.readFloat(); packet.readFloat();
-    } else if (data.moveType == 3) {
-        if (!packet.hasRemaining(8)) return false;
-        data.facingTarget = packet.readUInt64();
-    } else if (data.moveType == 4) {
-        if (!packet.hasRemaining(4)) return false;
-        data.facingAngle = packet.readFloat();
+    {
+        bool stopped = false;
+        if (!parseMonsterMoveFacing(packet, data, stopped)) return false;
+        if (stopped) return true;
     }
 
     if (!packet.hasRemaining(4)) return false;
@@ -706,7 +593,7 @@ bool TbcPacketParsers::parseMonsterMove(network::Packet& packet, MonsterMoveData
 // ============================================================================
 // TBC 2.4.3 CMSG_CAST_SPELL
 // Format: spellId(u32) + castCount(u8) + SpellCastTargets
-// WotLK 3.3.5a adds castFlags(u8) between spellId and targets — TBC does NOT.
+// WotLK 3.3.5a adds castFlags(u8) between spellId and targets - TBC does NOT.
 // ============================================================================
 network::Packet TbcPacketParsers::buildCastSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) {
     network::Packet packet(wireOpcode(LogicalOpcode::CMSG_CAST_SPELL));
@@ -717,21 +604,7 @@ network::Packet TbcPacketParsers::buildCastSpell(uint32_t spellId, uint64_t targ
     if (targetGuid != 0) {
         packet.writeUInt32(0x02); // TARGET_FLAG_UNIT
         // Write packed GUID
-        uint8_t mask = 0;
-        uint8_t bytes[8];
-        int byteCount = 0;
-        uint64_t g = targetGuid;
-        for (int i = 0; i < 8; ++i) {
-            uint8_t b = g & 0xFF;
-            if (b != 0) {
-                mask |= (1 << i);
-                bytes[byteCount++] = b;
-            }
-            g >>= 8;
-        }
-        packet.writeUInt8(mask);
-        for (int i = 0; i < byteCount; ++i)
-            packet.writeUInt8(bytes[i]);
+        packet.writePackedGuid(targetGuid);
     } else {
         packet.writeUInt32(0x00); // TARGET_FLAG_SELF
     }
@@ -780,17 +653,13 @@ network::Packet TbcPacketParsers::buildUseItem(uint8_t bagIndex, uint8_t slotInd
 }
 
 network::Packet TbcPacketParsers::buildAcceptQuestPacket(uint64_t npcGuid, uint32_t questId) {
-    network::Packet packet(wireOpcode(Opcode::CMSG_QUESTGIVER_ACCEPT_QUEST));
-    packet.writeUInt64(npcGuid);
-    packet.writeUInt32(questId);
-    // TBC servers generally expect guid + questId only.
-    return packet;
+    return buildAcceptQuestPacketPreWotlk(npcGuid, questId);
 }
 
 // ============================================================================
 // TBC 2.4.3 SMSG_QUESTGIVER_QUEST_DETAILS
 //
-// TBC and Classic share the same format — neither has the WotLK-specific fields
+// TBC and Classic share the same format - neither has the WotLK-specific fields
 // (informUnit GUID, flags uint32, isFinished uint8) that were added in 3.x.
 //
 // Format:
@@ -810,7 +679,7 @@ network::Packet TbcPacketParsers::buildAcceptQuestPacket(uint64_t npcGuid, uint3
 //   rewardCount(u32) + rewardCount × (itemId, count, displayId)   ← variable
 //   money(u32)
 //   trailing: Classic = rewSpell; TBC = honor + rewSpell + rewSpellCast + title
-//   emote block LAST (count + pairs) — never before the reward arrays.
+//   emote block LAST (count + pairs) - never before the reward arrays.
 // QUEST_FLAGS_HIDDEN_REWARDS quests serialize counts of 0 and money 0.
 bool TbcPacketParsers::parseQuestDetailsPreWotlk(network::Packet& packet, QuestDetailsData& data,
                                                  bool hasSuggestedPlayers) {
@@ -867,7 +736,7 @@ bool TbcPacketParsers::parseQuestDetailsPreWotlk(network::Packet& packet, QuestD
     if (packet.hasRemaining(4))
         data.rewardMoney = packet.readUInt32();
     // Remaining bytes are spell/honor/title trailing fields plus the emote
-    // block — no XP field exists pre-WotLK.
+    // block - no XP field exists pre-WotLK.
     data.rewardXp = 0;
 
     LOG_DEBUG("Quest details tbc/classic: id=", data.questId, " title='", data.title,
@@ -882,11 +751,7 @@ bool TbcPacketParsers::parseQuestDetailsPreWotlk(network::Packet& packet, QuestD
 // TBC format: guid(8) + questId(4) = 12 bytes.
 // ============================================================================
 network::Packet TbcPacketParsers::buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) {
-    network::Packet packet(wireOpcode(Opcode::CMSG_QUESTGIVER_QUERY_QUEST));
-    packet.writeUInt64(npcGuid);
-    packet.writeUInt32(questId);
-    // No isDialogContinued byte (WotLK-only addition)
-    return packet;
+    return buildQueryQuestPacketPreWotlk(npcGuid, questId);
 }
 
 // ============================================================================
@@ -985,181 +850,13 @@ bool TbcPacketParsers::parseNameQueryResponse(network::Packet& packet, NameQuery
 //   - Has SoundOverrideSubclass (int32) after subClass (Classic lacks it)
 //   - Otherwise keeps the fixed 10-stat-pair item metadata layout
 // ============================================================================
-bool TbcPacketParsers::parseItemQueryResponse(network::Packet& packet, ItemQueryResponseData& data) {
-    // Validate minimum packet size: entry(4)
-    if (packet.getSize() < 4) {
-        LOG_ERROR("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: packet too small (", packet.getSize(), " bytes)");
-        return false;
-    }
-
-    data.entry = packet.readUInt32();
-    if (data.entry & 0x80000000) {
-        data.entry &= ~0x80000000;
-        return true;
-    }
-
-    // Validate minimum size for fixed fields: itemClass(4) + subClass(4) + soundOverride(4) + 4 name strings + displayInfoId(4) + quality(4)
-    if (!packet.hasRemaining(12)) {
-        LOG_ERROR("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before names (entry=", data.entry, ")");
-        return false;
-    }
-
-    uint32_t itemClass = packet.readUInt32();
-    uint32_t subClass  = packet.readUInt32();
-    data.itemClass = itemClass;
-    data.subClass  = subClass;
-    packet.readUInt32(); // SoundOverrideSubclass (int32, -1 = no override)
-    data.subclassName = getItemSubclassName(itemClass, subClass);
-
-    // Name strings
-    data.name = packet.readString();
-    packet.readString(); // name2
-    packet.readString(); // name3
-    packet.readString(); // name4
-
-    data.displayInfoId = packet.readUInt32();
-    data.quality       = packet.readUInt32();
-
-    // Validate minimum size for fixed fields: Flags(4) + BuyPrice(4) + SellPrice(4) + inventoryType(4)
-    if (!packet.hasRemaining(16)) {
-        LOG_ERROR("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before inventoryType (entry=", data.entry, ")");
-        return false;
-    }
-
-    data.itemFlags = packet.readUInt32(); // Flags  (TBC: 1 flags field only — no Flags2)
-    // TBC: NO Flags2, NO BuyCount
-    packet.readUInt32(); // BuyPrice
-    data.sellPrice = packet.readUInt32();
-
-    data.inventoryType = packet.readUInt32();
-
-    // Validate minimum size for remaining fixed fields: 14×4 = 56 bytes
-    if (!packet.hasRemaining(56)) {
-        LOG_ERROR("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before stats (entry=", data.entry, ")");
-        return false;
-    }
-
-    data.allowableClass = packet.readUInt32(); // AllowableClass
-    data.allowableRace  = packet.readUInt32(); // AllowableRace
-    data.itemLevel = packet.readUInt32();
-    data.requiredLevel = packet.readUInt32();
-    data.requiredSkill     = packet.readUInt32(); // RequiredSkill
-    data.requiredSkillRank = packet.readUInt32(); // RequiredSkillRank
-    packet.readUInt32(); // RequiredSpell
-    packet.readUInt32(); // RequiredHonorRank
-    packet.readUInt32(); // RequiredCityRank
-    data.requiredReputationFaction = packet.readUInt32(); // RequiredReputationFaction
-    data.requiredReputationRank    = packet.readUInt32(); // RequiredReputationRank
-    data.maxCount = static_cast<int32_t>(packet.readUInt32()); // MaxCount (1 = Unique)
-    data.maxStack = static_cast<int32_t>(packet.readUInt32()); // Stackable
-    data.containerSlots = packet.readUInt32();
-
-    // TBC/CMaNGOS sends the same fixed 10 stat pairs as vanilla. There is no
-    // statsCount prefix here; reading one shifts every later field and makes
-    // StartQuest look non-zero for ordinary items.
-    if (!packet.hasRemaining(80)) {
-        LOG_WARNING("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated in stats section (entry=", data.entry, ")");
-    }
-    for (uint32_t i = 0; i < 10; i++) {
-        if (!packet.hasRemaining(8)) {
-            LOG_WARNING("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: stat ", i, " truncated (entry=", data.entry, ")");
-            break;
-        }
-        uint32_t statType  = packet.readUInt32();
-        int32_t  statValue = static_cast<int32_t>(packet.readUInt32());
-        if (statType == 0) continue;
-        switch (statType) {
-            case 3: data.agility  = statValue; break;
-            case 4: data.strength = statValue; break;
-            case 5: data.intellect = statValue; break;
-            case 6: data.spirit   = statValue; break;
-            case 7: data.stamina  = statValue; break;
-            default:
-                if (statValue != 0)
-                    data.extraStats.push_back({statType, statValue});
-                break;
-        }
-    }
-    // TBC: NO ScalingStatDistribution, NO ScalingStatValue (WotLK-only)
-
-    // 5 damage entries (5×12 = 60 bytes)
-    bool haveWeaponDamage = false;
-    for (int i = 0; i < 5; i++) {
-        // Each damage entry is dmgMin(4) + dmgMax(4) + damageType(4) = 12 bytes
-        if (!packet.hasRemaining(12)) {
-            LOG_WARNING("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: damage ", i, " truncated (entry=", data.entry, ")");
-            break;
-        }
-        float    dmgMin     = packet.readFloat();
-        float    dmgMax     = packet.readFloat();
-        uint32_t damageType = packet.readUInt32();
-        if (!haveWeaponDamage && dmgMax > 0.0f) {
-            if (damageType == 0 || data.damageMax <= 0.0f) {
-                data.damageMin = dmgMin;
-                data.damageMax = dmgMax;
-                haveWeaponDamage = (damageType == 0);
-            }
-        }
-    }
-
-    // Validate minimum size for armor (4 bytes)
-    if (!packet.hasRemaining(4)) {
-        LOG_WARNING("TBC SMSG_ITEM_QUERY_SINGLE_RESPONSE: truncated before armor (entry=", data.entry, ")");
-        return true;  // Have core fields; armor is important but optional
-    }
-    data.armor = static_cast<int32_t>(packet.readUInt32());
-
-    if (packet.hasRemaining(28)) {
-        data.holyRes   = static_cast<int32_t>(packet.readUInt32()); // HolyRes
-        data.fireRes   = static_cast<int32_t>(packet.readUInt32()); // FireRes
-        data.natureRes = static_cast<int32_t>(packet.readUInt32()); // NatureRes
-        data.frostRes  = static_cast<int32_t>(packet.readUInt32()); // FrostRes
-        data.shadowRes = static_cast<int32_t>(packet.readUInt32()); // ShadowRes
-        data.arcaneRes = static_cast<int32_t>(packet.readUInt32()); // ArcaneRes
-        data.delayMs = packet.readUInt32();
-    }
-
-    // AmmoType + RangedModRange
-    if (packet.hasRemaining(8)) {
-        packet.readUInt32(); // AmmoType
-        packet.readFloat();  // RangedModRange
-    }
-
-    // 5 item spells
-    for (int i = 0; i < 5; i++) {
-        if (!packet.hasRemaining(24)) break;
-        data.spells[i].spellId = packet.readUInt32();
-        data.spells[i].spellTrigger = packet.readUInt32();
-        packet.readUInt32(); // SpellCharges
-        packet.readUInt32(); // SpellCooldown
-        packet.readUInt32(); // SpellCategory
-        packet.readUInt32(); // SpellCategoryCooldown
-    }
-
-    // Bonding type
-    if (packet.hasRemaining(4))
-        data.bindType = packet.readUInt32();
-
-    // Flavor/lore text
-    if (packet.getReadPos() < packet.getSize())
-        data.description = packet.readString();
-
-    // Post-description: PageText, LanguageID, PageMaterial, StartQuest
-    if (packet.hasRemaining(16)) {
-        data.pageTextId = packet.readUInt32(); // PageText
-        packet.readUInt32(); // LanguageID
-        packet.readUInt32(); // PageMaterial
-        data.startQuestId = packet.readUInt32(); // StartQuest
-    }
-
-    data.valid = !data.name.empty();
-    LOG_DEBUG("[TBC] Item query: ", data.name, " quality=", data.quality,
-              " invType=", data.inventoryType, " armor=", data.armor);
-    return true;
+bool TbcPacketParsers::parseItemQueryResponse(network::Packet& packet,
+                                              ItemQueryResponseData& data) {
+    return parseItemQueryPreWotlk(packet, data, /*hasSoundOverrideSubclass=*/true, "TBC");
 }
 
 // ============================================================================
-// TbcPacketParsers::parseMailList — TBC 2.4.3 SMSG_MAIL_LIST_RESULT
+// TbcPacketParsers::parseMailList - TBC 2.4.3 SMSG_MAIL_LIST_RESULT
 //
 // Differences from WotLK 3.3.5a (base implementation):
 //   - Header: uint8 count only (WotLK: uint32 totalCount + uint8 shownCount)
@@ -1261,7 +958,7 @@ bool TbcPacketParsers::parseMailList(network::Packet& packet, std::vector<MailMe
 
 // ============================================================================
 // ---------------------------------------------------------------------------
-// skipTbcSpellCastTargets — consume all SpellCastTargets payload bytes for TBC.
+// skipTbcSpellCastTargets - consume all SpellCastTargets payload bytes for TBC.
 //
 // TBC uses uint32 targetFlags (Classic: uint16). Unit/item/object/corpse targets
 // are PackedGuid (same as Classic). Source/dest location is 3 floats (12 bytes)
@@ -1324,7 +1021,7 @@ static bool skipTbcSpellCastTargets(network::Packet& packet, uint64_t* primaryTa
     return true;
 }
 
-// TbcPacketParsers::parseSpellStart — TBC 2.4.3 SMSG_SPELL_START
+// TbcPacketParsers::parseSpellStart - TBC 2.4.3 SMSG_SPELL_START
 //
 // CMaNGOS TBC sends:
 //   PackedGuid(caster object/item) + PackedGuid(caster unit)
@@ -1370,7 +1067,7 @@ bool TbcPacketParsers::parseSpellStart(network::Packet& packet, SpellStartData& 
 }
 
 // ============================================================================
-// TbcPacketParsers::parseSpellGo — TBC 2.4.3 SMSG_SPELL_GO
+// TbcPacketParsers::parseSpellGo - TBC 2.4.3 SMSG_SPELL_GO
 //
 // CMaNGOS TBC sends:
 //   PackedGuid(caster object/item) + PackedGuid(caster unit)
@@ -1478,7 +1175,7 @@ bool TbcPacketParsers::parseSpellGo(network::Packet& packet, SpellGoData& data) 
     }
     data.missCount = static_cast<uint8_t>(data.missTargets.size());
 
-    // SpellCastTargets follows the miss list — consume all target bytes so that
+    // SpellCastTargets follows the miss list - consume all target bytes so that
     // any subsequent fields are not misaligned for ground-targeted AoE spells.
     skipTbcSpellCastTargets(packet, &data.targetGuid);
 
@@ -1507,7 +1204,7 @@ static uint8_t translateTbcCastFailure(uint8_t tbcResult) {
 }
 
 // ============================================================================
-// TbcPacketParsers::parseCastResult — TBC 2.4.3 SMSG_CAST_RESULT
+// TbcPacketParsers::parseCastResult - TBC 2.4.3 SMSG_CAST_RESULT
 //
 // TBC format: spellId(u32) + result(u8) + castCount(u8).
 // ============================================================================
@@ -1527,7 +1224,7 @@ bool TbcPacketParsers::parseCastResult(network::Packet& packet, uint32_t& spellI
 }
 
 // ============================================================================
-// TbcPacketParsers::parseCastFailed — TBC 2.4.3 SMSG_CAST_FAILED
+// TbcPacketParsers::parseCastFailed - TBC 2.4.3 SMSG_CAST_FAILED
 //
 // TBC format: spellId(u32) + result(u8) + castCount(u8).
 // ============================================================================
@@ -1547,7 +1244,7 @@ bool TbcPacketParsers::parseCastFailed(network::Packet& packet, CastFailedData& 
 }
 
 // ============================================================================
-// TbcPacketParsers::parseAttackerStateUpdate — TBC 2.4.3 SMSG_ATTACKERSTATEUPDATE
+// TbcPacketParsers::parseAttackerStateUpdate - TBC 2.4.3 SMSG_ATTACKERSTATEUPDATE
 //
 // CMaNGOS TBC writes attacker and target as packed GUIDs:
 //   hitInfo(u32) + PackedGuid(attacker) + PackedGuid(target)
@@ -1557,52 +1254,11 @@ bool TbcPacketParsers::parseCastFailed(network::Packet& packet, CastFailedData& 
 bool TbcPacketParsers::parseAttackerStateUpdate(network::Packet& packet, AttackerStateUpdateData& data) {
     data = AttackerStateUpdateData{};
 
-    const size_t startPos = packet.getReadPos();
     auto rem = [&]() { return packet.getRemainingSize(); };
+    if (rem() < 5) return false;  // hitInfo + at least one packed guid mask byte
 
-    if (rem() < 5) return false;  // hitInfo + at least one packed GUID mask byte
-
-    data.hitInfo = packet.readUInt32();
-    if (!packet.hasFullPackedGuid()) {
-        packet.setReadPos(startPos);
-        return false;
-    }
-    data.attackerGuid = packet.readPackedGuid();
-    if (!packet.hasFullPackedGuid()) {
-        packet.setReadPos(startPos);
-        return false;
-    }
-    data.targetGuid = packet.readPackedGuid();
-
-    if (rem() < 5) {
-        packet.setReadPos(startPos);
-        return false;
-    }
-    data.totalDamage    = static_cast<int32_t>(packet.readUInt32());
-    data.subDamageCount = packet.readUInt8();
-
-    // Clamp to what can fit in the remaining payload (20 bytes per sub-damage entry).
-    const uint8_t maxSubDamageCount = static_cast<uint8_t>(std::min<size_t>(rem() / 20, 64));
-    if (data.subDamageCount > maxSubDamageCount) {
-        data.subDamageCount = maxSubDamageCount;
-    }
-
-    data.subDamages.reserve(data.subDamageCount);
-    for (uint8_t i = 0; i < data.subDamageCount; ++i) {
-        if (rem() < 20) {
-            packet.setReadPos(startPos);
-            return false;
-        }
-        SubDamage sub;
-        sub.schoolMask = packet.readUInt32();
-        sub.damage     = packet.readFloat();
-        sub.intDamage  = packet.readUInt32();
-        sub.absorbed   = packet.readUInt32();
-        sub.resisted   = packet.readUInt32();
-        data.subDamages.push_back(sub);
-    }
-
-    data.subDamageCount = static_cast<uint8_t>(data.subDamages.size());
+    const size_t startPos = packet.getReadPos();
+    if (!data.readCommonHead(packet, startPos)) return false;
 
     // TBC sends victim state, an unknown field, a spell id field used by some
     // melee specials, then blocked amount.  There is no overkill field here.
@@ -1623,44 +1279,16 @@ bool TbcPacketParsers::parseAttackerStateUpdate(network::Packet& packet, Attacke
 }
 
 // ============================================================================
-// TbcPacketParsers::parseSpellDamageLog — TBC 2.4.3 SMSG_SPELLNONMELEEDAMAGELOG
+// TbcPacketParsers::parseSpellDamageLog - TBC 2.4.3 SMSG_SPELLNONMELEEDAMAGELOG
 //
 // CMaNGOS TBC writes target and attacker as packed GUIDs.
 // ============================================================================
 bool TbcPacketParsers::parseSpellDamageLog(network::Packet& packet, SpellDamageLogData& data) {
-    data = SpellDamageLogData{};
-    auto rem = [&]() { return packet.getRemainingSize(); };
-
-    if (rem() < 2 || !packet.hasFullPackedGuid()) return false;
-    data.targetGuid = packet.readPackedGuid();
-    if (rem() < 1 || !packet.hasFullPackedGuid()) return false;
-    data.attackerGuid = packet.readPackedGuid();
-
-    // spellId + damage + schoolMask + absorbed + resisted + periodicLog + unused + blocked + flags
-    if (rem() < 21) return false;
-    data.spellId      = packet.readUInt32();
-    data.damage       = packet.readUInt32();
-    data.schoolMask   = packet.readUInt8();
-    data.absorbed     = packet.readUInt32();
-    data.resisted     = packet.readUInt32();
-
-    uint8_t periodicLog = packet.readUInt8();
-    (void)periodicLog;
-    packet.readUInt8();   // unused
-    packet.readUInt32();  // blocked
-    uint32_t flags = packet.readUInt32();
-    data.isCrit = (flags & 0x02) != 0;
-
-    // TBC does not have an overkill field here
-    data.overkill = 0;
-
-    LOG_DEBUG("[TBC] Spell damage: spellId=", data.spellId, " dmg=", data.damage,
-              data.isCrit ? " CRIT" : "");
-    return true;
+    return parseSpellDamageLogPreWotlk(packet, data, "[TBC]");
 }
 
 // ============================================================================
-// TbcPacketParsers::parseSpellHealLog — TBC 2.4.3 SMSG_SPELLHEALLOG
+// TbcPacketParsers::parseSpellHealLog - TBC 2.4.3 SMSG_SPELLHEALLOG
 //
 // CMaNGOS TBC writes target and caster as packed GUIDs.
 // ============================================================================
@@ -1714,7 +1342,7 @@ uint8_t TbcPacketParsers::readQuestGiverStatus(network::Packet& packet) {
         case 2: return 0;   // CHAT → NONE (no marker)
         case 3: return 5;   // INCOMPLETE → WotLK INCOMPLETE
         case 4: return 6;   // REWARD_REP → WotLK REWARD_REP
-        case 5: return 7;   // AVAILABLE_REP → WotLK AVAILABLE_LOW_LEVEL
+        case 5: return 7;   // AVAILABLE_REP → WotLK AVAILABLE_REP
         case 6: return 8;   // AVAILABLE → WotLK AVAILABLE
         case 7: return 10;  // REWARD2 → WotLK REWARD
         case 8: return 10;  // REWARD → WotLK REWARD
@@ -1755,62 +1383,9 @@ network::Packet TbcPacketParsers::buildLeaveChannel(const std::string& channelNa
 // ============================================================================
 
 bool TbcPacketParsers::parseGameObjectQueryResponse(network::Packet& packet, GameObjectQueryResponseData& data) {
-    if (packet.getSize() < 4) {
-        LOG_ERROR("TBC SMSG_GAMEOBJECT_QUERY_RESPONSE: packet too small (", packet.getSize(), " bytes)");
-        return false;
-    }
-
-    data.entry = packet.readUInt32();
-
-    if (data.entry & 0x80000000) {
-        data.entry &= ~0x80000000;
-        data.name = "";
-        return true;
-    }
-
-    if (!packet.hasRemaining(8)) {
-        LOG_ERROR("TBC SMSG_GAMEOBJECT_QUERY_RESPONSE: truncated before names (entry=", data.entry, ")");
-        return false;
-    }
-
-    data.type = packet.readUInt32();
-    data.displayId = packet.readUInt32();
-    // 4 name strings
-    data.name = packet.readString();
-    packet.readString();
-    packet.readString();
-    packet.readString();
-
-    // TBC: 2 extra strings (iconName + castBarCaption) — WotLK has 3, Classic has 0
-    packet.readString();  // iconName
-    packet.readString();  // castBarCaption
-
-    // Read 24 type-specific data fields
-    size_t remaining = packet.getRemainingSize();
-    if (remaining >= 24 * 4) {
-        for (int i = 0; i < 24; i++) {
-            data.data[i] = packet.readUInt32();
-        }
-        data.hasData = true;
-    } else if (remaining > 0) {
-        uint32_t fieldsToRead = remaining / 4;
-        for (uint32_t i = 0; i < fieldsToRead && i < 24; i++) {
-            data.data[i] = packet.readUInt32();
-        }
-        if (fieldsToRead < 24) {
-            LOG_WARNING("TBC SMSG_GAMEOBJECT_QUERY_RESPONSE: truncated in data fields (", fieldsToRead,
-                        " of 24, entry=", data.entry, ")");
-        }
-    }
-
-    if (data.type == 15) { // MO_TRANSPORT
-        LOG_DEBUG("TBC GO query: MO_TRANSPORT entry=", data.entry,
-                  " name=\"", data.name, "\" displayId=", data.displayId,
-                  " taxiPathId=", data.data[0], " moveSpeed=", data.data[1]);
-    } else {
-        LOG_DEBUG("TBC GO query: ", data.name, " type=", data.type, " entry=", data.entry);
-    }
-    return true;
+    // Two of the 2.0.3 strings, where WotLK reads three. See
+    // parseGameObjectQueryBody for why that difference is not settled.
+    return parseGameObjectQueryBody(packet, data, /*extraStrings=*/2);
 }
 
 // ============================================================================
@@ -1820,119 +1395,10 @@ bool TbcPacketParsers::parseGameObjectQueryResponse(network::Packet& packet, Gam
 // ============================================================================
 
 bool TbcPacketParsers::parseGuildRoster(network::Packet& packet, GuildRosterData& data) {
-    if (packet.getSize() < 4) {
-        LOG_ERROR("TBC SMSG_GUILD_ROSTER too small: ", packet.getSize());
-        return false;
-    }
-    uint32_t numMembers = packet.readUInt32();
-
-    // Safety cap — guilds rarely exceed 500 members; 1000 prevents excessive
-    // memory allocation from malformed packets while covering all real cases
-    const uint32_t MAX_GUILD_MEMBERS = 1000;
-    if (numMembers > MAX_GUILD_MEMBERS) {
-        LOG_WARNING("TBC GuildRoster: numMembers capped (requested=", numMembers, ")");
-        numMembers = MAX_GUILD_MEMBERS;
-    }
-
-    data.motd = packet.readString();
-    data.guildInfo = packet.readString();
-
-    if (!packet.hasRemaining(4)) {
-        LOG_WARNING("TBC GuildRoster: truncated before rankCount");
-        data.ranks.clear();
-        data.members.clear();
-        return true;
-    }
-
-    uint32_t rankCount = packet.readUInt32();
-    const uint32_t MAX_GUILD_RANKS = 20;
-    if (rankCount > MAX_GUILD_RANKS) {
-        LOG_WARNING("TBC GuildRoster: rankCount capped (requested=", rankCount, ")");
-        rankCount = MAX_GUILD_RANKS;
-    }
-
-    data.ranks.resize(rankCount);
-    for (uint32_t i = 0; i < rankCount; ++i) {
-        if (!packet.hasRemaining(4)) {
-            LOG_WARNING("TBC GuildRoster: truncated rank at index ", i);
-            break;
-        }
-        data.ranks[i].rights = packet.readUInt32();
-        if (!packet.hasRemaining(4)) {
-            data.ranks[i].goldLimit = 0;
-        } else {
-            data.ranks[i].goldLimit = packet.readUInt32();
-        }
-        // 6 bank tab flags + 6 bank tab items per day (guild banks added in TBC 2.3)
-        for (int t = 0; t < 6; ++t) {
-            if (!packet.hasRemaining(8)) break;
-            packet.readUInt32(); // tabFlags
-            packet.readUInt32(); // tabItemsPerDay
-        }
-    }
-
-    data.members.resize(numMembers);
-    for (uint32_t i = 0; i < numMembers; ++i) {
-        if (!packet.hasRemaining(9)) {
-            LOG_WARNING("TBC GuildRoster: truncated member at index ", i);
-            break;
-        }
-        auto& m = data.members[i];
-        m.guid = packet.readUInt64();
-        m.online = (packet.readUInt8() != 0);
-
-        if (packet.getReadPos() >= packet.getSize()) {
-            m.name.clear();
-        } else {
-            m.name = packet.readString();
-        }
-
-        if (!packet.hasRemaining(1)) {
-            m.rankIndex = 0;
-            m.level = 1;
-            m.classId = 0;
-            m.gender = 0;
-            m.zoneId = 0;
-        } else {
-            m.rankIndex = packet.readUInt32();
-            if (!packet.hasRemaining(2)) {
-                m.level = 1;
-                m.classId = 0;
-            } else {
-                m.level = packet.readUInt8();
-                m.classId = packet.readUInt8();
-            }
-            // TBC: NO gender byte (WotLK added it)
-            m.gender = 0;
-            if (!packet.hasRemaining(4)) {
-                m.zoneId = 0;
-            } else {
-                m.zoneId = packet.readUInt32();
-            }
-        }
-
-        if (!m.online) {
-            if (!packet.hasRemaining(4)) {
-                m.lastOnline = 0.0f;
-            } else {
-                m.lastOnline = packet.readFloat();
-            }
-        }
-
-        if (packet.getReadPos() >= packet.getSize()) {
-            m.publicNote.clear();
-            m.officerNote.clear();
-        } else {
-            m.publicNote = packet.readString();
-            if (packet.getReadPos() >= packet.getSize()) {
-                m.officerNote.clear();
-            } else {
-                m.officerNote = packet.readString();
-            }
-        }
-    }
-    LOG_INFO("Parsed TBC SMSG_GUILD_ROSTER: ", numMembers, " members, motd=", data.motd);
-    return true;
+    // TBC's roster is WotLK's without the gender byte. It was ninety-nine
+    // lines saying so, and the copy dropped the bank tab rights it had just
+    // read - see parseGuildRosterBody.
+    return parseGuildRosterBody(packet, data, {/*rankCount=*/.rankCount=true, /*gender=*/.gender=false});
 }
 
 // ============================================================================

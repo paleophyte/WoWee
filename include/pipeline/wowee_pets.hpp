@@ -7,18 +7,18 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Pet System catalog (.wpet) — novel replacement
+// Wowee Open Pet System catalog (.wpet) - novel replacement
 // for AzerothCore-style pet_template + pet_levelstats SQL
 // + the pet-related subsets of CreatureFamily.dbc and
 // SpellFamilyName.dbc. The 38th open format added to the
 // editor.
 //
 // Defines two related kinds of player-controlled NPCs:
-//   • Pet families  — hunter pet families (Wolf / Cat / Bear /
+//   • Pet families  - hunter pet families (Wolf / Cat / Bear /
 //                      Boar / Raptor / Spider / etc.) with
 //                      per-family ability sets, base stat
 //                      multipliers, and diet preferences
-//   • Warlock minions — Imp / Voidwalker / Succubus /
+//   • Warlock minions - Imp / Voidwalker / Succubus /
 //                        Felhunter / Felguard, each with
 //                        their own summon spell and
 //                        ability list
@@ -107,10 +107,10 @@ struct WoweePet {
     std::vector<Family> families;
     std::vector<Minion> minions;
 
-    bool isValid() const { return !families.empty() || !minions.empty(); }
+    [[nodiscard]] bool isValid() const { return !families.empty() || !minions.empty(); }
 
-    const Family* findFamily(uint32_t familyId) const;
-    const Minion* findMinion(uint32_t minionId) const;
+    [[nodiscard]] const Family* findFamily(uint32_t familyId) const;
+    [[nodiscard]] const Minion* findMinion(uint32_t minionId) const;
 
     static const char* petTypeName(uint8_t t);
     // Decode a dietMask into a short string ("meat+fish").
@@ -126,15 +126,15 @@ public:
 
     // Preset emitters used by --gen-pets* variants.
     //
-    //   makeStarter  — 2 hunter families (Wolf + Cat) with
+    //   makeStarter  - 2 hunter families (Wolf + Cat) with
     //                   3 abilities each + 1 warlock minion
     //                   (Imp).
-    //   makeHunter   — full beast family set (8 classic
+    //   makeHunter   - full beast family set (8 classic
     //                   families: Wolf / Cat / Bear / Boar /
     //                   Raptor / Hyena / Spider / Bat) with
     //                   per-type Cunning/Ferocity/Tenacity
     //                   classification.
-    //   makeWarlock  — 5 minions (Imp / Voidwalker /
+    //   makeWarlock  - 5 minions (Imp / Voidwalker /
     //                   Succubus / Felhunter / Felguard) with
     //                   summon spell + creature template
     //                   cross-refs.

@@ -1,6 +1,6 @@
-// composite_renderer.hpp — Vulkan off-screen composite rendering for the world map.
+// composite_renderer.hpp - Vulkan off-screen composite rendering for the world map.
 // Extracted from WorldMap (Phase 7 of refactoring plan).
-// SRP — all GPU resource management separated from domain logic.
+// SRP - all GPU resource management separated from domain logic.
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
@@ -23,18 +23,22 @@ namespace world_map {
 
 /// Push constant for world map tile composite vertex shader.
 struct WorldMapTilePush {
-    glm::vec2 gridOffset;  // 8 bytes
-    float gridCols;          // 4 bytes
-    float gridRows;          // 4 bytes
-};  // 16 bytes
+    glm::vec2 gridOffset;               // 8 bytes   quad origin, in grid cells
+    float gridCols;                     // 4 bytes
+    float gridRows;                     // 4 bytes
+    glm::vec2 gridScale{1.0f, 1.0f};    // 8 bytes   quad size, in grid cells
+    glm::vec2 uvScale{1.0f, 1.0f};      // 8 bytes   fraction of the file to sample
+};  // 32 bytes
 
 /// Push constant for the overlay/fog pipeline (vertex + fragment stages).
 struct OverlayPush {
-    glm::vec2 gridOffset;  // 8 bytes  (vertex)
-    float gridCols;          // 4 bytes  (vertex)
-    float gridRows;          // 4 bytes  (vertex)
-    glm::vec4 tintColor;   // 16 bytes (fragment)
-};  // 32 bytes
+    glm::vec2 gridOffset;               // 8 bytes  (vertex)
+    float gridCols;                     // 4 bytes  (vertex)
+    float gridRows;                     // 4 bytes  (vertex)
+    glm::vec2 gridScale{1.0f, 1.0f};    // 8 bytes  (vertex)
+    glm::vec2 uvScale{1.0f, 1.0f};      // 8 bytes  (vertex)
+    glm::vec4 tintColor;                // 16 bytes (fragment, offset 32)
+};  // 48 bytes
 
 class CompositeRenderer {
 public:
@@ -60,10 +64,9 @@ public:
                        bool hasServerMask);
 
     /// Descriptor set for ImGui display of the composite.
-    VkDescriptorSet displayDescriptorSet() const { return imguiDisplaySet; }
+    [[nodiscard]] VkDescriptorSet displayDescriptorSet() const { return imguiDisplaySet; }
 
     /// Destroy all loaded zone textures (on map change).
-    void destroyZoneTextures(std::vector<Zone>& zones);
 
     /// Detach zone textures for deferred GPU destruction.
     /// Clears CPU tracking immediately but moves GPU texture objects to a stale
@@ -75,13 +78,20 @@ public:
     void flushStaleTextures();
 
     /// Index of the zone currently composited (-1 if none).
-    int compositedIdx() const { return compositedIdx_; }
+    [[nodiscard]] int compositedIdx() const { return compositedIdx_; }
+    /// Whether the composite image has ever been rendered into.
+    ///
+    /// Distinct from compositedIdx(), which says whether it is *current*:
+    /// invalidateComposite() clears that on every zone change while the image
+    /// still holds a perfectly good picture. Only the first use is the one
+    /// where its contents are undefined.
+    [[nodiscard]] bool everComposited() const { return everComposited_; }
 
     /// Reset composited index to force re-composite.
     void invalidateComposite() { compositedIdx_ = -1; }
 
     /// Check whether a zone has any loaded tile textures.
-    bool hasAnyTile(int zoneIdx) const;
+    [[nodiscard]] bool hasAnyTile(int zoneIdx) const;
 
     // FBO dimensions (public for overlay coordinate math)
     static constexpr int GRID_COLS = 4;
@@ -90,7 +100,7 @@ public:
     static constexpr int FBO_W = GRID_COLS * TILE_PX;
     static constexpr int FBO_H = GRID_ROWS * TILE_PX;
 
-    // WoW's WorldMapDetailFrame is 1002x668 — the visible map content area.
+    // WoW's WorldMapDetailFrame is 1002x668 - the visible map content area.
     // The FBO is 1024x768 so we crop UVs to show only the actual map region.
     static constexpr int MAP_W = 1002;
     static constexpr int MAP_H = 668;
@@ -133,6 +143,7 @@ private:
     std::vector<std::unique_ptr<VkTexture>> zoneTextures;
 
     int compositedIdx_ = -1;
+    bool everComposited_ = false;
     int pendingCompositeIdx_ = -1;
 
     // Per-zone tile texture pointers (indexed by zone, then by tile slot)

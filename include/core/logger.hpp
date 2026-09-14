@@ -38,7 +38,7 @@ public:
 
     void log(LogLevel level, const std::string& message);
     void setLogLevel(LogLevel level);
-    bool shouldLog(LogLevel level) const;
+    [[nodiscard]] bool shouldLog(LogLevel level) const;
 
     template<typename... Args>
     void debug(Args&&... args) {
@@ -97,6 +97,8 @@ private:
     bool echoToStdout_ = true;
     std::chrono::steady_clock::time_point lastFlushTime_{};
     uint32_t flushIntervalMs_ = 250;
+    /// Something is written and not yet on disk. See flushIfStale.
+    bool unflushed_ = false;
     bool dedupeEnabled_ = true;
     uint32_t dedupeWindowMs_ = 250;
     LogLevel lastLevel_ = LogLevel::DEBUG;
@@ -104,6 +106,18 @@ private:
     std::chrono::steady_clock::time_point lastMessageTime_{};
     uint64_t suppressedCount_ = 0;
     void emitLineLocked(LogLevel level, const std::string& message);
+public:
+    /// Put whatever is buffered on disk if it has been there long enough.
+    ///
+    /// Called once a frame. A warning used to flush the stream by itself, which
+    /// is a write for every line - and this client puts its diagnostics at
+    /// warning on purpose, so a burst is hundreds of them in a row: a hundred
+    /// and twelve while FrameXML loads, two hundred for one takeover check. The
+    /// interval coalesces a burst into one write and this keeps the tail of it
+    /// from sitting in the buffer afterwards, so a warning still reaches the
+    /// file within a frame or two of being written.
+    void flushIfStale();
+private:
     void flushSuppressedLocked();
     void ensureFile();
 };
@@ -145,6 +159,44 @@ private:
         _wowee_logger.fatal(__VA_ARGS__); \
     } \
 } while (0)
+
+/// A budget for a diagnostic that would otherwise repeat as long as its
+/// condition holds.
+///
+/// A rate limit bounds how often a line is written, not how many times: at one
+/// a second, a condition that holds for a minute writes sixty of them, all
+/// saying what the first one said. Declare one of these static beside the line
+/// and the diagnostic keeps its first few - which is where the information is
+/// - then says so once and stops.
+///
+///     static core::LogBudget budget(12, "Floor jump");
+///     if (budget.take()) LOG_WARNING("Floor jump: player z=", z, ...);
+class LogBudget {
+public:
+    LogBudget(int total, const char* what) : left_(total), total_(total), what_(what) {}
+
+    /// True while there is budget left. The call after the last one writes a
+    /// closing line naming the diagnostic, so a reader can tell a report that
+    /// stopped from one that never fired again.
+    bool take() {
+        if (left_ > 0) {
+            --left_;
+            return true;
+        }
+        if (!closed_) {
+            closed_ = true;
+            LOG_WARNING(what_, ": said ", total_, " times and will not be said "
+                        "again this run");
+        }
+        return false;
+    }
+
+private:
+    int left_ = 0;
+    int total_ = 0;
+    const char* what_ = "";
+    bool closed_ = false;
+};
 
 inline std::string toHexString(const uint8_t* data, size_t len, bool spaces = false) {
     std::string s;

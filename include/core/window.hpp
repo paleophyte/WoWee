@@ -30,26 +30,54 @@ public:
     bool initialize();
     void shutdown();
 
-    void swapBuffers() {} // No-op: Vulkan presents in Renderer::endFrame()
-    void pollEvents();
+private:
+    /// Give the window its own icon rather than the toolkit's default.
+    void setWindowIcon();
 
-    bool shouldClose() const { return shouldCloseFlag; }
+public:
+
+    void swapBuffers() {} // No-op: Vulkan presents in Renderer::endFrame()
+
+    [[nodiscard]] bool shouldClose() const { return shouldCloseFlag; }
     void setShouldClose(bool value) { shouldCloseFlag = value; }
 
-    int getWidth() const { return width; }
-    int getHeight() const { return height; }
-    void setSize(int w, int h) { width = w; height = h; }
-    float getAspectRatio() const { return static_cast<float>(width) / height; }
-    bool isFullscreen() const { return fullscreen; }
-    bool isVsyncEnabled() const { return vsync; }
+    /// The window, in the units the desktop places windows in.
+    ///
+    /// Points, not pixels, and on a high density display the two differ: a
+    /// 14-inch MacBook Pro is 3024x1964 pixels and 1512x982 points. Every
+    /// mouse position and every interface coordinate is in these, so this is
+    /// what the interface asks for - and what a window can be sized to.
+    [[nodiscard]] int getWidth() const { return width; }
+    [[nodiscard]] int getHeight() const { return height; }
+    /// The surface behind it, in pixels. What the swapchain has to be.
+    ///
+    /// Equal to the size above wherever a point is a pixel, which is every
+    /// platform this runs on but macOS. There it is twice it, and rendering
+    /// at the point size means drawing a 1512-wide picture and letting the
+    /// display stretch it over 3024 - which is what this client did.
+    [[nodiscard]] int getDrawableWidth() const { return drawableWidth; }
+    [[nodiscard]] int getDrawableHeight() const { return drawableHeight; }
+    void setSize(int w, int h) { width = w; height = h; refreshDrawableSize(); }
+    [[nodiscard]] float getAspectRatio() const { return static_cast<float>(width) / height; }
+    [[nodiscard]] bool isFullscreen() const { return fullscreen; }
+    [[nodiscard]] bool isVsyncEnabled() const { return vsync; }
+
+    /// Frames per second the main loop paces itself to, or 0 for uncapped.
+    ///
+    /// Lives here beside vsync because it is the same question asked a
+    /// different way - how often to present - and a client drawing a 2004 game
+    /// will otherwise run as fast as the hardware allows, which on a laptop is
+    /// heat and fan noise for frames nobody sees.
+    void setFrameCap(int fps) { frameCapFps_ = (fps > 0) ? fps : 0; }
+    [[nodiscard]] int frameCap() const { return frameCapFps_; }
     void setFullscreen(bool enable);
     void setVsync(bool enable);
     void applyResolution(int w, int h);
 
-    SDL_Window* getSDLWindow() const { return window; }
+    [[nodiscard]] SDL_Window* getSDLWindow() const { return window; }
 
     // Vulkan context access
-    rendering::VkContext* getVkContext() const { return vkContext.get(); }
+    [[nodiscard]] rendering::VkContext* getVkContext() const { return vkContext.get(); }
 
 private:
     WindowConfig config;
@@ -58,9 +86,15 @@ private:
 
     int width;
     int height;
+    /// Refreshed with the size, never set by hand: SDL is the only thing
+    /// that knows what the surface behind the window came out as.
+    int drawableWidth = 0;
+    int drawableHeight = 0;
+    void refreshDrawableSize();
     int windowedWidth = 0;
     int windowedHeight = 0;
     bool fullscreen = false;
+    int frameCapFps_ = 0;   // 0 = uncapped
     bool vsync = true;
     bool shouldCloseFlag = false;
 };

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open World Locations catalog (.wloc) —
+// Wowee Open World Locations catalog (.wloc) -
 // novel unified replacement for the half-dozen
 // proprietary location tables vanilla WoW
 // scattered across AreaPOI.dbc (zone-discovery
@@ -42,7 +42,7 @@ namespace pipeline {
 //     x (float)
 //     y (float)
 //     z (float)
-//     locKind (uint8)            — 0=POI /
+//     locKind (uint8)            - 0=POI /
 //                                   1=RareSpawn /
 //                                   2=HerbNode /
 //                                   3=MineralVein /
@@ -50,20 +50,20 @@ namespace pipeline {
 //                                   5=AreaTrigger /
 //                                   6=PortalLanding
 //     iconIndex (uint8)
-//     factionAccess (uint8)      — 0=Both /
+//     factionAccess (uint8)      - 0=Both /
 //                                   1=Alliance /
 //                                   2=Horde /
 //                                   3=Neutral
 //     pad0 (uint8)
-//     respawnSec (uint32)        — 0 = static
+//     respawnSec (uint32)        - 0 = static
 //                                   (POI / Trigger /
 //                                   Portal land)
-//     discoverableXp (uint32)    — XP on first
+//     discoverableXp (uint32)    - XP on first
 //                                   discovery (POI
 //                                   only)
-//     requiredSkillId (uint16)   — 0 if not gather-
+//     requiredSkillId (uint16)   - 0 if not gather-
 //                                   gated
-//     requiredSkillLevel (uint16) — gathering skill
+//     requiredSkillLevel (uint16) - gathering skill
 //                                    minimum
 struct WoweeWorldLocations {
     enum LocKind : uint8_t {
@@ -104,19 +104,19 @@ struct WoweeWorldLocations {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t locationId) const;
+    [[nodiscard]] const Entry* findById(uint32_t locationId) const;
 
     // Returns all locations on a map (used by the
     // world-map UI to populate per-map markers).
-    std::vector<const Entry*> findByMap(uint32_t mapId) const;
+    [[nodiscard]] std::vector<const Entry*> findByMap(uint32_t mapId) const;
 
     // Returns all locations of a single kind on a
     // map. Used by the herbalism-tracking UI to
     // show only HerbNode markers without polluting
     // with POIs.
-    std::vector<const Entry*> findByMapAndKind(uint32_t mapId,
+    [[nodiscard]] std::vector<const Entry*> findByMapAndKind(uint32_t mapId,
                                                   uint8_t kind) const;
 };
 
@@ -129,19 +129,19 @@ public:
 
     // Preset emitters used by --gen-loc* variants.
     //
-    //   makeAlliancePOIs   — 4 Alliance POIs
+    //   makeAlliancePOIs   - 4 Alliance POIs
     //                          (Stormwind / Ironforge
     //                          / Goldshire / Sentinel
     //                          Hill) with discoverable
     //                          XP and POI-kind iconry.
-    //   makeHerbalismNodes — 5 herb nodes (Peacebloom
+    //   makeHerbalismNodes - 5 herb nodes (Peacebloom
     //                          / Silverleaf /
     //                          Briarthorn / Mageroyal
     //                          / Stranglekelp) with
     //                          required Herbalism skill
     //                          1..125 + 600s (10min)
     //                          respawn.
-    //   makeRareSpawns     — 4 vanilla rare-elites
+    //   makeRareSpawns     - 4 vanilla rare-elites
     //                          (Mor'Ladim / Princess
     //                          Tempestria / Foreman
     //                          Rigger / Lord Sakrasis)

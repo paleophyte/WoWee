@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -43,6 +45,10 @@ public:
      */
     [[nodiscard]] bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void recreatePipelines();
+    /// The pipeline state both initialize() and recreatePipelines() need.
+    void buildPipelines(VkDevice device,
+                        const VkPipelineShaderStageCreateInfo& vertStage,
+                        const VkPipelineShaderStageCreateInfo& fragStage);
 
     /**
      * @brief Update weather particles
@@ -62,24 +68,37 @@ public:
      * @brief Set weather type
      */
     void setWeatherType(Type type) { weatherType = type; }
-    Type getWeatherType() const { return weatherType; }
+    [[nodiscard]] Type getWeatherType() const { return weatherType; }
 
     /**
      * @brief Set weather intensity (0.0 = none, 1.0 = heavy)
      */
     void setIntensity(float intensity);
-    float getIntensity() const { return intensity; }
+    [[nodiscard]] float getIntensity() const { return intensity; }
+
+    /// How much of the weather to draw, as a fraction of what the current
+    /// weather would use. The game's Weather Detail setting, which is a
+    /// quality knob rather than a forecast: it says how heavily to draw the
+    /// rain, not how hard it is raining.
+    ///
+    /// Intensity is the weather itself and comes from the server; this
+    /// multiplies it, so turning the setting down thins every storm without
+    /// making any of them a different storm.
+    void setDensityScale(float scale) {
+        densityScale_ = std::clamp(scale, 0.0f, 1.0f);
+    }
+    [[nodiscard]] float densityScale() const { return densityScale_; }
 
     /**
      * @brief Enable or disable weather
      */
     void setEnabled(bool enabled) { this->enabled = enabled; }
-    bool isEnabled() const { return enabled; }
+    [[nodiscard]] bool isEnabled() const { return enabled; }
 
     /**
      * @brief Get active particle count
      */
-    int getParticleCount() const;
+    [[nodiscard]] int getParticleCount() const;
 
     /**
      * @brief Zone weather configuration
@@ -125,7 +144,7 @@ private:
 
     void resetParticles(const Camera& camera);
     void updateParticle(Particle& particle, const glm::vec3& cameraPos, float deltaTime);
-    glm::vec3 getRandomPosition(const glm::vec3& center) const;
+    [[nodiscard]] glm::vec3 getRandomPosition(const glm::vec3& center) const;
 
     // Vulkan objects
     VkContext* vkCtx = nullptr;
@@ -146,6 +165,7 @@ private:
     bool enabled = false;
     Type weatherType = Type::NONE;
     float intensity = 0.5f;
+    float densityScale_ = 1.0f;
 
     // Particle system parameters
     static constexpr int MAX_PARTICLES = 2000;

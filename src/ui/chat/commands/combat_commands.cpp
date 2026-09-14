@@ -89,7 +89,7 @@ uint32_t parseNumericSpellId(const std::string& str) {
 class CastCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
         std::string spellArg = ctx.args;
         trimInPlace(spellArg);
@@ -151,15 +151,15 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cast"}; }
-    std::string helpText() const override { return "Cast a spell by name or ID"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cast"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cast a spell by name or ID"; }
 };
 
 // --- /castsequence ---
 class CastSequenceCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
         std::string seqArg = ctx.args;
         trimInPlace(seqArg);
@@ -262,15 +262,15 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"castsequence"}; }
-    std::string helpText() const override { return "Cycle through a spell sequence"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"castsequence"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cycle through a spell sequence"; }
 };
 
 // --- /use ---
 class UseCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
         std::string useArg = ctx.args;
         trimInPlace(useArg);
@@ -290,10 +290,10 @@ public:
             iss >> bagNum >> slotNum;
             if (!iss.fail() && slotNum >= 1) {
                 if (bagNum == 0) {
-                    ctx.gameHandler.useItemBySlot(slotNum - 1);
+                    ctx.gameHandler.useItemBySlot(slotNum - 1, true);
                     return {};
-                } else if (bagNum >= 1 && bagNum <= game::Inventory::NUM_BAG_SLOTS) {
-                    ctx.gameHandler.useItemInBag(bagNum - 1, slotNum - 1);
+                } if (bagNum >= 1 && bagNum <= game::Inventory::NUM_BAG_SLOTS) {
+                    ctx.gameHandler.useItemInBag(bagNum - 1, slotNum - 1, true);
                     return {};
                 }
             }
@@ -326,7 +326,7 @@ public:
             std::string nameLow = info->name;
             for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (nameLow == useArgLower) {
-                ctx.gameHandler.useItemBySlot(s);
+                ctx.gameHandler.useItemBySlot(s, true);
                 found = true;
             }
         }
@@ -340,7 +340,7 @@ public:
                 std::string nameLow = info->name;
                 for (char& c : nameLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (nameLow == useArgLower) {
-                    ctx.gameHandler.useItemInBag(b, s);
+                    ctx.gameHandler.useItemInBag(b, s, true);
                     found = true;
                 }
             }
@@ -354,15 +354,15 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"use"}; }
-    std::string helpText() const override { return "Use an item by name, ID, or bag/slot"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"use"}; }
+    [[nodiscard]] std::string helpText() const override { return "Use an item by name, ID, or bag/slot"; }
 };
 
 // --- /equip ---
 class EquipCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
         std::string equipArg = ctx.args;
         trimInPlace(equipArg);
@@ -406,8 +406,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"equip"}; }
-    std::string helpText() const override { return "Auto-equip an item from inventory"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"equip"}; }
+    [[nodiscard]] std::string helpText() const override { return "Auto-equip an item from inventory"; }
 };
 
 // --- /equipset ---
@@ -452,8 +452,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"equipset"}; }
-    std::string helpText() const override { return "Equip a saved equipment set"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"equipset"}; }
+    [[nodiscard]] std::string helpText() const override { return "Equip a saved equipment set"; }
 };
 
 // --- /startattack ---
@@ -485,8 +485,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"startattack"}; }
-    std::string helpText() const override { return "Start auto-attack"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"startattack"}; }
+    [[nodiscard]] std::string helpText() const override { return "Start auto-attack"; }
 };
 
 // --- /stopattack ---
@@ -496,8 +496,8 @@ public:
         ctx.gameHandler.stopAutoAttack();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"stopattack"}; }
-    std::string helpText() const override { return "Stop auto-attack"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopattack"}; }
+    [[nodiscard]] std::string helpText() const override { return "Stop auto-attack"; }
 };
 
 // --- /stopcasting ---
@@ -507,8 +507,8 @@ public:
         ctx.gameHandler.stopCasting();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"stopcasting"}; }
-    std::string helpText() const override { return "Stop current cast"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopcasting"}; }
+    [[nodiscard]] std::string helpText() const override { return "Stop current cast"; }
 };
 
 // --- /cancelqueuedspell, /stopspellqueue ---
@@ -518,8 +518,8 @@ public:
         ctx.gameHandler.cancelQueuedSpell();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cancelqueuedspell", "stopspellqueue"}; }
-    std::string helpText() const override { return "Cancel queued spell"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancelqueuedspell", "stopspellqueue"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cancel queued spell"; }
 };
 
 // --- Registration ---

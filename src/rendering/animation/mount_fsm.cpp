@@ -1,4 +1,5 @@
 #include "rendering/animation/mount_fsm.hpp"
+#include "core/coordinates.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <algorithm>
 #include <cmath>
@@ -21,7 +22,6 @@ void MountFSM::configure(const MountAnimSet& anims, bool taxiFlight) {
     idleSoundTimer_ = 0.0f;
     prevYaw_ = 0.0f;
     roll_ = 0.0f;
-    lastMountAnim_ = 0;
 
     // Seed per-instance RNG
     std::random_device rd;
@@ -43,7 +43,6 @@ void MountFSM::clear() {
     fidgetTimer_ = 0.0f;
     activeFidget_ = 0;
     idleSoundTimer_ = 0.0f;
-    lastMountAnim_ = 0;
 }
 
 // ── Event handling ───────────────────────────────────────────────────────────
@@ -97,7 +96,7 @@ uint32_t MountFSM::resolveGroundOrFlyAnim(const Input& in) const {
                 return anims_.flyForward ? anims_.flyForward : (anims_.flyIdle ? anims_.flyIdle : anim::RUN);
             }
         } else if (in.swimming) {
-            // Mounted swimming — simplified, no per-direction mount swim anims needed here
+            // Mounted swimming - simplified, no per-direction mount swim anims needed here
             // (the original code used pickMountAnim with mount-specific swim IDs)
             return anims_.run ? anims_.run : anim::RUN;
         } else if (anyStrafeLeft) {
@@ -135,8 +134,20 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
 
     const float dt = in.deltaTime;
 
+    // On a taxi, as of this frame.
+    //
+    // The configured flag is only what was true when the mount was set up, and
+    // a taxi sets the mount up before it says the flight has begun - so on
+    // every flight it was false, the branch below was skipped, and the gryphon
+    // resolved through the ordinary ground path and ran through the air. The
+    // per-frame answer was already being passed in and read by nothing; the
+    // comment where the mount is configured has described this the whole time.
+    //
+    // Either one counts, so a mount configured mid-flight still flies.
+    const bool onTaxi = in.taxiFlight || taxiFlight_;
+
     // ── Procedural lean ─────────────────────────────────────────────────
-    if (!taxiFlight_ && in.moving && dt > 0.0f) {
+    if (!onTaxi && in.moving && dt > 0.0f) {
         float turnRate = (in.characterYaw - prevYaw_) / dt;
         while (turnRate > 180.0f) turnRate -= 360.0f;
         while (turnRate < -180.0f) turnRate += 360.0f;
@@ -149,12 +160,10 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
     out.mountRoll = roll_;
 
     // ── Rider animation ─────────────────────────────────────────────────
-    out.riderAnimId = anim::MOUNT;
-    out.riderAnimLoop = true;
-    // (Flight rider variants handled by the caller via capability set, not here)
+    // The rider is the caller's to resolve; see MountFSM::Output.
 
     // ── Taxi flight branch ──────────────────────────────────────────────
-    if (taxiFlight_) {
+    if (onTaxi) {
         // Try flight animations in preference order using discovered anims
         uint32_t taxiAnim = anim::STAND;
         if (anims_.flyForward) taxiAnim = anims_.flyForward;
@@ -170,10 +179,9 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             float wrappedTime = in.curMountTime;
             while (wrappedTime >= in.curMountDuration) wrappedTime -= in.curMountDuration;
             float norm = wrappedTime / in.curMountDuration;
-            out.mountBob = std::sin(norm * 2.0f * 3.14159f * 2.0f) * 0.12f;
+            out.mountBob = std::sin(norm * core::coords::TWO_PI * 2.0f) * 0.12f;
         }
 
-        lastMountAnim_ = out.mountAnimId;
         return out;
     }
 
@@ -188,17 +196,16 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             out.mountAnimChanged = true;
             out.playJumpSound = true;
             out.triggerMountJump = true;
-            lastMountAnim_ = out.mountAnimId;
 
             // Bob calc
             if (in.haveMountState && in.curMountDuration > 1.0f) {
                 float wrappedTime = in.curMountTime;
                 while (wrappedTime >= in.curMountDuration) wrappedTime -= in.curMountDuration;
                 float norm = wrappedTime / in.curMountDuration;
-                out.mountBob = std::sin(norm * 2.0f * 3.14159f) * 0.12f;
+                out.mountBob = std::sin(norm * core::coords::TWO_PI) * 0.12f;
             }
             return out;
-        } else if (!in.moving && anims_.rearUp > 0) {
+        } if (!in.moving && anims_.rearUp > 0) {
             action_ = MountAction::RearUp;
             actionPhase_ = 0;
             actionAnimId_ = anims_.rearUp;
@@ -206,7 +213,6 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             out.mountAnimLoop = false;
             out.mountAnimChanged = true;
             out.playRearUpSound = true;
-            lastMountAnim_ = out.mountAnimId;
             return out;
         }
     }
@@ -265,9 +271,8 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             float wrappedTime = in.curMountTime;
             while (wrappedTime >= in.curMountDuration) wrappedTime -= in.curMountDuration;
             float norm = wrappedTime / in.curMountDuration;
-            out.mountBob = std::sin(norm * 2.0f * 3.14159f) * 0.12f;
+            out.mountBob = std::sin(norm * core::coords::TWO_PI) * 0.12f;
         }
-        lastMountAnim_ = out.mountAnimId;
         return out;
     }
 
@@ -280,14 +285,13 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
         out.mountAnimId = mountAnimId;
         out.mountAnimLoop = true;
         out.mountAnimChanged = true;
-        lastMountAnim_ = out.mountAnimId;
 
         // Bob calc
         if (in.haveMountState && in.curMountDuration > 1.0f) {
             float wrappedTime = in.curMountTime;
             while (wrappedTime >= in.curMountDuration) wrappedTime -= in.curMountDuration;
             float norm = wrappedTime / in.curMountDuration;
-            out.mountBob = std::sin(norm * 2.0f * 3.14159f) * 0.12f;
+            out.mountBob = std::sin(norm * core::coords::TWO_PI) * 0.12f;
         }
         return out;
     }
@@ -315,8 +319,6 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
             out.mountAnimId = fidgetAnim;
             out.mountAnimLoop = false;
             out.mountAnimChanged = true;
-            out.fidgetStarted = true;
-            lastMountAnim_ = out.mountAnimId;
             return out;
         }
     }
@@ -350,10 +352,9 @@ MountFSM::Output MountFSM::evaluate(const Input& in) {
         while (wrappedTime >= in.curMountDuration) wrappedTime -= in.curMountDuration;
         float norm = wrappedTime / in.curMountDuration;
         float bobSpeed = taxiFlight_ ? 2.0f : 1.0f;
-        out.mountBob = std::sin(norm * 2.0f * 3.14159f * bobSpeed) * 0.12f;
+        out.mountBob = std::sin(norm * core::coords::TWO_PI * bobSpeed) * 0.12f;
     }
 
-    lastMountAnim_ = out.mountAnimId;
     return out;
 }
 

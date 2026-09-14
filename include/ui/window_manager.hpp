@@ -1,5 +1,5 @@
 // ============================================================
-// WindowManager — extracted from GameScreen
+// WindowManager - extracted from GameScreen
 // Owns all NPC interaction windows, popup dialogs, and misc
 // overlay UI: loot, gossip, quest, vendor, trainer, mail, bank,
 // auction house, barber, stable, taxi, escape menu, death screen,
@@ -37,66 +37,13 @@ public:
     using SpellIconFn = std::function<VkDescriptorSet(uint32_t, pipeline::AssetManager*)>;
 
     // ---- NPC interaction windows ----
-    void renderLootWindow(game::GameHandler& gameHandler,
-                          InventoryScreen& inventoryScreen,
-                          ChatPanel& chatPanel);
-    void renderGossipWindow(game::GameHandler& gameHandler,
-                            ChatPanel& chatPanel);
-    void renderQuestDetailsWindow(game::GameHandler& gameHandler,
-                                  ChatPanel& chatPanel,
-                                  InventoryScreen& inventoryScreen);
-    void renderQuestRequestItemsWindow(game::GameHandler& gameHandler,
-                                       ChatPanel& chatPanel,
-                                       InventoryScreen& inventoryScreen);
-    void renderQuestOfferRewardWindow(game::GameHandler& gameHandler,
-                                      ChatPanel& chatPanel,
-                                      InventoryScreen& inventoryScreen);
-    void renderVendorWindow(game::GameHandler& gameHandler,
-                            InventoryScreen& inventoryScreen,
-                            ChatPanel& chatPanel);
-    void renderTrainerWindow(game::GameHandler& gameHandler,
-                             SpellIconFn getSpellIcon,
-                             InventoryScreen& inventoryScreen);
-    // Standalone crafting window (crafting_window.cpp) — opened by casting a
-    // profession spell (Cooking, First Aid, ...); recipe list with difficulty
-    // colors, reagent counts, and multi-craft controls.
-    void renderCraftingWindow(game::GameHandler& gameHandler,
-                              SpellIconFn getSpellIcon,
-                              InventoryScreen& inventoryScreen);
-    // Recipe difficulty vs current skill (orange/yellow/green/gray), shared by
-    // the trainer panel and the crafting window.
-    static ImVec4 recipeDifficultyColor(game::GameHandler& gameHandler, uint32_t spellId);
-    static const char* recipeDifficultyLabel(game::GameHandler& gameHandler, uint32_t spellId);
-    void renderBarberShopWindow(game::GameHandler& gameHandler);
-    void renderStableWindow(game::GameHandler& gameHandler);
-    void renderTaxiWindow(game::GameHandler& gameHandler);
 
     // ---- Mail and banking ----
-    void renderMailWindow(game::GameHandler& gameHandler,
-                          InventoryScreen& inventoryScreen,
-                          ChatPanel& chatPanel);
-    void renderMailComposeWindow(game::GameHandler& gameHandler,
-                                 InventoryScreen& inventoryScreen);
-    void renderBankWindow(game::GameHandler& gameHandler,
-                          InventoryScreen& inventoryScreen,
-                          ChatPanel& chatPanel);
-    void renderGuildBankWindow(game::GameHandler& gameHandler,
-                               InventoryScreen& inventoryScreen,
-                               ChatPanel& chatPanel);
-    void renderAuctionHouseWindow(game::GameHandler& gameHandler,
-                                  InventoryScreen& inventoryScreen,
-                                  ChatPanel& chatPanel);
 
     // ---- Popup / overlay windows ----
-    void renderEscapeMenu(SettingsPanel& settingsPanel);
-    void renderLogoutCountdown(game::GameHandler& gameHandler);
-    void renderDeathScreen(game::GameHandler& gameHandler);
-    void renderReclaimCorpseButton(game::GameHandler& gameHandler);
+    /// The game handler is only for the Help button, which has to reach
+    /// FrameXML's help frame when that element is handed over.
     void renderInstanceLockouts(game::GameHandler& gameHandler);
-    void renderAchievementWindow(game::GameHandler& gameHandler);
-    void renderGmTicketWindow(game::GameHandler& gameHandler);
-    void renderBookWindow(game::GameHandler& gameHandler);
-    void renderTitlesWindow(game::GameHandler& gameHandler);
     void renderEquipSetWindow(game::GameHandler& gameHandler);
     void renderSkillsWindow(game::GameHandler& gameHandler);
 
@@ -105,52 +52,22 @@ public:
     // Instance lockouts
     bool showInstanceLockouts_ = false;
 
-    // Achievements
-    bool showAchievementWindow_ = false;
-    char achievementSearchBuf_[128] = {};
-
     // Skills / Professions
     bool showSkillsWindow_ = false;
 
     // Titles
-    bool showTitlesWindow_ = false;
 
     // Equipment Sets
     bool showEquipSetWindow_ = false;
 
     // GM Ticket
-    bool showGmTicketWindow_     = false;
-    bool gmTicketWindowWasOpen_  = false;
-    char gmTicketBuf_[2048] = {};
-
-    // Book / scroll reader
-    bool showBookWindow_ = false;
-    int  bookCurrentPage_ = 0;
 
     // Death screen
-    float deathElapsed_ = 0.0f;
-    bool deathTimerRunning_ = false;
     static constexpr float kForcedReleaseSec = 360.0f;
 
-    // Escape menu
-    bool showEscapeMenu = false;
 
-    // Mail compose
-    char mailRecipientBuffer_[256] = "";
-    char mailSubjectBuffer_[256] = "";
-    char mailBodyBuffer_[2048] = "";
-    int mailComposeMoney_[3] = {0, 0, 0};
-
-    // Vendor
-    char vendorSearchFilter_[128] = "";
-    bool vendorConfirmOpen_ = false;
-    uint64_t vendorConfirmGuid_ = 0;
-    uint32_t vendorConfirmItemId_ = 0;
-    uint32_t vendorConfirmSlot_ = 0;
-    uint32_t vendorConfirmQty_ = 1;
-    uint32_t vendorConfirmPrice_ = 0;
-    std::string vendorConfirmItemName_;
     bool vendorBagsOpened_ = false;
+    bool guildBankBagsOpened_ = false;
 
     // Barber shop
     struct BarberStyleOption {
@@ -172,60 +89,54 @@ public:
     uint8_t barberOrigSkinColor_ = 0;
     uint8_t barberColorsForHairStyle_ = 0xFF;
     float barberBaseCost_ = 0.0f;
-    int barberPreviewSkin_ = -1;
-    int barberPreviewHairStyle_ = -1;
-    int barberPreviewHairColor_ = -1;
-    int barberPreviewFacialHair_ = -1;
-    std::unique_ptr<rendering::CharacterPreview> barberPreview_;
     bool barberInitialized_ = false;
+    /// What the character walked into the shop wearing, and whether the preview
+    /// has changed them since. Kept whole rather than as the four parts,
+    /// because the face is in there too and the barber does not sell faces.
+    uint32_t barberOrigAppearanceBytes_ = 0;
+    bool barberPreviewActive_ = false;
 
-    // Trainer
-    char trainerSearchFilter_[128] = "";
+    // Barber state, separated from the window that used to hold it.
+    //
+    // The style lists, the originals and the cost table were all built inside
+    // renderBarberShopWindow, so they existed only while this client drew the
+    // chair. FrameXML's barber asks the same questions through
+    // GetBarberShopStyleInfo and GetBarberShopTotalCost, and with the panel
+    // handed over that render never runs - the answers have to come from
+    // somewhere that does not depend on who is drawing.
+    void ensureBarberState(game::GameHandler& gameHandler);
+    void rebuildBarberHairColors(uint8_t hairStyle, uint8_t preferredColor,
+                                 uint32_t raceId, uint32_t sexId);
+    static int barberFindAppearance(const std::vector<BarberStyleOption>& options, uint8_t id);
+    static uint8_t barberSelectedAppearance(const std::vector<BarberStyleOption>& options,
+                                            int index, uint8_t fallback);
+    /// The four appearance values the current selections resolve to.
+    struct BarberSelection {
+        uint8_t hairStyle = 0, hairColor = 0, facialHair = 0, skin = 0;
+    };
+    BarberSelection barberSelection(game::GameHandler& gameHandler);
 
-    // Crafting window
-    char craftSearchFilter_[128] = "";
-    uint32_t craftSelectedRecipe_ = 0;
-    int craftQuantity_ = 1;
-    bool craftOnlyMakeable_ = false;
-
-    // Auction house
-    char auctionSearchName_[256] = "";
-    int auctionLevelMin_ = 0;
-    int auctionLevelMax_ = 0;
-    int auctionQuality_ = 0;
-    int auctionSellDuration_ = 2;
-    int auctionSellBid_[3] = {0, 0, 0};
-    int auctionSellBuyout_[3] = {0, 0, 0};
-    int auctionSelectedItem_ = -1;
-    int auctionSellSlotIndex_ = -1;
-    uint32_t auctionBrowseOffset_ = 0;
-    int auctionItemClass_ = -1;
-    int auctionItemSubClass_ = -1;
-    bool auctionUsableOnly_ = false;
-    int auctionSlotFilter_ = 0;        // index into AH equipment-slot combo (0 = All)
-    bool auctionBuyoutOnly_ = false;   // hide bid-only listings (client-side page filter)
-    int auctionMaxPriceGold_ = 0;      // client-side max buyout in gold (0 = no cap)
-
-    // Guild bank money input
-    int guildBankMoneyInput_[3] = {0, 0, 0};
+    /// The interface's own barber panel reads these through LuaServices.
+    /// Selectors follow FrameXML's BarberShopFrameSelector IDs: 1 hair style,
+    /// 2 hair colour, 3 facial hair, 4 skin.
+    bool barberStyleInfo(game::GameHandler& gameHandler, int selector,
+                         std::string& name, bool& isCurrent);
+    void barberCycleStyle(game::GameHandler& gameHandler, int selector, int direction);
+    /// Show the current selection on the character, without sending it.
+    void barberPreview(game::GameHandler& gameHandler);
+    uint32_t barberTotalCostCopper(game::GameHandler& gameHandler);
+    void barberResetSelections(game::GameHandler& gameHandler);
+    /// Buy the current selection. The Okay button on either barber calls this;
+    /// FrameXML's reaches it through ApplyBarberShopStyle.
+    void barberApplySelection(game::GameHandler& gameHandler);
 
     // ItemExtendedCost.dbc cache
-    struct ExtendedCostEntry {
-        uint32_t honorPoints = 0;
-        uint32_t arenaPoints = 0;
-        uint32_t itemId[5] = {};
-        uint32_t itemCount[5] = {};
-    };
-    std::unordered_map<uint32_t, ExtendedCostEntry> extendedCostCache_;
-    bool extendedCostDbLoaded_ = false;
-
     // UIServices injection (Phase B singleton breaking)
     void setServices(const UIServices& services) { services_ = services; }
 
 private:
     UIServices services_;
-    void loadExtendedCostDBC();
-    std::string formatExtendedCost(uint32_t extendedCostId, game::GameHandler& gameHandler);
+    // Resolve an achievement's SpellIcon.dbc ID to an ImGui texture (lazy BLP load + cache).
 };
 
 } // namespace ui

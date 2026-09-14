@@ -52,7 +52,7 @@ struct M2AnimationTrack {
     };
     std::vector<SequenceKeys> sequences;    // One per animation sequence
 
-    bool hasData() const { return !sequences.empty(); }
+    [[nodiscard]] bool hasData() const { return !sequences.empty(); }
 };
 
 // Bone data for skeletal animation
@@ -134,6 +134,11 @@ struct M2Attachment {
 // cinematics) carry the framing the artist authored them for; without it, a scene
 // whose geometry sits hundreds of units from its origin cannot be placed sensibly.
 struct M2Camera {
+    /// 0 is the portrait camera, 1 the character-sheet one, -1 anything else.
+    /// Kept because the portrait framing is chosen by it: a model that carries
+    /// its own portrait camera knows where its face is far better than a
+    /// fraction of the bind-pose height can guess.
+    int32_t type = -1;
     float fov = 0.0f;      // radians
     float farClip = 0.0f;
     float nearClip = 0.0f;
@@ -247,6 +252,13 @@ struct M2Model {
     // One entry per color animation slot; batch.colorIndex indexes directly into this.
     // Value 0=transparent, 1=opaque. Independent from textureWeights.
     std::vector<float> colorAlphas;
+    /// At-rest RGB of each colour track, parallel to colorAlphas.
+    ///
+    /// An M2Color is a vec3 colour track followed by an alpha track, and only
+    /// the alpha was read. The colour is what tints a batch: Orgrimmar's
+    /// bonfire glow is authored white and carries (1.0, 0.329, 0.0) here, so
+    /// without it the fire renders as a white blob.
+    std::vector<glm::vec3> colorRGB;
 
     // Full per-sequence alpha keyframes for the same color slots. Evaluated at
     // render time to hide batches whose alpha animates to 0 in the current
@@ -272,7 +284,7 @@ struct M2Model {
     // Flags
     uint32_t globalFlags;
 
-    bool isValid() const {
+    [[nodiscard]] bool isValid() const {
         return !vertices.empty() && !indices.empty();
     }
 };
@@ -309,6 +321,23 @@ public:
                              uint32_t sequenceIndex,
                              M2Model& model);
 };
+
+std::string skinPathForM2(const std::string& m2Path);
+
+/// The .m2 a model reference means, whatever it was written as.
+///
+/// WMO doodad lists, ADT doodad lists and GameObjectDisplayInfo all name models
+/// with the extension the art was authored with - .mdx, and occasionally .mdl -
+/// while what ships is .m2. Every reader has to rewrite it, and nine of them
+/// did, in their own words:
+///
+///   * four rewrote .mdx and .mdl
+///   * three rewrote only .mdx, so a .mdl reference reached the asset manager
+///     as ".mdl", found nothing, and the doodad silently did not appear
+///
+/// Both are handled here. A path with any other extension, or none, comes back
+/// unchanged - this rewrites a known alias and does not guess.
+std::string modelPathToM2(const std::string& modelPath);
 
 } // namespace pipeline
 } // namespace wowee

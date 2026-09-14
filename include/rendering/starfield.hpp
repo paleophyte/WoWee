@@ -45,24 +45,25 @@ public:
      * Enable/disable star rendering
      */
     void setEnabled(bool enabled) { renderingEnabled = enabled; }
-    bool isEnabled() const { return renderingEnabled; }
+    [[nodiscard]] bool isEnabled() const { return renderingEnabled; }
 
     /**
      * Get number of stars
      */
-    int getStarCount() const { return starCount; }
+    [[nodiscard]] int getStarCount() const { return starCount; }
 
 private:
     void generateStars();
     void createStarBuffers();
     void destroyStarBuffers();
 
-    float getStarIntensity(float timeOfDay) const;
+    [[nodiscard]] float getStarIntensity(float timeOfDay) const;
 
     struct Star {
         glm::vec3 position;
-        float brightness;    // 0.3 to 1.0
-        float twinklePhase;  // 0 to 2π for animation
+        float brightness;    // 0.14 to 1.0, weighted toward the faint end
+        float twinklePhase;  // 0 to 2*pi for animation
+        float colorTemp;     // 0 cool red-orange, 0.5 white, 1 hot blue-white
     };
 
     std::vector<Star> stars;

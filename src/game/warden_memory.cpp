@@ -14,7 +14,7 @@
 namespace wowee {
 namespace game {
 
-// Bounds-checked little-endian reads for PE parsing — malformed Warden modules
+// Bounds-checked little-endian reads for PE parsing - malformed Warden modules
 // must not cause out-of-bounds access.
 static inline uint32_t readLE32(const std::vector<uint8_t>& data, size_t offset) {
     if (offset + 4 > data.size()) return 0;
@@ -115,7 +115,7 @@ bool WardenMemory::parsePE(const std::vector<uint8_t>& fileData) {
                  " size=0x", copySize, std::dec);
     }
 
-    LOG_WARNING("WardenMemory: PE loaded — imageBase=0x", std::hex, imageBase_,
+    LOG_WARNING("WardenMemory: PE loaded - imageBase=0x", std::hex, imageBase_,
                 " imageSize=0x", imageSize_, std::dec,
                 " (", numSections, " sections, ", fileData.size(), " bytes on disk)");
 
@@ -126,7 +126,7 @@ void WardenMemory::initKuserSharedData() {
     std::memset(kuserData_, 0, KUSER_SIZE);
 
     // -------------------------------------------------------------------
-    // KUSER_SHARED_DATA layout — Windows 7 SP1 x86 (from ntddk.h PDB)
+    // KUSER_SHARED_DATA layout - Windows 7 SP1 x86 (from ntddk.h PDB)
     // Warden reads this in 238-byte chunks for OS fingerprinting.
     // All offsets verified against the canonical _KUSER_SHARED_DATA struct.
     // -------------------------------------------------------------------
@@ -146,12 +146,12 @@ void WardenMemory::initKuserSharedData() {
     w32(0x000C, 0x00000029);
     w32(0x0010, 0x00000029);
 
-    // +0x014 SystemTime (KSYSTEM_TIME) — ~2024 epoch FILETIME
+    // +0x014 SystemTime (KSYSTEM_TIME) - ~2024 epoch FILETIME
     w32(0x0014, 0xA0B71B00);
     w32(0x0018, 0x01DA5E80);
     w32(0x001C, 0x01DA5E80);
 
-    // +0x020 TimeZoneBias (KSYSTEM_TIME) — 0 = UTC
+    // +0x020 TimeZoneBias (KSYSTEM_TIME) - 0 = UTC
     // (leave zeros)
 
     // +0x02C ImageNumberLow / ImageNumberHigh (USHORT each)
@@ -167,31 +167,31 @@ void WardenMemory::initKuserSharedData() {
     // +0x238 MaxStackTraceDepth (ULONG)
     w32(0x0238, 0);
 
-    // +0x23C CryptoExponent (ULONG) — 65537
+    // +0x23C CryptoExponent (ULONG) - 65537
     w32(0x023C, 0x00010001);
 
-    // +0x240 TimeZoneId (ULONG) — TIME_ZONE_ID_UNKNOWN
+    // +0x240 TimeZoneId (ULONG) - TIME_ZONE_ID_UNKNOWN
     w32(0x0240, 0);
 
-    // +0x244 LargePageMinimum (ULONG) — 2 MB
+    // +0x244 LargePageMinimum (ULONG) - 2 MB
     w32(0x0244, 0x00200000);
 
-    // +0x248 Reserved2[7] (28 bytes) — zeros
+    // +0x248 Reserved2[7] (28 bytes) - zeros
     // (leave zeros)
 
-    // +0x264 NtProductType (NT_PRODUCT_TYPE = ULONG) — VER_NT_WORKSTATION
+    // +0x264 NtProductType (NT_PRODUCT_TYPE = ULONG) - VER_NT_WORKSTATION
     w32(0x0264, 1);
 
     // +0x268 ProductTypeIsValid (BOOLEAN = UCHAR)
     w8(0x0268, 1);
 
-    // +0x269 Reserved9[3] — padding
+    // +0x269 Reserved9[3] - padding
     // (leave zeros)
 
-    // +0x26C NtMajorVersion (ULONG) — 6 (Windows Vista/7/8/10)
+    // +0x26C NtMajorVersion (ULONG) - 6 (Windows Vista/7/8/10)
     w32(0x026C, 6);
 
-    // +0x270 NtMinorVersion (ULONG) — 1 (Windows 7)
+    // +0x270 NtMinorVersion (ULONG) - 1 (Windows 7)
     w32(0x0270, 1);
 
     // +0x274 ProcessorFeatures (BOOLEAN[64] = 64 bytes, ends at +0x2B4)
@@ -232,19 +232,19 @@ void WardenMemory::initKuserSharedData() {
     // +0x2C8 SystemExpirationDate (LARGE_INTEGER = 8 bytes)
     // (leave zeros)
 
-    // +0x2D0 SuiteMask (ULONG) — VER_SUITE_SINGLEUSERTS | VER_SUITE_TERMINAL
+    // +0x2D0 SuiteMask (ULONG) - VER_SUITE_SINGLEUSERTS | VER_SUITE_TERMINAL
     w32(0x02D0, 0x0110); // 0x0100=SINGLEUSERTS, 0x0010=TERMINAL
 
     // +0x2D4 KdDebuggerEnabled (BOOLEAN = UCHAR)
     w8(0x02D4, 0);
 
-    // +0x2D5 NXSupportPolicy (UCHAR) — 2 = OptIn
+    // +0x2D5 NXSupportPolicy (UCHAR) - 2 = OptIn
     w8(0x02D5, 2);
 
     // +0x2D6 Reserved6[2]
     // (leave zeros)
 
-    // +0x2D8 ActiveConsoleId (ULONG) — session 0 or 1
+    // +0x2D8 ActiveConsoleId (ULONG) - session 0 or 1
     w32(0x02D8, 1);
 
     // +0x2DC DismountCount (ULONG)
@@ -253,19 +253,19 @@ void WardenMemory::initKuserSharedData() {
     // +0x2E0 ComPlusPackage (ULONG)
     w32(0x02E0, 0);
 
-    // +0x2E4 LastSystemRITEventTickCount (ULONG) — recent input tick
+    // +0x2E4 LastSystemRITEventTickCount (ULONG) - recent input tick
     w32(0x02E4, 0x003F4900);
 
-    // +0x2E8 NumberOfPhysicalPages (ULONG) — 4GB / 4KB ≈ 1M pages
+    // +0x2E8 NumberOfPhysicalPages (ULONG) - 4GB / 4KB ≈ 1M pages
     w32(0x02E8, 0x000FF000);
 
-    // +0x2EC SafeBootMode (BOOLEAN) — 0 = normal boot
+    // +0x2EC SafeBootMode (BOOLEAN) - 0 = normal boot
     w8(0x02EC, 0);
 
     // +0x2F0 SharedDataFlags / TraceLogging (ULONG)
     w32(0x02F0, 0);
 
-    // +0x2F8 TestRetInstruction (ULONGLONG = 8 bytes) — RET opcode
+    // +0x2F8 TestRetInstruction (ULONGLONG = 8 bytes) - RET opcode
     w8(0x02F8, 0xC3); // x86 RET instruction
 
     // +0x300 SystemCall (ULONG)
@@ -277,16 +277,16 @@ void WardenMemory::initKuserSharedData() {
     // +0x308 SystemCallPad[3] (24 bytes)
     // (leave zeros)
 
-    // +0x320 TickCount (KSYSTEM_TIME) — matches TickCountLowDeprecated
+    // +0x320 TickCount (KSYSTEM_TIME) - matches TickCountLowDeprecated
     w32(0x0320, 0x003F4A00);
 
     // +0x32C TickCountPad[1]
     // (leave zeros)
 
-    // +0x330 Cookie (ULONG) — stack cookie, random-looking value
+    // +0x330 Cookie (ULONG) - stack cookie, random-looking value
     w32(0x0330, 0x4A2F8C15);
 
-    // +0x334 ConsoleSessionForegroundProcessId (ULONG) — some PID
+    // +0x334 ConsoleSessionForegroundProcessId (ULONG) - some PID
     w32(0x0334, 0x00001234);
 
     // Everything after +0x338 is typically zero on Win7 x86
@@ -305,7 +305,7 @@ void WardenMemory::writeLE32(uint32_t va, uint32_t value) {
 void WardenMemory::patchRuntimeGlobals() {
     if (imageBase_ != 0x00400000) {
         LOG_WARNING("WardenMemory: unexpected imageBase=0x", std::hex, imageBase_, std::dec,
-                    " — skipping runtime global patches");
+                    " - skipping runtime global patches");
         return;
     }
 
@@ -313,7 +313,7 @@ void WardenMemory::patchRuntimeGlobals() {
     // VMaNGOS has TWO types of Warden scans that read these addresses:
     //
     // 1. DB-driven scans (warden_scans table): memcmp against expected bytes.
-    //    These check CODE sections for integrity — never check runtime data addresses.
+    //    These check CODE sections for integrity - never check runtime data addresses.
     //
     // 2. Scripted scans (WardenWin::LoadScriptedScans): READ and INTERPRET values.
     //    - "Warden locate" reads 0xCE897C as a pointer, follows chain to SYSTEM_INFO
@@ -362,7 +362,7 @@ void WardenMemory::patchRuntimeGlobals() {
         uint32_t dwAllocationGranularity;
         uint16_t wProcessorLevel;
         uint16_t wProcessorRevision;
-    } sysInfo = {0, 0, 4096, 0x00010000, 0x7FFEFFFF, 0x0F, 4, 586, 65536, 6, 0x3A09};
+    } sysInfo = {.wProcessorArchitecture = 0, .wReserved = 0, .dwPageSize = 4096, .lpMinimumApplicationAddress = 0x00010000, .lpMaximumApplicationAddress = 0x7FFEFFFF, .dwActiveProcessorMask = 0x0F, .dwNumberOfProcessors = 4, .dwProcessorType = 586, .dwAllocationGranularity = 65536, .wProcessorLevel = 6, .wProcessorRevision = 0x3A09};
 #pragma pack(pop)
     static_assert(sizeof(sysInfo) == 36, "SYSTEM_INFO must be 36 bytes");
     uint32_t rva = sysInfoAddr - imageBase_;
@@ -413,7 +413,7 @@ void WardenMemory::patchRuntimeGlobals() {
     writeLE32(WORLD_ENABLES, enables);
     LOG_WARNING("WardenMemory: Patched WorldEnables @0x", std::hex, WORLD_ENABLES, std::dec);
 
-    // LastHardwareAction — must be a recent GetTickCount()-style timestamp
+    // LastHardwareAction - must be a recent GetTickCount()-style timestamp
     // so the anti-AFK scan sees (currentTime - lastAction) < threshold.
     constexpr uint32_t LAST_HARDWARE_ACTION = 0xCF0BC8;
     uint32_t nowMs = static_cast<uint32_t>(
@@ -612,14 +612,14 @@ uint32_t WardenMemory::expectedImageSizeForBuild(uint16_t build, bool isTurtle) 
             // Turtle WoW uses a custom WoW.exe with different code bytes.
             // Their warden_scans DB expects bytes from this custom exe.
             return isTurtle ? 0x00906000 : 0x009FD000;
-        default:   return 0;          // Unknown — accept any
+        default:   return 0;          // Unknown - accept any
     }
 }
 
 std::string WardenMemory::findWowExe(uint16_t build) const {
     std::vector<std::string> candidateDirs;
     if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR")) {
-        if (env && *env) candidateDirs.push_back(env);
+        if (env && *env) candidateDirs.emplace_back(env);
     }
     if (const char* home = std::getenv("HOME")) {
         if (home && *home) {
@@ -628,10 +628,10 @@ std::string WardenMemory::findWowExe(uint16_t build) const {
             candidateDirs.push_back(std::string(home) + "/twmoa_1180");
         }
     }
-    candidateDirs.push_back("Data/expansions/turtle/misc");
-    candidateDirs.push_back("Data/expansions/classic/misc");
-    candidateDirs.push_back("Data/misc");
-    candidateDirs.push_back("Data/expansions/turtle/overlay/misc");
+    candidateDirs.emplace_back("Data/expansions/turtle/misc");
+    candidateDirs.emplace_back("Data/expansions/classic/misc");
+    candidateDirs.emplace_back("Data/misc");
+    candidateDirs.emplace_back("Data/expansions/turtle/overlay/misc");
 
     const char* candidateExes[] = { "WoW.exe", "TurtleWoW.exe", "Wow.exe", "wow.exe" };
 
@@ -726,7 +726,7 @@ bool WardenMemory::loadFromFile(const std::string& exePath) {
         patchTurtleWowBinary();
         LOG_WARNING("WardenMemory: Applied Turtle patches to vanilla PE (imageSize=0x", std::hex, imageSize_, std::dec, ")");
     } else if (isTurtle_) {
-        LOG_WARNING("WardenMemory: Loaded native Turtle PE — skipping patches");
+        LOG_WARNING("WardenMemory: Loaded native Turtle PE - skipping patches");
     }
     loaded_ = true;
     LOG_INFO("WardenMemory: Loaded PE image (", fileData.size(), " bytes on disk, ",
@@ -742,80 +742,80 @@ bool WardenMemory::loadFromFile(const std::string& exePath) {
 void WardenMemory::verifyWardenScanEntries() {
     struct ScanEntry { int id; uint32_t address; uint8_t length; const char* expectedHex; const char* comment; };
     static const ScanEntry entries[] = {
-        { 1, 8679268, 6, "686561646572", "Packet internal sign - header"},
-        { 3, 8530960, 6, "53595354454D", "Packet internal sign - SYSTEM"},
-        { 8, 8151666, 4, "D893FEC0", "Jump gravity"},
-        { 9, 8151646, 2, "3075", "Jump gravity water"},
-        {10, 6382555, 2, "8A47", "Anti root"},
-        {11, 6380789, 1, "F8", "Anti move"},
-        {12, 8151647, 1, "75", "Anti jump"},
-        {13, 8152026, 4, "8B4F7889", "No fall damage"},
-        {14, 6504892, 2, "7425", "Super fly"},
-        {15, 6383433, 2, "780F", "Heartbeat interval speedhack"},
-        {16, 6284623, 1, "F4", "Anti slow hack"},
-        {17, 6504931, 2, "85D2", "No fall damage"},
-        {18, 8151565, 2, "2000", "Fly hack"},
-        {19, 7153475, 6, "890D509CCE00", "General hacks"},
-        {20, 7138894, 6, "A3D89BCE00EB", "Wall climb"},
-        {21, 7138907, 6, "890DD89BCE00", "Wall climb"},
-        {22, 6993044, 1, "74", "Zero gravity"},
-        {23, 6502300, 1, "FC", "Air walk"},
-        {24, 6340512, 2, "7F7D", "Wall climb"},
-        {25, 6380455, 4, "F4010000", "Wall climb"},
-        {26, 8151657, 4, "488C11C1", "Wall climb"},
-        {27, 6992319, 3, "894704", "Wall climb"},
-        {28, 6340529, 2, "746C", "No water hack"},
-        {29, 6356016, 10, "C70588D8C4000C000000", "No water hack"},
-        {30, 4730584, 6, "0F8CE1000000", "WMO collision"},
-        {31, 4803152, 7, "A1C0EACE0085C0", "noclip hack"},
-        {32, 5946704, 6, "8BD18B0D80E0", "M2 collision"},
-        {33, 6340543, 2, "7546", "M2 collision"},
-        {34, 5341282, 1, "7F", "Warden disable"},
-        {35, 4989376, 1, "72", "No fog hack"},
-        {36, 8145237, 1, "8B", "No fog hack"},
-        {37, 6392083, 8, "8B450850E824DA1A", "No fog hack"},
-        {38, 8146241, 10, "D9818C0000008BE55DC2", "tp2plane hack"},
-        {39, 6995731, 1, "74", "Air swim hack"},
-        {40, 6964859, 1, "75", "Infinite jump hack"},
-        {41, 6382558, 10, "84C074178B86A4000000", "Gravity water hack"},
-        {42, 8151997, 3, "895108", "Gravity hack"},
-        {43, 8152025, 1, "34", "Plane teleport"},
-        {44, 6516436, 1, "FC", "Zero fall time"},
-        {45, 6501616, 1, "FC", "No fall damage"},
-        {46, 6511674, 1, "FC", "Fall time hack"},
-        {47, 6513048, 1, "FC", "Death bug hack"},
-        {48, 6514072, 1, "FC", "Anti slow hack"},
-        {49, 8152029, 3, "894E38", "Anti slow hack"},
-        {50, 4847346, 3, "8B45D4", "Max camera distance hack"},
-        {51, 4847069, 1, "74", "Wall climb"},
-        {52, 8155231, 3, "000000", "Signature check"},
-        {53, 6356849, 1, "74", "Signature check"},
-        {54, 6354889, 6, "0F8A71FFFFFF", "Signature check"},
-        {55, 4657642, 1, "74", "Max interact distance hack"},
-        {56, 6211360, 8, "558BEC83EC0C8B45", "Hover speed hack"},
-        {57, 8153504, 3, "558BEC", "Flight speed hack"},
-        {58, 6214285, 6, "8B82500E0000", "Track all units hack"},
-        {59, 8151558, 11, "25FFFFDFFB0D0020000089", "No fall damage"},
-        {60, 8155228, 6, "89868C000000", "Run speed hack"},
-        {61, 6356837, 2, "7474", "Follow anything hack"},
-        {62, 6751806, 1, "74", "No water hack"},
-        {63, 4657632, 2, "740A", "Any name hack"},
-        {64, 8151976, 4, "84E5FFFF", "Plane teleport"},
-        {65, 6214371, 6, "8BB1540E0000", "Object tracking hack"},
-        {66, 6818689, 5, "A388F2C700", "No water hack"},
-        {67, 6186028, 5, "C705ACD2C4", "No fog hack"},
-        {68, 5473808, 4, "30855300", "Warden disable hack"},
-        {69, 4208171, 3, "6B2C00", "Warden disable hack"},
-        {70, 7119285, 1, "74", "Warden disable hack"},
-        {71, 4729827, 1, "5E", "Daylight hack"},
-        {72, 6354512, 6, "0F84EA000000", "Ranged attack stop hack"},
-        {73, 5053463, 2, "7415", "Officer note hack"},
-        {79, 8139737, 5, "D84E14DEC1", "UNKNOWN movement hack"},
-        {80, 8902804, 4, "8E977042", "Wall climb hack"},
-        {81, 8902808, 4, "0000E040", "Run speed hack"},
-        {82, 8154755, 7, "8166403FFFDFFF", "Moveflag hack"},
-        {83, 8445948, 4, "BB8D243F", "Wall climb hack"},
-        {84, 6493717, 2, "741D", "Speed hack"},
+        { .id = 1, .address = 8679268, .length = 6, .expectedHex = "686561646572", .comment = "Packet internal sign - header"},
+        { .id = 3, .address = 8530960, .length = 6, .expectedHex = "53595354454D", .comment = "Packet internal sign - SYSTEM"},
+        { .id = 8, .address = 8151666, .length = 4, .expectedHex = "D893FEC0", .comment = "Jump gravity"},
+        { .id = 9, .address = 8151646, .length = 2, .expectedHex = "3075", .comment = "Jump gravity water"},
+        {.id = 10, .address = 6382555, .length = 2, .expectedHex = "8A47", .comment = "Anti root"},
+        {.id = 11, .address = 6380789, .length = 1, .expectedHex = "F8", .comment = "Anti move"},
+        {.id = 12, .address = 8151647, .length = 1, .expectedHex = "75", .comment = "Anti jump"},
+        {.id = 13, .address = 8152026, .length = 4, .expectedHex = "8B4F7889", .comment = "No fall damage"},
+        {.id = 14, .address = 6504892, .length = 2, .expectedHex = "7425", .comment = "Super fly"},
+        {.id = 15, .address = 6383433, .length = 2, .expectedHex = "780F", .comment = "Heartbeat interval speedhack"},
+        {.id = 16, .address = 6284623, .length = 1, .expectedHex = "F4", .comment = "Anti slow hack"},
+        {.id = 17, .address = 6504931, .length = 2, .expectedHex = "85D2", .comment = "No fall damage"},
+        {.id = 18, .address = 8151565, .length = 2, .expectedHex = "2000", .comment = "Fly hack"},
+        {.id = 19, .address = 7153475, .length = 6, .expectedHex = "890D509CCE00", .comment = "General hacks"},
+        {.id = 20, .address = 7138894, .length = 6, .expectedHex = "A3D89BCE00EB", .comment = "Wall climb"},
+        {.id = 21, .address = 7138907, .length = 6, .expectedHex = "890DD89BCE00", .comment = "Wall climb"},
+        {.id = 22, .address = 6993044, .length = 1, .expectedHex = "74", .comment = "Zero gravity"},
+        {.id = 23, .address = 6502300, .length = 1, .expectedHex = "FC", .comment = "Air walk"},
+        {.id = 24, .address = 6340512, .length = 2, .expectedHex = "7F7D", .comment = "Wall climb"},
+        {.id = 25, .address = 6380455, .length = 4, .expectedHex = "F4010000", .comment = "Wall climb"},
+        {.id = 26, .address = 8151657, .length = 4, .expectedHex = "488C11C1", .comment = "Wall climb"},
+        {.id = 27, .address = 6992319, .length = 3, .expectedHex = "894704", .comment = "Wall climb"},
+        {.id = 28, .address = 6340529, .length = 2, .expectedHex = "746C", .comment = "No water hack"},
+        {.id = 29, .address = 6356016, .length = 10, .expectedHex = "C70588D8C4000C000000", .comment = "No water hack"},
+        {.id = 30, .address = 4730584, .length = 6, .expectedHex = "0F8CE1000000", .comment = "WMO collision"},
+        {.id = 31, .address = 4803152, .length = 7, .expectedHex = "A1C0EACE0085C0", .comment = "noclip hack"},
+        {.id = 32, .address = 5946704, .length = 6, .expectedHex = "8BD18B0D80E0", .comment = "M2 collision"},
+        {.id = 33, .address = 6340543, .length = 2, .expectedHex = "7546", .comment = "M2 collision"},
+        {.id = 34, .address = 5341282, .length = 1, .expectedHex = "7F", .comment = "Warden disable"},
+        {.id = 35, .address = 4989376, .length = 1, .expectedHex = "72", .comment = "No fog hack"},
+        {.id = 36, .address = 8145237, .length = 1, .expectedHex = "8B", .comment = "No fog hack"},
+        {.id = 37, .address = 6392083, .length = 8, .expectedHex = "8B450850E824DA1A", .comment = "No fog hack"},
+        {.id = 38, .address = 8146241, .length = 10, .expectedHex = "D9818C0000008BE55DC2", .comment = "tp2plane hack"},
+        {.id = 39, .address = 6995731, .length = 1, .expectedHex = "74", .comment = "Air swim hack"},
+        {.id = 40, .address = 6964859, .length = 1, .expectedHex = "75", .comment = "Infinite jump hack"},
+        {.id = 41, .address = 6382558, .length = 10, .expectedHex = "84C074178B86A4000000", .comment = "Gravity water hack"},
+        {.id = 42, .address = 8151997, .length = 3, .expectedHex = "895108", .comment = "Gravity hack"},
+        {.id = 43, .address = 8152025, .length = 1, .expectedHex = "34", .comment = "Plane teleport"},
+        {.id = 44, .address = 6516436, .length = 1, .expectedHex = "FC", .comment = "Zero fall time"},
+        {.id = 45, .address = 6501616, .length = 1, .expectedHex = "FC", .comment = "No fall damage"},
+        {.id = 46, .address = 6511674, .length = 1, .expectedHex = "FC", .comment = "Fall time hack"},
+        {.id = 47, .address = 6513048, .length = 1, .expectedHex = "FC", .comment = "Death bug hack"},
+        {.id = 48, .address = 6514072, .length = 1, .expectedHex = "FC", .comment = "Anti slow hack"},
+        {.id = 49, .address = 8152029, .length = 3, .expectedHex = "894E38", .comment = "Anti slow hack"},
+        {.id = 50, .address = 4847346, .length = 3, .expectedHex = "8B45D4", .comment = "Max camera distance hack"},
+        {.id = 51, .address = 4847069, .length = 1, .expectedHex = "74", .comment = "Wall climb"},
+        {.id = 52, .address = 8155231, .length = 3, .expectedHex = "000000", .comment = "Signature check"},
+        {.id = 53, .address = 6356849, .length = 1, .expectedHex = "74", .comment = "Signature check"},
+        {.id = 54, .address = 6354889, .length = 6, .expectedHex = "0F8A71FFFFFF", .comment = "Signature check"},
+        {.id = 55, .address = 4657642, .length = 1, .expectedHex = "74", .comment = "Max interact distance hack"},
+        {.id = 56, .address = 6211360, .length = 8, .expectedHex = "558BEC83EC0C8B45", .comment = "Hover speed hack"},
+        {.id = 57, .address = 8153504, .length = 3, .expectedHex = "558BEC", .comment = "Flight speed hack"},
+        {.id = 58, .address = 6214285, .length = 6, .expectedHex = "8B82500E0000", .comment = "Track all units hack"},
+        {.id = 59, .address = 8151558, .length = 11, .expectedHex = "25FFFFDFFB0D0020000089", .comment = "No fall damage"},
+        {.id = 60, .address = 8155228, .length = 6, .expectedHex = "89868C000000", .comment = "Run speed hack"},
+        {.id = 61, .address = 6356837, .length = 2, .expectedHex = "7474", .comment = "Follow anything hack"},
+        {.id = 62, .address = 6751806, .length = 1, .expectedHex = "74", .comment = "No water hack"},
+        {.id = 63, .address = 4657632, .length = 2, .expectedHex = "740A", .comment = "Any name hack"},
+        {.id = 64, .address = 8151976, .length = 4, .expectedHex = "84E5FFFF", .comment = "Plane teleport"},
+        {.id = 65, .address = 6214371, .length = 6, .expectedHex = "8BB1540E0000", .comment = "Object tracking hack"},
+        {.id = 66, .address = 6818689, .length = 5, .expectedHex = "A388F2C700", .comment = "No water hack"},
+        {.id = 67, .address = 6186028, .length = 5, .expectedHex = "C705ACD2C4", .comment = "No fog hack"},
+        {.id = 68, .address = 5473808, .length = 4, .expectedHex = "30855300", .comment = "Warden disable hack"},
+        {.id = 69, .address = 4208171, .length = 3, .expectedHex = "6B2C00", .comment = "Warden disable hack"},
+        {.id = 70, .address = 7119285, .length = 1, .expectedHex = "74", .comment = "Warden disable hack"},
+        {.id = 71, .address = 4729827, .length = 1, .expectedHex = "5E", .comment = "Daylight hack"},
+        {.id = 72, .address = 6354512, .length = 6, .expectedHex = "0F84EA000000", .comment = "Ranged attack stop hack"},
+        {.id = 73, .address = 5053463, .length = 2, .expectedHex = "7415", .comment = "Officer note hack"},
+        {.id = 79, .address = 8139737, .length = 5, .expectedHex = "D84E14DEC1", .comment = "UNKNOWN movement hack"},
+        {.id = 80, .address = 8902804, .length = 4, .expectedHex = "8E977042", .comment = "Wall climb hack"},
+        {.id = 81, .address = 8902808, .length = 4, .expectedHex = "0000E040", .comment = "Run speed hack"},
+        {.id = 82, .address = 8154755, .length = 7, .expectedHex = "8166403FFFDFFF", .comment = "Moveflag hack"},
+        {.id = 83, .address = 8445948, .length = 4, .expectedHex = "BB8D243F", .comment = "Wall climb hack"},
+        {.id = 84, .address = 6493717, .length = 2, .expectedHex = "741D", .comment = "Speed hack"},
     };
 
     auto hexToByte = [](char hi, char lo) -> uint8_t {
@@ -945,14 +945,14 @@ bool WardenMemory::searchCodePattern(const uint8_t seed[4], const uint8_t expect
                                | (uint32_t(image_[secOfs+10]) << 16) | (uint32_t(image_[secOfs+11]) << 24);
                 size_t rEnd = std::min(static_cast<size_t>(va + vsize), static_cast<size_t>(imageSize_));
                 if (va + patternLen <= rEnd)
-                    ranges.push_back({va, rEnd});
+                    ranges.push_back({.start = va, .end = rEnd});
             }
         }
     }
 
     if (ranges.empty()) {
         if (patternLen <= imageSize_)
-            ranges.push_back({0, imageSize_});
+            ranges.push_back({.start = 0, .end = imageSize_});
     }
 
     auto bruteStart = std::chrono::steady_clock::now();

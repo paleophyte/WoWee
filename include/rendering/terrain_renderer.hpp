@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cmath>
+
+#include "rendering/vk_shader.hpp"
+#include "rendering/shadow_params.hpp"
+
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/camera.hpp"
@@ -46,9 +51,6 @@ struct TerrainChunkGPU {
     VkTexture* alphaTextures[3] = {nullptr, nullptr, nullptr};
     int layerCount = 0;
 
-    // Per-chunk alpha textures (owned by this chunk, destroyed on removal)
-    std::vector<std::unique_ptr<VkTexture>> ownedAlphaTextures;
-
     // World position for culling
     float worldX = 0.0f;
     float worldY = 0.0f;
@@ -66,7 +68,7 @@ struct TerrainChunkGPU {
     uint32_t megaFirstIndex = 0;
     uint32_t vertexCount = 0;
 
-    bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexBuffer != VK_NULL_HANDLE; }
 };
 
 /**
@@ -91,6 +93,7 @@ public:
     bool loadTerrain(const pipeline::TerrainMesh& mesh,
                      const std::vector<std::string>& texturePaths,
                      int tileX = -1, int tileY = -1);
+
 
     /// Upload a batch of terrain chunks incrementally. Returns true when all chunks done.
     /// chunkIndex is updated to the next chunk to process (0-255 row-major).
@@ -127,26 +130,34 @@ public:
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                       const glm::vec3& shadowCenter, float shadowRadius);
 
-    bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
+    [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
     void clear();
 
     void recreatePipelines();
+    /// The fill pipeline and its wireframe derivative, which
+    /// initialize() and recreatePipelines() both need.
+    bool buildMainPassPipelines(VkDevice device,
+                                wowee::rendering::VkShaderModule& vertShader,
+                                wowee::rendering::VkShaderModule& fragShader);
 
     void setWireframe(bool enabled) { wireframe = enabled; }
     void setFrustumCulling(bool enabled) { frustumCullingEnabled = enabled; }
     void setFogEnabled(bool enabled) { fogEnabled = enabled; }
-    bool isFogEnabled() const { return fogEnabled; }
+    [[nodiscard]] bool isFogEnabled() const { return fogEnabled; }
     void setViewDistance(float distance) { maxViewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
 
     void setShadowMap(VkDescriptorImageInfo /*depthInfo*/, const glm::mat4& /*lightSpaceMat*/) {}
     void clearShadowMap() {}
 
-    int getChunkCount() const { return static_cast<int>(chunks.size()); }
-    int getRenderedChunkCount() const { return renderedChunks; }
-    int getCulledChunkCount() const { return culledChunks; }
-    int getTriangleCount() const;
-    VkContext* getVkContext() const { return vkCtx; }
+    [[nodiscard]] int getChunkCount() const { return static_cast<int>(chunks.size()); }
+    [[nodiscard]] int getRenderedChunkCount() const { return renderedChunks; }
+    /// How far the furthest chunk drawn this frame was, for the diagnostic that
+    /// compares it against the doodads. See Renderer::logViewDistanceDiag.
+    [[nodiscard]] float getFurthestDrawnDistance() const { return std::sqrt(furthestDrawnSq_); }
+    [[nodiscard]] int getCulledChunkCount() const { return culledChunks; }
+    [[nodiscard]] int getTriangleCount() const;
+    [[nodiscard]] VkContext* getVkContext() const { return vkCtx; }
 
 private:
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
@@ -155,8 +166,26 @@ private:
     bool isChunkVisible(const TerrainChunkGPU& chunk, const Frustum& frustum);
     void calculateBoundingSphere(TerrainChunkGPU& chunk, const pipeline::ChunkMesh& meshChunk);
     VkDescriptorSet allocateMaterialSet();
-    void writeMaterialDescriptors(VkDescriptorSet set, const TerrainChunkGPU& chunk);
+    /// False when there is nothing sampleable to write, in which case the
+    /// caller must drop the chunk: a descriptor set that was allocated and
+    /// never written is as undefined to bind as one holding a null view.
+    bool writeMaterialDescriptors(VkDescriptorSet set, const TerrainChunkGPU& chunk);
     void destroyChunkGPU(TerrainChunkGPU& chunk);
+
+    /// Point a chunk's base, layer and alpha textures at the loaded ones.
+    ///
+    /// Both load paths do this identically; chunkX and chunkY only name the
+    /// chunk in the warnings. A layer whose textureId is past the end of the
+    /// tile's texture list falls back to white rather than going unbound.
+    void bindChunkTextures(TerrainChunkGPU& gpuChunk,
+                           const pipeline::ChunkMesh& chunk,
+                           const std::vector<std::string>& texturePaths,
+                           int tileX, int tileY, int chunkX, int chunkY);
+
+    /// Allocate and fill a chunk's params UBO. False means the allocation
+    /// failed, and the two callers answer that differently: the one-shot load
+    /// skips the chunk, the incremental one hands it back to be retried.
+    bool createChunkParamsUBO(TerrainChunkGPU& gpuChunk);
 
     VkContext* vkCtx = nullptr;
     pipeline::AssetManager* assetManager = nullptr;
@@ -170,15 +199,19 @@ private:
     // Shadow pipeline
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout shadowParamsLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool shadowParamsPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet shadowParamsSet_ = VK_NULL_HANDLE;
-    VkBuffer shadowParamsUBO_ = VK_NULL_HANDLE;
-    VmaAllocation shadowParamsAlloc_ = VK_NULL_HANDLE;
+    /// The set the shadow pass binds. Five separate members before,
+    /// built and torn down here and in three other renderers.
+    ShadowParamsSet shadowParams_;
 
-    // Descriptor pool for material sets
+    // Descriptor pool for material sets. One set per terrain chunk, 256 chunks
+    // to a tile, so this is a tile budget: 65536 covered 256 tiles, and tiles
+    // are held to the *unload* radius, not the load radius - 8 loading and 11
+    // unloading is 23×23 = 529 resident. Every tile past the 256th arrived
+    // with no descriptor set and, before the retry in loadTerrainIncremental,
+    // was dropped for good: terrain that simply was not there, in whichever
+    // direction the player had travelled furthest.
     VkDescriptorPool materialDescPool = VK_NULL_HANDLE;
-    static constexpr uint32_t MAX_MATERIAL_SETS = 65536;
+    static constexpr uint32_t MAX_MATERIAL_SETS = 160 * 1024;  // 640 tiles
 
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;
@@ -195,7 +228,22 @@ private:
     size_t textureCacheBudgetBytes_ = 4096ull * 1024 * 1024;
     std::unordered_set<std::string> failedTextureCache_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
-    uint32_t textureBudgetRejectWarnings_ = 0;
+    /// Cache entries handed out at or after this counter are never evicted.
+    ///
+    /// A chunk under construction is not in `chunks` yet, so the scan for what
+    /// is in use cannot see the textures it has already been given. Raised to
+    /// the counter at the start of every upload call, which puts everything
+    /// this tile has taken out of reach until the chunk holding it lands.
+    uint64_t evictProtectFrom_ = 0;
+
+    /// Free least-recently-used cached textures until `needBytes` fits.
+    ///
+    /// Returns whether there is now room. Only textures no live chunk points
+    /// at are freed, and they go through the frame fences rather than being
+    /// destroyed on the spot: a chunk's material descriptor set names the
+    /// image, so one still being drawn from must outlive the frame that
+    /// referenced it.
+    bool evictTexturesFor(size_t needBytes);
 
     // Fallback textures
     std::unique_ptr<VkTexture> whiteTexture;
@@ -207,6 +255,7 @@ private:
     bool fogEnabled = true;
     float maxViewDistance_ = 1200.0f;
     int renderedChunks = 0;
+    float furthestDrawnSq_ = 0.0f;
     int culledChunks = 0;
 
     // Mega vertex/index buffers for indirect drawing
@@ -225,7 +274,6 @@ private:
 
     VkBuffer indirectBuffer_ = VK_NULL_HANDLE;
     VmaAllocation indirectAlloc_ = VK_NULL_HANDLE;
-    void* indirectMapped_ = nullptr;
     static constexpr uint32_t MAX_INDIRECT_DRAWS = 8192;
 };
 

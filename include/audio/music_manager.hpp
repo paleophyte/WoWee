@@ -24,29 +24,33 @@ public:
     void playMusic(const std::string& mpqPath, bool loop = true, float fadeInMs = 0.0f);
     void playFilePath(const std::string& filePath, bool loop = true, float fadeInMs = 0.0f);
     void stopMusic(float fadeMs = 2000.0f);
+    /// Loop Music, from the audio options. Takes effect on the next track.
+    void setLooping(bool loop) { loopTracks_ = loop; }
+    [[nodiscard]] bool isLooping() const { return loopTracks_; }
+
     void crossfadeTo(const std::string& mpqPath, float fadeMs = 3000.0f);
     void crossfadeToFile(const std::string& filePath, float fadeMs = 3000.0f);
     void update(float deltaTime);
     void setVolume(int volume);
-    int getVolume() const { return volumePercent; }
+    [[nodiscard]] int getVolume() const { return volumePercent; }
     void setUnderwaterMode(bool underwater);
     void preloadMusic(const std::string& mpqPath);
 
-    bool isPlaying() const { return playing; }
+    [[nodiscard]] bool isPlaying() const { return playing; }
     /// True while a track is being read on the worker but has not started yet.
     /// Callers must treat this as "in progress", not as failure.
-    bool isLoading() const { return pendingFileLoad_.has_value(); }
-    bool isInitialized() const { return assetManager != nullptr; }
-    const std::string& getCurrentTrack() const { return currentTrack; }
+    [[nodiscard]] bool isLoading() const { return pendingFileLoad_.has_value(); }
+    [[nodiscard]] bool isInitialized() const { return assetManager != nullptr; }
+    [[nodiscard]] const std::string& getCurrentTrack() const { return currentTrack; }
     /// True when the current track came from the filesystem (WoWee original
     /// music) rather than a game archive.
-    bool isCurrentTrackFile() const { return currentTrackIsFile; }
+    [[nodiscard]] bool isCurrentTrackFile() const { return currentTrackIsFile; }
 
 private:
-    float effectiveMusicVolume() const;
+    [[nodiscard]] float effectiveMusicVolume() const;
 
     // Tracks run to several MB, so reading one on the calling thread stalls whatever
-    // frame asked for it — starting the login music was costing ~200ms of render time.
+    // frame asked for it - starting the login music was costing ~200ms of render time.
     // The read happens on a worker; update() hands the bytes to the AudioEngine once
     // they land, keeping every miniaudio call on the main thread.
     struct PendingFileLoad {
@@ -67,6 +71,12 @@ private:
     bool underwaterMode = false;
 
     // Crossfade state
+    /// Loop Music: whether a zone track runs on instead of stopping at its
+    /// end. Every place a track is started reads this, including the one that
+    /// starts the pending track after a crossfade - a flag applied at three of
+    /// four sites is worse than none, because the exception is the one nobody
+    /// remembers.
+    bool loopTracks_ = false;
     bool crossfading = false;
     std::string pendingTrack;
     bool pendingIsFile = false;

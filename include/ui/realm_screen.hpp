@@ -1,9 +1,11 @@
 #pragma once
 
 #include "auth/auth_handler.hpp"
+#include "ui/paper_ui.hpp"
 #include <imgui.h>
 #include <string>
 #include <functional>
+#include <utility>
 
 namespace wowee { namespace ui {
 
@@ -27,7 +29,7 @@ public:
      * @param callback Function to call when realm is selected (receives realm name and address)
      */
     void setOnRealmSelected(std::function<void(const std::string&, const std::string&)> callback) {
-        onRealmSelected = callback;
+        onRealmSelected = std::move(callback);
     }
 
     void setOnBack(std::function<void()> cb) { onBack = std::move(cb); }
@@ -59,13 +61,13 @@ public:
     /**
      * Check if a realm has been selected
      */
-    bool hasSelection() const { return realmSelected; }
+    [[nodiscard]] bool hasSelection() const { return realmSelected; }
 
     /**
      * Get selected realm info
      */
-    const std::string& getSelectedName() const { return selectedRealmName; }
-    const std::string& getSelectedAddress() const { return selectedRealmAddress; }
+    [[nodiscard]] const std::string& getSelectedName() const { return selectedRealmName; }
+    [[nodiscard]] const std::string& getSelectedAddress() const { return selectedRealmAddress; }
 
 private:
     // UI state
@@ -77,6 +79,10 @@ private:
 
     // Status
     std::string statusMessage;
+
+    /// The controls. See paper_ui.hpp - this screen is drawn rather than
+    /// asked for, the same as the login screen it follows.
+    PaperUI ui_;
 
     // Callbacks
     std::function<void(const std::string&, const std::string&)> onRealmSelected;
@@ -90,12 +96,17 @@ private:
     /**
      * Get realm status text
      */
-    const char* getRealmStatus(uint8_t flags) const;
+    [[nodiscard]] const char* getRealmStatus(uint8_t flags) const;
 
     /**
      * Get population color
      */
-    ImVec4 getPopulationColor(float population) const;
+    [[nodiscard]] ImVec4 getPopulationColor(float population) const;
+
+    /// What the population number is called.
+    [[nodiscard]] static const char* getPopulationName(float population);
+    /// What the type icon means.
+    [[nodiscard]] static const char* getRealmType(uint8_t icon);
 };
 
 }} // namespace wowee::ui

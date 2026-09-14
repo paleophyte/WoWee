@@ -104,15 +104,35 @@ struct LightParamsProfile {
     uint32_t lightSkyboxId = 0;
 
     // 18 color channels (IntBand)
+    //
+    // Read off the file rather than from the order they are usually listed in.
+    // The sky gradient anchors the rest: for Stormwind at noon, channels 2 to 5
+    // are (0,31,73), (58,162,207), (153,220,245), (175,218,224) - a deep blue
+    // overhead paling to the horizon, which can only be the sky and fixes every
+    // index around it.
+    //
+    // Channel 0 is not the ambient. Across zones it is the warm, bright one -
+    // (199,168,134) over Dun Morogh's snow, (255,224,169) in Teldrassil,
+    // (255,136,0) in Stormwind - while channel 1 is the dark cool one that
+    // carries the zone's cast: (31,82,125) in Dun Morogh, violet (125,72,130)
+    // in Teldrassil and Winterspring. A scene ambient multiplies every surface,
+    // so reading channel 0 into it put Stormwind's orange over the whole city
+    // and left it looking like Durotar, whose channel 0 is (255,204,148).
+    //
+    // Channel 7 is the fog. Channel 6 is the sky's smog layer and is a neutral
+    // grey - (180,180,180) at Stormwind noon - which is the pale grey the fog
+    // blend further down was written to work around.
     enum ColorChannel {
-        AMBIENT_COLOR = 0,
-        DIFFUSE_COLOR = 1,
+        DIFFUSE_COLOR = 0,
+        AMBIENT_COLOR = 1,
         SKY_TOP_COLOR = 2,
         SKY_MIDDLE_COLOR = 3,
         SKY_BAND1_COLOR = 4,
         SKY_BAND2_COLOR = 5,
-        FOG_COLOR = 6,
-        // ... more channels exist (ocean, river, shadow, etc.)
+        SKY_SMOG_COLOR = 6,
+        FOG_COLOR = 7,
+        SUN_COLOR = 9,
+        // ... more channels exist (clouds, ocean, river)
         COLOR_CHANNEL_COUNT = 18
     };
 
@@ -122,7 +142,14 @@ struct LightParamsProfile {
     enum FloatChannel {
         FOG_END = 0,
         FOG_START_SCALAR = 1,  // Multiplier for fog start
-        CLOUD_DENSITY = 2,
+        // Channel 2 is not a density. Measured over every band in the file,
+        // 98% of its 2509 samples are exactly 1.0 - it is the switch for how
+        // much the sun and moon show through cloud, and reading it as cloud
+        // density left almost every zone under solid overcast at all hours,
+        // which is what hid the skybox.
+        CELESTIAL_GLOW_THROUGH = 2,
+        // Channel 3 is the curve that actually varies: 0 to 5, mean 0.50.
+        CLOUD_DENSITY = 3,
         FOG_DENSITY = 3,
         // ... more channels
         FLOAT_CHANNEL_COUNT = 6
@@ -168,23 +195,34 @@ public:
     /**
      * Get current lighting parameters
      */
-    const LightingParams& getLightingParams() const { return currentParams_; }
+    [[nodiscard]] const LightingParams& getLightingParams() const { return currentParams_; }
 
     /**
      * Set whether player is indoors (disables outdoor lighting)
      */
     void setIndoors(bool indoors) { isIndoors_ = indoors; }
+    /// How far the distance fog is pulled toward the sky's horizon colour.
+    /// 0 keeps LightParams' own fog colour, 1 is the sky itself. See
+    /// LightingManager::update.
+    void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
+    [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
+    /// How much distance fog, as a multiplier on the zone's own fog distances.
+    /// 1 is the DBC unchanged, above 1 is thicker, 0 is none; the default
+    /// 0.4 thins the authored fog, which reads too heavy here. See
+    /// LightingManager::update.
+    void setFogStrength(float strength) { fogStrength_ = strength; }
+    [[nodiscard]] float getFogStrength() const { return fogStrength_; }
 
     /**
      * Get current time of day (0.0-1.0)
      */
-    float getTimeOfDay() const { return timeOfDay_; }
+    [[nodiscard]] float getTimeOfDay() const { return timeOfDay_; }
 
     /** Time used by the visible sky, including persistent zone ambience. */
-    float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
+    [[nodiscard]] float getVisualTimeOfDayHours() const { return visualTimeOfDayHours_; }
 
     /** Original client M2 sky selected by the dominant LightParams volume. */
-    const std::string& getActiveSkyboxPath() const { return activeSkyboxPath_; }
+    [[nodiscard]] const std::string& getActiveSkyboxPath() const { return activeSkyboxPath_; }
 
     /**
      * Manually set time of day for testing
@@ -225,7 +263,7 @@ private:
     /**
      * Find light volumes for blending (up to 4 with weight > 0)
      */
-    std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
+    [[nodiscard]] std::vector<WeightedVolume> findLightVolumes(const glm::vec3& playerPos, uint32_t mapId) const;
 
     /**
      * Get LightParams ID based on conditions
@@ -240,19 +278,18 @@ private:
     /**
      * Sample color from band
      */
-    glm::vec3 sampleColorBand(const ColorBand& band, uint16_t timeHalfMinutes) const;
+    [[nodiscard]] glm::vec3 sampleColorBand(const ColorBand& band, uint16_t timeHalfMinutes) const;
 
     /**
      * Sample float from band
      */
-    float sampleFloatBand(const FloatBand& band, uint16_t timeHalfMinutes) const;
+    [[nodiscard]] float sampleFloatBand(const FloatBand& band, uint16_t timeHalfMinutes) const;
 
     /**
      * Convert DBC BGR color to RGB vec3
      */
-    glm::vec3 dbcColorToVec3(uint32_t dbcColor) const;
+    [[nodiscard]] glm::vec3 dbcColorToVec3(uint32_t dbcColor) const;
 
-    pipeline::AssetManager* assetManager_ = nullptr;
 
     // Light volumes by map
     std::map<uint32_t, std::vector<LightVolume>> lightVolumesByMap_;
@@ -263,14 +300,27 @@ private:
 
     // Current state
     LightingParams currentParams_;
-    LightingParams targetParams_;  // For smooth blending
     std::vector<WeightedVolume> activeVolumes_;
     glm::vec3 currentPlayerPos_{0.0f};
-    uint32_t currentMapId_ = 0;
     float timeOfDay_ = 0.5f;  // Start at noon
     float visualTimeOfDayHours_ = 12.0f;
     std::string activeSkyboxPath_;
     bool isIndoors_ = false;
+    float fogSkyBlend_ = 0.7f;
+    float fogStrength_ = 0.4f;
+
+    // Last values the sky diagnostic reported, so it prints on a change
+    // rather than every frame. See LightingManager::update.
+    /// The map the volume list was last named for, so it is named once per map
+    /// rather than once per frame. findLightVolumes is const.
+    mutable uint32_t diagLoggedMapId_ = 0xFFFFFFFFu;
+    uint32_t diagZoneId_ = 0xFFFFFFFFu;
+    uint32_t diagCallsSinceLog_ = 0;
+    uint32_t diagFirstVolume_ = 0xFFFFFFFFu;
+    uint32_t diagSecondVolume_ = 0xFFFFFFFFu;
+    float diagVisualHours_ = -1.0f;
+    float diagSkyLuma_ = -1.0f;
+    std::string diagSkyboxPath_ = "\x01";
     bool manualTime_ = false;
     bool initialized_ = false;
 

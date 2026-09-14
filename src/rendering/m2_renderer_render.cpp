@@ -1,5 +1,9 @@
+#include "rendering/shadow_params.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
+#include "rendering/m2_sway.hpp"
+#include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_glow_card.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include "rendering/hiz_system.hpp"
@@ -13,6 +17,7 @@
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "rendering/render_constants.hpp"
+#include "rendering/m2_view_distance.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
@@ -32,12 +37,61 @@
 #include <future>
 #include <thread>
 
+#include <set>
+#include <utility>
+
 namespace wowee {
 namespace rendering {
 
+/// Starts a new instance's animation and gives it bones to draw with now.
+///
+/// Both spawn paths need this: the one that takes a position and the one that
+/// takes a whole matrix, and each had its own copy.
+///
+/// The bone seed is what keeps a new instance from being invisible for a
+/// frame. Bones are computed in update(), so an instance spawned mid-frame has
+/// none until the next one; copying them from a sibling of the same model
+/// draws it immediately. A seed entry pointing at an instance that has since
+/// gone is dropped rather than followed.
+void M2Renderer::seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
+                                       M2Instance& instance) {
+        if (!model.sequences.empty()) {
+            instance.currentSequenceIndex = 0;
+            instance.idleSequenceIndex = 0;
+            instance.animDuration = static_cast<float>(model.sequences[0].duration);
+            instance.animTime = static_cast<float>(randRange(std::max(1u, model.sequences[0].duration)));
+            instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
+        }
+
+    auto seedIt = boneSeedInstanceByModel_.find(modelId);
+    if (seedIt != boneSeedInstanceByModel_.end()) {
+        auto idxIt = instanceIndexById.find(seedIt->second);
+        if (idxIt != instanceIndexById.end() && idxIt->second < instances.size()) {
+            const auto& existing = instances[idxIt->second];
+            if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
+                instance.boneMatrices = existing.boneMatrices;
+                instance.bonesDirty[0] = instance.bonesDirty[1] = true;
+            } else {
+                boneSeedInstanceByModel_.erase(seedIt);  // stale entry
+            }
+        } else {
+            boneSeedInstanceByModel_.erase(seedIt);  // that instance is gone
+        }
+    }
+
+    // No sibling to copy from, so pay for the bones now.
+    if (instance.boneMatrices.empty()) {
+        computeBoneMatrices(model, instance, &cachedCamPos_);
+    }
+    if (!instance.boneMatrices.empty()) {
+        boneSeedInstanceByModel_.emplace(modelId, instance.id);
+    }
+}
+
 uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
-                                     const glm::vec3& rotation, float scale) {
-    // Reject NaN inputs at the boundary — std::round of NaN is implementation-
+                                     const glm::vec3& rotation, float scale,
+                                     bool allowPositionDedup) {
+    // Reject NaN inputs at the boundary - std::round of NaN is implementation-
     // defined and a NaN instance position propagates into the GPU model matrix,
     // either tripping Vulkan validation or rendering at the world origin.
     if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
@@ -54,14 +108,15 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     const auto& mdlRef = modelIt->second;
     modelUnusedSince_.erase(modelId);
 
+
     // Deduplicate: skip if same model already at nearly the same position.
     // Uses hash map for O(1) lookup instead of O(N) scan.
-    // Spell effects are exempt — transient visuals must always create fresh instances.
-    if (!mdlRef.isGroundDetail && !mdlRef.isSpellEffect) {
-        DedupKey dk{modelId,
-                    static_cast<int32_t>(std::round(position.x * 10.0f)),
-                    static_cast<int32_t>(std::round(position.y * 10.0f)),
-                    static_cast<int32_t>(std::round(position.z * 10.0f))};
+    // Spell effects are exempt - transient visuals must always create fresh instances.
+    if (allowPositionDedup && !mdlRef.isGroundDetail && !mdlRef.isSpellEffect) {
+        DedupKey dk{.modelId = modelId,
+                    .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
+                    .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
+                    .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
         auto dit = instanceDedupMap_.find(dk);
         if (dit != instanceDedupMap_.end()) {
             return dit->second;
@@ -101,40 +156,23 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
     // Initialize animation: play first sequence (usually Stand/Idle)
     const auto& mdl = mdlRef;
     if (mdl.hasAnimation && !mdl.disableAnimation) {
-        if (!mdl.sequences.empty()) {
-            instance.currentSequenceIndex = 0;
-            instance.idleSequenceIndex = 0;
-            instance.animDuration = static_cast<float>(mdl.sequences[0].duration);
-            instance.animTime = static_cast<float>(randRange(std::max(1u, mdl.sequences[0].duration)));
-            instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
-        }
-
-        // Seed bone matrices from an existing instance of the same model so the
-        // new instance renders immediately instead of being invisible until the
-        // next update() computes bones (prevents pop-in flash).
-        for (const auto& existing : instances) {
-            if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
-                instance.boneMatrices = existing.boneMatrices;
-                instance.bonesDirty[0] = instance.bonesDirty[1] = true;
-                break;
-            }
-        }
-        // If no sibling exists yet, compute bones immediately
-        if (instance.boneMatrices.empty()) {
-            computeBoneMatrices(mdlRef, instance);
-        }
+        seedInstanceAnimation(mdlRef, modelId, instance);
     }
 
     // Register in dedup map before pushing (uses original position, not ground-adjusted)
     // Spell effects are exempt from dedup tracking (transient, overlapping allowed).
-    if (!mdlRef.isGroundDetail && !mdlRef.isSpellEffect) {
-        DedupKey dk{modelId,
-                    static_cast<int32_t>(std::round(position.x * 10.0f)),
-                    static_cast<int32_t>(std::round(position.y * 10.0f)),
-                    static_cast<int32_t>(std::round(position.z * 10.0f))};
+    if (allowPositionDedup && !mdlRef.isGroundDetail && !mdlRef.isSpellEffect) {
+        DedupKey dk{.modelId = modelId,
+                    .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
+                    .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
+                    .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
         instanceDedupMap_[dk] = instance.id;
     }
 
+    // WOWEE_M2_CENSUS: what the model is drawn at, beside what it was
+    // authored at. The load-time census gives the authored height; a game
+    // object's scale comes from the server and is only known here.
+    censusInstance(instance);
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
     // Track special instances for fast-path iteration
@@ -153,15 +191,7 @@ uint32_t M2Renderer::createInstance(uint32_t modelId, const glm::vec3& position,
         particleOnlyInstanceIndices_.push_back(idx);
     }
     instanceIndexById[instance.id] = idx;
-    GridCell minCell = toCell(instance.worldBoundsMin);
-    GridCell maxCell = toCell(instance.worldBoundsMax);
-    for (int z = minCell.z; z <= maxCell.z; z++) {
-        for (int y = minCell.y; y <= maxCell.y; y++) {
-            for (int x = minCell.x; x <= maxCell.x; x++) {
-                spatialGrid[GridCell{x, y, z}].push_back(instance.id);
-            }
-        }
-    }
+    insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
 }
@@ -186,10 +216,10 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     // Deduplicate: O(1) hash lookup
     {
-        DedupKey dk{modelId,
-                    static_cast<int32_t>(std::round(position.x * 10.0f)),
-                    static_cast<int32_t>(std::round(position.y * 10.0f)),
-                    static_cast<int32_t>(std::round(position.z * 10.0f))};
+        DedupKey dk{.modelId = modelId,
+                    .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
+                    .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
+                    .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
         auto dit = instanceDedupMap_.find(dk);
         if (dit != instanceDedupMap_.end()) {
             return dit->second;
@@ -225,38 +255,33 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
 
     // Initialize animation
     if (mdl2.hasAnimation && !mdl2.disableAnimation) {
-        if (!mdl2.sequences.empty()) {
-            instance.currentSequenceIndex = 0;
-            instance.idleSequenceIndex = 0;
-            instance.animDuration = static_cast<float>(mdl2.sequences[0].duration);
-            instance.animTime = static_cast<float>(randRange(std::max(1u, mdl2.sequences[0].duration)));
-            instance.variationTimer = randFloat(rendering::M2_VARIATION_TIMER_MIN_MS, rendering::M2_VARIATION_TIMER_MAX_MS);
-        }
-
-        // Seed bone matrices from an existing sibling so the instance renders immediately
-        for (const auto& existing : instances) {
-            if (existing.modelId == modelId && !existing.boneMatrices.empty()) {
-                instance.boneMatrices = existing.boneMatrices;
-                instance.bonesDirty[0] = instance.bonesDirty[1] = true;
-                break;
-            }
-        }
-        if (instance.boneMatrices.empty()) {
-            computeBoneMatrices(mdl2, instance);
-        }
+        seedInstanceAnimation(mdl2, modelId, instance);
     } else {
+        // A model with no skeleton can still have particle emitters, and their
+        // rate and lifespan tracks are sampled at animTime. Starting every
+        // instance at zero puts a courtyard of identical torches in lockstep,
+        // so the phase is spread.
+        //
+        // createInstance above does not do this, so doodads spawned by
+        // position keep the lockstep this avoids. Which of the two is right is
+        // a question for whoever next looks at particle timing; they differ
+        // today and this is the difference.
         instance.animTime = randFloat(0.0f, 10000.0f);
     }
 
     // Register in dedup map
     {
-        DedupKey dk{modelId,
-                    static_cast<int32_t>(std::round(position.x * 10.0f)),
-                    static_cast<int32_t>(std::round(position.y * 10.0f)),
-                    static_cast<int32_t>(std::round(position.z * 10.0f))};
+        DedupKey dk{.modelId = modelId,
+                    .qx = static_cast<int32_t>(std::round(position.x * 10.0f)),
+                    .qy = static_cast<int32_t>(std::round(position.y * 10.0f)),
+                    .qz = static_cast<int32_t>(std::round(position.z * 10.0f))};
         instanceDedupMap_[dk] = instance.id;
     }
 
+    // WOWEE_M2_CENSUS: what the model is drawn at, beside what it was
+    // authored at. The load-time census gives the authored height; a game
+    // object's scale comes from the server and is only known here.
+    censusInstance(instance);
     instances.push_back(instance);
     size_t idx = instances.size() - 1;
     if (mdl2.isSmoke) {
@@ -271,17 +296,24 @@ uint32_t M2Renderer::createInstanceWithMatrix(uint32_t modelId, const glm::mat4&
         particleOnlyInstanceIndices_.push_back(idx);
     }
     instanceIndexById[instance.id] = idx;
-    GridCell minCell = toCell(instance.worldBoundsMin);
-    GridCell maxCell = toCell(instance.worldBoundsMax);
-    for (int z = minCell.z; z <= maxCell.z; z++) {
-        for (int y = minCell.y; y <= maxCell.y; y++) {
-            for (int x = minCell.x; x <= maxCell.x; x++) {
-                spatialGrid[GridCell{x, y, z}].push_back(instance.id);
-            }
-        }
-    }
+    insertBounds(spatialGrid, instance.worldBoundsMin, instance.worldBoundsMax, instance.id);
 
     return instance.id;
+}
+
+// WOWEE_SKY_M2_MAX_BATCH=<n> draws only the sky model's first n layers.
+//
+// Thirty-four of them, and every measurement says the set drawn is the same
+// every frame - so if the flicker is one layer's doing, bisecting the count
+// finds it in about five runs. That has worked three times on this fault where
+// reading the code has worked none.
+static bool skyBatchAllowed(bool skyMode, std::size_t index) {
+    if (!skyMode) return true;
+    static const int maxBatch = [] {
+        const char* set = std::getenv("WOWEE_SKY_M2_MAX_BATCH");
+        return set ? std::atoi(set) : -1;
+    }();
+    return maxBatch < 0 || static_cast<int>(index) < maxBatch;
 }
 
 void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4& viewProjection) {
@@ -294,10 +326,16 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 
     // Cache camera state for frustum-culling bone computation
     cachedCamPos_ = cameraPos;
-    const float maxRenderDistance = viewDistanceScale_ *
-        ((instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
-             ? rendering::M2_MAX_RENDER_DISTANCE_HIGH_DENSITY
-             : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY);
+    // Never past the ground. The density constants are how far models are
+    // worth drawing, not how far there is anything to draw them on: the
+    // terrain and the WMOs stop at the view distance itself, so a doodad
+    // beyond it is a tree standing on nothing.
+    const float maxRenderDistance = std::min(
+        cappedViewDistance(),
+        viewDistanceScale_ *
+            ((instances.size() > rendering::M2_HIGH_DENSITY_INSTANCE_THRESHOLD)
+                 ? rendering::M2_MAX_RENDER_DISTANCE_HIGH_DENSITY
+                 : rendering::M2_MAX_RENDER_DISTANCE_LOW_DENSITY));
     cachedMaxRenderDistSq_ = maxRenderDistance * maxRenderDistance;
 
     // Build frustum for culling bones
@@ -378,10 +416,37 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 
     // --- Normal M2 animation update ---
     // Advance animTime for ALL instances (needed for texture UV animation on static doodads).
-    // This is a tight loop touching only one float per instance — no hash lookups.
+    // This is a tight loop touching only one float per instance - no hash lookups.
     for (auto& instance : instances) {
         instance.animTime += dtMs;
         instance.globalSequenceTime += dtMs;
+    }
+
+    // The sky model's clock, when this is the renderer that draws one.
+    //
+    // A report of the sky "playing an animation that brightens and dims, faster
+    // when walking" survived three fixes to what chooses the sky, and the
+    // lighting diagnostic then showed every input to it holding still while it
+    // happened - the zone, the volumes, the model and the target colour. So
+    // what is moving is this, and the two things worth telling apart are
+    // whether the instance is being rebuilt (animTime back to zero) and
+    // whether the clock runs at wall speed (animTime should advance by dtMs and
+    // by nothing else).
+    //
+    // Only this renderer has skyMode_, and only on a change worth seeing, so it
+    // is quiet unless asked for with WOWEE_LOG_LEVEL=info.
+    if (skyMode_ && !instances.empty()) {
+        const auto& sky = instances.front();
+        const bool restarted = sky.animTime < skyDiagAnimTime_;
+        if (restarted || sky.id != skyDiagInstanceId_ ||
+            sky.animTime - skyDiagAnimTime_ > 1000.0f) {
+            LOG_INFO("skyM2: instance=", sky.id, " instances=", instances.size(),
+                     " animTime=", sky.animTime, " duration=", sky.animDuration,
+                     " gsTime=", sky.globalSequenceTime, " dtMs=", dtMs,
+                     restarted ? " RESTARTED" : "");
+            skyDiagInstanceId_ = sky.id;
+            skyDiagAnimTime_ = sky.animTime;
+        }
     }
     // Wrap animTime for particle-only instances so emission rate tracks keep looping.
     // 3333ms chosen as a safe wrap period: long enough to cover the longest known M2
@@ -403,15 +468,42 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // Update animated instances (full animation state + bone computation culling)
     // Note: animTime was already advanced by dtMs in the global loop above.
     // Here we apply the speed factor: subtract the base dtMs and add dtMs*speed.
+    // Ground clutter stops being stepped once it is past the distance it draws
+    // at. There are hundreds of tufts to a tile and each one plays a sequence of
+    // its own, so this list is mostly grass that nothing can see; the sequences
+    // loop, so one that resumes from a stale time is indistinguishable from one
+    // that never stopped.
+    const float clutterAnimCutoffSq = (groundDetailMaxDistance_ > 0.0f)
+        ? (groundDetailMaxDistance_ * groundDetailMaxDistance_) : 0.0f;
+
     for (size_t idx : animatedInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
+
+        if (clutterAnimCutoffSq > 0.0f && instance.cachedIsGroundDetail) {
+            const glm::vec3 toCam = instance.position - cachedCamPos_;
+            if (glm::dot(toCam, toCam) > clutterAnimCutoffSq) continue;
+        }
 
         instance.animTime += dtMs * (instance.animSpeed - 1.0f);
 
         // For animation looping/variation, we need the actual model data.
         if (!instance.cachedModel) continue;
         const M2ModelGPU& model = *instance.cachedModel;
+
+        // The reversing clock, kept beside the ordinary one rather than in
+        // place of it: animTime keeps looping for the rest of the skeleton.
+        if (model.pingPongAnim) {
+            const float dur = std::max(1.0f, instance.animDuration);
+            instance.animTimeAlt += dtMs * instance.animDir;
+            if (instance.animTimeAlt >= dur) {
+                instance.animTimeAlt = dur;
+                instance.animDir = -1.0f;
+            } else if (instance.animTimeAlt <= 0.0f) {
+                instance.animTimeAlt = 0.0f;
+                instance.animDir = 1.0f;
+            }
+        }
 
         // Validate sequence index
         if (instance.currentSequenceIndex < 0 ||
@@ -427,7 +519,12 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             instance.animDuration = rendering::M2_DEFAULT_PARTICLE_ANIM_MS;
         }
         if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
-            if (instance.playingVariation) {
+            if (instance.holdAtEnd) {
+                // Stay on the last frame. A door's open sequence ends with the
+                // door open, and that is the pose the server is describing.
+                instance.animTime = instance.animDuration;
+                instance.animSpeed = 0.0f;
+            } else if (instance.playingVariation) {
                 instance.playingVariation = false;
                 instance.currentSequenceIndex = instance.idleSequenceIndex;
                 if (instance.idleSequenceIndex < static_cast<int>(model.sequences.size())) {
@@ -445,7 +542,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
 
         // Idle variation timer
-        if (!instance.playingVariation && model.idleVariationIndices.size() > 1) {
+        if (!instance.playingVariation && !instance.holdAtEnd &&
+            model.idleVariationIndices.size() > 1) {
             instance.variationTimer -= dtMs;
             if (instance.variationTimer <= 0.0f) {
                 int pick = static_cast<int>(randRange(static_cast<uint32_t>(model.idleVariationIndices.size())));
@@ -466,7 +564,10 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         // recomputeCachedCullFactors(); we only need the per-frame distance and frustum test.
         glm::vec3 toCam = instance.position - cachedCamPos_;
         float distSq = glm::dot(toCam, toCam);
-        float effectiveMaxDistSq = cachedMaxRenderDistSq_ * instance.cachedEffectiveMaxDistSqFactor;
+        float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
+            cachedMaxRenderDistSq_, instance.cachedEffectiveMaxDistSqFactor,
+            false, 0.0f, cappedViewDistance(),
+            instance.cachedIsGroundDetail, groundDetailMaxDistance_);
         if (instance.cachedIsSkyBird) {
             constexpr float kBirdMaxDistSq =
                 rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
@@ -479,7 +580,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 
         // LOD 3 skip: models beyond 150 units use the lowest LOD mesh which has
         // no visible skeletal animation.  Keep their last-computed bone matrices
-        // (always valid — seeded on spawn) and avoid the expensive per-bone work.
+        // (always valid - seeded on spawn) and avoid the expensive per-bone work.
         // Sky birds, light beams, and ship machinery are exempt: their visible
         // motion is baked entirely into bone animation.
         constexpr float kLOD3DistSq = rendering::M2_LOD3_DISTANCE * rendering::M2_LOD3_DISTANCE;
@@ -505,15 +606,15 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         static const size_t minParallelAnimInstances = std::max<size_t>(
             8, envSizeOrDefault("WOWEE_M2_ANIM_MT_MIN", 96));
         if (animCount < minParallelAnimInstances || numAnimThreads_ <= 1) {
-            // Sequential — not enough work to justify thread overhead
+            // Sequential - not enough work to justify thread overhead
             for (size_t i : boneWorkIndices_) {
                 if (i >= instances.size()) continue;
                 auto& inst = instances[i];
                 if (!inst.cachedModel) continue;
-                computeBoneMatrices(*inst.cachedModel, inst);
+                computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
             }
         } else {
-            // Parallel — dispatch across worker threads
+            // Parallel - dispatch across worker threads
             static const size_t minAnimWorkPerThread = std::max<size_t>(
                 16, envSizeOrDefault("WOWEE_M2_ANIM_WORK_PER_THREAD", 64));
             const size_t maxUsefulThreads = std::max<size_t>(
@@ -524,7 +625,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                     if (i >= instances.size()) continue;
                     auto& inst = instances[i];
                     if (!inst.cachedModel) continue;
-                    computeBoneMatrices(*inst.cachedModel, inst);
+                    computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
                 }
             } else {
                 const size_t chunkSize = animCount / numThreads;
@@ -536,7 +637,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
                         if (idx >= instances.size()) continue;
                         auto& inst = instances[idx];
                         if (!inst.cachedModel) continue;
-                        computeBoneMatrices(*inst.cachedModel, inst);
+                        computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
                     }
                 };
 
@@ -565,7 +666,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         }
     }
 
-    // Particle update (sequential — uses RNG, not thread-safe)
+    // Particle update (sequential - uses RNG, not thread-safe)
     // Only iterate instances that have particle emitters (pre-built list).
     for (size_t idx : particleInstanceIndices_) {
         if (idx >= instances.size()) continue;
@@ -584,13 +685,21 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
 
 }
 
+// Diagnostic: WOWEE_M2_NO_SKINNING=1 renders every M2 in its bind pose by
+// telling the shader to ignore bones, separating a skinning artifact from one
+// drawn by the particle or ribbon systems.
+static const bool kM2NoSkinning = envFlagEnabled("WOWEE_M2_NO_SKINNING");
+
 void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
     if (!initialized_ || instances.empty()) return;
     (void)camera;  // reserved for future frustum-based culling
 
-    // --- Mega bone SSBO: assign slots and upload all animated instance bones ---
-    // Slot 0 = identity (non-animated), slots 1..N = animated instances.
-    uint32_t nextSlot = 1;
+    // --- Mega bone SSBO: assign ranges and upload all animated instance bones ---
+    // Offset 0 is reserved as the identity/no-bones sentinel; animated instances
+    // are packed after it at their own bone count, so a 300-bone creature gets
+    // all 300 matrices instead of being truncated into a fixed stride and
+    // reading into its neighbour's range.
+    uint32_t nextOffset = 1;
     for (size_t idx : animatedInstanceIndices_) {
         if (idx >= instances.size()) continue;
         auto& instance = instances[idx];
@@ -600,30 +709,75 @@ void M2Renderer::prepareRender(uint32_t frameIndex, const Camera& camera) {
             continue;
         }
 
-        if (nextSlot >= MEGA_BONE_MAX_INSTANCES) {
-            instance.megaBoneOffset = 0;  // Overflow — use identity
+        // A bone that has left the model behind.
+        //
+        // The vertex shader skins by these matrices, so one that translates far
+        // outside the model's own bounds drags every vertex weighted to it out
+        // with it. What that looks like on screen is not a bone problem: it is
+        // a long flat triangle with the skin smeared across it, which reads as
+        // a missing texture or a stray card. The Elemental Slave's white sheets
+        // were reported three times as missing textures, and the texture paths,
+        // the display skins, the particle emitters and the ribbons were all
+        // measured and found correct before the geometry was suspected.
+        //
+        // Judged against the other bones, not against the model's origin, and
+        // against the model's own bounding radius so a large creature is not
+        // accused for being large. Measuring from the origin flags every
+        // flying critter: a bird's flight path is authored into its root bone,
+        // so the whole skeleton is sixteen yards out and nothing is stretched.
+        // What a stretch looks like is one bone leaving the set behind.
+        if (instance.cachedModel != nullptr) {
+            const M2ModelGPU& m = *instance.cachedModel;
+            const glm::vec3 extent = m.boundMax - m.boundMin;
+            const float radius = 0.5f * glm::length(extent);
+            // Examined once per model, not once per frame: this walks every
+            // bone, and there are models with three hundred of them drawn
+            // dozens at a time.
+            static std::unordered_set<uint32_t> boneRangeChecked;
+            if (radius > 0.01f && boneRangeChecked.size() < 64 &&
+                boneRangeChecked.insert(instance.modelId).second) {
+                glm::vec3 centre(0.0f);
+                for (const auto& bone : instance.boneMatrices) centre += glm::vec3(bone[3]);
+                centre /= static_cast<float>(instance.boneMatrices.size());
+
+                const float limit = radius * 4.0f;
+                for (size_t bi = 0; bi < instance.boneMatrices.size(); ++bi) {
+                    const glm::vec3 t(instance.boneMatrices[bi][3]);
+                    const float stray = glm::length(t - centre);
+                    if (stray <= limit) continue;
+                    LOG_WARNING("M2 '", m.name, "' bone ", bi, " of ",
+                                instance.boneMatrices.size(), " sits ", stray,
+                                " from where the rest of its skeleton is, in a model whose"
+                                " bounding radius is ", radius,
+                                " - anything weighted to it is drawn stretched");
+                    break;
+                }
+            }
+        }
+
+        const uint32_t boneCount = static_cast<uint32_t>(instance.boneMatrices.size());
+        if (boneCount > MEGA_BONE_MATRIX_CAPACITY - nextOffset) {
+            instance.megaBoneOffset = 0;  // Overflow - use identity
             continue;
         }
 
-        instance.megaBoneOffset = nextSlot * MAX_BONES_PER_INSTANCE;
+        instance.megaBoneOffset = nextOffset;
 
-        // Upload bone matrices to mega buffer — only when they were recomputed
+        // Upload bone matrices to mega buffer - only when they were recomputed
         // since the last upload into this frame's buffer, or the instance's
         // slot moved (animated set changed). Most animated instances are
         // distance/frustum/frame-skip culled and keep their previous bones, so
         // skipping their memcpy avoids megabytes of redundant writes per frame.
         if (megaBoneMapped_[frameIndex] &&
             (instance.bonesDirty[frameIndex] ||
-             instance.megaBoneUploadedSlot[frameIndex] != nextSlot)) {
-            int numBones = std::min(static_cast<int>(instance.boneMatrices.size()),
-                                    static_cast<int>(MAX_BONES_PER_INSTANCE));
+             instance.megaBoneUploadedSlot[frameIndex] != instance.megaBoneOffset)) {
             auto* dst = static_cast<glm::mat4*>(megaBoneMapped_[frameIndex]) + instance.megaBoneOffset;
-            memcpy(dst, instance.boneMatrices.data(), numBones * sizeof(glm::mat4));
+            memcpy(dst, instance.boneMatrices.data(), boneCount * sizeof(glm::mat4));
             instance.bonesDirty[frameIndex] = false;
-            instance.megaBoneUploadedSlot[frameIndex] = nextSlot;
+            instance.megaBoneUploadedSlot[frameIndex] = instance.megaBoneOffset;
         }
 
-        nextSlot++;
+        nextOffset += boneCount;
     }
 }
 
@@ -647,7 +801,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
     const float maxRenderDistance = smoothedRenderDist_;
     const float maxRenderDistanceSq = maxRenderDistance * maxRenderDistance;
     // The shader rejects on this bound before it ever reads the per-instance
-    // distance, so it has to clear the game-object floor as well — otherwise
+    // distance, so it has to clear the game-object floor as well - otherwise
     // that floor is silently capped at 2x the ambient doodad distance.
     const float maxPossibleDistSq = std::max(
         maxRenderDistanceSq * 4.0f,  // 2x safety margin
@@ -677,7 +831,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         // reprojected screen positions diverge from the actual pyramid data.
         bool hizSafe = hizReady;
         if (hizReady) {
-            // Compare current VP against previous VP — Frobenius-style max diff.
+            // Compare current VP against previous VP - Frobenius-style max diff.
             float maxDiff = 0.0f;
             const float* curM  = &vp[0][0];
             const float* prevM = &prevVP_[0][0];
@@ -702,7 +856,7 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
                 0.0f
             );
             ubo->viewProj = vp;
-            // Use previous frame's VP for HiZ reprojection — the HiZ pyramid
+            // Use previous frame's VP for HiZ reprojection - the HiZ pyramid
             // was built from the previous frame's depth, so we must project
             // into the same screen space to sample the correct depths.
             ubo->prevViewProj = prevVP_;
@@ -737,12 +891,11 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
         auto* input = static_cast<CullInstanceGPU*>(cullInputMapped_[frameIndex]);
         for (uint32_t i = 0; i < numInstances; i++) {
             const auto& inst = instances[i];
-            float effectiveMaxDistSq = maxRenderDistanceSq * inst.cachedEffectiveMaxDistSqFactor;
-            if (inst.isGameObject) {
-                effectiveMaxDistSq = std::max(effectiveMaxDistSq,
-                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
-            }
+            float effectiveMaxDistSq = rendering::m2InstanceMaxDistSq(
+                maxRenderDistanceSq, inst.cachedEffectiveMaxDistSqFactor,
+                inst.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
+                cappedViewDistance(),
+                inst.cachedIsGroundDetail, groundDetailMaxDistance_);
             if (inst.cachedIsSkyBird && inst.cachedHasAnimation && !inst.cachedDisableAnimation) {
                 constexpr float kBirdMaxDistSq =
                     rendering::M2_SKY_BIRD_MAX_RENDER_DISTANCE *
@@ -754,13 +907,22 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
             if (inst.cachedIsValid)          flags |= 1u;
             if (inst.cachedIsSmoke)           flags |= 2u;
             if (inst.cachedIsInvisibleTrap)   flags |= 4u;
-            // Bit 3: previouslyVisible — the shader skips HiZ for objects
-            // that were NOT rendered last frame (no reliable depth data).
-            // Hysteresis: treat as "previously visible" unless culled for
-            // 2+ consecutive frames, preventing single-frame false-cull flicker.
-            // The counter lives on the instance, so streaming churn can never
-            // pair it with a different object's history.
-            if (inst.hizPrevCulledFrames < 2)
+            // Bit 3: previouslyVisible - the shader runs the HiZ occlusion test
+            // ONLY when this bit is set (an object with no depth in last frame's
+            // pyramid can't be tested reliably). Hysteresis: keep it set unless
+            // culled for 2+ consecutive frames, preventing single-frame false-cull
+            // flicker. The counter lives on the instance, so streaming churn can
+            // never pair it with a different object's history.
+            //
+            // Server game objects (mailboxes, chests, ...) opt out of HiZ entirely
+            // by never setting this bit: they are small gameplay props that sit
+            // flush against walls and doorframes, exactly where the coarse depth
+            // pyramid reports false occlusions. Such a false-cull would persist
+            // (the prop is then not rendered, so it never regains depth to clear
+            // itself) - the "mailbox went invisible in place" report. Frustum +
+            // distance culling still bound them; only the unreliable occlusion
+            // test is waived.
+            if (inst.hizPrevCulledFrames < 2 && !inst.isGameObject)
                 flags |= 8u;
 
             input[i].sphere = glm::vec4(inst.cachedCullCenter, inst.cachedPaddedRadius);
@@ -792,13 +954,15 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex, c
 
     // Make writes available to the host after this frame's fence signals. The
     // CPU invalidates and reads them when this frame slot is reused.
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_HOST_BIT;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_HOST_BIT,
-        0, 1, &barrier, 0, nullptr, 0, nullptr);
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &barrier;
+    cmdPipelineBarrier2(cmd, dep);
 }
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera) {
@@ -842,7 +1006,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     const float lavaAnimSeconds = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - kLavaAnimStart).count();
 
-    // GPU cull results — dispatchCullCompute() already updated smoothedRenderDist_.
+    // GPU cull results - dispatchCullCompute() already updated smoothedRenderDist_.
     // Use the cached value (set by dispatchCullCompute or fallback below).
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
     const uint32_t numInstances = std::min(static_cast<uint32_t>(instances.size()), MAX_CULL_INSTANCES);
@@ -856,7 +1020,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // swap-removes, so a respawned game object lands at the volatile tail of the
     // array and would otherwise inherit the verdict of whatever transient object
     // (spell visual, streamed doodad, creature) held that index two frames back
-    // — leaving it culled for as long as the churn continued.
+    // - leaving it culled for as long as the churn continued.
     //
     // Instances with no entry in the readable set were created after that
     // dispatch and keep their defaults: visible, and exempt from the HiZ test.
@@ -889,7 +1053,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             }
         }
     } else {
-        // No GPU cull data — conservatively treat everything as visible.
+        // No GPU cull data - conservatively treat everything as visible.
         for (auto& inst : instances) {
             inst.lastCullVisible = 1;
             inst.hizPrevCulledFrames = 0;
@@ -915,9 +1079,20 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     const float fadeStartFraction = 0.75f;
     const glm::vec3 camPos = camera.getPosition();
 
+    // Where this pass's three milliseconds go.
+    //
+    // Recording the M2 secondary is the largest single piece of CPU work in
+    // the frame - renderWorld waits on the slowest worker and this is always
+    // it - and the stage around it cannot see whether that is the cull, the
+    // sort or the recording itself.
+    static const bool m2Profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    const auto m2T0 = std::chrono::steady_clock::now();
+
     // Build sorted visible instance list
     sortedVisible_.clear();
     transparentVisible_.clear();
+    skyDiagDrawsOpaque_ = 0;
+    skyDiagDrawsTransparent_ = 0;
     const size_t expectedVisible = std::min(instances.size() / 3, size_t(600));
     if (sortedVisible_.capacity() < expectedVisible) {
         sortedVisible_.reserve(expectedVisible);
@@ -925,7 +1100,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     if (transparentVisible_.capacity() < expectedVisible / 4)
         transparentVisible_.reserve(expectedVisible / 4);
 
-    // GPU frustum culling — build frustum for CPU fallback path and overflow instances
+    // GPU frustum culling - build frustum for CPU fallback path and overflow instances
     Frustum frustum;
     {
         const glm::mat4 vp = camera.getProjectionMatrix() * camera.getViewMatrix();
@@ -964,14 +1139,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             // Server game objects keep a distance floor instead of following the
             // ambient doodad distance down; it also feeds the fade curve below,
             // so a mailbox doesn't fade out at the doodad boundary either.
-            const float instanceMaxDistSq = [&] {
-                float d = maxRenderDistanceSq * instance.cachedEffectiveMaxDistSqFactor;
-                if (instance.isGameObject) {
-                    d = std::max(d, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE *
-                                    rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE);
-                }
-                return d;
-            }();
+            const float instanceMaxDistSq = rendering::m2InstanceMaxDistSq(
+                maxRenderDistanceSq, instance.cachedEffectiveMaxDistSqFactor,
+                instance.isGameObject, rendering::M2_GAME_OBJECT_MIN_RENDER_DISTANCE,
+                cappedViewDistance(),
+                instance.cachedIsGroundDetail, groundDetailMaxDistance_);
 
             if (forceNoCull_) {
                 if (!instance.cachedIsValid) continue;
@@ -979,7 +1151,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 distSq = glm::dot(toCam, toCam);
                 effectiveMaxDistSq = instanceMaxDistSq;
             } else if (gpuCullAvailable && i < numInstances) {
-                // Per-instance verdict scattered above — indexing visibility[]
+                // Per-instance verdict scattered above - indexing visibility[]
                 // directly here would read the slot of whichever instance held
                 // this array position when the dispatch was recorded.
                 if (!instance.lastCullVisible) continue;
@@ -1005,7 +1177,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 if (distSq > effectiveMaxDistSq) continue;
             }
 
-            VisibleEntry visible{i, instance.modelId, distSq, effectiveMaxDistSq};
+            VisibleEntry visible{.index = i, .modelId = instance.modelId, .distSq = distSq, .effectiveMaxDistSq = effectiveMaxDistSq};
             out.opaque.push_back(visible);
             if (instance.cachedModel &&
                 (instance.cachedModel->hasTransparentBatches || instance.cachedModel->isSpellEffect)) {
@@ -1036,14 +1208,72 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                    std::make_move_iterator(chunk.transparent.end()));
     }
 
+    // The furthest doodad actually drawn, for the diagnostic that sets it
+    // against the furthest terrain chunk. See Renderer::logViewDistanceDiag.
+    furthestDrawnSq_ = 0.0f;
+    for (const auto& e : sortedVisible_)
+        if (e.distSq > furthestDrawnSq_) furthestDrawnSq_ = e.distSq;
+    for (const auto& e : transparentVisible_)
+        if (e.distSq > furthestDrawnSq_) furthestDrawnSq_ = e.distSq;
+
+    // Whether the sky model survived culling this frame, when this is the
+    // renderer that draws one.
+    //
+    // Reported as flickering while the camera turns and steady while it does
+    // not, with everything upstream measured and holding still: the lighting
+    // inputs, the model's clock, the frame time. What that leaves is the dome
+    // being drawn on some frames and not others, and this says so in one line
+    // per change rather than one per frame.
+    // WOWEE_SKY_M2_OPAQUE_ONLY=1 drops the sky model's blended layers.
+    //
+    // The model is the culprit - the flicker goes with WOWEE_NO_SKY_M2 - and it
+    // is not a small one: hellfireskybox.m2 carries 23 textures over 34 render
+    // flags, with five transparency tracks and seven UV animations driven by
+    // six global sequences. The brightening and dimming is those alpha tracks.
+    // This says whether the flicker is in the blended layers or in the base the
+    // opaque pass draws, which halves what is left to read.
+    static const bool skyOpaqueOnly = std::getenv("WOWEE_SKY_M2_OPAQUE_ONLY") != nullptr;
+    if (skyMode_ && skyOpaqueOnly) transparentVisible_.clear();
+
+    if (skyMode_) {
+        const bool drawn = !sortedVisible_.empty() || !transparentVisible_.empty();
+        if (drawn != skyDiagWasDrawn_) {
+            skyDiagWasDrawn_ = drawn;
+            LOG_INFO("skyM2 cull: ", drawn ? "DRAWN" : "CULLED",
+                     " opaque=", sortedVisible_.size(),
+                     " transparent=", transparentVisible_.size(),
+                     " instances=", instances.size());
+        }
+    }
+
     // Two-pass rendering: opaque/alpha-test first (depth write ON), then transparent/additive
     // (depth write OFF, sorted back-to-front) so transparent geometry composites correctly
     // against all opaque geometry rather than only against what was rendered before it.
 
     // Pass 1: sort by modelId for minimum buffer rebinds (opaque batches)
+    //
+    // Ordering the groups front-to-back was tried, on the theory that cutout
+    // foliage cannot be rejected before it is shaded so the near trees should
+    // lay depth down first. It moved nothing: doodads measured 14.66ms against
+    // 16.55 and 13.38 either side of it, which is the middle of the spread.
+    // What it did cost was a hash map over every visible instance, two index
+    // vectors and a copy of the whole list, every frame, in the pass that
+    // turned out to be the largest single piece of CPU work in the frame.
+    const auto m2T1 = std::chrono::steady_clock::now();
     std::sort(sortedVisible_.begin(), sortedVisible_.end(),
               [](const VisibleEntry& a, const VisibleEntry& b) { return a.modelId < b.modelId; });
-
+    const auto m2T2 = std::chrono::steady_clock::now();
+    // Reported at the end of the pass; see m2Profile above.
+    struct M2Phases { double cull, sort, record; std::size_t visible, instances; };
+    const auto sayPhases = [&](const M2Phases& p) {
+        static auto lastSaid = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastSaid <= std::chrono::seconds(10)) return;
+        lastSaid = now;
+        LOG_WARNING("  m2 record: cull ", p.cull, "ms, sort ", p.sort,
+                    "ms, draws ", p.record, "ms over ", p.visible,
+                    " visible of ", p.instances, " instances");
+    };
 
     uint32_t currentModelId = UINT32_MAX;
     const M2ModelGPU* currentModel = nullptr;
@@ -1056,8 +1286,36 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     // Push constants now carry per-batch data only; per-instance data is in instance SSBO.
     struct M2PushConstants {
         int32_t texCoordSet;        // UV set index (0 or 1)
-        int32_t isFoliage;          // Foliage wind animation flag
+        int32_t isFoliage;          // -1 = sky, 0 = none, 1 = wind foliage, 2 = ground clutter
         int32_t instanceDataOffset; // Base index into instance SSBO for this draw group
+        float swayRefHeight;        // Model-space height the wind normalises against
+        float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
+        float plantHeight;          // The model's own height, for the player brush
+    };
+
+    // Fill the sway half of the push constants for one model.
+    //
+    // Two modes, and the split is about who owns the idle motion. Ground clutter
+    // plays a sequence of its own, so mode 2 asks the shader for the player
+    // brush and no wind - two swings of one plant at two rates reads as a
+    // glitch. Everything else the wind picks up has its animation disabled by
+    // the classifier and gets mode 1, wind and brush both.
+    //
+    // The wind itself was written for trees: it normalised height against 20
+    // yards and displaced by an absolute number of model units, so a one-yard
+    // tuft travelled a fraction of a millimetre. Every model normalises against
+    // its own height now, with an amplitude interpolated between the two ends
+    // rather than switched at a threshold - a bush a foot taller than its
+    // neighbour should not sway ten times less. Both ends reproduce the numbers
+    // that were there: a 20-yard tree still throws 0.35 model units at the tip.
+    auto fillSway = [](M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
+        const M2Sway sway = m2SwayFor(sky, mdl.isHangingCloth, mdl.shadowWindFoliage,
+                                      mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
+                                      mdl.isStandingCloth);
+        pc.isFoliage = sway.mode;
+        pc.swayRefHeight = sway.refHeight;
+        pc.swayAmp = sway.amp;
+        pc.plantHeight = sway.plantHeight;
     };
 
     auto appendInstancePortalGlow = [&](const M2Instance& instance, float distSq) {
@@ -1077,11 +1335,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
     // Validate per-frame descriptor set before any Vulkan commands
     if (!perFrameSet) {
-        LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE — skipping M2 render");
+        LOG_ERROR("M2Renderer::render: perFrameSet is VK_NULL_HANDLE - skipping M2 render");
         return;
     }
 
-    // Bind per-frame descriptor set (set 0) — shared across all draws
+    // Bind per-frame descriptor set (set 0) - shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
 
@@ -1090,7 +1348,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     currentPipeline = opaquePipeline_;
 
     // Bind dummy bone set (set 2) so non-animated draws have a valid binding.
-    // Bind mega bone SSBO instead — all instances index into one buffer via boneBase.
+    // Bind mega bone SSBO instead - all instances index into one buffer via boneBase.
     if (megaBoneSet_[frameIndex]) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 2, 1, &megaBoneSet_[frameIndex], 0, nullptr);
@@ -1099,7 +1357,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 pipelineLayout_, 2, 1, &dummyBoneSet_, 0, nullptr);
     }
 
-    // Bind instance data SSBO (set 3) — per-instance transforms, fade, bones
+    // Bind instance data SSBO (set 3) - per-instance transforms, fade, bones
     if (instanceSet_[frameIndex]) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
@@ -1110,7 +1368,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
 
     // =====================================================================
-    // Opaque pass — instanced draws grouped by (modelId, LOD)
+    // Opaque pass - instanced draws grouped by (modelId, LOD)
     // =====================================================================
     // sortedVisible_ is already sorted by modelId so consecutive entries share
     // the same vertex/index buffer.  Within each model group we sub-group by
@@ -1143,6 +1401,10 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 continue;
             }
             const M2ModelGPU& model = *instances[firstEntry.index].cachedModel;
+            if (skipGroundDetail_ && model.isGroundDetail) {
+                visStart = groupEnd;
+                continue;
+            }
             if (model.isInstancePortal) {
                 for (size_t vi = visStart; vi < groupEnd; vi++) {
                     const auto& entry = sortedVisible_[vi];
@@ -1177,8 +1439,12 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     fadeAlpha = std::clamp((entry.effectiveMaxDistSq - entry.distSq) /
                                           (entry.effectiveMaxDistSq - fadeStartDistSq), 0.0f, 1.0f);
                 }
+                // Ground detail used to be held at 0.82 here. This is the
+                // opaque pass: nothing blended it, so it was a number with no
+                // effect - and now that the cutout pipeline turns alpha into
+                // coverage, keeping it would punch a fifth of the pixels out
+                // of every tuft of grass in reach.
                 float instanceFadeAlpha = fadeAlpha;
-                if (model.isGroundDetail) instanceFadeAlpha *= 0.82f;
 
                 // Bone readiness check
                 if (modelNeedsAnimation && instance.boneMatrices.empty()) continue;
@@ -1190,10 +1456,14 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 if (entry.distSq > 150.0f * 150.0f) desiredLOD = 3;
                 else if (entry.distSq > 80.0f * 80.0f) desiredLOD = 2;
                 else if (entry.distSq > 40.0f * 40.0f) desiredLOD = 1;
+                // Down to the nearest level the model actually has, not all
+                // the way back to full detail. A model carrying 0 and 1 and
+                // asked for 3 was drawn at 0 - the most expensive level there
+                // is - at the distance where it mattered least.
                 uint16_t targetLOD = desiredLOD;
-                if (desiredLOD > 0 && !(model.availableLODs & (1u << desiredLOD))) targetLOD = 0;
+                while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
 
-                pending.push_back({entry.index, instanceFadeAlpha, needsBones, targetLOD});
+                pending.push_back({.instanceIdx = entry.index, .fadeAlpha = instanceFadeAlpha, .useBones = needsBones, .targetLOD = targetLOD});
             }
 
             if (pending.empty()) { visStart = groupEnd; continue; }
@@ -1207,8 +1477,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &vbOffset);
             vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            // Write base instance data to SSBO (uvOffset=0 — overridden for tex-anim batches)
+            // Write base instance data to SSBO (uvOffset=0 - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
+            size_t writtenInstances = 0;
             for (const auto& p : pending) {
                 if (instanceDataCount_ >= MAX_INSTANCE_DATA) break;
                 auto& inst = instances[p.instanceIdx];
@@ -1216,10 +1487,36 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 e.model = inst.modelMatrix;
                 e.uvOffset = glm::vec2(0.0f);
                 e.fadeAlpha = p.fadeAlpha;
-                e.useBones = p.useBones ? 1 : 0;
+                e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                 e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
-                std::memset(e._pad, 0, sizeof(e._pad));
+                e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
+                e.highlight = inst.highlight;
+                e._pad = 0;
                 instanceDataCount_++;
+                ++writtenInstances;
+            }
+
+            // Drop what did not fit. The loop above stops writing at the cap,
+            // but the LOD sub-groups below are ranges over `pending` and were
+            // still being drawn in full - groupSSBOOffset then runs past the
+            // end of the buffer and the vertex shader reads instance data that
+            // is not there. That is a real out-of-bounds read on the GPU, not a
+            // missing model: it fires once per instance past the cap, hundreds
+            // of times a frame, and the device is lost seconds later.
+            //
+            // Truncating is safe here precisely because `pending` was sorted by
+            // LOD before the write: the sub-groups are contiguous and in the
+            // same order, so cutting the tail cuts whole instances rather than
+            // splitting a range.
+            if (writtenInstances < pending.size()) {
+                static bool warnedInstanceCap = false;
+                if (!warnedInstanceCap) {
+                    warnedInstanceCap = true;
+                    LOG_WARNING("M2Renderer: instance buffer full at ", MAX_INSTANCE_DATA,
+                                "; dropping ", pending.size() - writtenInstances,
+                                " instances of '", model.name, "' this frame");
+                }
+                pending.resize(writtenInstances);
             }
 
             // Process LOD sub-groups within this model group
@@ -1231,28 +1528,85 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 uint32_t groupSize = static_cast<uint32_t>(lodEnd - lodIdx);
                 uint32_t groupSSBOOffset = baseSSBOOffset + static_cast<uint32_t>(lodIdx);
 
+                // What each batch of a named model does at draw time, once.
+                //
+                // WOWEE_M2_BATCH_DIAG says what a batch IS, at load. It could
+                // not say whether the batch was drawn, and a tree reported as
+                // missing a section of trunk is exactly that question: four
+                // readings of the model data in a row said every batch was
+                // present and correct, which it is, so the answer has to come
+                // from the frame rather than from the file.
+                static const std::string kDrawDiag = [] {
+                    const char* v = std::getenv("WOWEE_M2_BATCH_DIAG");
+                    std::string t = v ? v : "";
+                    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    return t;
+                }();
+                bool diagThisModel = false;
+                if (!kDrawDiag.empty()) {
+                    std::string lowerName = model.name;
+                    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    diagThisModel = lowerName.find(kDrawDiag) != std::string::npos;
+                }
+                // WOWEE_M2_ONLY_BATCH=<n> draws just that batch of the named
+                // model and hides the rest.
+                //
+                // Everything checkable has now been checked on these trees and
+                // every answer came back correct: the trunk mesh is continuous
+                // from root to tip, its submesh level matches, its texture
+                // loads, its mips preserve coverage, and the draw diagnostic
+                // says every batch reaches the frame. A section still looks
+                // missing. Seeing the trunk by itself is the difference
+                // between the trunk being wrong and the canopy eating it, and
+                // no amount of reading the files can tell those apart.
+                static const int kOnlyBatch = [] {
+                    const char* v = std::getenv("WOWEE_M2_ONLY_BATCH");
+                    return (v && *v) ? std::atoi(v) : -1;
+                }();
                 for (size_t bi = 0; bi < model.batches.size(); bi++) {
                     const auto& batch = model.batches[bi];
-                    if (batch.indexCount == 0) continue;
-                    if (!model.isGroundDetail && batch.submeshLevel != lod) continue;
-                    if (batch.batchOpacity < 0.01f) continue;
-
-                    // Glow sprite check (per model+batch, sprites generated per instance)
-                    const bool koboldFlameCard = batch.colorKeyBlack && model.isKoboldFlame;
-                    const bool smallCardLikeBatch =
-                        (batch.glowSize <= 1.35f) ||
-                        (batch.lanternGlowHint && batch.glowSize <= 6.0f);
+                    const char* skipped = nullptr;
+                    if (kOnlyBatch >= 0 && diagThisModel &&
+                        bi != static_cast<size_t>(kOnlyBatch)) {
+                        skipped = "WOWEE_M2_ONLY_BATCH";
+                    }
+                    else if (batch.indexCount == 0) skipped = "no indices";
+                    else if (!model.isGroundDetail && batch.submeshLevel != lod)
+                        skipped = "submeshLevel is not this LOD";
+                    else if (batch.batchOpacity < 0.01f) skipped = "opacity is zero";
+                    else if (!skyBatchAllowed(skyMode_, bi)) skipped = "sky batch rule";
+                    else if (suppressBakedStars_ && batch.starLayer) skipped = "baked star layer";
+                    if (diagThisModel) {
+                        static std::set<std::pair<const void*, size_t>> saidDraw;
+                        if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
+                            LOG_WARNING("M2 DRAW '", model.name, "' batch ", bi,
+                                        " lod=", lod, " submeshLevel=", batch.submeshLevel,
+                                        " idx=", batch.indexCount,
+                                        " opacity=", batch.batchOpacity,
+                                        (skipped ? "  SKIPPED: " : "  drawn"),
+                                        (skipped ? skipped : ""));
+                        }
+                    }
+                    if (skipped) continue;
                     const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
-                    const bool shouldUseGlowSprite =
-                        !koboldFlameCard &&
-                        (model.isElvenLike ||
-                         ((model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
-                          batch.lanternGlowHint)) &&
-                        !model.isSpellEffect &&
-                        smallCardLikeBatch &&
-                        (batch.lanternGlowHint ||
-                         (batch.blendMode >= 3) ||
-                         (batch.colorKeyBlack && batchUnlit && batch.blendMode >= 1));
+                    M2GlowCardBatch glowCard;
+                    glowCard.glowSize = batch.glowSize;
+                    glowCard.blendMode = batch.blendMode;
+                    glowCard.lanternGlowHint = batch.lanternGlowHint;
+                    glowCard.glowCardLike = batch.glowCardLike;
+                    glowCard.colorKeyBlack = batch.colorKeyBlack;
+                    glowCard.unlit = batchUnlit;
+                    glowCard.preserveGlowMesh = batch.preserveGlowMesh;
+                    glowCard.modelIsElvenLike = model.isElvenLike;
+                    glowCard.modelIsLanternLike = model.isLanternLike;
+                    glowCard.modelIsTorch = model.isTorch;
+                    glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
+                    glowCard.modelIsSpellEffect = model.isSpellEffect;
+                    glowCard.modelIsKoboldFlame = model.isKoboldFlame;
+                    const bool shouldUseGlowSprite = m2WantsGlowSprite(glowCard);
                     if (shouldUseGlowSprite) {
                         // Generate glow sprites for each instance in the group
                         for (size_t j = lodIdx; j < lodEnd; j++) {
@@ -1304,7 +1658,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             // A fixture with real particle flames should read as
                             // flames with a halo behind them. The sprite is sized
                             // from its glow card's geometric radius, which on a
-                            // chandelier spans the whole fixture — an additive
+                            // chandelier spans the whole fixture - an additive
                             // blob about a unit across, against candle flames of
                             // 0.15, so the glow swallowed them entirely. Cap it
                             // just above what a small glow card already produces
@@ -1319,7 +1673,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             // Fire burning inside a hearth. The sprite is a point
                             // billboard carrying one depth value for the whole
                             // quad, so as soon as its centre shows through the
-                            // fireplace opening the entire square draws — brick
+                            // fireplace opening the entire square draws - brick
                             // surround included, which reads as the fire glowing
                             // through the masonry. Sized from the glow card's
                             // geometric radius these spheres are wider than the
@@ -1334,7 +1688,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
                             // Flame guttering. The phase comes from the lamp's own
                             // world position, so two lanterns on the same street
-                            // never pulse together — a synchronised row of lamps
+                            // never pulse together - a synchronised row of lamps
                             // reads as a rendering artifact, not firelight. Two
                             // detuned sines keep any single lamp from looping
                             // visibly. Alpha and size move together, since a
@@ -1364,24 +1718,15 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             }
                             glowSprites_.push_back(halo);
                         }
-                        const bool cardLikeSkipMesh =
-                            !batch.preserveGlowMesh &&
-                            (batch.glowCardLike || (batch.blendMode >= 3) ||
-                             batch.colorKeyBlack || batchUnlit);
-                        const bool lanternGlowCardSkip =
-                            (model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
-                            batch.lanternGlowHint &&
-                            smallCardLikeBatch && cardLikeSkipMesh;
-                        if (lanternGlowCardSkip || (cardLikeSkipMesh && !model.isLanternLike))
-                            continue;
+                        if (m2GlowSpriteReplacesMesh(glowCard)) continue;
                     }
 
-                    // Opaque gate — transparent glow cards were handled above so their
+                    // Opaque gate - transparent glow cards were handled above so their
                     // sprites are generated before the mesh moves to pass 2.
                     const bool rawTransparent = (batch.blendMode >= 2) || model.isSpellEffect;
                     if (rawTransparent) continue;
 
-                    // Particle-dominant effects: emission geometry — skip opaque
+                    // Particle-dominant effects: emission geometry - skip opaque
                     if (particleDominantEffect && batch.blendMode <= 1) continue;
 
                     // Handle texture animation: if this batch has per-instance uvOffset,
@@ -1427,25 +1772,65 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             e.model = inst.modelMatrix;
                             e.uvOffset = uvOffset;
                             e.fadeAlpha = p.fadeAlpha;
-                            e.useBones = p.useBones ? 1 : 0;
+                            e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
                             e.boneBase = p.useBones ? static_cast<int32_t>(inst.megaBoneOffset) : 0;
-                            std::memset(e._pad, 0, sizeof(e._pad));
+                            e.boneCount = static_cast<int32_t>(inst.boneMatrices.size());
+                            e.highlight = inst.highlight;
+                            e._pad = 0;
                             instanceDataCount_++;
                         }
                     }
 
                     // Pipeline selection (per-model/batch, not per-instance)
-                    const bool foliageCutout = foliageLikeModel && !model.isSpellEffect && batch.blendMode <= 3;
-                    // A forge model is nothing but the fire burning inside the
-                    // hearth — an effect overlay on a black background, the same
-                    // shape as a spell visual. Drawn opaque it fills the forge
-                    // opening with a black rectangle instead of flame.
-                    const bool fireEffectModel = model.isForge;
+                    // A batch the artist marked opaque is not asking for
+                    // any of this. Blend mode 0 means the alpha channel goes
+                    // unread, and M2 textures are routinely atlases whose
+                    // alpha belongs to another layer or another model - so
+                    // keying on it eats surfaces that were painted solid.
+                    //
+                    // Silverpine's trees are the case that found it. Their
+                    // trunk is one opaque batch sampling the right-hand panel
+                    // of SilverPineTree01TrunkSkin, and that panel carries a
+                    // stale alpha hole across its middle - 24% of the texels
+                    // the trunk's own triangles cover, with unbroken bark
+                    // painted underneath. Forced to the cutout pipeline, where
+                    // alpha becomes coverage, the trunk lost its midsection
+                    // and left the canopy floating over the stump. 133 foliage
+                    // models were holed the same way - Tirisfal's canopytree07,
+                    // the Plaguelands and Stonetalon pines, Eversong and
+                    // Silvermoon, Nagrand, Crystalsong, Ruby Sanctum, the
+                    // Storm Peaks, and every Zangarmarsh mushroom cap.
+                    //
+                    // Where the alpha really is the silhouette - a card drawn
+                    // on a black backing, or DXT1 punch-through, which stores
+                    // no colour under a transparent texel at all - the cutout
+                    // still stands, over the 15 models that need it: Swamp of
+                    // Sorrows' canopies, the quilboar thorn cards, Loch Modan's
+                    // leaves and the lamps whose glass is keyed out. Measured
+                    // from the texture by alphaIsSilhouette, not guessed from
+                    // its name.
+                    const bool opaqueByMaterial = batch.blendMode == M2_BLEND_OPAQUE;
+                    const bool foliageCutout = foliageLikeModel && !model.isSpellEffect &&
+                                               batch.blendMode <= 3 &&
+                                               (!opaqueByMaterial || batch.alphaIsSilhouette);
+                    // The fire burning in the hearth is an effect overlay on a
+                    // black background, the same shape as a spell visual; drawn
+                    // opaque it fills the forge opening with a black rectangle
+                    // instead of flame. That is true of the flame cards only -
+                    // treating the whole model this way turned the masonry and
+                    // ironwork additive, which is to say translucent.
+                    const bool fireEffectModel = batch.forgeFireCard;
+                    // A batch the artist marked additive is already doing
+                    // what the cutout and the colour key are approximations
+                    // of: black adds nothing, so it disappears on its own.
+                    // Forcing it opaque and then keying the black out leaves
+                    // the bright middle of a glow card as a solid disc, which
+                    // is what Orgrimmar's bonfires were.
                     const bool forceCutout =
                         !model.isSpellEffect && !fireEffectModel &&
+                        !m2BlendIsAdditive(batch.blendMode) &&
                         (model.isGroundDetail || foliageCutout ||
-                         batch.blendMode == 1 ||
-                         (batch.blendMode >= 2 && !batch.hasAlpha) ||
+                         m2BatchNeedsAlphaTest(batch.blendMode, batch.hasAlpha) ||
                          batch.colorKeyBlack);
 
                     uint8_t effectiveBlendMode = batch.blendMode;
@@ -1457,7 +1842,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
                     VkPipeline desiredPipeline;
                     if (forceCutout) {
-                        desiredPipeline = opaquePipeline_;
+                        desiredPipeline = cutoutPipeline_;
                     } else {
                         switch (effectiveBlendMode) {
                             case 0: desiredPipeline = opaquePipeline_; break;
@@ -1474,7 +1859,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Update material UBO
                     if (batch.materialUBOMapped) {
                         auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
-                        // interiorDarken is a camera-based flag — it darkens ALL M2s (incl.
+                        // interiorDarken is a camera-based flag - it darkens ALL M2s (incl.
                         // outdoor trees) when the camera is inside a WMO.  Disable it; indoor
                         // M2s already look correct from the darker ambient/lighting.
                         mat->interiorDarken = 0.0f;
@@ -1484,6 +1869,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                             mat->alphaTest = model.isGroundDetail ? 3 : (foliageCutout ? 2 : 1);
                             if (model.isGroundDetail) mat->unlit = 0;
                         }
+                        mat->volumetricBeam =
+                            (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
+                        mat->fireCard = batch.forgeFireCard ? 1 : 0;
                     }
 
                     // Bind material descriptor set (set 1)
@@ -1497,10 +1885,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                     // Push constants + instanced draw
                     M2PushConstants pc;
                     pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-                    pc.isFoliage = skyMode_ ? -1 : (model.shadowWindFoliage ? 1 : 0);
+                    fillSway(pc, model, skyMode_);
                     pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, batch.indexStart, 0, 0);
+                    if (skyMode_) ++skyDiagDrawsOpaque_;
                     lastDrawCallCount++;
                 }
 
@@ -1512,7 +1901,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
     }
 
     // =====================================================================
-    // Pass 2: Transparent/additive batches — back-to-front per instance
+    // Pass 2: Transparent/additive batches - back-to-front per instance
     // =====================================================================
     // Transparent geometry must be drawn individually per instance in back-to-
     // front order for correct alpha compositing.  Each draw writes one
@@ -1530,7 +1919,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         if (entry.index >= instances.size()) continue;
         auto& instance = instances[entry.index];
 
-        // Model boundary: read cachedModel off the instance — was doing a
+        // Model boundary: read cachedModel off the instance - was doing a
         // per-boundary models.find() even though every instance already has
         // the pointer cached at addInstance time.
         if (entry.modelId != currentModelId) {
@@ -1571,8 +1960,9 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         if (entry.distSq > 150.0f * 150.0f) desiredLOD = 3;
         else if (entry.distSq > 80.0f * 80.0f) desiredLOD = 2;
         else if (entry.distSq > 40.0f * 40.0f) desiredLOD = 1;
+        // The nearest level the model has; see the note in the batched path.
         uint16_t targetLOD = desiredLOD;
-        if (desiredLOD > 0 && !(model.availableLODs & (1u << desiredLOD))) targetLOD = 0;
+        while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
 
         const bool particleDominantEffect = model.isSpellEffect &&
             !model.particleEmitters.empty() && model.batches.size() <= 2;
@@ -1581,6 +1971,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             if (batch.indexCount == 0) continue;
             if (!model.isGroundDetail && batch.submeshLevel != targetLOD) continue;
             if (batch.batchOpacity < 0.01f) continue;
+            if (!skyBatchAllowed(skyMode_, static_cast<std::size_t>(&batch - model.batches.data()))) continue;
 
             // Pass 2 gate: only transparent/additive batches
             {
@@ -1588,39 +1979,56 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                 if (!rawTransparent) continue;
             }
 
+            // WOWEE_SKY_M2_SKIP_BLEND=<n> drops the sky's layers of one blend
+            // mode. Its thirty-four batches are six opaque, ten alpha-blended
+            // (2) and eighteen additive (4), and the two behave differently in
+            // a way that matters: additive is order-independent and alpha
+            // blending is not. Dropping ten or dropping eighteen says which
+            // half the flicker lives in, the same way NO_SKY_M2 and
+            // OPAQUE_ONLY narrowed it to the blended layers at all.
+            if (skyMode_) {
+                static const int skipBlend = [] {
+                    const char* set = std::getenv("WOWEE_SKY_M2_SKIP_BLEND");
+                    return set ? std::atoi(set) : -1;
+                }();
+                if (skipBlend >= 0 && batch.blendMode == skipBlend) continue;
+            }
+
             // Skip glow sprites (handled in opaque pass)
             const bool batchUnlit = (batch.materialFlags & 0x01) != 0;
-            const bool koboldFlameCard = batch.colorKeyBlack && model.isKoboldFlame;
-            const bool smallCardLikeBatch =
-                (batch.glowSize <= 1.35f) ||
-                (batch.lanternGlowHint && batch.glowSize <= 6.0f);
-            const bool shouldUseGlowSprite =
-                !koboldFlameCard &&
-                (model.isElvenLike ||
-                 ((model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
-                  batch.lanternGlowHint)) &&
-                !model.isSpellEffect &&
-                smallCardLikeBatch &&
-                (batch.lanternGlowHint || (batch.blendMode >= 3) ||
-                 (batch.colorKeyBlack && batchUnlit && batch.blendMode >= 1));
-            if (shouldUseGlowSprite) {
-                const bool cardLikeSkipMesh = !batch.preserveGlowMesh &&
-                    (batch.glowCardLike || (batch.blendMode >= 3) ||
-                     batch.colorKeyBlack || batchUnlit);
-                const bool lanternGlowCardSkip =
-                    (model.isLanternLike || model.isTorch || model.isBrazierOrFire) &&
-                    batch.lanternGlowHint &&
-                    smallCardLikeBatch &&
-                    cardLikeSkipMesh;
-                if (lanternGlowCardSkip || (cardLikeSkipMesh && !model.isLanternLike))
-                    continue;
+            M2GlowCardBatch glowCard;
+            glowCard.glowSize = batch.glowSize;
+            glowCard.blendMode = batch.blendMode;
+            glowCard.lanternGlowHint = batch.lanternGlowHint;
+            glowCard.glowCardLike = batch.glowCardLike;
+            glowCard.colorKeyBlack = batch.colorKeyBlack;
+            glowCard.unlit = batchUnlit;
+            glowCard.preserveGlowMesh = batch.preserveGlowMesh;
+            glowCard.modelIsElvenLike = model.isElvenLike;
+            glowCard.modelIsLanternLike = model.isLanternLike;
+            glowCard.modelIsTorch = model.isTorch;
+            glowCard.modelIsBrazierOrFire = model.isBrazierOrFire;
+            glowCard.modelIsSpellEffect = model.isSpellEffect;
+            glowCard.modelIsKoboldFlame = model.isKoboldFlame;
+            if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) {
+                continue;
             }
 
             if (particleDominantEffect) continue; // emission-only mesh
 
             // Compute UV offset for this instance + batch
+            //
+            // WOWEE_SKY_M2_NO_TEXANIM=1 freezes the sky's scrolling. Nine of
+            // its eighteen additive layers carry a texture animation, and
+            // those offsets are the one thing about those layers that changes
+            // between frames at all - so if the flicker survives freezing them
+            // it is not in what the layers sample, it is in the geometry they
+            // are drawn on.
+            static const bool skyNoTexAnim =
+                std::getenv("WOWEE_SKY_M2_NO_TEXANIM") != nullptr;
             glm::vec2 uvOffset(0.0f);
-            if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation) {
+            if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation &&
+                !(skyMode_ && skyNoTexAnim)) {
                 uint16_t lookupIdx = batch.textureAnimIndex;
                 if (lookupIdx < model.textureTransformLookup.size()) {
                     uint16_t transformIdx = model.textureTransformLookup[lookupIdx];
@@ -1646,15 +2054,18 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             e.model = instance.modelMatrix;
             e.uvOffset = uvOffset;
             e.fadeAlpha = instanceFadeAlpha;
-            e.useBones = needsBones ? 1 : 0;
+            e.useBones = (needsBones && !kM2NoSkinning) ? 1 : 0;
             e.boneBase = needsBones ? static_cast<int32_t>(instance.megaBoneOffset) : 0;
-            std::memset(e._pad, 0, sizeof(e._pad));
+            e.boneCount = static_cast<int32_t>(instance.boneMatrices.size());
+            e.highlight = instance.highlight;
+            e._pad = 0;
             instanceDataCount_++;
 
             // Pipeline selection
             uint8_t effectiveBlendMode = batch.blendMode;
-            if (model.isSpellEffect || model.isForge) {
-                // Matches the opaque pass: forge fire is an additive effect.
+            if (model.isSpellEffect || batch.forgeFireCard) {
+                // Matches the opaque pass: a forge's flame cards are additive,
+                // the forge itself is not.
                 if (effectiveBlendMode <= 1) effectiveBlendMode = 3;
                 else if (effectiveBlendMode == 4 || effectiveBlendMode == 5) effectiveBlendMode = 3;
             }
@@ -1671,9 +2082,38 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
 
             if (batch.materialUBOMapped) {
                 auto* mat = static_cast<M2MaterialUBO*>(batch.materialUBOMapped);
+                // Here as well as in the opaque pass. A searchlight beam is
+                // additive, so this is the pass that actually draws it - and
+                // setting the flag only in the other one meant the softening
+                // never ran on the one model it was written for.
+                mat->volumetricBeam =
+                    (model.isVolumetricBeam || batch.volumetricBeam) ? 1 : 0;
+                mat->fireCard = batch.forgeFireCard ? 1 : 0;
                 mat->interiorDarken = 0.0f;
                 if (batch.colorKeyBlack)
                     mat->colorKeyThreshold = (effectiveBlendMode == 4 || effectiveBlendMode == 5) ? 0.7f : 0.08f;
+
+                // A fire's own glow breathes. The same clock and parameters as
+                // the lamp sprites and the local light they cast, so a brazier
+                // and the pool of light under it rise and fall together
+                // instead of beating against each other.
+                //
+                // Never for a sky. lampFlicker is keyed on the instance
+                // position and says a seed that drifts re-rolls its phase every
+                // frame and strobes; a sky dome's position IS the camera's,
+                // rewritten every frame, so it is the one instance that can
+                // never be a valid seed. The classifier no longer calls
+                // HellfireSkyBox a brazier, and this makes sure the next model
+                // that gets miscalled one cannot strobe the sky either.
+                if (!skyMode_ && m2BlendIsAdditive(batch.blendMode) &&
+                    (model.isBrazierOrFire || model.isTorch || model.isLanternLike)) {
+                    const float flicker = lampFlicker(
+                        instance.position, lampFlickerClockSeconds(),
+                        0.82f, 0.12f, 0.06f);
+                    mat->tintR = batch.tint.r * flicker;
+                    mat->tintG = batch.tint.g * flicker;
+                    mat->tintB = batch.tint.b * flicker;
+                }
             }
 
             if (!batch.materialSet) continue;
@@ -1686,10 +2126,11 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
             // Push constants + single-instance draw
             M2PushConstants pc;
             pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-            pc.isFoliage = skyMode_ ? -1 : (model.shadowWindFoliage ? 1 : 0);
+            fillSway(pc, model, skyMode_);
             pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+            if (skyMode_) ++skyDiagDrawsTransparent_;
             lastDrawCallCount++;
         }
     }
@@ -1703,7 +2144,7 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
                                 particlePipelineLayout_, 1, 1, &glowTexDescSet_, 0, nullptr);
 
         // Push constants for particle: tileCount(vec2) + alphaKey(int)
-        struct { float tileX, tileY; int alphaKey; } particlePush = {1.0f, 1.0f, 0};
+        struct { float tileX, tileY; int alphaKey; } particlePush = {.tileX = 1.0f, .tileY = 1.0f, .alphaKey = 0};
         vkCmdPushConstants(cmd, particlePipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(particlePush), &particlePush);
 
@@ -1728,100 +2169,48 @@ void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const 
         vkCmdDraw(cmd, static_cast<uint32_t>(uploadCount), 1, 0, 0);
     }
 
+    // How many of the sky's layers were actually drawn this frame.
+    //
+    // The instance-level report says DRAWN every frame, which is a different
+    // question: it counts instances that survived culling, not batches that
+    // reached a draw call. Every per-batch gate between the two is meant to be
+    // constant here - the material flags are static, the LOD is chosen by a
+    // distance that does not change for a dome centred on the camera, and the
+    // batch opacity is baked at load - so this number should never move. If it
+    // moves while the camera turns, the flicker is layers appearing and
+    // disappearing and one of those gates is not as constant as it reads.
+    if (skyMode_ && (skyDiagDrawsOpaque_ != skyDiagLastOpaque_ ||
+                     skyDiagDrawsTransparent_ != skyDiagLastTransparent_)) {
+        LOG_INFO("skyM2 draws: opaque=", skyDiagDrawsOpaque_,
+                 " transparent=", skyDiagDrawsTransparent_,
+                 " (was ", skyDiagLastOpaque_, "/", skyDiagLastTransparent_, ")");
+        skyDiagLastOpaque_ = skyDiagDrawsOpaque_;
+        skyDiagLastTransparent_ = skyDiagDrawsTransparent_;
+    }
+
+    if (m2Profile) {
+        const auto m2T3 = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        sayPhases({.cull = ms(m2T0, m2T1),
+                   .sort = ms(m2T1, m2T2),
+                   .record = ms(m2T2, m2T3),
+                   .visible = sortedVisible_.size(),
+                   .instances = instances.size()});
+    }
 }
 
 bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     if (!vkCtx_ || shadowRenderPass == VK_NULL_HANDLE) return false;
     VkDevice device = vkCtx_->getDevice();
 
-    // Create ShadowParams UBO
-    VkBufferCreateInfo bufCI{};
-    bufCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufCI.size = sizeof(ShadowParamsUBO);
-    bufCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    VmaAllocationCreateInfo allocCI{};
-    allocCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-    allocCI.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    VmaAllocationInfo allocInfo{};
-    if (vmaCreateBuffer(vkCtx_->getAllocator(), &bufCI, &allocCI,
-            &shadowParamsUBO_, &shadowParamsAlloc_, &allocInfo) != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: failed to create shadow params UBO");
+    // The set the shadow pass binds, built the same way for all four renderers.
+    if (!createShadowParamsSet(device, vkCtx_->getAllocator(), sizeof(ShadowParamsUBO),
+                               whiteTexture_->getImageView(),
+                              whiteTexture_->getSampler(), "M2Renderer", shadowParams_)) {
         return false;
     }
-    ShadowParamsUBO defaultParams{};
-    std::memcpy(allocInfo.pMappedData, &defaultParams, sizeof(defaultParams));
-
-    // Create descriptor set layout: binding 0 = sampler2D, binding 1 = ShadowParams UBO
-    VkDescriptorSetLayoutBinding layoutBindings[2]{};
-    layoutBindings[0].binding = 0;
-    layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    layoutBindings[0].descriptorCount = 1;
-    layoutBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    layoutBindings[1].binding = 1;
-    layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    layoutBindings[1].descriptorCount = 1;
-    layoutBindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutCreateInfo layoutCI{};
-    layoutCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutCI.bindingCount = 2;
-    layoutCI.pBindings = layoutBindings;
-    if (vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &shadowParamsLayout_) != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: failed to create shadow params layout");
-        return false;
-    }
-
-    // Create descriptor pool
-    VkDescriptorPoolSize poolSizes[2]{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 1;
-    poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[1].descriptorCount = 1;
-    VkDescriptorPoolCreateInfo poolCI{};
-    poolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCI.maxSets = 1;
-    poolCI.poolSizeCount = 2;
-    poolCI.pPoolSizes = poolSizes;
-    if (vkCreateDescriptorPool(device, &poolCI, nullptr, &shadowParamsPool_) != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: failed to create shadow params pool");
-        return false;
-    }
-
-    // Allocate descriptor set
-    VkDescriptorSetAllocateInfo setAlloc{};
-    setAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    setAlloc.descriptorPool = shadowParamsPool_;
-    setAlloc.descriptorSetCount = 1;
-    setAlloc.pSetLayouts = &shadowParamsLayout_;
-    if (vkAllocateDescriptorSets(device, &setAlloc, &shadowParamsSet_) != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: failed to allocate shadow params set");
-        return false;
-    }
-
-    // Write descriptors (use white fallback for binding 0)
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = shadowParamsUBO_;
-    bufInfo.offset = 0;
-    bufInfo.range = sizeof(ShadowParamsUBO);
-
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imgInfo.imageView = whiteTexture_->getImageView();
-    imgInfo.sampler = whiteTexture_->getSampler();
-
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = shadowParamsSet_;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &imgInfo;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = shadowParamsSet_;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].pBufferInfo = &bufInfo;
-    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
     // Per-frame pools for foliage shadow texture sets (one per frame-in-flight, reset each frame)
     {
@@ -1843,12 +2232,13 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
         }
     }
 
-    // Create shadow pipeline layout: set 1 = shadowParamsLayout_, push constants = 128 bytes
+    // Create shadow pipeline layout: set 1 = shadowParams_.layout, push constants = 128 bytes
     VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // The fragment stage reads the alpha-test flags out of the same block.
+    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 128;  // lightSpaceMatrix (64) + model (64)
-    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParamsLayout_}, {pc});
+    pc.size = sizeof(ShadowPush);  // one combined matrix, plus the sway slot
+    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParams_.layout}, {pc});
     if (!shadowPipelineLayout_) {
         LOG_ERROR("M2Renderer: failed to create shadow pipeline layout");
         return false;
@@ -1875,27 +2265,17 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
     vertBind.stride = 18 * sizeof(float);
     vertBind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     std::vector<VkVertexInputAttributeDescription> vertAttrs = {
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0},                     // aPos       -> position
-        {1, 0, VK_FORMAT_R32G32_SFLOAT,       6 * sizeof(float)},     // aTexCoord  -> texCoord0
-        {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 10 * sizeof(float)},    // aBoneWeights
-        {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 14 * sizeof(float)},    // aBoneIndicesF
+        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,    .offset = 0},                     // aPos       -> position
+        {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,       .offset = 6 * sizeof(float)},     // aTexCoord  -> texCoord0
+        {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 10 * sizeof(float)},    // aBoneWeights
+        {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 14 * sizeof(float)},    // aBoneIndicesF
     };
 
-    shadowPipeline_ = PipelineBuilder()
-        .setShaders(vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
-                    fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
-        .setVertexInput({vertBind}, vertAttrs)
-        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        // Foliage/leaf cards are effectively two-sided; front-face culling can
-        // drop them from the shadow map depending on light/view orientation.
-        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
-        .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
-        .setDepthBias(0.05f, 0.20f)
-        .setNoColorAttachment()
-        .setLayout(shadowPipelineLayout_)
-        .setRenderPass(shadowRenderPass)
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
-        .build(device, vkCtx_->getPipelineCache());
+    shadowPipeline_ = buildShadowPipeline(
+        device, vkCtx_->getPipelineCache(),
+        vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+        fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT),
+        vertBind, vertAttrs, shadowPipelineLayout_, shadowRenderPass);
 
     vertShader.destroy();
     fragShader.destroy();
@@ -1909,8 +2289,8 @@ bool M2Renderer::initializeShadow(VkRenderPass shadowRenderPass) {
 }
 
 void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime,
-                              const glm::vec3& shadowCenter, float shadowRadius) {
-    if (!shadowPipeline_ || !shadowParamsSet_) return;
+                              const glm::vec3& /*shadowCenter*/, float shadowRadius) {
+    if (!shadowPipeline_ || !shadowParams_.set) return;
     if (instances.empty() || models.empty()) return;
 
     // Reset this frame slot's texture descriptor pool (safe: fence was waited on in beginFrame)
@@ -1920,7 +2300,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         vkResetDescriptorPool(vkCtx_->getDevice(), curShadowTexPool, 0);
     }
     // Cache: texture imageView -> allocated descriptor set (avoids duplicates within frame)
-    // Reuse persistent map — pool reset already invalidated the sets.
+    // Reuse persistent map - pool reset already invalidated the sets.
     shadowTexSetCache_.clear();
     auto& texSetCache = shadowTexSetCache_;
 
@@ -1934,16 +2314,16 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         ai.descriptorPool = curShadowTexPool;
         ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &shadowParamsLayout_;
+        ai.pSetLayouts = &shadowParams_.layout;
         if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &set) != VK_SUCCESS) {
-            return shadowParamsSet_; // fallback to white texture
+            return shadowParams_.set; // fallback to white texture
         }
         VkDescriptorImageInfo imgInfo{};
         imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         imgInfo.imageView = iv;
         imgInfo.sampler = tex->getSampler();
         VkDescriptorBufferInfo bufInfo{};
-        bufInfo.buffer = shadowParamsUBO_;
+        bufInfo.buffer = shadowParams_.ubo;
         bufInfo.offset = 0;
         bufInfo.range = sizeof(ShadowParamsUBO);
         VkWriteDescriptorSet writes[2]{};
@@ -1964,82 +2344,136 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         return set;
     };
 
+    // How many casters each pass drew, so a shadow that comes and goes can say
+    // whether its caster was culled or its texture was missing.
+    uint32_t castersDrawn[2] = {0, 0};
+
+    // Cull once, into the two passes, grouped by model.
+    //
+    // This walked every instance in the world twice - once per pass - doing a
+    // light-space transform for each, then drew them in whatever order they
+    // sat in: the vertex and index buffers were rebound whenever consecutive
+    // instances came from different models, which unsorted is most of them,
+    // and a batch's texture was bound once per instance rather than once per
+    // batch. With tens of thousands of instances resident that is the cost of
+    // this pass, and none of it is drawing.
+    shadowCasters_[0].clear();
+    shadowCasters_[1].clear();
+    for (uint32_t i = 0; i < instances.size(); ++i) {
+        const auto& instance = instances[i];
+        if (!instance.cachedIsValid || instance.cachedIsSmoke ||
+            instance.cachedIsInvisibleTrap) continue;
+        if (!instance.cachedModel) continue;
+        const M2ModelGPU& model = *instance.cachedModel;
+
+        // Cull casters against the light-space ortho footprint, not a
+        // world-space sphere around the player. The shadow frustum extends
+        // ~2000 units toward the sun, so a distant tree can legitimately
+        // cast across the whole view while sitting far outside any player
+        // sphere - sphere culling made such shadows pop on/off at the cull
+        // boundary as the player moved (large-area flicker at low sun).
+        const glm::vec4 clip = lightSpaceMatrix * glm::vec4(instance.position, 1.0f);
+        // Orthographic projection: w == 1, NDC directly comparable.
+        // Inflate by the model's bounding sphere converted to NDC
+        // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
+        const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
+        if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) continue;
+        if (clip.z < -margin || clip.z > 1.0f + margin) continue;
+
+        shadowCasters_[model.shadowWindFoliage ? 1 : 0].emplace_back(instance.modelId, i);
+    }
+    for (auto& bucket : shadowCasters_) {
+        std::sort(bucket.begin(), bucket.end());
+    }
+
     // Helper lambda to draw instances with a given foliageSway setting
     auto drawPass = [&](bool foliagePass) {
-        ShadowParamsUBO params{};
-        params.foliageSway = foliagePass ? 1 : 0;
-        params.windTime = globalTime;
-        params.foliageMotionDamp = 1.0f;
-        // For foliage pass: enable texture+alphaTest in UBO (per-batch textures bound below)
-        if (foliagePass) {
-            params.useTexture = 1;
-            params.alphaTest = 1;
-        }
-
-        VmaAllocationInfo allocInfo{};
-        vmaGetAllocationInfo(vkCtx_->getAllocator(), shadowParamsAlloc_, &allocInfo);
-        std::memcpy(allocInfo.pMappedData, &params, sizeof(params));
+        // What this pass is, carried with each draw rather than written into a
+        // buffer both passes share. The uniform buffer this used to be is read
+        // when a draw executes, not when it is recorded, so writing it again
+        // for the foliage pass decided what the solid pass's draws saw as
+        // well - and one mapped copy across frames in flight let a CPU write
+        // land inside the previous frame's reads. A foliage batch that lost
+        // its alpha test that way casts the whole leaf quad, which is the
+        // canopy's outline in solid black instead of its cutout.
+        const glm::ivec4 passFlags{foliagePass ? 1 : 0, foliagePass ? 1 : 0,
+                                   foliagePass ? 1 : 0, 0};
+        const glm::vec4 wind{globalTime, 0.0f, 0.0f, 0.0f};
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-            0, 1, &shadowParamsSet_, 0, nullptr);
+            0, 1, &shadowParams_.set, 0, nullptr);
 
-        uint32_t currentModelId = UINT32_MAX;
-        const M2ModelGPU* currentModel = nullptr;
+        const auto& casters = shadowCasters_[foliagePass ? 1 : 0];
+        for (std::size_t g = 0; g < casters.size();) {
+            const uint32_t modelId = casters[g].first;
+            std::size_t groupEnd = g;
+            while (groupEnd < casters.size() && casters[groupEnd].first == modelId) ++groupEnd;
 
-        for (const auto& instance : instances) {
-            // Use cached flags to skip early without hash lookup
-            if (!instance.cachedIsValid || instance.cachedIsSmoke || instance.cachedIsInvisibleTrap) continue;
+            const auto& firstInstance = instances[casters[g].second];
+            if (!firstInstance.cachedModel) { g = groupEnd; continue; }
+            const M2ModelGPU& model = *firstInstance.cachedModel;
 
-            if (!instance.cachedModel) continue;
-            const M2ModelGPU& model = *instance.cachedModel;
-
-            // Cull casters against the light-space ortho footprint, not a
-            // world-space sphere around the player. The shadow frustum extends
-            // ~2000 units toward the sun, so a distant tree can legitimately
-            // cast across the whole view while sitting far outside any player
-            // sphere — sphere culling made such shadows pop on/off at the cull
-            // boundary as the player moved (large-area flicker at low sun).
-            {
-                const glm::vec4 clip = lightSpaceMatrix * glm::vec4(instance.position, 1.0f);
-                // Orthographic projection: w == 1, NDC directly comparable.
-                // Inflate by the model's bounding sphere converted to NDC
-                // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
-                const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
-                if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) continue;
-                if (clip.z < -margin || clip.z > 1.0f + margin) continue;
-            }
-
-            // Filter: only draw foliage models in foliage pass, non-foliage in non-foliage pass
-            if (model.shadowWindFoliage != foliagePass) continue;
-
-            // Bind vertex/index buffers when model changes
-            if (instance.modelId != currentModelId) {
-                currentModelId = instance.modelId;
-                currentModel = &model;
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &currentModel->vertexBuffer, &offset);
-                vkCmdBindIndexBuffer(cmd, currentModel->indexBuffer, 0, VK_INDEX_TYPE_UINT16);
-            }
-
-            ShadowPush push{lightSpaceMatrix, instance.modelMatrix};
-            vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, 128, &push);
+            // Once per model, not once per instance: the bend comes from the
+            // model's own bounds and its kind, and so do the buffers.
+            const M2Sway sway = m2SwayFor(false, model.isHangingCloth,
+                                          model.shadowWindFoliage, model.isGroundDetail,
+                                          model.boundMin.z, model.boundMax.z,
+                                          model.isStandingCloth);
+            const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
+            vkCmdBindIndexBuffer(cmd, model.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             for (const auto& batch : model.batches) {
                 if (batch.submeshLevel > 0) continue;
-                // For foliage: bind per-batch texture for alpha-tested shadows
+                // A leaf card with no texture is a shadow with no caster.
+                //
+                // The else below binds the white set, whose alpha test passes
+                // everywhere, so a batch that arrived without its texture casts
+                // the shadow of a solid quad - while the main pass skips that
+                // same batch for want of a material set. The result is a black
+                // rectangle on the ground under a tree that looks fine, coming
+                // and going as the texture cache lets the sheet back in.
+                if (foliagePass && !batch.texture) {
+                    if (!warnedShadowNoTexture_) {
+                        warnedShadowNoTexture_ = true;
+                        LOG_WARNING("Shadow pass: a foliage batch of ", model.name,
+                                    " has no texture; skipping it rather than casting a "
+                                    "solid quad. The texture cache is the usual reason.");
+                    }
+                    continue;
+                }
+                // Once per batch, where it used to be once per batch per
+                // instance: the texture is the batch's, and every instance of
+                // this model shares it.
                 if (foliagePass && batch.hasAlpha && batch.texture) {
                     VkDescriptorSet texSet = getTexDescSet(batch.texture);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-                        0, 1, &texSet, 0, nullptr);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
                 } else if (foliagePass) {
-                    // Non-alpha batch: rebind default set (white texture, alpha test passes)
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-                        0, 1, &shadowParamsSet_, 0, nullptr);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
                 }
-                vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+
+                for (std::size_t k = g; k < groupEnd; ++k) {
+                    const auto& instance = instances[casters[k].second];
+                    // The instance's own origin is what gives the wind its
+                    // per-tree phase; the height and amplitude beside it are
+                    // the model's.
+                    const glm::vec3 origin = glm::vec3(instance.modelMatrix[3]);
+                    ShadowPush push{
+                        .lightSpaceModel = lightSpaceMatrix * instance.modelMatrix,
+                        .sway = glm::vec4(origin.x, origin.y, modelSwayZW.x, modelSwayZW.y),
+                        .flags = passFlags,
+                        .wind = wind};
+                    vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                                       0, sizeof(ShadowPush), &push);
+                    vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
+                }
             }
+            castersDrawn[foliagePass ? 1 : 0] += static_cast<uint32_t>(groupEnd - g);
+            g = groupEnd;
         }
     };
 
@@ -2047,6 +2481,31 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     drawPass(false);
     // Pass 2: foliage (wind displacement enabled, per-batch alpha-tested textures)
     drawPass(true);
+
+    // A shadow that flickers is a caster that was drawn last frame and is not
+    // drawn this one. The cull is in light space and the light turns with the
+    // hour, so a tree on the boundary can cross it while the player stands
+    // still - and from the ground that reads as the shadow blinking. Said at
+    // most once a second, and only when the count actually swings, so an
+    // ordinary walk through a forest stays quiet.
+    {
+        const uint32_t foliageNow = castersDrawn[1];
+        const uint32_t foliageWas = lastFoliageCasters_;
+        lastFoliageCasters_ = foliageNow;
+        const uint32_t larger = std::max(foliageNow, foliageWas);
+        const uint32_t delta = larger - std::min(foliageNow, foliageWas);
+        if (foliageWas != 0 && larger >= 8 && delta * 10 > larger) {
+            static std::chrono::steady_clock::time_point lastLog{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastLog > std::chrono::seconds(1)) {
+                lastLog = now;
+                LOG_WARNING("Shadow casters swung ", foliageWas, " -> ", foliageNow,
+                            " foliage instances in one frame (", castersDrawn[0],
+                            " solid). A shadow that blinks with the player standing "
+                            "still is one of these crossing the light-space cull.");
+            }
+        }
+    }
 }
 
 } // namespace rendering

@@ -1,4 +1,4 @@
-// world_map.hpp — Shim header for backward compatibility.
+// world_map.hpp - Shim header for backward compatibility.
 // Redirects to the modular world_map/world_map_facade.hpp.
 // Consumers should migrate to #include "rendering/world_map/world_map_facade.hpp" directly.
 #pragma once
@@ -12,7 +12,6 @@ namespace rendering {
 // (game_screen_hud.cpp, renderer.cpp, etc.)
 using WorldMapPartyDot = world_map::PartyDot;
 using WorldMapRareMark = world_map::RareMark;
-using WorldMapChestMark = world_map::ChestMark;
 using WorldMapTaxiNode = world_map::TaxiNode;
 using MapPOI           = world_map::POI;
 

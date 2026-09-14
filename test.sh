@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test.sh — Run the Catch2 unit tests and/or clang-tidy linter.
+# test.sh - Run the Catch2 unit tests and/or clang-tidy linter.
 #
 # Usage:
 #   ./test.sh                    # run both lint and tests (default)
@@ -13,8 +13,8 @@
 # Exit code is non-zero if any lint diagnostic or test failure is reported.
 #
 # Build directories:
-#   build/       — Release build used for normal ctest  (cmake -DCMAKE_BUILD_TYPE=Release)
-#   build_asan/  — Debug+ASAN build used with --asan    (cmake -DCMAKE_BUILD_TYPE=Debug
+#   build/       - Release build used for normal ctest  (cmake -DCMAKE_BUILD_TYPE=Release)
+#   build_asan/  - Debug+ASAN build used with --asan    (cmake -DCMAKE_BUILD_TYPE=Debug
 #                                                              -DWOWEE_ENABLE_ASAN=ON
 #                                                              -DWOWEE_BUILD_TESTS=ON)
 
@@ -80,7 +80,7 @@ if [[ $RUN_TEST -eq 1 ]]; then
 
     # Check that CTestTestfile.cmake exists (tests were configured)
     if [[ ! -f "$BUILD_TEST_DIR/CTestTestfile.cmake" ]]; then
-        echo "CTestTestfile.cmake not found in $BUILD_TEST_DIR — tests not configured."
+        echo "CTestTestfile.cmake not found in $BUILD_TEST_DIR - tests not configured."
         echo "Re-run cmake with -DWOWEE_BUILD_TESTS=ON"
         exit 1
     fi
@@ -142,16 +142,56 @@ if [[ ! -f "$COMPILE_COMMANDS" ]]; then
     exit 1
 fi
 
+# clang-tidy cannot read a precompiled header built by a different compiler,
+# and it usually is one: the PCH comes from whatever CXX cmake picked, while
+# clang-tidy comes from whatever LLVM is on PATH. Mismatched, every file fails
+# with "PCH file uses an older format that is no longer supported" and the real
+# diagnostics never appear.
+#
+# So lint against a copy of the database with the PCH arguments removed. The
+# headers are still included normally -- the PCH is only a parse cache.
+TIDY_DB_DIR="$SCRIPT_DIR/build/.tidy"
+mkdir -p "$TIDY_DB_DIR"
+python3 - "$COMPILE_COMMANDS" "$TIDY_DB_DIR/compile_commands.json" <<'PYEOF'
+import json, re, sys
+src, dst = sys.argv[1], sys.argv[2]
+db = json.load(open(src))
+strip = re.compile(r'\s+-Xclang\s+-include-pch\s+-Xclang\s+\S+|\s+-include-pch\s+\S+|\s+-Winvalid-pch')
+for entry in db:
+    if 'command' in entry:
+        entry['command'] = strip.sub('', entry['command'])
+    if 'arguments' in entry:
+        args, out = entry['arguments'], []
+        i = 0
+        while i < len(args):
+            if args[i] == '-include-pch':
+                i += 2
+            elif args[i] == '-Xclang' and i + 1 < len(args) and args[i + 1] == '-include-pch':
+                i += 4
+            else:
+                out.append(args[i]); i += 1
+        entry['arguments'] = out
+json.dump(db, open(dst, 'w'))
+PYEOF
+COMPILE_COMMANDS="$TIDY_DB_DIR/compile_commands.json"
+
 # ---------------------------------------------------------------------------
 # Source files to check (first-party only)
 # ---------------------------------------------------------------------------
-mapfile -t SOURCE_FILES < <(
+# Read with a while loop rather than mapfile: mapfile is bash 4, and macOS
+# ships bash 3.2 as /bin/bash. The shebang finds a newer bash when one is
+# installed, so this only bites on a machine without one - where it aborts
+# under set -e with "mapfile: command not found" and no lint runs at all.
+SOURCE_FILES=()
+while IFS= read -r src_file; do
+    SOURCE_FILES+=("$src_file")
+done < <(
     find "$SCRIPT_DIR/src" -type f \( -name '*.cpp' -o -name '*.cxx' -o -name '*.cc' \) | sort
 )
 
 if [[ ${#SOURCE_FILES[@]} -eq 0 ]]; then
     echo "No source files found in src/"
-    exit 0
+    exit 1
 fi
 
 echo "Linting ${#SOURCE_FILES[@]} source files..."
@@ -177,7 +217,7 @@ if command -v gcc >/dev/null 2>&1; then
 
     while IFS= read -r inc_path; do
         [[ -d "$inc_path" ]] || continue
-        # Skip the GCC compiler built-in include dir — clang's resource dir above
+        # Skip the GCC compiler built-in include dir - clang's resource dir above
         # provides compatible replacements for xmmintrin.h, ia32intrin.h, etc.
         [[ "$inc_path" == */gcc/* ]] && continue
         EXTRA_TIDY_ARGS+=("--extra-arg=-isystem${inc_path}")
@@ -197,7 +237,7 @@ FIX="${FIX:-0}"
 FIX_FLAG=""
 if [[ "$FIX" == "1" ]]; then
     FIX_FLAG="-fix"
-    echo "Fix mode enabled — applying suggested fixes."
+    echo "Fix mode enabled - applying suggested fixes."
 fi
 
 LINT_FAILED=0
@@ -208,7 +248,7 @@ if [[ -n "$RUN_CLANG_TIDY" ]]; then
     SRC_REGEX="$(echo "$SCRIPT_DIR/src" | sed 's|/|\\/|g')"
     "$RUN_CLANG_TIDY" \
         -clang-tidy-binary "$CLANG_TIDY" \
-        -p "$SCRIPT_DIR/build" \
+        -p "$TIDY_DB_DIR" \
         $FIX_FLAG \
         "${EXTRA_RUN_ARGS[@]}" \
         "$SRC_REGEX" || LINT_FAILED=$?
@@ -216,7 +256,7 @@ else
     echo "run-clang-tidy not found; running sequentially..."
     for f in "${SOURCE_FILES[@]}"; do
         "$CLANG_TIDY" \
-            -p "$SCRIPT_DIR/build" \
+            -p "$TIDY_DB_DIR" \
             $FIX_FLAG \
             "${EXTRA_TIDY_ARGS[@]}" \
             "$f" || LINT_FAILED=$?

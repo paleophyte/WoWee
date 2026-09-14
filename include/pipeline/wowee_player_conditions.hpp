@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Player Condition catalog (.wpcn) — novel
+// Wowee Open Player Condition catalog (.wpcn) - novel
 // replacement for Blizzard's PlayerCondition.dbc plus the
 // AzerothCore-style condition resolver. The 49th open
 // format added to the editor.
@@ -85,7 +85,7 @@ struct WoweePlayerCondition {
     };
 
     enum ChainOp : uint8_t {
-        ChainNone = 0,         // no further check — terminator
+        ChainNone = 0,         // no further check - terminator
         ChainAnd  = 1,         // also requires chainNextId to pass
         ChainOr   = 2,         // either this or chainNextId passes
         ChainNot  = 3,         // negate the chainNextId result
@@ -109,9 +109,9 @@ struct WoweePlayerCondition {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t conditionId) const;
+    [[nodiscard]] const Entry* findById(uint32_t conditionId) const;
 
     static const char* conditionKindName(uint8_t k);
     static const char* comparisonOpName(uint8_t o);
@@ -127,13 +127,13 @@ public:
 
     // Preset emitters used by --gen-pcn* variants.
     //
-    //   makeStarter    — 3 single-check conditions (level
+    //   makeStarter    - 3 single-check conditions (level
     //                     60+, race Human, class Warrior).
-    //   makeQuestGates — 4 quest-style gates (quest X
+    //   makeQuestGates - 4 quest-style gates (quest X
     //                     complete, reputation honored with
     //                     faction Y, achievement Z earned,
     //                     player in zone W).
-    //   makeComposite  — 3 chained conditions exercising
+    //   makeComposite  - 3 chained conditions exercising
     //                     AND / OR / NOT chainOps (level 80
     //                     AND warrior; ally rep OR horde rep;
     //                     NOT in-combat).

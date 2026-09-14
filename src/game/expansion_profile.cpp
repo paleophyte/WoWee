@@ -1,4 +1,5 @@
 #include "game/expansion_profile.hpp"
+#include "game/inventory_slots.hpp"
 #include "core/logger.hpp"
 #include <filesystem>
 #include <fstream>
@@ -7,7 +8,7 @@
 #include <cstdlib>
 #include <limits>
 
-// Minimal JSON parsing (no external dependency) — expansion.json is tiny and flat.
+// Minimal JSON parsing (no external dependency) - expansion.json is tiny and flat.
 // We parse the subset we need: strings, integers, arrays of integers.
 namespace {
 
@@ -38,7 +39,7 @@ std::string jsonValue(const std::string& json, const std::string& key) {
         return (end != std::string::npos) ? json.substr(pos + 1, end - pos - 1) : "";
     }
     if (json[pos] == '{') {
-        // Nested object — return content between braces
+        // Nested object - return content between braces
         size_t depth = 1;
         size_t start = pos + 1;
         for (size_t i = start; i < json.size() && depth > 0; ++i) {
@@ -48,7 +49,7 @@ std::string jsonValue(const std::string& json, const std::string& key) {
         return "";
     }
     if (json[pos] == '[') {
-        // Array — return content between brackets (including brackets)
+        // Array - return content between brackets (including brackets)
         size_t end = json.find(']', pos);
         return (end != std::string::npos) ? json.substr(pos, end - pos + 1) : "";
     }
@@ -63,7 +64,7 @@ int jsonInt(const std::string& json, const std::string& key, int def = 0) {
     try {
         return std::stoi(v);
     } catch (...) {
-        // Non-numeric value for an integer field — fall back to default rather than
+        // Non-numeric value for an integer field - fall back to default rather than
         // crashing, but log it so malformed expansion.json files are diagnosable.
         wowee::core::Logger::getInstance().warning("jsonInt: failed to parse '", key, "' value '", v, "', using default ", def);
         return def;
@@ -148,6 +149,7 @@ size_t ExpansionRegistry::initialize(const std::string& dataRoot) {
         }
         activeId_ = (it != profiles_.end()) ? it->id : profiles_.back().id;
     }
+    activeChanged();
 
     LOG_INFO("ExpansionRegistry: discovered ", profiles_.size(), " expansion(s), active=", activeId_);
     return profiles_.size();
@@ -160,9 +162,23 @@ const ExpansionProfile* ExpansionRegistry::getProfile(const std::string& id) con
     return nullptr;
 }
 
+void ExpansionRegistry::activeChanged() {
+    // The bank is not the same shape in every expansion - vanilla has 24
+    // general slots and 6 bags where 2.0 onward have 28 and 7, and the keyring
+    // moves with them - and a slot number is what a move names.
+    //
+    // Both places that move activeId_ come through here. Discovery sets it
+    // directly rather than through setActive, so hanging this off setActive
+    // alone would have left every auto-detected install - which is every
+    // ordinary one - on the layout it was not playing.
+    slots::setBankLayout(
+        slots::bankLayoutFor(activeId_ == "classic" || activeId_ == "turtle"));
+}
+
 bool ExpansionRegistry::setActive(const std::string& id) {
     if (!getProfile(id)) return false;
     activeId_ = id;
+    activeChanged();
     return true;
 }
 
@@ -224,6 +240,35 @@ bool ExpansionRegistry::loadProfile(const std::string& jsonPath, const std::stri
         p.timezone = static_cast<uint32_t>(jsonInt(json, "timezone", static_cast<int>(p.timezone)));
     }
     p.maxLevel = static_cast<uint32_t>(jsonInt(json, "maxLevel", 60));
+
+    // The realm's own Warden signing key, if it has one. 512 hex characters;
+    // anything else is refused rather than half-read, because a key that is
+    // wrong in one nibble fails exactly the way no key at all does and would
+    // be looked for anywhere but here.
+    if (const std::string hex = jsonValue(json, "wardenRsaModulus"); !hex.empty()) {
+        auto nibble = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        bool ok = (hex.size() == 512);
+        std::vector<uint8_t> bytes;
+        bytes.reserve(256);
+        for (size_t i = 0; ok && i + 1 < hex.size(); i += 2) {
+            const int hi = nibble(hex[i]);
+            const int lo = nibble(hex[i + 1]);
+            if (hi < 0 || lo < 0) { ok = false; break; }
+            bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        }
+        if (ok) {
+            p.wardenRsaModulus = std::move(bytes);
+        } else {
+            wowee::core::Logger::getInstance().warning(
+                "Expansion '", p.id, "': wardenRsaModulus is not 512 hex characters"
+                " - ignoring it and checking against the retail key");
+        }
+    }
     p.races = jsonUintArray(json, "races");
     p.classes = jsonUintArray(json, "classes");
 

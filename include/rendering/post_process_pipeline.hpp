@@ -50,17 +50,20 @@ public:
 
     /// Returns the framebuffer the scene should render into.
     /// If no post-processing is active, returns VK_NULL_HANDLE (use swapchain).
-    VkFramebuffer getSceneFramebuffer() const;
+    [[nodiscard]] VkFramebuffer getSceneFramebuffer() const;
 
     /// Returns the render extent for the active post-process pipeline.
     /// Falls back to swapchain extent if nothing is active.
-    VkExtent2D getSceneRenderExtent() const;
+    [[nodiscard]] VkExtent2D getSceneRenderExtent() const;
+    // The images behind getSceneFramebuffer(), so the scene can be copied for
+    // water refraction after it is drawn but before the water goes over it.
+    [[nodiscard]] VkImage getSceneColorImage() const;
+    [[nodiscard]] VkImage getSceneDepthImage() const;
+    [[nodiscard]] bool sceneDepthIsMsaa() const;
 
-    /// True if any post-process pipeline is active (FSR/FXAA/FSR2).
-    bool hasActivePostProcess() const;
 
     /// True when FXAA alone (no FSR2) needs its own off-screen pass.
-    bool useFXAAPostPass() const { return fxaa_.enabled; }
+    [[nodiscard]] bool useFXAAPostPass() const { return fxaa_.enabled; }
 
     // --- Frame-loop integration (called from Renderer::endFrame) ---
 
@@ -75,56 +78,60 @@ public:
     void destroyAllResources();
 
     /// True when FSR2 is active and MSAA changes should be blocked.
-    bool isFsr2BlockingMsaa() const { return fsr2_.enabled; }
+    /// True only where the temporal upscaler cannot share the scene with
+    /// multisampling: it needs a single-sampled depth to read, which with MSAA
+    /// on is the render pass's depth resolve, and a device without depth
+    /// resolve has no such image. Everywhere else the two run together.
+    [[nodiscard]] bool isFsr2BlockingMsaa() const;
 
     // --- Public API (delegated from Renderer) ---
 
     // FXAA
     void setFXAAEnabled(bool enabled);
-    bool isFXAAEnabled() const { return fxaa_.enabled; }
+    [[nodiscard]] bool isFXAAEnabled() const { return fxaa_.enabled; }
 
     // FSR 1.0
     MsaaChangeRequest setFSREnabled(bool enabled);
-    bool isFSREnabled() const { return fsr_.enabled; }
+    [[nodiscard]] bool isFSREnabled() const { return fsr_.enabled; }
     void setFSRQuality(float scaleFactor);
     void setFSRSharpness(float sharpness);
-    float getFSRScaleFactor() const { return fsr_.scaleFactor; }
-    float getFSRSharpness() const { return fsr_.sharpness; }
+    [[nodiscard]] float getFSRScaleFactor() const { return fsr_.scaleFactor; }
+    [[nodiscard]] float getFSRSharpness() const { return fsr_.sharpness; }
 
     // FSR 2.2
     MsaaChangeRequest setFSR2Enabled(bool enabled, Camera* camera);
-    bool isFSR2Enabled() const { return fsr2_.enabled; }
+    [[nodiscard]] bool isFSR2Enabled() const { return fsr2_.enabled; }
     void setFSR2DebugTuning(float jitterSign, float motionVecScaleX, float motionVecScaleY);
 
     // FSR3 Framegen
     void setAmdFsr3FramegenEnabled(bool enabled);
-    bool isAmdFsr3FramegenEnabled() const { return fsr2_.amdFsr3FramegenEnabled; }
-    float getFSR2JitterSign() const { return fsr2_.jitterSign; }
-    float getFSR2MotionVecScaleX() const { return fsr2_.motionVecScaleX; }
-    float getFSR2MotionVecScaleY() const { return fsr2_.motionVecScaleY; }
+    [[nodiscard]] bool isAmdFsr3FramegenEnabled() const { return fsr2_.amdFsr3FramegenEnabled; }
+    [[nodiscard]] float getFSR2JitterSign() const { return fsr2_.jitterSign; }
+    [[nodiscard]] float getFSR2MotionVecScaleX() const { return fsr2_.motionVecScaleX; }
+    [[nodiscard]] float getFSR2MotionVecScaleY() const { return fsr2_.motionVecScaleY; }
 #if WOWEE_HAS_AMD_FSR2
     bool isAmdFsr2SdkAvailable() const { return true; }
 #else
-    bool isAmdFsr2SdkAvailable() const { return false; }
+    [[nodiscard]] bool isAmdFsr2SdkAvailable() const { return false; }
 #endif
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     bool isAmdFsr3FramegenSdkAvailable() const { return true; }
 #else
-    bool isAmdFsr3FramegenSdkAvailable() const { return false; }
+    [[nodiscard]] bool isAmdFsr3FramegenSdkAvailable() const { return false; }
 #endif
-    bool isAmdFsr3FramegenRuntimeActive() const { return fsr2_.amdFsr3FramegenRuntimeActive; }
-    bool isAmdFsr3FramegenRuntimeReady() const { return fsr2_.amdFsr3FramegenRuntimeReady; }
-    const char* getAmdFsr3FramegenRuntimePath() const;
-    const std::string& getAmdFsr3FramegenRuntimeError() const { return fsr2_.amdFsr3RuntimeLastError; }
-    size_t getAmdFsr3UpscaleDispatchCount() const { return fsr2_.amdFsr3UpscaleDispatchCount; }
-    size_t getAmdFsr3FramegenDispatchCount() const { return fsr2_.amdFsr3FramegenDispatchCount; }
-    size_t getAmdFsr3FallbackCount() const { return fsr2_.amdFsr3FallbackCount; }
+    [[nodiscard]] bool isAmdFsr3FramegenRuntimeActive() const { return fsr2_.amdFsr3FramegenRuntimeActive; }
+    [[nodiscard]] bool isAmdFsr3FramegenRuntimeReady() const { return fsr2_.amdFsr3FramegenRuntimeReady; }
+    [[nodiscard]] const char* getAmdFsr3FramegenRuntimePath() const;
+    [[nodiscard]] const std::string& getAmdFsr3FramegenRuntimeError() const { return fsr2_.amdFsr3RuntimeLastError; }
+    [[nodiscard]] size_t getAmdFsr3UpscaleDispatchCount() const { return fsr2_.amdFsr3UpscaleDispatchCount; }
+    [[nodiscard]] size_t getAmdFsr3FramegenDispatchCount() const { return fsr2_.amdFsr3FramegenDispatchCount; }
+    [[nodiscard]] size_t getAmdFsr3FallbackCount() const { return fsr2_.amdFsr3FallbackCount; }
 
     // Brightness (1.0 = default, <1 darkens, >1 brightens)
     void setBrightness(float b) { brightness_ = b; }
-    float getBrightness() const { return brightness_; }
+    [[nodiscard]] float getBrightness() const { return brightness_; }
     void setIntoxication(float amount) { intoxication_ = glm::clamp(amount, 0.0f, 1.0f); }
-    float getIntoxication() const { return intoxication_; }
+    [[nodiscard]] float getIntoxication() const { return intoxication_; }
 
 private:
     VkContext* vkCtx_ = nullptr;
@@ -138,7 +145,7 @@ private:
     float brightness_ = 1.0f;
     float intoxication_ = 0.0f;
 
-    bool needsFXAAPass() const { return fxaa_.enabled || intoxication_ > 0.001f; }
+    [[nodiscard]] bool needsFXAAPass() const { return fxaa_.enabled || intoxication_ > 0.001f; }
 
     // FSR 1.0 upscaling state
     struct FSRState {
@@ -174,13 +181,19 @@ private:
         bool enabled       = false;
         bool needsRecreate = false;
 
-        // Off-screen scene target (same resolution as swapchain — no scaling)
+        // Off-screen scene target (same resolution as swapchain - no scaling)
         AllocatedImage sceneColor{};        // 1x resolved color target
         AllocatedImage sceneDepth{};        // Depth (matches MSAA sample count)
         AllocatedImage sceneMsaaColor{};    // MSAA color target (when MSAA > 1x)
         AllocatedImage sceneDepthResolve{}; // Depth resolve (MSAA + depth resolve)
         VkFramebuffer sceneFramebuffer = VK_NULL_HANDLE;
         VkSampler sceneSampler         = VK_NULL_HANDLE;
+        /// sceneColor as a single-sampled colour target of its own. While the
+        /// temporal upscaler owns the scene this image is otherwise idle, so
+        /// RCAS sharpens into it and FXAA then reads it from its usual
+        /// descriptor - the two run in sequence instead of FXAA standing in
+        /// for the sharpening.
+        VkFramebuffer sharpenFramebuffer = VK_NULL_HANDLE;
 
         // FXAA fullscreen pipeline
         VkPipeline           pipeline          = VK_NULL_HANDLE;
@@ -205,9 +218,15 @@ private:
         uint32_t internalWidth = 0;
         uint32_t internalHeight = 0;
 
-        // Off-screen scene targets (internal resolution, no MSAA — FSR2 replaces AA)
-        AllocatedImage sceneColor{};
-        AllocatedImage sceneDepth{};
+        // Off-screen scene targets at the internal resolution, laid out like
+        // FSR 1's: with MSAA on, the scene draws into the multisampled pair
+        // and the render pass resolves both into the single-sampled pair,
+        // which is what the upscaler reads. It used to insist on 1x and
+        // switch multisampling off behind the player's back to get it.
+        AllocatedImage sceneColor{};        // 1x: the render target, or the resolve target under MSAA
+        AllocatedImage sceneDepth{};        // at the scene's sample count
+        AllocatedImage sceneMsaaColor{};    // MSAA colour target, only while MSAA is on
+        AllocatedImage sceneDepthResolve{}; // 1x depth, only while MSAA is on
         VkFramebuffer sceneFramebuffer = VK_NULL_HANDLE;
 
         // Samplers
@@ -257,7 +276,6 @@ private:
         size_t amdFsr3UpscaleDispatchCount = 0;
         size_t amdFsr3FramegenDispatchCount = 0;
         size_t amdFsr3FallbackCount = 0;
-        uint64_t amdFsr3InteropSyncValue = 1;
         float jitterSign = 0.38f;
         float motionVecScaleX = 1.0f;
         float motionVecScaleY = 1.0f;
@@ -271,14 +289,17 @@ private:
 
         // Convergent accumulation: jitter for N frames then freeze
         int convergenceFrame = 0;
-        static constexpr int convergenceMaxFrames = 8;
         glm::mat4 lastStableVP = glm::mat4(1.0f);
     };
     FSR2State fsr2_;
     bool initFSR2Resources();
+    /// The single-sampled depth the upscaler's passes read: the resolve while
+    /// MSAA is on, the scene depth itself otherwise.
+    [[nodiscard]] const AllocatedImage& fsr2ReadDepth() const {
+        return fsr2_.sceneDepthResolve.image != VK_NULL_HANDLE ? fsr2_.sceneDepthResolve : fsr2_.sceneDepth;
+    }
     void destroyFSR2Resources();
     void dispatchMotionVectors();
-    void dispatchTemporalAccumulate();
     void dispatchAmdFsr2();
     void dispatchAmdFsr3Framegen();
     void renderFSR2Sharpen();

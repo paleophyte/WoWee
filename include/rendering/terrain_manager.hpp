@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/m2_loader.hpp"
@@ -150,7 +151,7 @@ enum class FinalizationPhase {
 };
 
 /**
- * In-progress tile finalization state — tracks progress across frames
+ * In-progress tile finalization state - tracks progress across frames
  */
 struct FinalizingTile {
     std::shared_ptr<PendingTile> pending;
@@ -206,16 +207,9 @@ public:
      * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
      */
     void setMapName(const std::string& mapName) { this->mapName = mapName; }
-    bool isCustomZone() const { return isCustomZone_; }
+    [[nodiscard]] bool isCustomZone() const { return isCustomZone_; }
     void setCustomZone(bool custom) { isCustomZone_ = custom; }
 
-    /**
-     * Load a single tile
-     * @param x Tile X coordinate (0-63)
-     * @param y Tile Y coordinate (0-63)
-     * @return true if loaded successfully
-     */
-    bool loadTile(int x, int y);
 
     /**
      * Enqueue a tile for async loading (returns false if previously failed).
@@ -229,10 +223,6 @@ public:
      */
     void unloadTile(int x, int y);
 
-    /**
-     * Unload all tiles
-     */
-    void unloadAll();
     void stopWorkers();  // Stop worker threads without restarting (for shutdown)
     void softReset();  // Clear tile data without stopping worker threads (non-blocking)
 
@@ -251,7 +241,26 @@ public:
     void setUpdateInterval(float seconds) { updateInterval = seconds; }
     void setTaxiStreamingMode(bool enabled) { taxiStreamingMode_ = enabled; }
     void setGroundClutterDensityScale(float scale) { groundClutterDensityScale_ = glm::clamp(scale, 0.0f, 1.5f); }
-    float getGroundClutterDensityScale() const { return groundClutterDensityScale_; }
+    [[nodiscard]] float getGroundClutterDensityScale() const { return groundClutterDensityScale_; }
+
+    /** Density for a ground-effect id, or 0 if it grows nothing or is unknown.
+     *
+     * The one question grass asks of this table. Exposed rather than handing
+     * out the table, so callers cannot start depending on its shape - and so
+     * the grass generator can take a plain callback and stay testable without
+     * a TerrainManager at all.
+     */
+    [[nodiscard]] uint32_t getGroundEffectDensity(uint32_t effectId) const;
+
+    /** The detail doodads a ground effect plants, and their weights.
+     *
+     * Their model names are what says whether a patch of ground is meadow,
+     * scrub or scree, so grass derives its whole appearance from them rather
+     * than from a table of zones. Doodad ids that resolved to no model are
+     * left out, along with their weights.
+     */
+    void getGroundEffectDoodads(uint32_t effectId, std::vector<std::string>& outModels,
+                                std::vector<uint32_t>& outWeights) const;
     void setWaterRenderer(WaterRenderer* renderer) { waterRenderer = renderer; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     void setWMORenderer(WMORenderer* renderer) { wmoRenderer = renderer; }
@@ -263,33 +272,87 @@ public:
      * @param glY GL Y position
      * @return Height (GL Z) if terrain loaded at that position, empty otherwise
      */
-    std::optional<float> getHeightAt(float glX, float glY) const;
+    [[nodiscard]] std::optional<float> getHeightAt(float glX, float glY) const;
+
+    /**
+     * True when the MCNK chunk containing this position is cut by terrain holes.
+     * getHeightAt interpolates straight across a hole and reports a surface that
+     * is not there, so anything reasoning about "below the terrain" has to know
+     * the heightfield is fiction here - hole-cut chunks are how cave mouths and
+     * below-ground entrances are opened up. Answered per chunk rather than per
+     * quad: this only ever gates a safety net, and being coarse in the safe
+     * direction beats depending on the hole bit's axis order.
+     */
+    [[nodiscard]] bool chunkHasHoles(float glX, float glY) const;
+
+    /**
+     * True when the single terrain quad under this position is cut away.
+     * chunkHasHoles answers for a whole 33x33-yard chunk, which is far too
+     * coarse to decide whether the player is standing on ground: a chunk
+     * containing one cave mouth would report every yard of it as empty. This
+     * is the per-quad question, matched to the quads the mesh builder skips.
+     */
+    [[nodiscard]] bool isHoleAt(float glX, float glY) const;
+
+    /**
+     * Whether the tile covering a world position has finished streaming in.
+     *
+     * getHeightAt answers nothing both for a hole, which the character should
+     * fall through, and for a tile that has not arrived yet, which it should
+     * not. Physics cannot tell those apart from the height alone, and on a
+     * slow device the second one is what happens at every login: the character
+     * enters the world before the ground does and falls until the server kills
+     * it.
+     */
+    [[nodiscard]] bool isTileLoadedAt(float glX, float glY) const;
+
+    /**
+     * The chunk under a world position, plus the offsets within it that
+     * getHeightAt samples and isHoleAt reads a quad from. Shared so those two
+     * cannot drift: the first copy of this search that was written by hand
+     * omitted the full-scan fallback and answered "no hole" for chunks the
+     * index guess missed.
+     */
+    const pipeline::MapChunk* findChunkAt(float glX, float glY,
+                                          float& fracX, float& fracY,
+                                          const TerrainTile** outTile = nullptr) const;
+
+    /** The tones a terrain texture is painted in, cached by path.
+     *
+     * These textures already depict their region's own grass and foliage -
+     * Elwynn's greens, Westfall's dry golds - so the grass growing out of one
+     * takes its colours from it rather than from a palette of ours. Shadow
+     * and highlight are luminance percentiles of the decoded base level, not
+     * a mean: a mean of a grass texture is the average of its blades and the
+     * earth between them, and grass wants the blades.
+     *
+     * Wrong answers here are a tint, not a hole, so failures return greys.
+     */
+    struct TerrainTextureTones {
+        glm::vec3 shadow{0.35f};
+        glm::vec3 highlight{0.65f};
+    };
+    [[nodiscard]] TerrainTextureTones getTerrainTextureTones(const std::string& texturePath);
 
     /** Get the precise MCNK AreaTable ID at a world position. */
-    std::optional<uint32_t> getAreaIdAt(float glX, float glY) const;
+    [[nodiscard]] std::optional<uint32_t> getAreaIdAt(float glX, float glY) const;
 
-    // Collision queries using WOC data (custom zones)
-    bool isPositionWalkable(float glX, float glY) const;
-    uint8_t getCollisionFlags(float glX, float glY) const;
 
     /**
      * Get dominant terrain texture name at a GL position.
      * Returns empty if terrain is not loaded at that position.
      */
-    std::optional<std::string> getDominantTextureAt(float glX, float glY) const;
+    [[nodiscard]] std::optional<std::string> getDominantTextureAt(float glX, float glY) const;
 
     /**
      * Get statistics
      */
-    int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
-    int getPendingTileCount() const { return static_cast<int>(pendingTiles.size()); }
-    int getReadyQueueCount() const { return static_cast<int>(readyQueue.size()); }
+    [[nodiscard]] int getLoadedTileCount() const { return static_cast<int>(loadedTiles.size()); }
+    [[nodiscard]] int getPendingTileCount() const { return static_cast<int>(pendingTiles.size()); }
+    [[nodiscard]] int getReadyQueueCount() const { return static_cast<int>(readyQueue.size()); }
     /** Total unfinished tiles (worker threads + ready queue + finalizing) */
-    int getRemainingTileCount() const { return static_cast<int>(pendingTiles.size() + readyQueue.size() + finalizingTiles_.size()); }
-    TileCoord getCurrentTile() const { return currentTile; }
-
-    /** Process all ready tiles immediately (use during loading screens) */
-    void processAllReadyTiles();
+    [[nodiscard]] int getRemainingTileCount() const { return static_cast<int>(pendingTiles.size() + readyQueue.size() + finalizingTiles_.size()); }
+    [[nodiscard]] TileCoord getCurrentTile() const { return currentTile; }
 
     /** Process one ready tile (for loading screens with per-tile progress updates) */
     void processOneReadyTile();
@@ -304,7 +367,7 @@ private:
     /**
      * Get tile coordinates from GL world position
      */
-    TileCoord worldToTile(float worldX, float worldY) const;
+    [[nodiscard]] TileCoord worldToTile(float worldX, float worldY) const;
 
     /**
      * Get world bounds for a tile
@@ -315,7 +378,7 @@ private:
     /**
      * Build ADT file path
      */
-    std::string getADTPath(const TileCoord& coord) const;
+    [[nodiscard]] std::string getADTPath(const TileCoord& coord) const;
 
     /**
      * Load tiles in radius around current tile
@@ -358,8 +421,8 @@ private:
     std::unordered_map<TileCoord, bool, TileCoord::Hash> failedTiles;
 
     // Current tile (where camera is)
-    TileCoord currentTile = {-1, -1};
-    TileCoord lastStreamTile = {-1, -1};
+    TileCoord currentTile = {.x = -1, .y = -1};
+    TileCoord lastStreamTile = {.x = -1, .y = -1};
 
     // Streaming parameters
     bool streamingEnabled = true;
@@ -379,12 +442,12 @@ private:
         bool loaded = false;
     };
     std::unordered_map<uint64_t, CollisionData> collisionTiles_;
-    uint64_t tileKey(int x, int y) const { return (static_cast<uint64_t>(x) << 32) | static_cast<uint32_t>(y); }
+    [[nodiscard]] uint64_t tileKey(int x, int y) const { return (static_cast<uint64_t>(x) << 32) | static_cast<uint32_t>(y); }
 
     // Tile size constants (WoW ADT specifications)
     // A tile (ADT) = 16x16 chunks = 533.33 units across
     // A chunk = 8x8 vertex quads = 33.33 units across
-    static constexpr float TILE_SIZE = 533.33333f;          // One tile = 533.33 units
+    static constexpr float TILE_SIZE = core::coords::TILE_SIZE;
     static constexpr float CHUNK_SIZE = 33.33333f;          // One chunk = 33.33 units
 
     // Background loading worker pool
@@ -412,13 +475,10 @@ private:
     // THREAD-SAFE: protected by tileCacheMutex_.
     std::unordered_map<TileCoord, CachedTile, TileCoord::Hash> tileCache_;
     std::list<TileCoord> tileCacheLru_;
-    size_t tileCacheBytes_ = 0;
     size_t tileCacheBudgetBytes_ = 8ull * 1024 * 1024 * 1024; // Dynamic, set at init based on RAM
     std::mutex tileCacheMutex_;
 
     std::shared_ptr<PendingTile> getCachedTile(const TileCoord& coord);
-    void putCachedTile(const std::shared_ptr<PendingTile>& tile);
-    size_t estimatePendingTileBytes(const PendingTile& tile) const;
     void logMissingAdtOnce(const std::string& adtPath);
     std::atomic<bool> workerRunning{false};
 
@@ -440,7 +500,7 @@ private:
     // MAIN-THREAD-ONLY: tiles beyond unloadRadius, queued by streamTiles() and drained a
     // time-budgeted batch at a time by processPendingUnloads() each frame. Unloading them
     // all synchronously in one call (e.g. ~100 tiles right after a taxi landing snaps the
-    // radius down) caused multi-second main-thread stalls — live-confirmed via "SLOW
+    // radius down) caused multi-second main-thread stalls - live-confirmed via "SLOW
     // terrainManager->update: 1943.71ms" immediately after "Unloaded 103 distant tiles" in
     // a real flight-landing log.
     //
@@ -448,7 +508,7 @@ private:
     // budget. That prevented the single-frame catastrophic stall but doesn't scale with
     // actual frame cost: streamTiles() discovers newly-out-of-range tiles at a roughly
     // constant real-world rate during a long, fast (taxi) flight, but a count-based drain
-    // processes fewer tiles per *second* whenever frame rate drops for any reason — and once
+    // processes fewer tiles per *second* whenever frame rate drops for any reason - and once
     // the backlog (and therefore loadedTiles_/streamTiles()'s own per-call scan cost) starts
     // growing, frame rate drops further, which throttles the count-based drain further still.
     // Live-reproduced: a long cross-continent taxi flight (the first sustained-large-radius
@@ -478,6 +538,7 @@ private:
     std::unordered_map<uint32_t, GroundEffectEntry> groundEffectById_; // effectId -> config
     std::unordered_map<uint32_t, std::string> groundDoodadModelById_;  // doodadId -> model path
     float groundClutterDensityScale_ = 1.0f;
+    std::unordered_map<std::string, TerrainTextureTones> terrainTextureTones_;
 };
 
 } // namespace rendering

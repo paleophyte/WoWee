@@ -1,4 +1,6 @@
 #include "rendering/loading_screen.hpp"
+
+#include <SDL2/SDL_vulkan.h>
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
@@ -17,7 +19,7 @@ namespace wowee {
 namespace rendering {
 
 LoadingScreen::LoadingScreen() {
-    imagePaths.push_back("assets/krayonload.png");
+    imagePaths.emplace_back("assets/krayonload.png");
 }
 
 LoadingScreen::~LoadingScreen() {
@@ -150,7 +152,7 @@ bool LoadingScreen::loadImage(const std::string& path) {
         imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imgInfo.imageType = VK_IMAGE_TYPE_2D;
         imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        imgInfo.extent = {static_cast<uint32_t>(imageWidth), static_cast<uint32_t>(imageHeight), 1};
+        imgInfo.extent = {.width = static_cast<uint32_t>(imageWidth), .height = static_cast<uint32_t>(imageHeight), .depth = 1};
         imgInfo.mipLevels = 1;
         imgInfo.arrayLayers = 1;
         imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -175,33 +177,42 @@ bool LoadingScreen::loadImage(const std::string& path) {
     // Transfer: transition, copy, transition
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
         // Transition to transfer dst
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = bgImage;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo barrierDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        barrierDep.dependencyFlags = 0;
+        barrierDep.imageMemoryBarrierCount = 1;
+        barrierDep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, barrierDep);
 
         // Copy buffer to image
         VkBufferImageCopy region{};
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent = {static_cast<uint32_t>(imageWidth), static_cast<uint32_t>(imageHeight), 1};
+        region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        region.imageExtent = {.width = static_cast<uint32_t>(imageWidth), .height = static_cast<uint32_t>(imageHeight), .depth = 1};
         vkCmdCopyBufferToImage(cmd, stagingBuffer, bgImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         // Transition to shader read
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo toReadDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        toReadDep.imageMemoryBarrierCount = 1;
+        toReadDep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, toReadDep);
     });
 
     // Cleanup staging
@@ -215,7 +226,7 @@ bool LoadingScreen::loadImage(const std::string& path) {
         viewInfo.image = bgImage;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         vkCreateImageView(device, &viewInfo, nullptr, &bgImageView);
     }
 
@@ -238,16 +249,18 @@ bool LoadingScreen::loadImage(const std::string& path) {
     return true;
 }
 
-void LoadingScreen::renderOverlay() {
-    // Draw loading screen content as ImGui overlay within an existing ImGui frame.
-    // Caller is responsible for ImGui NewFrame/Render and Vulkan frame management.
-    ImGuiIO& io = ImGui::GetIO();
-    float screenW = io.DisplaySize.x;
-    float screenH = io.DisplaySize.y;
-
+/// Opens the fullscreen window the loading screen draws into and blits its
+/// background.
+///
+/// Both draws need it: the overlay that sits over a live frame and the standalone
+/// one that runs its own ImGui frame. Every flag matters. NoInputs is what keeps
+/// the screen from swallowing clicks meant for what is behind it, and
+/// NoBringToFrontOnFocus is what stops it climbing over the windows it is meant
+/// to sit under.
+void LoadingScreen::beginBackdrop(const char* windowName, float screenW, float screenH) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(screenW, screenH));
-    ImGui::Begin("##LoadingScreenOverlay", nullptr,
+    ImGui::Begin(windowName, nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground |
@@ -258,6 +271,16 @@ void LoadingScreen::renderOverlay() {
             reinterpret_cast<ImTextureID>(bgDescriptorSet),
             ImVec2(0, 0), ImVec2(screenW, screenH));
     }
+}
+
+void LoadingScreen::renderOverlay() {
+    // Draw loading screen content as ImGui overlay within an existing ImGui frame.
+    // Caller is responsible for ImGui NewFrame/Render and Vulkan frame management.
+    ImGuiIO& io = ImGui::GetIO();
+    float screenW = io.DisplaySize.x;
+    float screenH = io.DisplaySize.y;
+
+    beginBackdrop("##LoadingScreenOverlay", screenW, screenH);
 
     // Zone name header
     if (!zoneName.empty()) {
@@ -329,20 +352,7 @@ void LoadingScreen::render() {
     ImGui::NewFrame();
 
     // Invisible fullscreen window
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(screenW, screenH));
-    ImGui::Begin("##LoadingScreen", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    // Draw background image
-    if (bgDescriptorSet) {
-        ImGui::GetWindowDrawList()->AddImage(
-            reinterpret_cast<ImTextureID>(bgDescriptorSet),
-            ImVec2(0, 0), ImVec2(screenW, screenH));
-    }
+    beginBackdrop("##LoadingScreen", screenW, screenH);
 
     // Zone name header (large text centered above progress bar)
     if (!zoneName.empty()) {
@@ -418,8 +428,11 @@ void LoadingScreen::render() {
     if (vkCtx) {
         // Handle window resize: recreate swapchain before acquiring an image
         if (vkCtx->isSwapchainDirty() && sdlWindow) {
+            // The surface, in pixels. SDL_GetWindowSize answers points, and
+            // on a high density display rebuilding at those halves the
+            // swapchain under a loading screen that is drawn full width.
             int w = 0, h = 0;
-            SDL_GetWindowSize(sdlWindow, &w, &h);
+            SDL_Vulkan_GetDrawableSize(sdlWindow, &w, &h);
             if (w > 0 && h > 0) {
                 (void)vkCtx->recreateSwapchain(w, h);
             }
@@ -429,25 +442,31 @@ void LoadingScreen::render() {
         VkCommandBuffer cmd = vkCtx->beginFrame(imageIndex);
         if (cmd != VK_NULL_HANDLE) {
             // Begin render pass
+            // The UI draws in the overlay pass, which is what ImGui's pipelines
+            // are built for: single-sampled and colour only. Drawing it in the
+            // scene pass instead put a 1x pipeline inside an 8x pass, which the
+            // validation layers reject and the driver renders as it pleases.
+            // This variant clears, since there is no scene underneath here.
             VkRenderPassBeginInfo rpInfo{};
             rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            rpInfo.renderPass = vkCtx->getImGuiRenderPass();
-            rpInfo.framebuffer = vkCtx->getSwapchainFramebuffers()[imageIndex];
-            rpInfo.renderArea.offset = {0, 0};
+            rpInfo.renderPass = vkCtx->getOverlayClearRenderPass();
+            rpInfo.framebuffer = vkCtx->getOverlayFramebuffers()[imageIndex];
+            rpInfo.renderArea.offset = {.x = 0, .y = 0};
             rpInfo.renderArea.extent = vkCtx->getSwapchainExtent();
 
-            // Render pass has 2 attachments (color + depth) or 3 with MSAA
-            VkClearValue clearValues[3]{};
+            VkClearValue clearValues[1]{};
             clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-            clearValues[1].depthStencil = {1.0f, 0};
-            clearValues[2].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-            bool msaaOn = vkCtx->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT;
-            rpInfo.clearValueCount = msaaOn ? 3 : 2;
+            rpInfo.clearValueCount = 1;
             rpInfo.pClearValues = clearValues;
 
-            vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
-            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
-            vkCmdEndRenderPass(cmd);
+            const bool overlayReady =
+                rpInfo.renderPass != VK_NULL_HANDLE &&
+                imageIndex < vkCtx->getOverlayFramebuffers().size();
+            if (overlayReady) {
+                vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+                vkCmdEndRenderPass(cmd);
+            }
 
             vkCtx->endFrame(cmd, imageIndex);
         }

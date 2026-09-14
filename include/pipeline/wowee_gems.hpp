@@ -7,16 +7,16 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Gem / Enchantment catalog (.wgem) — novel
+// Wowee Open Gem / Enchantment catalog (.wgem) - novel
 // replacement for Blizzard's ItemEnchantment.dbc +
 // GemProperties.dbc + SpellItemEnchantment.dbc. The 35th
 // open format added to the editor.
 //
 // Defines two related kinds of item enhancement:
-//   • Gems         — socketable jewelry pieces (red / blue /
+//   • Gems         - socketable jewelry pieces (red / blue /
 //                     yellow / meta colors) that fit into
 //                     gear sockets
-//   • Enchantments — persistent buffs applied to weapon /
+//   • Enchantments - persistent buffs applied to weapon /
 //                     armor pieces, either by an enchanter
 //                     spell or by an item proc
 //
@@ -99,10 +99,10 @@ struct WoweeGem {
     std::vector<GemEntry> gems;
     std::vector<EnchantEntry> enchantments;
 
-    bool isValid() const { return !gems.empty() || !enchantments.empty(); }
+    [[nodiscard]] bool isValid() const { return !gems.empty() || !enchantments.empty(); }
 
-    const GemEntry* findGem(uint32_t gemId) const;
-    const EnchantEntry* findEnchant(uint32_t enchantId) const;
+    [[nodiscard]] const GemEntry* findGem(uint32_t gemId) const;
+    [[nodiscard]] const EnchantEntry* findEnchant(uint32_t enchantId) const;
 
     static const char* colorName(uint8_t c);
     static const char* enchantSlotName(uint8_t s);
@@ -117,13 +117,13 @@ public:
 
     // Preset emitters used by --gen-gems* variants.
     //
-    //   makeStarter — 3 gems (one per primary color) + 2
+    //   makeStarter - 3 gems (one per primary color) + 2
     //                  enchantments (one weapon proc + one
     //                  armor stat).
-    //   makeGemSet  — 6 gems covering all primary + secondary
+    //   makeGemSet  - 6 gems covering all primary + secondary
     //                  colors (red/yellow/blue/purple/green/
     //                  orange).
-    //   makeEnchants — 5 enchantment variants spanning slots
+    //   makeEnchants - 5 enchantment variants spanning slots
     //                   (permanent stat / temporary poison /
     //                   ring / cloak / weapon proc).
     static WoweeGem makeStarter(const std::string& catalogName);

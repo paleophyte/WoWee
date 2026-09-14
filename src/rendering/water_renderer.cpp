@@ -1,4 +1,8 @@
+#include "core/coordinates.hpp"
+#include "rendering/water_surface_grid.hpp"
+#include "rendering/water_mask.hpp"
 #include "rendering/water_renderer.hpp"
+#include "rendering/water_mask.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -36,12 +40,14 @@ struct WaterPushConstants {
     float waveFreq;
     float waveSpeed;
     float liquidBasicType; // 0=water, 1=ocean, 2=magma, 3=slime
+    glm::vec2 screenSize;  // target size, for screen-space UVs
+    glm::vec2 depthRange;  // camera near, far - the shader linearises SceneDepth with these
+    float sceneValid = 0.0f; // 1 once captureSceneHistory has run; the shader used to guess this per pixel
+    float pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
 };
+static_assert(sizeof(WaterPushConstants) == 112, "the two shader declarations of this range are laid out for 112 bytes");
 
-// Matches set 2 binding 3 in water.frag.glsl
-struct ReflectionUBOData {
-    glm::mat4 reflViewProj;
-};
+
 
 WaterRenderer::WaterRenderer() = default;
 
@@ -152,7 +158,7 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     // createSceneHistoryResources writes descriptor binding 3
     createReflectionResources();
 
-    createSceneHistoryResources(vkCtx->getSwapchainExtent(),
+    createSceneHistoryResources(refractionCaptureExtent(),
                                 vkCtx->getSwapchainFormat(),
                                 vkCtx->getDepthFormat());
 
@@ -176,8 +182,8 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     // Water vertex shader only takes aPos(vec3) at loc 0 and aTexCoord(vec2) at loc 1
     // (normal is computed in shader from wave derivatives)
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },                     // aPos
-        { 1, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float) },        // aTexCoord (skip normal)
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },                     // aPos
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },        // aTexCoord (skip normal)
     };
 
     VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
@@ -193,7 +199,7 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         .setMultisample(vkCtx->getMsaaSamples())
         .setLayout(pipelineLayout)
         .setRenderPass(mainPass)
-        .setDynamicStates({ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR })
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 
     vertShader.destroy();
@@ -214,12 +220,12 @@ void WaterRenderer::recreatePipelines() {
 
     destroyReflectionResources();
     createReflectionResources();
-    createSceneHistoryResources(vkCtx->getSwapchainExtent(),
+    createSceneHistoryResources(refractionCaptureExtent(),
                                 vkCtx->getSwapchainFormat(),
                                 vkCtx->getDepthFormat());
 
     // Destroy old pipeline (keep layout)
-    if (waterPipeline) { vkDestroyPipeline(device, waterPipeline, nullptr); waterPipeline = VK_NULL_HANDLE; }
+    destroy(device, waterPipeline);
 
     // Load shaders
     VkShaderModule vertShader, fragShader;
@@ -240,8 +246,8 @@ void WaterRenderer::recreatePipelines() {
     vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
-        { 1, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float) },
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
     };
 
     VkRenderPass mainPass = vkCtx->getImGuiRenderPass();
@@ -257,7 +263,7 @@ void WaterRenderer::recreatePipelines() {
         .setMultisample(vkCtx->getMsaaSamples())
         .setLayout(pipelineLayout)
         .setRenderPass(mainPass)
-        .setDynamicStates({ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR })
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 
     vertShader.destroy();
@@ -276,34 +282,41 @@ void WaterRenderer::setRefractionEnabled(bool enabled) {
     // detects "no data" and uses the non-refraction path.
     if (!enabled && vkCtx) {
         vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-            for (uint32_t f = 0; f < SCENE_HISTORY_FRAMES; f++) {
-                auto& sh = sceneHistory[f];
+            for (auto& sh : sceneHistory) {
                 if (!sh.colorImage) continue;
 
-                VkImageMemoryBarrier toTransfer{};
-                toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                VkImageMemoryBarrier2 toTransfer{};
+                toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+                toTransfer.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                toTransfer.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
                 toTransfer.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toTransfer.image = sh.colorImage;
-                toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                toTransfer.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
                 toTransfer.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
                 toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+                VkDependencyInfo toTransferDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                toTransferDep.imageMemoryBarrierCount = 1;
+                toTransferDep.pImageMemoryBarriers = &toTransfer;
+                cmdPipelineBarrier2(cmd, toTransferDep);
 
                 VkClearColorValue clearColor = {{0.0f, 0.0f, 0.0f, 0.0f}};
-                VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                VkImageSubresourceRange range = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
                 vkCmdClearColorImage(cmd, sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &range);
 
-                VkImageMemoryBarrier toRead = toTransfer;
+                VkImageMemoryBarrier2 toRead = toTransfer;
+                toRead.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                toRead.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                 toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                     0, 0, nullptr, 0, nullptr, 1, &toRead);
+                VkDependencyInfo toReadDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                toReadDep.imageMemoryBarrierCount = 1;
+                toReadDep.pImageMemoryBarriers = &toRead;
+                cmdPipelineBarrier2(cmd, toReadDep);
             }
         });
     }
@@ -316,15 +329,21 @@ void WaterRenderer::shutdown() {
     VkDevice device = vkCtx->getDevice();
     vkDeviceWaitIdle(device);
 
+    // clear() defers surface destruction, and those lambdas free descriptor sets
+    // from the pools destroyed just below. Drain them here, while the pools are
+    // still valid - otherwise they linger until some later subsystem's flush
+    // runs them against a dead pool.
+    vkCtx->flushDeferredCleanup();
+
     destroyWater1xResources();
     destroyReflectionResources();
     destroySceneHistoryResources();
-    if (waterPipeline) { vkDestroyPipeline(device, waterPipeline, nullptr); waterPipeline = VK_NULL_HANDLE; }
-    if (pipelineLayout) { vkDestroyPipelineLayout(device, pipelineLayout, nullptr); pipelineLayout = VK_NULL_HANDLE; }
-    if (sceneDescPool) { vkDestroyDescriptorPool(device, sceneDescPool, nullptr); sceneDescPool = VK_NULL_HANDLE; }
-    if (sceneSetLayout) { vkDestroyDescriptorSetLayout(device, sceneSetLayout, nullptr); sceneSetLayout = VK_NULL_HANDLE; }
-    if (materialDescPool) { vkDestroyDescriptorPool(device, materialDescPool, nullptr); materialDescPool = VK_NULL_HANDLE; }
-    if (materialSetLayout) { vkDestroyDescriptorSetLayout(device, materialSetLayout, nullptr); materialSetLayout = VK_NULL_HANDLE; }
+    destroy(device, waterPipeline);
+    destroy(device, pipelineLayout);
+    destroy(device, sceneDescPool);
+    destroy(device, sceneSetLayout);
+    destroy(device, materialDescPool);
+    destroy(device, materialSetLayout);
 
     vkCtx = nullptr;
 }
@@ -355,8 +374,24 @@ void WaterRenderer::destroySceneHistoryResources() {
     }
     sceneColorSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
     sceneDepthSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-    sceneHistoryExtent = {0, 0};
+    sceneHistoryExtent = {.width = 0, .height = 0};
     sceneHistoryReady = false;
+}
+
+// Full resolution, deliberately.
+//
+// This was half, on the grounds that refraction is low-frequency - sampled
+// through a rippling normal that displaces it by a few pixels anyway - so the
+// difference would not show through moving water. That holds for a lake bed.
+// It does not hold for the player's own character, which is what is under the
+// surface most of the time this is being looked at, and which arrived through
+// the refraction visibly aliased however much anti-aliasing was asked for: the
+// copy it was sampled from had already thrown half the resolution away, and
+// nothing downstream can put that back. It is the thing in the middle of the
+// screen, so it gets the pixels.
+VkExtent2D WaterRenderer::refractionCaptureExtent() const {
+    VkExtent2D full = vkCtx ? vkCtx->getSwapchainExtent() : VkExtent2D{.width = 0, .height = 0};
+    return { .width = std::max(1u, full.width), .height = std::max(1u, full.height) };
 }
 
 void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colorFormat, VkFormat depthFormat) {
@@ -392,7 +427,7 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
     colorImgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     colorImgInfo.imageType = VK_IMAGE_TYPE_2D;
     colorImgInfo.format = colorFormat;
-    colorImgInfo.extent = {extent.width, extent.height, 1};
+    colorImgInfo.extent = {.width = extent.width, .height = extent.height, .depth = 1};
     colorImgInfo.mipLevels = 1;
     colorImgInfo.arrayLayers = 1;
     colorImgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -471,7 +506,7 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
         VkDescriptorBufferInfo reflUBOInfo{};
         reflUBOInfo.buffer = reflectionUBO;
         reflUBOInfo.offset = 0;
-        reflUBOInfo.range = sizeof(ReflectionUBOData);
+        reflUBOInfo.range = sizeof(WaterFrameUBOData);
 
         std::vector<VkWriteDescriptorSet> writes;
 
@@ -518,25 +553,29 @@ void WaterRenderer::createSceneHistoryResources(VkExtent2D extent, VkFormat colo
 
     // Initialize all per-frame history images to shader-read layout
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-        std::vector<VkImageMemoryBarrier> barriers;
-        for (uint32_t f = 0; f < SCENE_HISTORY_FRAMES; f++) {
-            VkImageMemoryBarrier b{};
-            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        std::vector<VkImageMemoryBarrier2> barriers;
+        for (auto& sh : sceneHistory) {
+            VkImageMemoryBarrier2 b{};
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            b.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = sceneHistory[f].colorImage;
-            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.image = sh.colorImage;
+            b.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
             b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             barriers.push_back(b);
 
-            b.image = sceneHistory[f].depthImage;
+            b.image = sh.depthImage;
             b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
             barriers.push_back(b);
         }
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
+        dep.pImageMemoryBarriers = barriers.data();
+        cmdPipelineBarrier2(cmd, dep);
     });
 }
 
@@ -548,11 +587,11 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
     if (surface.wmoId != 0) {
         const uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
         if (basicType == 2) {
-            // Magma — bright orange-red, opaque
+            // Magma - bright orange-red, opaque
             color = glm::vec4(1.0f, 0.35f, 0.05f, 1.0f);
             alpha = 0.95f;
         } else if (basicType == 3) {
-            // Slime — green, semi-opaque
+            // Slime - green, semi-opaque
             color = glm::vec4(0.2f, 0.6f, 0.1f, 1.0f);
             alpha = 0.85f;
         }
@@ -608,7 +647,7 @@ void WaterRenderer::updateMaterialUBO(WaterSurface& surface) {
 }
 
 // ==============================================================
-// Data loading (preserved from GL version — no GL calls)
+// Data loading (preserved from GL version - no GL calls)
 // ==============================================================
 
 void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool append,
@@ -652,7 +691,7 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
             MergeKey key;
             key.liquidType = layer.liquidType;
             key.roundedHeight = static_cast<int32_t>(std::round(layer.minHeight * 2.0f));
-            mergeGroups[key].push_back({chunkX, chunkY, &layer});
+            mergeGroups[key].push_back({.chunkX = chunkX, .chunkY = chunkY, .layer = &layer});
         }
     }
 
@@ -664,8 +703,8 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
     float tileWorldX = 0, tileWorldY = 0;
     glm::vec2 moonwellPos2D(0.0f);
     if (isStormwindArea) {
-        tileWorldX = (32.0f - tileX) * 533.33333f;
-        tileWorldY = (32.0f - tileY) * 533.33333f;
+        tileWorldX = (32.0f - tileX) * core::coords::TILE_SIZE;
+        tileWorldY = (32.0f - tileY) * core::coords::TILE_SIZE;
         moonwellPos2D = glm::vec2(-8755.9f, 1108.9f);
     }
 
@@ -780,11 +819,21 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
         // Initialize mask (128×128 sub-tiles)
         // Mask uses LSB bit order: tileIndex = row * 128 + col
         const int maskBytes = (MERGED_W * MERGED_W + 7) / 8;
-        // For ocean water (basicType 1) at sea level, fill the entire tile.
-        // Depth testing against terrain handles land occlusion naturally.
+        // Ocean water (basicType 1) at sea level fills each chunk that declares
+        // it, whatever its own bitmap says - an ocean layer's sub-rect is often
+        // sparse and the gaps read as holes in open sea.
+        //
+        // Each chunk that declares it, not the whole tile. This used to seed
+        // the entire 128×128 mask, on the reading that depth testing against
+        // the terrain would hide the water wherever there was land. That holds
+        // only for land *above* sea level. Somewhere the ground drops below it
+        // the water is drawn over the top with nothing to occlude it, and a
+        // chunk that declares no liquid at all got a surface anyway: the
+        // Caverns of Time, a hole in a coastal tile in Tanaris, was roofed with
+        // ocean. Any cave below sea level on an ocean tile had the same.
         uint8_t basicType = (key.liquidType == 0) ? 0 : ((key.liquidType - 1) % 4);
         bool isOcean = (basicType == 1) && (std::abs(groupHeight) < 1.0f);
-        surface.mask.resize(maskBytes, isOcean ? 0xFF : 0x00);
+        surface.mask.resize(maskBytes, 0x00);
 
         // ── Fill from each contributing chunk ──
         for (const auto& info : chunkLayers) {
@@ -829,30 +878,21 @@ void WaterRenderer::loadFromTerrain(const pipeline::ADTTerrain& terrain, bool ap
                 }
             }
 
-            // Copy mask — mark contributing sub-tiles as renderable.
-            // layer.mask is the canonical chunk-wide 8x8 mask (row*8+col, LSB).
-            for (int ly = 0; ly < layer.height; ly++) {
-                for (int lx = 0; lx < layer.width; lx++) {
-                    bool render = true;
-                    if (!layer.mask.empty()) {
-                        int origTileIdx = (layer.y + ly) * 8 + (layer.x + lx);
-                        int origByte = origTileIdx / 8;
-                        int origBit = origTileIdx % 8;
-                        if (origByte < static_cast<int>(layer.mask.size())) {
-                            render = (layer.mask[origByte] & (1 << origBit)) != 0;
-                        }
-                    }
-
-                    if (render) {
-                        int mx = baseGx + layer.y + ly;
-                        int my = baseGy + layer.x + lx;
-                        if (mx >= MERGED_W || my >= MERGED_W) continue;
-
-                        int mergedTileIdx = my * MERGED_W + mx;
-                        int byteIdx = mergedTileIdx / 8;
-                        int bitIdx = mergedTileIdx % 8;
-                        surface.mask[byteIdx] |= static_cast<uint8_t>(1 << bitIdx);
-                    }
+            // Which of this chunk's sixty-four sub-tiles are drawn. The rule
+            // lives in water_mask.hpp so it can be checked without a device;
+            // this places the answer, in the chunk-row-to-render-X order the
+            // merged grid uses.
+            const uint64_t chunkMask = chunkWaterMask(
+                layer.mask, layer.x, layer.y, layer.width, layer.height, isOcean);
+            for (int row = 0; row < 8; row++) {
+                for (int col = 0; col < 8; col++) {
+                    if (!(chunkMask & (uint64_t{1} << (row * 8 + col)))) continue;
+                    const int mx = baseGx + row;
+                    const int my = baseGy + col;
+                    if (mx >= MERGED_W || my >= MERGED_W) continue;
+                    const int mergedTileIdx = my * MERGED_W + mx;
+                    surface.mask[mergedTileIdx / 8] |=
+                        static_cast<uint8_t>(1 << (mergedTileIdx % 8));
                 }
             }
         }
@@ -1050,7 +1090,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkPipeline pipeline = (use1x && water1xPipeline) ? water1xPipeline : waterPipeline;
     if (!renderingEnabled || surfaces.empty() || !pipeline) {
         if (renderDiagCounter_++ % 300 == 0 && !surfaces.empty()) {
-            LOG_WARNING("Water: render skipped — enabled=", renderingEnabled,
+            LOG_WARNING("Water: render skipped - enabled=", renderingEnabled,
                         " surfaces=", surfaces.size(),
                         " pipeline=", (pipeline ? "ok" : "null"),
                         " use1x=", use1x);
@@ -1061,7 +1101,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkDescriptorSet activeSceneSet = sceneHistory[fi].sceneSet;
     if (!activeSceneSet) {
         if (renderDiagCounter_++ % 300 == 0) {
-            LOG_WARNING("Water: render skipped — sceneSet is null, surfaces=", surfaces.size());
+            LOG_WARNING("Water: render skipped - sceneSet is null, surfaces=", surfaces.size());
         }
         return;
     }
@@ -1105,7 +1145,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         bool isWmoWater = (surface.wmoId != 0);
         bool canalProfile = isWmoWater || (surface.liquidType == 5);
         uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
-        // WMO water gets no wave displacement — prevents visible slosh at
+        // WMO water gets no wave displacement - prevents visible slosh at
         // geometry edges (bridges, docks) where water is far below the surface.
         float waveAmp = isWmoWater ? 0.0f : (basicType == 1 ? 0.35f : 0.08f);
         float waveFreq = canalProfile ? 0.35f : (basicType == 1 ? 0.20f : 0.30f);
@@ -1117,6 +1157,13 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         push.waveFreq = waveFreq;
         push.waveSpeed = waveSpeed;
         push.liquidBasicType = static_cast<float>(basicType);
+        push.screenSize = glm::vec2(static_cast<float>(renderExtent_.width),
+                                    static_cast<float>(renderExtent_.height));
+        // Asked of the camera rather than written out in the shader, which is
+        // how the two came to disagree: the shader linearised the depth buffer
+        // against a near plane of 0.05 while the camera's is 0.5.
+        push.depthRange = glm::vec2(camera.getNearPlane(), camera.getFarPlane());
+        push.sceneValid = sceneHistoryReady ? 1.0f : 0.0f;
 
         vkCmdPushConstants(cmd, pipelineLayout,
                             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1145,9 +1192,16 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
         return;
     }
 
+    // The scene is not always rendered at the history's resolution - FSR renders
+    // smaller and upscales later. Copying the smaller image into the corner of a
+    // larger history would leave the refraction sampling a fraction of the frame
+    // stretched over all of it, so scale with a blit whenever they differ and
+    // keep the cheap straight copy when they match.
+    const bool needsScaling = (srcExtent.width != sceneHistoryExtent.width ||
+                               srcExtent.height != sceneHistoryExtent.height);
     VkExtent2D copyExtent{
-        std::min(srcExtent.width, sceneHistoryExtent.width),
-        std::min(srcExtent.height, sceneHistoryExtent.height)
+        .width = std::min(srcExtent.width, sceneHistoryExtent.width),
+        .height = std::min(srcExtent.height, sceneHistoryExtent.height)
     };
     if (copyExtent.width == 0 || copyExtent.height == 0) return;
 
@@ -1159,8 +1213,10 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
                         VkAccessFlags dstAccess,
                         VkPipelineStageFlags srcStage,
                         VkPipelineStageFlags dstStage) {
-        VkImageMemoryBarrier b{};
-        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b.srcStageMask = srcStage;
+        b.dstStageMask = dstStage;
         b.oldLayout = oldLayout;
         b.newLayout = newLayout;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1173,7 +1229,10 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
         b.subresourceRange.layerCount = 1;
         b.srcAccessMask = srcAccess;
         b.dstAccessMask = dstAccess;
-        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &b;
+        cmdPipelineBarrier2(cmd, dep);
     };
 
     // Color source: final render pass layout is PRESENT_SRC.
@@ -1190,12 +1249,25 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
              VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-    VkImageCopy colorCopy{};
-    colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    colorCopy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    colorCopy.extent = {copyExtent.width, copyExtent.height, 1};
-    vkCmdCopyImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
+    if (needsScaling) {
+        VkImageBlit colorBlit{};
+        colorBlit.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorBlit.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorBlit.srcOffsets[1] = {.x = static_cast<int32_t>(srcExtent.width),
+                                   .y = static_cast<int32_t>(srcExtent.height), .z = 1};
+        colorBlit.dstOffsets[1] = {.x = static_cast<int32_t>(sceneHistoryExtent.width),
+                                   .y = static_cast<int32_t>(sceneHistoryExtent.height), .z = 1};
+        vkCmdBlitImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &colorBlit, VK_FILTER_LINEAR);
+    } else {
+        VkImageCopy colorCopy{};
+        colorCopy.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorCopy.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        colorCopy.extent = {.width = copyExtent.width, .height = copyExtent.height, .depth = 1};
+        vkCmdCopyImage(cmd, srcColorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       sh.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
+    }
 
     barrier2(sh.colorImage, VK_IMAGE_ASPECT_COLOR_BIT,
              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1217,12 +1289,27 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-        VkImageCopy depthCopy{};
-        depthCopy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-        depthCopy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
-        depthCopy.extent = {copyExtent.width, copyExtent.height, 1};
-        vkCmdCopyImage(cmd, srcDepthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       sh.depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthCopy);
+        if (needsScaling) {
+            // Depth must not be filtered - an interpolated depth is a surface
+            // that exists nowhere.
+            VkImageBlit depthBlit{};
+            depthBlit.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+            depthBlit.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+            depthBlit.srcOffsets[1] = {.x = static_cast<int32_t>(srcExtent.width),
+                                       .y = static_cast<int32_t>(srcExtent.height), .z = 1};
+            depthBlit.dstOffsets[1] = {.x = static_cast<int32_t>(sceneHistoryExtent.width),
+                                       .y = static_cast<int32_t>(sceneHistoryExtent.height), .z = 1};
+            vkCmdBlitImage(cmd, srcDepthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           sh.depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &depthBlit, VK_FILTER_NEAREST);
+        } else {
+            VkImageCopy depthCopy{};
+            depthCopy.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+            depthCopy.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+            depthCopy.extent = {.width = copyExtent.width, .height = copyExtent.height, .depth = 1};
+            vkCmdCopyImage(cmd, srcDepthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           sh.depthImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthCopy);
+        }
 
         barrier2(sh.depthImage, VK_IMAGE_ASPECT_DEPTH_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1277,26 +1364,9 @@ void WaterRenderer::createWaterMesh(WaterSurface& surface) {
     // Generate indices respecting render mask (same logic as GL version)
     for (int y = 0; y < gridHeight - 1; y++) {
         for (int x = 0; x < gridWidth - 1; x++) {
-            bool renderTile = true;
-            if (!surface.mask.empty()) {
-                int tileIndex;
-                if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
-                    // Per-chunk terrain surfaces carry the canonical
-                    // chunk-wide 8x8 mask: bit = row*8 + col, LSB-first.
-                    int cx = static_cast<int>(surface.xOffset) + x;
-                    int cy = static_cast<int>(surface.yOffset) + y;
-                    tileIndex = cy * 8 + cx;
-                } else {
-                    // Merged terrain and WMO masks are packed width×height,
-                    // row-major, LSB-first.
-                    tileIndex = y * surface.width + x;
-                }
-                int byteIndex = tileIndex / 8;
-                int bitIndex = tileIndex % 8;
-                if (byteIndex < static_cast<int>(surface.mask.size())) {
-                    renderTile = (surface.mask[byteIndex] & (1 << bitIndex)) != 0;
-                }
-            }
+            const bool renderTile =
+                waterCellRendered(surface.mask, surface.wmoId, surface.width,
+                                  surface.xOffset, surface.yOffset, x, y);
 
             if (!renderTile) continue;
 
@@ -1381,60 +1451,43 @@ void WaterRenderer::destroyWaterMesh(WaterSurface& surface) {
 // Query functions (data-only, no GL)
 // ==============================================================
 
+/// Where a point sits on a surface, if that surface has water there at all.
+///
+/// Every water query starts with the same pair of questions: does the point
+/// fall on this surface, and does its render mask say the cell it lands in
+/// holds water. Three of them asked it separately - the height, the nearest
+/// height and the liquid type - and the cell arithmetic between the two halves
+/// was written out each time.
+///
+/// The cell is clamped at the far edge because a grid of `width` cells has
+/// `width + 1` corners: a point exactly on the last corner belongs to the last
+/// cell, not to one past it.
+std::optional<glm::vec2> WaterRenderer::wateredGridPosition(const WaterSurface& surface,
+                                                            float glX, float glY) const {
+    const auto grid = surfaceGridPosition(surface.origin, surface.stepX, surface.stepY,
+                                          surface.width, surface.height, glX, glY);
+    if (!grid) return std::nullopt;
+
+    const int ix = std::min(static_cast<int>(grid->x), static_cast<int>(surface.width) - 1);
+    const int iy = std::min(static_cast<int>(grid->y), static_cast<int>(surface.height) - 1);
+    if (!waterCellRendered(surface.mask, surface.wmoId, surface.width,
+                           surface.xOffset, surface.yOffset, ix, iy)) {
+        return std::nullopt;
+    }
+    return grid;
+}
+
 std::optional<float> WaterRenderer::getWaterHeightAt(float glX, float glY) const {
     std::optional<float> best;
 
     for (const auto& surface : surfaces) {
-        glm::vec2 rel(glX - surface.origin.x, glY - surface.origin.y);
-        glm::vec2 sX(surface.stepX.x, surface.stepX.y);
-        glm::vec2 sY(surface.stepY.x, surface.stepY.y);
-        float lenSqX = glm::dot(sX, sX);
-        float lenSqY = glm::dot(sY, sY);
-        if (lenSqX < 1e-6f || lenSqY < 1e-6f) continue;
-        float gx = glm::dot(rel, sX) / lenSqX;
-        float gy = glm::dot(rel, sY) / lenSqY;
+        const auto grid = wateredGridPosition(surface, glX, glY);
+        if (!grid) continue;
 
-        if (gx < 0.0f || gx > static_cast<float>(surface.width) ||
-            gy < 0.0f || gy > static_cast<float>(surface.height)) continue;
-
-        int gridWidth = surface.width + 1;
-        int ix = static_cast<int>(gx);
-        int iy = static_cast<int>(gy);
-        float fx = gx - ix;
-        float fy = gy - iy;
-
-        if (ix >= surface.width) { ix = surface.width - 1; fx = 1.0f; }
-        if (iy >= surface.height) { iy = surface.height - 1; fy = 1.0f; }
-        if (ix < 0 || iy < 0) continue;
-
-        if (!surface.mask.empty()) {
-            int tileIndex;
-            if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
-                tileIndex = (static_cast<int>(surface.yOffset) + iy) * 8 +
-                            (static_cast<int>(surface.xOffset) + ix);
-            } else {
-                tileIndex = iy * surface.width + ix;
-            }
-            int byteIndex = tileIndex / 8;
-            int bitIndex = tileIndex % 8;
-            if (byteIndex < static_cast<int>(surface.mask.size())) {
-                uint8_t maskByte = surface.mask[byteIndex];
-                bool renderTile = (maskByte & (1 << bitIndex)) != 0;
-                if (!renderTile) continue;
-            }
-        }
-
-        int idx00 = iy * gridWidth + ix;
-        int idx10 = idx00 + 1;
-        int idx01 = idx00 + gridWidth;
-        int idx11 = idx01 + 1;
-
-        int total = static_cast<int>(surface.heights.size());
-        if (idx11 >= total) continue;
-
-        float h00 = surface.heights[idx00], h10 = surface.heights[idx10];
-        float h01 = surface.heights[idx01], h11 = surface.heights[idx11];
-        float h = h00*(1-fx)*(1-fy) + h10*fx*(1-fy) + h01*(1-fx)*fy + h11*fx*fy;
+        const auto sampled = sampleGridHeight(surface.heights, surface.width,
+                                              surface.height, grid->x, grid->y);
+        if (!sampled) continue;
+        const float h = *sampled;
 
         if (!best || h > *best) best = h;
     }
@@ -1447,56 +1500,13 @@ std::optional<float> WaterRenderer::getNearestWaterHeightAt(float glX, float glY
     float bestDist = 1e9f;
 
     for (const auto& surface : surfaces) {
-        glm::vec2 rel(glX - surface.origin.x, glY - surface.origin.y);
-        glm::vec2 sX(surface.stepX.x, surface.stepX.y);
-        glm::vec2 sY(surface.stepY.x, surface.stepY.y);
-        float lenSqX = glm::dot(sX, sX);
-        float lenSqY = glm::dot(sY, sY);
-        if (lenSqX < 1e-6f || lenSqY < 1e-6f) continue;
-        float gx = glm::dot(rel, sX) / lenSqX;
-        float gy = glm::dot(rel, sY) / lenSqY;
+        const auto grid = wateredGridPosition(surface, glX, glY);
+        if (!grid) continue;
 
-        if (gx < 0.0f || gx > static_cast<float>(surface.width) ||
-            gy < 0.0f || gy > static_cast<float>(surface.height)) continue;
-
-        int gridWidth = surface.width + 1;
-        int ix = static_cast<int>(gx);
-        int iy = static_cast<int>(gy);
-        float fx = gx - ix;
-        float fy = gy - iy;
-
-        if (ix >= surface.width) { ix = surface.width - 1; fx = 1.0f; }
-        if (iy >= surface.height) { iy = surface.height - 1; fy = 1.0f; }
-        if (ix < 0 || iy < 0) continue;
-
-        if (!surface.mask.empty()) {
-            int tileIndex;
-            if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
-                tileIndex = (static_cast<int>(surface.yOffset) + iy) * 8 +
-                            (static_cast<int>(surface.xOffset) + ix);
-            } else {
-                tileIndex = iy * surface.width + ix;
-            }
-            int byteIndex = tileIndex / 8;
-            int bitIndex = tileIndex % 8;
-            if (byteIndex < static_cast<int>(surface.mask.size())) {
-                uint8_t maskByte = surface.mask[byteIndex];
-                bool renderTile = (maskByte & (1 << bitIndex)) != 0;
-                if (!renderTile) continue;
-            }
-        }
-
-        int idx00 = iy * gridWidth + ix;
-        int idx10 = idx00 + 1;
-        int idx01 = idx00 + gridWidth;
-        int idx11 = idx01 + 1;
-
-        int total = static_cast<int>(surface.heights.size());
-        if (idx11 >= total) continue;
-
-        float h00 = surface.heights[idx00], h10 = surface.heights[idx10];
-        float h01 = surface.heights[idx01], h11 = surface.heights[idx11];
-        float h = h00*(1-fx)*(1-fy) + h10*fx*(1-fy) + h01*(1-fx)*fy + h11*fx*fy;
+        const auto sampled = sampleGridHeight(surface.heights, surface.width,
+                                              surface.height, grid->x, grid->y);
+        if (!sampled) continue;
+        const float h = *sampled;
 
         // Only consider water that's above queryZ but not too far above
         if (h < queryZ - 2.0f) continue;  // water below camera, skip
@@ -1517,40 +1527,7 @@ std::optional<uint16_t> WaterRenderer::getWaterTypeAt(float glX, float glY) cons
     std::optional<uint16_t> bestType;
 
     for (const auto& surface : surfaces) {
-        glm::vec2 rel(glX - surface.origin.x, glY - surface.origin.y);
-        glm::vec2 sX(surface.stepX.x, surface.stepX.y);
-        glm::vec2 sY(surface.stepY.x, surface.stepY.y);
-        float lenSqX = glm::dot(sX, sX);
-        float lenSqY = glm::dot(sY, sY);
-        if (lenSqX < 1e-6f || lenSqY < 1e-6f) continue;
-
-        float gx = glm::dot(rel, sX) / lenSqX;
-        float gy = glm::dot(rel, sY) / lenSqY;
-        if (gx < 0.0f || gx > static_cast<float>(surface.width) ||
-            gy < 0.0f || gy > static_cast<float>(surface.height)) continue;
-
-        int ix = static_cast<int>(gx);
-        int iy = static_cast<int>(gy);
-        if (ix >= surface.width) ix = surface.width - 1;
-        if (iy >= surface.height) iy = surface.height - 1;
-        if (ix < 0 || iy < 0) continue;
-
-        if (!surface.mask.empty()) {
-            int tileIndex;
-            if (surface.wmoId == 0 && surface.width <= 8 && surface.mask.size() >= 8) {
-                tileIndex = (static_cast<int>(surface.yOffset) + iy) * 8 +
-                            (static_cast<int>(surface.xOffset) + ix);
-            } else {
-                tileIndex = iy * surface.width + ix;
-            }
-            int byteIndex = tileIndex / 8;
-            int bitIndex = tileIndex % 8;
-            if (byteIndex < static_cast<int>(surface.mask.size())) {
-                uint8_t maskByte = surface.mask[byteIndex];
-                bool renderTile = (maskByte & (1 << bitIndex)) != 0;
-                if (!renderTile) continue;
-            }
-        }
+        if (!wateredGridPosition(surface, glX, glY)) continue;
 
         float h = surface.minHeight;
         if (!bestHeight || h > *bestHeight) {
@@ -1565,17 +1542,10 @@ std::optional<uint16_t> WaterRenderer::getWaterTypeAt(float glX, float glY) cons
 bool WaterRenderer::isWmoWaterAt(float glX, float glY) const {
     for (const auto& surface : surfaces) {
         if (surface.wmoId == 0) continue;
-        glm::vec2 rel(glX - surface.origin.x, glY - surface.origin.y);
-        glm::vec2 sX(surface.stepX.x, surface.stepX.y);
-        glm::vec2 sY(surface.stepY.x, surface.stepY.y);
-        float lenSqX = glm::dot(sX, sX);
-        float lenSqY = glm::dot(sY, sY);
-        if (lenSqX < 1e-6f || lenSqY < 1e-6f) continue;
-        float gx = glm::dot(rel, sX) / lenSqX;
-        float gy = glm::dot(rel, sY) / lenSqY;
-        if (gx >= 0.0f && gx <= static_cast<float>(surface.width) &&
-            gy >= 0.0f && gy <= static_cast<float>(surface.height))
+        if (surfaceGridPosition(surface.origin, surface.stepX, surface.stepY,
+                                surface.width, surface.height, glX, glY)) {
             return true;
+        }
     }
     return false;
 }
@@ -1615,7 +1585,7 @@ void WaterRenderer::createReflectionResources() {
     colorImgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     colorImgCI.imageType = VK_IMAGE_TYPE_2D;
     colorImgCI.format = vkCtx->getSwapchainFormat();
-    colorImgCI.extent = {REFLECTION_WIDTH, REFLECTION_HEIGHT, 1};
+    colorImgCI.extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT, .depth = 1};
     colorImgCI.mipLevels = 1;
     colorImgCI.arrayLayers = 1;
     colorImgCI.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1637,7 +1607,7 @@ void WaterRenderer::createReflectionResources() {
     colorViewCI.image = reflectionColorImage;
     colorViewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
     colorViewCI.format = vkCtx->getSwapchainFormat();
-    colorViewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    colorViewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     if (vkCreateImageView(device, &colorViewCI, nullptr, &reflectionColorView) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection color view");
         return;
@@ -1648,7 +1618,7 @@ void WaterRenderer::createReflectionResources() {
     depthImgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     depthImgCI.imageType = VK_IMAGE_TYPE_2D;
     depthImgCI.format = vkCtx->getDepthFormat();
-    depthImgCI.extent = {REFLECTION_WIDTH, REFLECTION_HEIGHT, 1};
+    depthImgCI.extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT, .depth = 1};
     depthImgCI.mipLevels = 1;
     depthImgCI.arrayLayers = 1;
     depthImgCI.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1667,7 +1637,7 @@ void WaterRenderer::createReflectionResources() {
     depthViewCI.image = reflectionDepthImage;
     depthViewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
     depthViewCI.format = vkCtx->getDepthFormat();
-    depthViewCI.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    depthViewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     if (vkCreateImageView(device, &depthViewCI, nullptr, &reflectionDepthView) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection depth view");
         return;
@@ -1708,8 +1678,8 @@ void WaterRenderer::createReflectionResources() {
     depthAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depthAttach.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference colorRef{.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{.attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -1759,7 +1729,7 @@ void WaterRenderer::createReflectionResources() {
     // --- Reflection UBO ---
     VkBufferCreateInfo bufCI{};
     bufCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufCI.size = sizeof(ReflectionUBOData);
+    bufCI.size = sizeof(WaterFrameUBOData);
     bufCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
     VmaAllocationCreateInfo uboAllocCI{};
@@ -1775,7 +1745,7 @@ void WaterRenderer::createReflectionResources() {
     reflectionUBOMapped = mapInfo.pMappedData;
 
     // Initialize with identity
-    ReflectionUBOData initData{};
+    WaterFrameUBOData initData{};
     initData.reflViewProj = glm::mat4(1.0f);
     if (reflectionUBOMapped) {
         std::memcpy(reflectionUBOMapped, &initData, sizeof(initData));
@@ -1783,18 +1753,21 @@ void WaterRenderer::createReflectionResources() {
 
     // Transition reflection color image to shader-read so first frame doesn't read undefined
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = reflectionColorImage;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, dep);
     });
     reflectionColorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -1833,19 +1806,19 @@ bool WaterRenderer::beginReflectionPass(VkCommandBuffer cmd) {
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpInfo.renderPass = reflectionRenderPass;
     rpInfo.framebuffer = reflectionFramebuffer;
-    rpInfo.renderArea = {{0, 0}, {REFLECTION_WIDTH, REFLECTION_HEIGHT}};
+    rpInfo.renderArea = {.offset = {.x = 0, .y = 0}, .extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}};
 
     VkClearValue clears[2]{};
     clears[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    clears[1].depthStencil = {1.0f, 0};
+    clears[1].depthStencil = {.depth = 1.0f, .stencil = 0};
     rpInfo.clearValueCount = 2;
     rpInfo.pClearValues = clears;
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    VkViewport vp{0, 0, static_cast<float>(REFLECTION_WIDTH), static_cast<float>(REFLECTION_HEIGHT), 0.0f, 1.0f};
+    VkViewport vp{.x = 0, .y = 0, .width = static_cast<float>(REFLECTION_WIDTH), .height = static_cast<float>(REFLECTION_HEIGHT), .minDepth = 0.0f, .maxDepth = 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{{0, 0}, {REFLECTION_WIDTH, REFLECTION_HEIGHT}};
+    VkRect2D sc{.offset = {.x = 0, .y = 0}, .extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT}};
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     return true;
@@ -1880,10 +1853,108 @@ void WaterRenderer::endReflectionPass(VkCommandBuffer cmd) {
 }
 
 void WaterRenderer::updateReflectionUBO(const glm::mat4& reflViewProj) {
+    frameUBO_.reflViewProj = reflViewProj;
+    uploadFrameUBO();
+}
+
+void WaterRenderer::uploadFrameUBO() {
     if (!reflectionUBOMapped) return;
-    ReflectionUBOData data{};
-    data.reflViewProj = reflViewProj;
-    std::memcpy(reflectionUBOMapped, &data, sizeof(data));
+    std::memcpy(reflectionUBOMapped, &frameUBO_, sizeof(frameUBO_));
+}
+
+// Disturbance trail. Points are dropped along the path rather than parented to
+// the character, so the froth stays where the water was churned and the
+// character runs out of it - froth pinned under the feet reads as a decal.
+void WaterRenderer::updateWake(float deltaTime, const glm::vec2& pos,
+                               const glm::vec2& travelDir, float intensity, bool wading) {
+    // Age the existing trail. Drift is what spreads a swimmer's two emission
+    // lines apart with distance behind, which is the V.
+    for (auto& p : wakePoints_) {
+        p.age += deltaTime;
+        p.pos += p.drift * deltaTime;
+        // Barely any drag. A wake's arms are straight because the separation
+        // keeps growing with distance behind; damping the drift collapsed the
+        // two arms back onto each other and the V read as a single line.
+        p.drift *= std::max(0.0f, 1.0f - 0.25f * deltaTime);
+    }
+    wakePoints_.erase(std::remove_if(wakePoints_.begin(), wakePoints_.end(),
+                                     [](const WakePoint& p) { return p.age >= p.life; }),
+                      wakePoints_.end());
+
+    if (intensity > 0.0f) {
+        // Emit by distance travelled, not by time: standing still in the
+        // shallows should settle rather than pile froth up in one spot.
+        // Close enough together that the patches overlap into a continuous
+        // trail. Spaced out, each one reads as its own blob.
+        const float spacing = wading ? 0.40f : 0.60f;
+        bool emit = !hasWakeEmitPos_;
+        if (!emit) {
+            const glm::vec2 delta = pos - lastWakeEmitPos_;
+            emit = glm::dot(delta, delta) >= spacing * spacing;
+        }
+
+        if (emit) {
+            hasWakeEmitPos_ = true;
+            lastWakeEmitPos_ = pos;
+
+            glm::vec2 fwd = travelDir;
+            const float fwdLenSq = glm::dot(fwd, fwd);
+            fwd = (fwdLenSq > 1e-6f) ? fwd * glm::inversesqrt(fwdLenSq) : glm::vec2(0.0f, 1.0f);
+            const glm::vec2 side(-fwd.y, fwd.x);
+
+            auto push = [&](const glm::vec2& at, const glm::vec2& drift,
+                            float life, float strength) {
+                if (static_cast<int>(wakePoints_.size()) >= kMaxWakePoints) {
+                    wakePoints_.erase(wakePoints_.begin());  // oldest goes first
+                }
+                WakePoint wp;
+                wp.pos = at;
+                wp.drift = drift;
+                wp.life = life;
+                wp.strength = strength;
+                wakePoints_.push_back(wp);
+            };
+
+            if (wading) {
+                // Legs punching through the surface: one churned patch per
+                // stride, thrown slightly forward of where the foot lands.
+                push(pos + fwd * 0.25f, side * 0.30f, 1.5f, intensity);
+            } else {
+                // Swimming: a pair off the shoulders, each drifting outward and
+                // back. The arms open with age because the emissions keep
+                // separating after the swimmer has moved on, so the trail is a V
+                // even though every point is laid down on the same line.
+                const float spread = 0.50f;
+                const float lateral = 1.15f;
+                const float life = 1.9f;
+                push(pos + side * spread - fwd * 0.2f,
+                     side * lateral - fwd * 0.30f, life, intensity * 0.8f);
+                push(pos - side * spread - fwd * 0.2f,
+                     -side * lateral - fwd * 0.30f, life, intensity * 0.8f);
+            }
+        }
+    } else {
+        hasWakeEmitPos_ = false;
+    }
+
+    // Pack for the shader, and build the bounding circle the fragment shader
+    // uses to reject the rest of the sheet in one test.
+    const int count = std::min(static_cast<int>(wakePoints_.size()), kMaxWakePoints);
+    glm::vec2 centre(0.0f);
+    for (int i = 0; i < count; ++i) centre += wakePoints_[i].pos;
+    if (count > 0) centre /= static_cast<float>(count);
+
+    float cullRadius = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        const WakePoint& p = wakePoints_[i];
+        const float age01 = std::min(1.0f, p.age / p.life);
+        // Must cover the point's own spread, or froth is clipped mid-patch.
+        constexpr float kMaxPatchRadius = 1.45f;
+        cullRadius = std::max(cullRadius, glm::length(p.pos - centre) + kMaxPatchRadius);
+        frameUBO_.wakePoints[i] = glm::vec4(p.pos.x, p.pos.y, age01, p.strength);
+    }
+    frameUBO_.wakeBounds = glm::vec4(centre.x, centre.y, cullRadius, static_cast<float>(count));
+    uploadFrameUBO();
 }
 
 // ==============================================================
@@ -1899,7 +1970,7 @@ std::optional<float> WaterRenderer::getDominantWaterHeight(const glm::vec3& came
     bool found = false;
 
     for (const auto& surface : surfaces) {
-        // Skip magma/slime — only reflect water/ocean
+        // Skip magma/slime - only reflect water/ocean
         uint8_t basicType = (surface.liquidType == 0) ? 0 : ((surface.liquidType - 1) % 4);
         if (basicType >= 2) continue;
 
@@ -1992,8 +2063,8 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference colorRef{.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{.attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -2038,8 +2109,8 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
     vertBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     std::vector<VkVertexInputAttributeDescription> vertAttribs = {
-        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
-        { 1, 0, VK_FORMAT_R32G32_SFLOAT, 6 * sizeof(float) },
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 6 * sizeof(float) },
     };
 
     water1xPipeline = PipelineBuilder()
@@ -2053,7 +2124,7 @@ bool WaterRenderer::createWater1xPass(VkFormat colorFormat, VkFormat depthFormat
         .setMultisample(VK_SAMPLE_COUNT_1_BIT)
         .setLayout(pipelineLayout)
         .setRenderPass(water1xRenderPass)
-        .setDynamicStates({ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR })
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx->getPipelineCache());
 
     vertShader.destroy();
@@ -2103,34 +2174,8 @@ void WaterRenderer::destroyWater1xResources() {
         if (fb) vkDestroyFramebuffer(device, fb, nullptr);
     }
     water1xFramebuffers.clear();
-    if (water1xPipeline) { vkDestroyPipeline(device, water1xPipeline, nullptr); water1xPipeline = VK_NULL_HANDLE; }
+    destroy(device, water1xPipeline);
     if (water1xRenderPass) { vkDestroyRenderPass(device, water1xRenderPass, nullptr); water1xRenderPass = VK_NULL_HANDLE; }
 }
-
-bool WaterRenderer::beginWater1xPass(VkCommandBuffer cmd, uint32_t imageIndex, VkExtent2D extent) {
-    if (!water1xRenderPass || imageIndex >= water1xFramebuffers.size() || !water1xFramebuffers[imageIndex])
-        return false;
-
-    VkRenderPassBeginInfo rpBI{};
-    rpBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rpBI.renderPass = water1xRenderPass;
-    rpBI.framebuffer = water1xFramebuffers[imageIndex];
-    rpBI.renderArea = {{0, 0}, extent};
-    rpBI.clearValueCount = 0;
-    rpBI.pClearValues = nullptr;
-    vkCmdBeginRenderPass(cmd, &rpBI, VK_SUBPASS_CONTENTS_INLINE);
-
-    VkViewport vp{0, 0, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{{0, 0}, extent};
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-
-    return true;
-}
-
-void WaterRenderer::endWater1xPass(VkCommandBuffer cmd) {
-    vkCmdEndRenderPass(cmd);
-}
-
 } // namespace rendering
 } // namespace wowee

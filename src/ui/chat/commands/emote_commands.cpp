@@ -5,6 +5,7 @@
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
+#include "game/pet_action.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
 #include <algorithm>
@@ -19,8 +20,8 @@ public:
         ctx.gameHandler.setStandState(1);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"sit"}; }
-    std::string helpText() const override { return "Sit down"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"sit"}; }
+    [[nodiscard]] std::string helpText() const override { return "Sit down"; }
 };
 
 // --- /stand ---
@@ -30,8 +31,8 @@ public:
         ctx.gameHandler.setStandState(0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"stand"}; }
-    std::string helpText() const override { return "Stand up"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"stand"}; }
+    [[nodiscard]] std::string helpText() const override { return "Stand up"; }
 };
 
 // --- /kneel ---
@@ -41,8 +42,8 @@ public:
         ctx.gameHandler.setStandState(8);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"kneel"}; }
-    std::string helpText() const override { return "Kneel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"kneel"}; }
+    [[nodiscard]] std::string helpText() const override { return "Kneel"; }
 };
 
 // --- /logout, /camp ---
@@ -52,10 +53,10 @@ public:
         ctx.gameHandler.requestLogout(false);
         return {};
     }
-    // aliases() is the complete name list — "logout" itself was missing here, so
+    // aliases() is the complete name list - "logout" itself was missing here, so
     // /logout was never actually a command despite /help advertising it.
-    std::vector<std::string> aliases() const override { return {"logout", "camp"}; }
-    std::string helpText() const override { return "Logout to character select"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"logout", "camp"}; }
+    [[nodiscard]] std::string helpText() const override { return "Logout to character select"; }
 };
 
 // --- /quit, /exit ---
@@ -67,8 +68,8 @@ public:
         ctx.gameHandler.requestLogout(true);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"quit", "exit"}; }
-    std::string helpText() const override { return "Logout and quit the game"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"quit", "exit"}; }
+    [[nodiscard]] std::string helpText() const override { return "Logout and quit the game"; }
 };
 
 // --- /cancellogout ---
@@ -78,8 +79,8 @@ public:
         ctx.gameHandler.cancelLogout();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cancellogout"}; }
-    std::string helpText() const override { return "Cancel pending logout"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancellogout"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cancel pending logout"; }
 };
 
 // --- /dismount ---
@@ -89,8 +90,8 @@ public:
         ctx.gameHandler.dismount();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"dismount"}; }
-    std::string helpText() const override { return "Dismount"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"dismount"}; }
+    [[nodiscard]] std::string helpText() const override { return "Dismount"; }
 };
 
 // --- /cancelform, /cancelshapeshift ---
@@ -106,15 +107,15 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cancelform", "cancelshapeshift"}; }
-    std::string helpText() const override { return "Cancel shapeshift form"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancelform", "cancelshapeshift"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cancel shapeshift form"; }
 };
 
 // --- /cancelaura ---
 class CancelAuraCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         std::string auraArg = ctx.args;
         while (!auraArg.empty() && auraArg.front() == ' ') auraArg.erase(auraArg.begin());
         while (!auraArg.empty() && auraArg.back()  == ' ') auraArg.pop_back();
@@ -146,8 +147,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cancelaura"}; }
-    std::string helpText() const override { return "Cancel a specific aura/buff"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cancelaura"}; }
+    [[nodiscard]] std::string helpText() const override { return "Cancel a specific aura/buff"; }
 };
 
 // --- Pet commands ---
@@ -155,61 +156,67 @@ class PetAttackCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         uint64_t target = ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0;
-        ctx.gameHandler.sendPetAction(5, target);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAttack), target);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petattack"}; }
-    std::string helpText() const override { return "Pet: attack target"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petattack"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: attack target"; }
 };
 
 class PetFollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.sendPetAction(2, 0);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kFollow), 0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petfollow"}; }
-    std::string helpText() const override { return "Pet: follow owner"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petfollow"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: follow owner"; }
 };
 
 class PetStayCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.sendPetAction(3, 0);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kStay), 0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petstay", "pethalt"}; }
-    std::string helpText() const override { return "Pet: stay"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petstay", "pethalt"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: stay"; }
 };
 
 class PetPassiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.sendPetAction(1, 0);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kPassive), 0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petpassive"}; }
-    std::string helpText() const override { return "Pet: passive mode"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petpassive"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: passive mode"; }
 };
 
 class PetDefensiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.sendPetAction(4, 0);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kDefensive), 0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petdefensive"}; }
-    std::string helpText() const override { return "Pet: defensive mode"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petdefensive"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: defensive mode"; }
 };
 
 class PetAggressiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.sendPetAction(6, 0);
+        ctx.gameHandler.sendPetAction(
+            game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kAggressive), 0);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petaggressive"}; }
-    std::string helpText() const override { return "Pet: aggressive mode"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petaggressive"}; }
+    [[nodiscard]] std::string helpText() const override { return "Pet: aggressive mode"; }
 };
 
 class PetDismissCommand : public IChatCommand {
@@ -218,8 +225,8 @@ public:
         ctx.gameHandler.dismissPet();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"petdismiss"}; }
-    std::string helpText() const override { return "Dismiss pet"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"petdismiss"}; }
+    [[nodiscard]] std::string helpText() const override { return "Dismiss pet"; }
 };
 
 // --- Registration ---

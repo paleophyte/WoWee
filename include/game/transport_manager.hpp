@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/transport_path_repository.hpp"
+#include "core/coordinates.hpp"
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_animator.hpp"
 #include <chrono>
@@ -55,6 +56,11 @@ struct ActiveTransport {
     bool hasServerYaw;              // Whether we've received server yaw
     float dockYaw;                  // Authored server spawn yaw used during route dwell
     bool hasDockYaw;                // Whether dockYaw was captured before client route assignment
+    // The yaw this object was placed at. An elevator never turns, so for a
+    // z-only path this is the heading for its whole life - there is no route
+    // tangent to derive one from, and deriving anyway is how a lift ended up
+    // sideways.
+    float spawnYaw = 0.0f;
     bool serverYawFlipped180;       // Auto-correction when server yaw is consistently opposite movement
     int serverYawAlignmentScore;    // Hysteresis score for yaw flip detection
 
@@ -68,6 +74,71 @@ struct ActiveTransport {
     bool allowBootstrapVelocity;   // Disable DBC bootstrap when spawn/path mismatch is clearly invalid
     bool isM2 = false;             // True if rendered as M2 (not WMO), uses M2Renderer for transforms
     bool worldCoords = false;       // TaxiPathNode absolute-world route (client-owned WMO ship)
+    /// Running a route borrowed from another transport, not its own.
+    ///
+    /// A transport with no TransportAnimation entry and no TaxiPathNode route
+    /// is given some other transport's moving path so it is not left sitting
+    /// still. That looks right from the shore and is wrong to ride: the client
+    /// flies the borrowed route while the server's transport is somewhere
+    /// else, so a passenger is carried to the wrong place and then snapped to
+    /// the real one - the Tirisfal zeppelin plays both journeys at once doing
+    /// this. Such a transport is moved by the server's own position updates
+    /// instead of being animated locally.
+    bool borrowedPath = false;
+
+    /// Whether the hull is on the player's map right now.
+    ///
+    /// A cross-continent route is one journey over two maps, and for part of
+    /// its cycle the hull is on the other one. It is not drawn then, nothing
+    /// can stand on it, and nobody can board it - the server will not have it
+    /// here either.
+    bool onThisMap = true;
+
+    /// Whether a player standing on this is carried by it.
+    ///
+    /// The client decides boarding for itself - the server never says "you
+    /// stepped onto your own transport" - so what matters is whether this
+    /// client knows where the deck is from one frame to the next. An M2
+    /// transport always does, and a WMO one does when it animates the path
+    /// itself.
+    ///
+    /// worldCoords used to be required as well, and it is not the same
+    /// question: it says the route is in absolute world coordinates rather
+    /// than relative to the spawn, which is about where the path is drawn and
+    /// not about whether there is a deck under the player. It is only ever set
+    /// when a TaxiPathNode route is assigned, and the Tirisfal zeppelin gets a
+    /// remapped fallback path instead - so it animated, carried its own
+    /// searchlights around, and left every passenger standing in the air where
+    /// the deck had been.
+    [[nodiscard]] bool carriesRiders() const {
+        // A borrowed-path transport no longer animates locally, but it still
+        // has a deck and still knows where it is - it is moved by server
+        // updates rather than by a spline. Riders belong on it either way.
+        //
+        // Not while it is on another map: its hull is held still and hidden
+        // there, so a deck query would answer from a position it left.
+        return onThisMap && (isM2 || useClientAnimation || borrowedPath);
+    }
+
+    // Whether the hull is currently holding at an authored dock stop, and what
+    // was last pushed to its child doodads because of it. A paddlewheel that
+    // keeps turning while its ship sits at the pier is the visible symptom of
+    // never revisiting this: the animation was set once when the doodad spawned.
+    // The count is kept because doodads stream in over several frames, so a
+    // doodad attached after the last push would otherwise keep its spawn state.
+    bool atDockDwell = false;
+    int appliedDoodadAnim = -1;
+    size_t appliedDoodadCount = 0;
+
+    // The server's own route clock, when it publishes one (WotLK MO_TRANSPORT).
+    // routePhase is the fraction of the route period the hull was at as of
+    // routePhaseAtTime; routePeriodMs is that period. Preferred over the client's
+    // invented period, which is what let a ferry lap its shore while the server's
+    // schedule caught up.
+    bool hasServerRouteClock = false;
+    float routePhase = 0.0f;
+    uint32_t routePeriodMs = 0;
+    double routePhaseAtTime = 0.0;
 };
 
 class TransportManager {
@@ -97,30 +168,32 @@ public:
                (transport.pathId >= 176080u && transport.pathId <= 176085u);
     }
 
-    // Single source of truth for a transport hull's fixed orientation offset.
+    // Single source of truth for a transport hull's fixed orientation offset:
+    // its rendered facing is (direction of travel) + this constant. Every
+    // orientation path funnels through here rather than re-listing ships.
+    // Server-position-driven transports (trams, zeppelins) never reach it - they
+    // measure the same offset live from heading-vs-velocity in updateYawAlignment().
     //
-    // A transport's rendered facing is (its direction of travel) + (a constant per-MODEL
-    // bow offset baked into how the art was authored): 0 means the model's bow already
-    // points along route-forward, PI means the bow is modelled pointing aft. This is a
-    // property of the displayId, not of the per-realm GameObject entry, so keying it by
-    // model makes the same correction apply to that hull on every expansion and realm.
+    // Measured from the art rather than guessed: every transport hull in the WoW
+    // data is authored with its bow at model-space -X, so the offset is PI for
+    // all of them and there are no exceptions to list.
     //
-    // Every orientation path funnels through this one function instead of re-listing
-    // ships: the client-animated TaxiPath ships add it to their spline-tangent yaw, and
-    // it also decides whether a docked ship restores its spawn yaw or holds its heading.
-    // Server-position-driven transports (trams, zeppelins) need no table entry — they
-    // measure the same offset live from heading-vs-velocity in updateYawAlignment(). This
-    // table is only the seed for hulls the client animates itself and can never observe
-    // move under server control, so there is nothing to learn the offset from.
-    static float transportModelBowOffset(uint32_t displayId) {
-        constexpr float kBowReversed = 3.14159265358979323846f;  // PI
-        switch (displayId) {
-            case 7087u:  // Auberdine night-elf ferry (The Moonspray, Elune's Blessing)
-            case 7446u:  // Icebreaker (Kraken-class)
-                return kBowReversed;
-            default:     // Bravery-class (3015) and every other hull: bow already forward
-                return 0.0f;
-        }
+    // Two independent measurements over every .wmo under World\wmo\transports:
+    // the hull tapers to a point at -X and stays blunt at +X (transportship
+    // 1.0 vs 10.1 half-width at the ends, icebreaker 4.1 vs 14.8, the NE ferry,
+    // the UD and pirate ships, both zeppelins and the battleships all the same
+    // way); and the icebreaker is a paddle steamer whose ICEBREAKER_PADDLEWHEEL
+    // doodad sits at x=+36.3 on a hull spanning -60.7..+50.1, which puts the
+    // stern at +X and so the bow at -X.
+    //
+    // The table this replaces claimed the opposite default and then listed the
+    // icebreaker and the NE ferry as the reversed ones - exactly inverted. It
+    // could never have been right for everything at once, because it was fitted
+    // against a facing that came from a frozen server yaw rather than from the
+    // route, so what it was correcting was not the hull.
+    static float transportModelBowOffset(uint32_t /*displayId*/) {
+        constexpr float kBowReversed = core::coords::PI;
+        return kBowReversed;
     }
 
     // Round a path duration to the nearest 500ms for seed-modulo purposes only. Deeprun
@@ -142,14 +215,36 @@ public:
     void setM2Renderer(rendering::M2Renderer* renderer) { m2Renderer_ = renderer; }
 
     void update(float deltaTime);
+    // Which transport the player is standing on, or 0. A cross-continent route
+    // spends part of its cycle on the other map, and the slice hides the hull
+    // and stops posing it for that stretch - which, with a rider aboard, takes
+    // the deck out from under them and leaves them frozen off the world. The
+    // manager has no other way to know a rider is there: boarding is decided
+    // entirely on the client.
+    void setRiderTransport(uint64_t guid) { riderTransportGuid_ = guid; }
+
+    /// Whether a point stands over an M2 transport's actual footprint.
+    ///
+    /// getTransportDeckFloorHeight refuses an M2 outright, so the ship path's
+    /// deck test has never been available to a lift, and boarding one is
+    /// decided on a radius about its origin instead - twelve yards across and
+    /// fifteen tall for anything that is not a tram or a Thunder Bluff lift.
+    /// An Undercity lift car is about fifteen wide, so that radius reaches
+    /// well past the deck and out into the shaft: standing beside one attaches
+    /// you to it, and it then carries you down through the floor.
+    ///
+    /// Nullopt where the renderer has no bounds for the instance, so a caller
+    /// can keep its old test rather than refuse a board it cannot judge.
+    [[nodiscard]] std::optional<bool> isPointOverM2Footprint(
+        uint64_t transportGuid, const glm::vec3& canonicalPosition) const;
     void registerTransport(uint64_t guid,
                            uint32_t wmoInstanceId,
                            uint32_t pathId,
                            const glm::vec3& spawnWorldPos,
                            uint32_t entry = 0,
                            uint32_t displayId = 0,
-                           bool isM2 = false);
-    void unregisterTransport(uint64_t guid);
+                           bool isM2 = false,
+                           float spawnOrientation = 0.0f);
     // Logical transport GUIDs are only unique within the current map. Clear all
     // active instances on map transitions so a reused GUID cannot retain the
     // previous map's entry/path while merely rebinding to a new render model.
@@ -159,9 +254,9 @@ public:
     // MAIN-THREAD-ONLY: this reference is not lock-protected, matching EntityManager's
     // getEntities(). Callers on another thread (e.g. a headless HTTP API thread) must
     // use snapshotTransports() instead.
-    const std::unordered_map<uint64_t, ActiveTransport>& getTransports() const { return transports_; }
+    [[nodiscard]] const std::unordered_map<uint64_t, ActiveTransport>& getTransports() const { return transports_; }
     // Thread-safe copy of all registered transports, safe to call from any thread.
-    std::vector<ActiveTransport> snapshotTransports() const {
+    [[nodiscard]] std::vector<ActiveTransport> snapshotTransports() const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<ActiveTransport> snapshot;
         snapshot.reserve(transports_.size());
@@ -171,13 +266,27 @@ public:
         return snapshot;
     }
     glm::vec3 getPlayerWorldPosition(uint64_t transportGuid, const glm::vec3& localOffset);
-    glm::vec3 serverToTransportLocal(uint64_t transportGuid,
+    [[nodiscard]] glm::vec3 serverToTransportLocal(uint64_t transportGuid,
                                      const glm::vec3& serverOffset) const;
-    glm::mat4 getTransportInvTransform(uint64_t transportGuid);
-    bool isPointOnTransportDeck(uint64_t transportGuid,
+    // Adopt the server's published route phase for a transport. phase is a
+    // fraction in [0,1) of periodMs. Cheap and idempotent - safe to call on every
+    // object update that carries the fields.
+    void applyServerRouteClock(uint64_t transportGuid, float phase, uint32_t periodMs);
+
+    // Ship machinery follows the hull: ShipMoving while under way, ShipStop when
+    // holding at a dock. Cheap to call every frame - it only reaches the
+    // renderer when the state or the doodad count actually changes.
+    void applyDoodadMotionState(ActiveTransport& transport, bool moving);
+
+    /// Whether this transport's hull collision has finished loading. Distinguishes
+    /// "the deck query found nothing because there is no deck here" from "because
+    /// the model is still uploading".
+    [[nodiscard]] bool isTransportCollisionReady(uint64_t transportGuid) const;
+
+    [[nodiscard]] bool isPointOnTransportDeck(uint64_t transportGuid,
                                 const glm::vec3& canonicalPosition,
                                 float maxFloorDelta = 1.25f) const;
-    std::optional<float> getTransportDeckFloorHeight(
+    [[nodiscard]] std::optional<float> getTransportDeckFloorHeight(
         uint64_t transportGuid,
         const glm::vec3& canonicalPosition) const;
 
@@ -191,9 +300,9 @@ public:
     bool loadTaxiPathNodeDBC(pipeline::AssetManager* assetMgr);
 
     // Check if a TaxiPathNode path exists for a given taxiPathId (on any map)
-    bool hasTaxiPath(uint32_t taxiPathId) const;
+    [[nodiscard]] bool hasTaxiPath(uint32_t taxiPathId) const;
     // Check if a TaxiPathNode segment exists for a taxiPathId on a specific map
-    bool hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const;
+    [[nodiscard]] bool hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) const;
 
     // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives).
     // mapId selects the per-map segment (cross-map boat paths only have valid world
@@ -201,24 +310,24 @@ public:
     bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId);
 
     // Check if a path exists for a given GameObject entry
-    bool hasPathForEntry(uint32_t entry) const;
+    [[nodiscard]] bool hasPathForEntry(uint32_t entry) const;
     // Check if a path has meaningful XY travel (used to reject near-stationary false positives).
-    bool hasUsableMovingPathForEntry(uint32_t entry, float minXYRange = 1.0f) const;
+    [[nodiscard]] bool hasUsableMovingPathForEntry(uint32_t entry, float minXYRange = 1.0f) const;
 
     // Infer a real moving DBC path by spawn position (for servers whose transport entry IDs
     // don't map 1:1 to TransportAnimation.dbc entry IDs).
     // Returns 0 when no suitable path match is found.
-    uint32_t inferMovingPathForSpawn(const glm::vec3& spawnWorldPos, float maxDistance = 1200.0f) const;
+    [[nodiscard]] uint32_t inferMovingPathForSpawn(const glm::vec3& spawnWorldPos, float maxDistance = 1200.0f) const;
 
     // Infer a DBC path by spawn position, optionally including z-only elevator paths.
     // Returns 0 when no suitable path match is found.
-    uint32_t inferDbcPathForSpawn(const glm::vec3& spawnWorldPos,
+    [[nodiscard]] uint32_t inferDbcPathForSpawn(const glm::vec3& spawnWorldPos,
                                   float maxDistance,
                                   bool allowZOnly) const;
 
     // Choose a deterministic fallback moving DBC path for known server transport entries/displayIds.
     // Returns 0 when no suitable moving path is available.
-    uint32_t pickFallbackMovingPath(uint32_t entry, uint32_t displayId) const;
+    [[nodiscard]] uint32_t pickFallbackMovingPath(uint32_t entry, uint32_t displayId) const;
 
     // Update server-controlled transport position/rotation directly (bypasses path movement)
     void updateServerTransport(uint64_t guid, const glm::vec3& position, float orientation);
@@ -237,7 +346,8 @@ public:
                                  const glm::vec3& canonicalSpawnPos,
                                  uint32_t wmoInstanceId,
                                  bool isM2,
-                                 bool preferServerData);
+                                 bool preferServerData,
+                                 float spawnOrientation = 0.0f);
 
     // Reconnect an existing transport to a newly spawned render instance. Servers can
     // despawn/respawn transports around visibility boundaries while the logical route
@@ -246,18 +356,28 @@ public:
 
     // Enable/disable client-side animation for transports without server updates
     void setClientSideAnimation(bool enabled) { clientSideAnimation_ = enabled; }
-    bool isClientSideAnimation() const { return clientSideAnimation_; }
+    [[nodiscard]] bool isClientSideAnimation() const { return clientSideAnimation_; }
 
 private:
     void updateTransportMovement(ActiveTransport& transport, float deltaTime);
     void updateTransformMatrices(ActiveTransport& transport);
     void pushTransform(ActiveTransport& transport);
+    /// Take the hull out of the world, or put it back. See ActiveTransport::onThisMap.
+    void setInstanceHidden(const ActiveTransport& transport, bool hidden);
 
     TransportPathRepository pathRepo_;
     TransportClockSync clockSync_;
     TransportAnimator animator_;
     mutable std::mutex mutex_;  // Guards transports_ map insert/erase for cross-thread snapshotTransports().
     std::unordered_map<uint64_t, ActiveTransport> transports_;
+    /// Route phases the server published before the transport was registered.
+    ///
+    /// A transport is registered once its model has loaded, several frames
+    /// after its create block arrives - and the create block is where the
+    /// server puts the route phase. See applyServerRouteClock.
+    struct PendingRouteClock { float phase; uint32_t periodMs; };
+    std::unordered_map<uint64_t, PendingRouteClock> pendingRouteClocks_;
+    uint64_t riderTransportGuid_ = 0;
     rendering::WMORenderer* wmoRenderer_ = nullptr;
     rendering::M2Renderer* m2Renderer_ = nullptr;
     bool clientSideAnimation_ = false;  // DISABLED - use server positions instead of client prediction

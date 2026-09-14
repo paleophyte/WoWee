@@ -1,8 +1,11 @@
-// GM command metadata — names, security levels, syntax, help text.
+// GM command metadata - names, security levels, syntax, help text.
 // Sourced from AzerothCore GM commands wiki.
 // Used for tab-completion and .gmhelp display; the server handles execution.
 #pragma once
 
+#include <vector>
+#include <string>
+#include <algorithm>
 #include <array>
 #include <string_view>
 #include <cstdint>
@@ -18,8 +21,10 @@ struct GmCommandEntry {
 };
 
 // Curated list of the most useful GM commands for a client emulator.
-// The full AzerothCore list has 500+ commands — this table covers the
+// The full AzerothCore list has 500+ commands - this table covers the
 // ones players/GMs actually type regularly, organized by category.
+// NOLINTBEGIN(modernize-use-designated-initializers) - 206 rows whose four
+// columns are their field names, with the struct in view directly above.
 inline constexpr std::array kGmCommands = {
 
     // ── GM mode & info ──────────────────────────────────────
@@ -63,9 +68,19 @@ inline constexpr std::array kGmCommands = {
     GmCommandEntry{"pinfo",           2, ".pinfo [$player]",                    "Show player account info"},
     GmCommandEntry{"guid",            2, ".guid",                               "Show target GUID"},
 
+    // ── Reset ───────────────────────────────────────────────
+    GmCommandEntry{"reset level",     3, ".reset level [$player]",             "Reset level to 1"},
+    GmCommandEntry{"reset stats",     3, ".reset stats [$player]",             "Reset stats to level default"},
+    GmCommandEntry{"reset spells",    3, ".reset spells [$player]",            "Reset to starting spells"},
+    GmCommandEntry{"reset talents",   3, ".reset talents [$player]",           "Refund all talent points"},
+    GmCommandEntry{"reset achievements", 3, ".reset achievements [$player]",   "Wipe all achievements"},
+    GmCommandEntry{"reset all",       3, ".reset all spells/talents",          "Reset all players (spells or talents)"},
+
     // ── Items & inventory ───────────────────────────────────
     GmCommandEntry{"additem",         2, ".additem #id [#count]",              "Add item to inventory"},
     GmCommandEntry{"additem set",     2, ".additem set #setid",                "Add item set to inventory"},
+    GmCommandEntry{"additemset",      2, ".additemset #setid",                 "Add item set to inventory"},
+    GmCommandEntry{"repairitems",     2, ".repairitems [$player]",             "Repair all equipped items"},
 
     // ── Spells & auras ──────────────────────────────────────
     GmCommandEntry{"learn",           2, ".learn #spell [all]",                "Learn a spell"},
@@ -99,6 +114,11 @@ inline constexpr std::array kGmCommands = {
     GmCommandEntry{"modify reputation", 2, ".modify reputation #faction #val", "Set faction reputation"},
     GmCommandEntry{"modify talentpoints", 2, ".modify talentpoints #amount",  "Set talent points"},
     GmCommandEntry{"modify gender",   2, ".modify gender male/female",         "Change gender"},
+    GmCommandEntry{"modify arenapoints", 3, ".modify arenapoints #amount",     "Set arena points"},
+    GmCommandEntry{"modify drunk",    2, ".modify drunk #value",               "Set drunk level (0-100)"},
+    GmCommandEntry{"modify faction",  3, ".modify faction #factionid",         "Change target faction template"},
+    GmCommandEntry{"modify xp",       2, ".modify xp #amount",                 "Give experience points"},
+    GmCommandEntry{"modify phase",    2, ".modify phase #mask",                "Set phase mask"},
 
     // ── Cheats ──────────────────────────────────────────────
     GmCommandEntry{"cheat god",       2, ".cheat god [on/off]",                "Toggle god mode"},
@@ -232,8 +252,6 @@ inline constexpr std::array kGmCommands = {
     GmCommandEntry{"played",          0, ".played",                             "Show time played"},
     GmCommandEntry{"gear repair",     2, ".gear repair",                        "Repair all gear"},
     GmCommandEntry{"gear stats",      0, ".gear stats",                         "Show avg item level"},
-    GmCommandEntry{"reset talents",   3, ".reset talents [$player]",           "Reset talents"},
-    GmCommandEntry{"reset spells",    3, ".reset spells [$player]",            "Reset spells"},
     GmCommandEntry{"pet create",      2, ".pet create",                         "Create pet from target"},
     GmCommandEntry{"pet learn",       2, ".pet learn #spell",                  "Teach spell to pet"},
 
@@ -267,6 +285,28 @@ inline constexpr std::array kGmCommands = {
     GmCommandEntry{"ticket delete",   3, ".ticket delete #id",                 "Delete ticket permanently"},
     GmCommandEntry{"ticket viewid",   2, ".ticket viewid #id",                 "View ticket details"},
 };
+// NOLINTEND(modernize-use-designated-initializers)
+
+/// The dot-commands that start with `prefix`, sorted.
+///
+/// Beside the table it reads rather than in the command file, because the
+/// command file includes game_handler.hpp and a test that wanted this had to
+/// write the ten lines out again instead of linking it. A test asserting
+/// against its own copy of the logic cannot fail when the real one changes,
+/// and that copy carried a comment saying it "matches chat_panel.cpp" - which
+/// is a claim about another file that nothing checked.
+inline std::vector<std::string> gmCompletionsFor(const std::string& prefix) {
+    std::vector<std::string> results;
+    for (const auto& cmd : kGmCommands) {
+        std::string dotName = "." + std::string(cmd.name);
+        if (dotName.size() >= prefix.size() &&
+            dotName.compare(0, prefix.size(), prefix) == 0) {
+            results.push_back(dotName);
+        }
+    }
+    std::sort(results.begin(), results.end());
+    return results;
+}
 
 } // namespace ui
 } // namespace wowee

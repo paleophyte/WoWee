@@ -61,16 +61,18 @@ public:
     /**
      * Check if asset manager is initialized
      */
-    bool isInitialized() const { return initialized; }
-    const std::string& getDataPath() const { return dataPath; }
-    const AssetManifest& getManifest() const { return manifest_; }
+    [[nodiscard]] bool isInitialized() const { return initialized; }
+    [[nodiscard]] const std::string& getDataPath() const { return dataPath; }
+    [[nodiscard]] const AssetManifest& getManifest() const { return manifest_; }
 
     /**
      * Load a BLP texture
      * @param path Virtual path to BLP file (e.g., "Textures\\Minimap\\Background.blp")
      * @return BLP image (check isValid())
      */
-    BLPImage loadTexture(const std::string& path);
+    /// keepCompressed asks the loader to leave a DXT texture in its blocks.
+    /// A PNG override is decoded regardless - it has no blocks to keep.
+    BLPImage loadTexture(const std::string& path, bool keepCompressed = false);
 
     /**
      * Set expansion-specific data path for DBC lookup.
@@ -80,13 +82,40 @@ public:
     void setExpansionDataPath(const std::string& path);
 
     /**
-     * Set a base data path to fall back to when the primary manifest
-     * does not contain a requested file.  Call this when the primary
-     * dataPath is an expansion-specific subset (e.g. Data/expansions/vanilla/)
-     * that only holds DBC overrides, not the full world asset set.
-     * @param basePath  Path to the base extraction (Data/) that has a manifest.json
+     * Set a base data path to fall back to when the primary manifest does not
+     * contain a requested file. Call this when the primary dataPath is an
+     * expansion-specific subset (e.g. Data/expansions/wotlk/) that only holds
+     * overrides rather than the full world asset set.
+     *
+     * The fallback is how a thin expansion tree works at all: the wotlk tree
+     * here holds 18,943 files against the base tree's 199,468, so nine assets
+     * in ten are answered by the base. It is also how one expansion's assets
+     * come to stand in for another's, because it is resolved per file with no
+     * check on where the file came from, and a borrowed file is not an error
+     * anywhere. Cataclysm is the case that makes this visible rather than
+     * merely wrong: its Azeroth is the sundered one, so a tile it does not
+     * cover is drawn as the old world and nothing says so.
+     *
+     * So the two trees are compared. A base extracted from a different client
+     * than the one being run is refused, and named, rather than used. A base
+     * whose manifest predates the `expansion` field cannot be compared, so it
+     * is used and said once. WOWEE_ASSET_BASE_FALLBACK=1 forces a refused one
+     * back on for whoever is deliberately mixing trees.
+     *
+     * @param basePath   Path to the base extraction (Data/) with a manifest.json
+     * @param expansionId The expansion actually being run, to compare against
+     * @return whether the fallback is now armed
      */
-    void setBaseFallbackPath(const std::string& basePath);
+    bool setBaseFallbackPath(const std::string& basePath,
+                             const std::string& expansionId);
+
+    /// How many lookups have been answered by the base fallback rather than by
+    /// the expansion's own tree. Nine in ten is normal for a thin expansion
+    /// tree and says nothing on its own; it is the count next to a mismatch
+    /// that says how much of what is on screen came from the wrong client.
+    [[nodiscard]] uint64_t getBaseFallbackHits() const {
+        return baseFallbackHits_.load(std::memory_order_relaxed);
+    }
 
     /**
      * Load a DBC file
@@ -103,26 +132,20 @@ public:
      */
     std::shared_ptr<DBCFile> loadDBCOptional(const std::string& name);
 
-    /**
-     * Get a cached DBC file
-     * @param name DBC file name
-     * @return Cached DBC or nullptr if not loaded
-     */
-    std::shared_ptr<DBCFile> getDBC(const std::string& name) const;
 
     /**
      * Check if a file exists
      * @param path Virtual file path
      * @return true if file exists
      */
-    bool fileExists(const std::string& path) const;
+    [[nodiscard]] bool fileExists(const std::string& path) const;
 
     /**
      * Read raw file data
      * @param path Virtual file path
      * @return File contents (empty if not found)
      */
-    std::vector<uint8_t> readFile(const std::string& path) const;
+    [[nodiscard]] std::vector<uint8_t> readFile(const std::string& path) const;
 
     /**
      * Read optional file data without warning spam.
@@ -130,19 +153,19 @@ public:
      * @param path Virtual file path
      * @return File contents (empty if not found)
      */
-    std::vector<uint8_t> readFileOptional(const std::string& path) const;
+    [[nodiscard]] std::vector<uint8_t> readFileOptional(const std::string& path) const;
 
     /**
      * Get loaded DBC count
      */
-    size_t getLoadedDBCCount() const { return dbcCache.size(); }
+    [[nodiscard]] size_t getLoadedDBCCount() const { return dbcCache.size(); }
 
     /**
      * Get file cache stats
      */
-    size_t getFileCacheSize() const { return fileCacheTotalBytes; }
-    size_t getFileCacheHits() const { return fileCacheHits; }
-    size_t getFileCacheMisses() const { return fileCacheMisses; }
+    [[nodiscard]] size_t getFileCacheSize() const { return fileCacheTotalBytes; }
+    [[nodiscard]] size_t getFileCacheHits() const { return fileCacheHits; }
+    [[nodiscard]] size_t getFileCacheMisses() const { return fileCacheMisses; }
 
     /**
      * Clear all cached resources
@@ -154,14 +177,6 @@ public:
      */
     void clearDBCCache();
 
-    /**
-     * Delete all extracted asset files from the data directory on disk.
-     * Removes extracted subdirectories (db, character, creature, terrain, etc.),
-     * manifest.json, override dir, and expansion-specific extracted assets.
-     * After calling this, initialize() will fail until assets are re-extracted.
-     * @return Number of entries removed
-     */
-    size_t purgeExtractedAssets();
 
     /**
      * Resolve a normalized WoW path to its on-disk location. Checks the
@@ -171,7 +186,7 @@ public:
      * extracted file's directory without reading it.
      * @return absolute or relative fs path, or "" if not found
      */
-    std::string resolveFile(const std::string& normalizedPath) const;
+    [[nodiscard]] std::string resolveFile(const std::string& normalizedPath) const;
 
 private:
     bool initialized = false;
@@ -181,14 +196,18 @@ private:
 
     // Base manifest (loaded from dataPath/manifest.json)
     AssetManifest manifest_;
-    LooseFileReader looseReader_;
 
     // Optional base-path fallback: used when manifest_ doesn't contain a file.
     // Populated by setBaseFallbackPath(); ignored if baseFallbackDataPath_ is empty.
     std::string    baseFallbackDataPath_;
     AssetManifest  baseFallbackManifest_;
+    // Counted from resolveAssetPath, which is const and takes no lock while
+    // several threads stream assets through it, so relaxed atomic rather than
+    // a plain mutable: nothing orders against this and a torn count would be
+    // a data race for a diagnostic.
+    mutable std::atomic<uint64_t> baseFallbackHits_{0};
 
-    // (resolveFile moved to public — declaration above.)
+    // (resolveFile moved to public - declaration above.)
 
     // Guards fileCache, dbcCache, fileCacheTotalBytes, fileCacheAccessCounter, and
     // fileCacheBudget.  Shared lock for read-only cache lookups (readFile cache hit,
@@ -202,12 +221,12 @@ private:
         std::vector<uint8_t> data;
         uint64_t lastAccessTime;
     };
-    // THREAD-SAFE: protected by cacheMutex (shared_mutex — shared_lock for reads,
+    // THREAD-SAFE: protected by cacheMutex (shared_mutex - shared_lock for reads,
     // exclusive lock_guard for writes/eviction).
     mutable std::unordered_map<std::string, CachedFile> fileCache;
     mutable size_t fileCacheTotalBytes = 0;
     mutable uint64_t fileCacheAccessCounter = 0;
-    // THREAD-SAFE: atomic — incremented from any thread after releasing cacheMutex.
+    // THREAD-SAFE: atomic - incremented from any thread after releasing cacheMutex.
     mutable std::atomic<size_t> fileCacheHits{0};
     mutable std::atomic<size_t> fileCacheMisses{0};
     mutable size_t fileCacheBudget = 1024 * 1024 * 1024;  // Dynamic, starts at 1GB
@@ -218,12 +237,18 @@ private:
      * Try to load a PNG override for a BLP path.
      * Returns valid BLPImage if PNG found, invalid otherwise.
      */
-    BLPImage tryLoadPngOverride(const std::string& normalizedPath) const;
+    /// Where a sidecar of this extension sits for a normalized .blp path, or
+    /// empty when there is none. Shared by the overrides below so they agree
+    /// on where to look.
+    [[nodiscard]] std::string resolveSidecarPath(const std::string& normalizedPath,
+                                                 const char* extension) const;
+    [[nodiscard]] BLPImage tryLoadDdsOverride(const std::string& normalizedPath) const;
+    [[nodiscard]] BLPImage tryLoadPngOverride(const std::string& normalizedPath) const;
 
     /**
      * Normalize path for case-insensitive lookup
      */
-    std::string normalizePath(const std::string& path) const;
+    [[nodiscard]] std::string normalizePath(const std::string& path) const;
 };
 
 } // namespace pipeline

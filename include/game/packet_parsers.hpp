@@ -18,17 +18,49 @@ namespace game {
  * in world_packets.hpp. Expansion subclasses override the methods that
  * differ from WotLK.
  */
+/// SMSG_CHAR_ENUM as Classic and TBC send it; see world_packets.cpp for why
+/// WotLK is not folded in. hasEnchantment is the whole difference between the
+/// two: TBC equipment entries carry a trailing uint32, Classic ones do not.
+bool parseCharEnumPreWotlk(network::Packet& packet, CharEnumResponse& response,
+                           bool hasEnchantment, const char* tag);
+
+/// SMSG_ITEM_QUERY_SINGLE_RESPONSE as classic and TBC send it. The two differ
+/// in one field: TBC carries a SoundOverrideSubclass after subClass.
+bool parseItemQueryPreWotlk(network::Packet& packet, ItemQueryResponseData& data,
+                            bool hasSoundOverrideSubclass, const char* tag);
+
+/// The two questgiver packets as Classic and TBC send them: the NPC's GUID and
+/// the quest id, and nothing else. WotLK appends a uint32 to each, so the
+/// whole of the pre-WotLK case is what is absent.
+///
+/// Unlike the movement packet, which reads the same in both parsers and is not
+/// the same, these two really are identical: they write their fields directly
+/// rather than through a per-expansion payload writer.
+network::Packet buildQueryQuestPacketPreWotlk(uint64_t npcGuid, uint32_t questId);
+network::Packet buildAcceptQuestPacketPreWotlk(uint64_t npcGuid, uint32_t questId);
+
+/// SMSG_SPELLNONMELEEDAMAGELOG as Classic and TBC send it.
+///
+/// The expansions differ by one field: WotLK carries an overkill amount after
+/// the damage and these do not, so the pre-WotLK readers set it to zero
+/// themselves. Between Classic and TBC the packet is byte for byte the same,
+/// which is why one reader serves both - checked field by field rather than
+/// assumed, since reading four bytes that are not there would take the school
+/// mask out of the middle of the absorbed amount.
+bool parseSpellDamageLogPreWotlk(network::Packet& packet, SpellDamageLogData& data,
+                                 const char* tag);
+
 class PacketParsers {
 public:
     virtual ~PacketParsers() = default;
 
     // Size of MovementInfo.flags2 in bytes for MSG_MOVE_* payloads.
     // Classic: none, TBC: u8, WotLK: u16.
-    virtual uint8_t movementFlags2Size() const { return 2; }
+    [[nodiscard]] virtual uint8_t movementFlags2Size() const { return 2; }
 
     // Wire-format movement flag that gates transport data in MSG_MOVE_* payloads.
     // WotLK/TBC: 0x200, Classic/Turtle: 0x02000000.
-    virtual uint32_t wireOnTransportFlag() const { return 0x00000200; }
+    [[nodiscard]] virtual uint32_t wireOnTransportFlag() const { return 0x00000200; }
 
     // --- Movement ---
 
@@ -57,6 +89,12 @@ public:
     /** Build CMSG_CAST_SPELL with SpellCastTargets targeting a game object. */
     virtual network::Packet buildCastGameObjectSpell(uint32_t spellId, uint64_t targetGuid, uint8_t castCount) {
         return CastSpellPacket::buildGameObjectTarget(spellId, targetGuid, castCount);
+    }
+
+    /** Build CMSG_CAST_SPELL with SpellCastTargets targeting an item - Disenchant,
+     *  Prospecting, Milling and the enchant formulas. */
+    virtual network::Packet buildCastSpellOnItem(uint32_t spellId, uint64_t itemGuid) {
+        return CastSpellPacket::buildItemTarget(spellId, itemGuid, 0);
     }
 
     /** Build CMSG_USE_ITEM (WotLK default: bag + slot + castCount + spellId + itemGuid + glyphIndex + castFlags + targets)
@@ -137,7 +175,7 @@ public:
      *  TBC/Classic: spellId(u32) + result(u8)  (no castCount prefix).
      *  Classic/TBC result enums have no SUCCESS entry, so parsers shift +1.
      *  miscArg/miscArg2 receive the trailing ids of spell-focus and totem
-     *  failures (0 otherwise) — see readCastResultArgs.
+     *  failures (0 otherwise) - see readCastResultArgs.
      */
     virtual bool parseCastResult(network::Packet& packet, uint32_t& spellId, uint8_t& result,
                                  uint32_t& miscArg, uint32_t& miscArg2) {
@@ -222,12 +260,12 @@ public:
 
     /** Stride of PLAYER_QUEST_LOG fields in update-object blocks.
      *  WotLK: 5 fields per slot, Classic/Vanilla: 3. */
-    virtual uint8_t questLogStride() const { return 5; }
+    [[nodiscard]] virtual uint8_t questLogStride() const { return 5; }
 
     /** Number of PLAYER_EXPLORED_ZONES uint32 fields in update-object blocks.
      *  Classic/Vanilla/Turtle: 64 (bit-packs up to zone ID 2047).
      *  TBC/WotLK: 128 (covers Outland/Northrend zone IDs up to 4095). */
-    virtual uint8_t exploredZonesCount() const { return 128; }
+    [[nodiscard]] virtual uint8_t exploredZonesCount() const { return 128; }
 
     // --- Quest Giver Status ---
 
@@ -332,7 +370,7 @@ class WotlkPacketParsers : public PacketParsers {
  */
 class TbcPacketParsers : public PacketParsers {
 public:
-    uint8_t movementFlags2Size() const override { return 1; }
+    [[nodiscard]] uint8_t movementFlags2Size() const override { return 1; }
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     void writeMovementPayload(network::Packet& packet, const MovementInfo& info) override;
     network::Packet buildMovementPacket(LogicalOpcode opcode,
@@ -379,8 +417,8 @@ public:
     bool parseSpellHealLog(network::Packet& packet, SpellHealLogData& data) override;
     // TBC 2.4.3 quest log has 4 update fields per slot (questId, state, counts, timer)
     // WotLK expands this to 5 (splits counts into two fields).
-    uint8_t questLogStride() const override { return 4; }
-    // TBC 2.4.3 CMSG_QUESTGIVER_QUERY_QUEST: guid(8) + questId(4) — no trailing
+    [[nodiscard]] uint8_t questLogStride() const override { return 4; }
+    // TBC 2.4.3 CMSG_QUESTGIVER_QUERY_QUEST: guid(8) + questId(4) - no trailing
     // isDialogContinued byte that WotLK added
     network::Packet buildQueryQuestPacket(uint64_t npcGuid, uint32_t questId) override;
     // TBC 2.4.3 SMSG_QUESTGIVER_QUEST_DETAILS (cmangos-tbc GossipDef.cpp):
@@ -419,7 +457,7 @@ public:
  *
  * Differences from TBC:
  * - No moveFlags2 byte (TBC has u8, Classic has none)
- * - Only 6 speed fields (no flight speeds — flying added in TBC)
+ * - Only 6 speed fields (no flight speeds - flying added in TBC)
  * - SPLINE_ENABLED at 0x00400000 (TBC/WotLK: 0x08000000)
  * - Transport data has no timestamp (TBC adds u32 timestamp)
  * - Pitch: only SWIMMING (no ONTRANSPORT secondary pitch)
@@ -428,8 +466,8 @@ public:
  */
 class ClassicPacketParsers : public TbcPacketParsers {
 public:
-    uint8_t movementFlags2Size() const override { return 0; }
-    uint32_t wireOnTransportFlag() const override { return 0x02000000; }
+    [[nodiscard]] uint8_t movementFlags2Size() const override { return 0; }
+    [[nodiscard]] uint32_t wireOnTransportFlag() const override { return 0x02000000; }
     bool parseCharEnum(network::Packet& packet, CharEnumResponse& response) override;
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     void writeMovementPayload(network::Packet& packet, const MovementInfo& info) override;
@@ -470,10 +508,10 @@ public:
     bool parseQuestDetails(network::Packet& packet, QuestDetailsData& data) override {
         return parseQuestDetailsPreWotlk(packet, data, /*hasSuggestedPlayers=*/false);
     }
-    uint8_t questLogStride() const override { return 3; }
+    [[nodiscard]] uint8_t questLogStride() const override { return 3; }
     // Classic 1.12 has 64 explored-zone uint32 fields (zone IDs fit in 2048 bits).
     // TBC/WotLK use 128 (needed for Outland/Northrend zone IDs up to 4095).
-    uint8_t exploredZonesCount() const override { return 64; }
+    [[nodiscard]] uint8_t exploredZonesCount() const override { return 64; }
     bool parseMonsterMove(network::Packet& packet, MonsterMoveData& data) override {
         return MonsterMoveParser::parseVanilla(packet, data);
     }
@@ -510,20 +548,30 @@ public:
  */
 class TurtlePacketParsers : public ClassicPacketParsers {
 public:
-    uint8_t movementFlags2Size() const override { return 0; }
+    [[nodiscard]] uint8_t movementFlags2Size() const override { return 0; }
     bool parseUpdateObject(network::Packet& packet, UpdateObjectData& data) override;
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     bool parseMonsterMove(network::Packet& packet, MonsterMoveData& data) override;
 };
 
 /**
- * Factory function to create the right parser set for an expansion.
+ * The parser set for an expansion id, or null if there is not one.
+ *
+ * Null rather than a WotLK fallback. This used to end in WotLK's parsers for
+ * every id it did not recognise, so a profile whose wire format is not WotLK's
+ * would authenticate, log in, and then misparse movement and update-object
+ * rather than failing where the gap actually is. An expansion is a parser set
+ * as much as it is a data directory, and this is the one place that says so.
+ *
+ * The caller decides what to do about it, because deciding here would mean
+ * logging, and this header is pure enough that ten standalone tests include it.
  */
 inline std::unique_ptr<PacketParsers> createPacketParsers(const std::string& expansionId) {
     if (expansionId == "classic") return std::make_unique<ClassicPacketParsers>();
     if (expansionId == "turtle") return std::make_unique<TurtlePacketParsers>();
     if (expansionId == "tbc") return std::make_unique<TbcPacketParsers>();
-    return std::make_unique<WotlkPacketParsers>();
+    if (expansionId == "wotlk") return std::make_unique<WotlkPacketParsers>();
+    return nullptr;
 }
 
 } // namespace game

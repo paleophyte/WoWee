@@ -146,6 +146,11 @@ void CombatFSM::updateTransitions(const Input& in) {
         if (state_ != State::MELEE_SWING) {
             clearSpellState();
             hitReactionAnimId_ = 0;
+            // The hand is chosen here, once, because this is where a swing
+            // begins. Choosing it where the animation is resolved chose it
+            // again on every frame the swing lasted.
+            offHandThisSwing_ = offHandTurn_;
+            offHandTurn_ = !offHandTurn_;
         }
         state_ = State::MELEE_SWING;
         return;
@@ -338,6 +343,8 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
                 animId = caps.resolvedReadyCrossbow;
             } else if (in.rangedWeaponActive && loadout.rangedType == RangedWeaponType::THROWN) {
                 animId = caps.resolvedReadyThrown;
+            } else if (in.rangedWeaponActive && loadout.rangedType == RangedWeaponType::WAND) {
+                animId = caps.resolvedReadyWand;
             } else if (loadout.is2HLoose) {
                 animId = caps.resolvedReady2HLoose;
             } else if (loadout.inventoryType == game::InvType::TWO_HAND) {
@@ -356,13 +363,15 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
             if (in.specialAttackAnimId != 0) {
                 animId = in.specialAttackAnimId;
             } else {
-                // Resolve melee animation using probed capabilities + weapon loadout
-                bool useOffHand = loadout.hasOffHand && offHandTurn_;
-                offHandTurn_ = loadout.hasOffHand ? !offHandTurn_ : false;
+                // Resolve melee animation using probed capabilities + weapon
+                // loadout. Which hand is already settled: this runs every frame
+                // of the swing and has to answer the same way each time.
+                const bool useOffHand = loadout.hasOffHand && offHandThisSwing_;
 
                 if (useOffHand) {
-                    if (loadout.isFist) animId = caps.resolvedMeleeOffHandFist;
-                    else if (loadout.isDagger) animId = caps.resolvedMeleeOffHandPierce;
+                    // The off-hand weapon's kind, not the main hand's.
+                    if (loadout.offHandIsFist) animId = caps.resolvedMeleeOffHandFist;
+                    else if (loadout.offHandIsDagger) animId = caps.resolvedMeleeOffHandPierce;
                     else if (loadout.inventoryType == game::InvType::NON_EQUIP) animId = caps.resolvedMeleeOffHandUnarmed;
                     else animId = caps.resolvedMeleeOffHand;
                 } else if (loadout.isFist) {
@@ -457,6 +466,7 @@ void CombatFSM::reset() {
     stunned_ = false;
     charging_ = false;
     offHandTurn_ = false;
+    offHandThisSwing_ = false;
 }
 
 } // namespace rendering

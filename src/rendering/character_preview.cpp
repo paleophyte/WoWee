@@ -1,4 +1,5 @@
 #include "rendering/character_preview.hpp"
+#include "rendering/imgui_texture.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/vk_render_target.hpp"
@@ -10,8 +11,12 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/dbc_loader.hpp"
+#include "pipeline/char_sections.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "core/appearance_composer.hpp"
+#include "core/geoset_rules.hpp"
+#include "pipeline/item_textures.hpp"
+#include "pipeline/m2_asset_loader.hpp"
 #include "core/logger.hpp"
 #include "core/application.hpp"
 #include <imgui.h>
@@ -91,7 +96,9 @@ void CharacterPreview::ensureAppearanceGeosetsLoaded() {
             uint32_t variation = chg->getUInt32(i, chgL ? (*chgL)["Variation"] : 3);
             uint32_t geosetId = chg->getUInt32(i, chgL ? (*chgL)["GeosetID"] : 4);
             const bool useDefaultScalp = chg->getFieldCount() > 5 && chg->getUInt32(i, 5) != 0;
-            uint32_t key = (raceId << 16) | (sexId << 8) | variation;
+            const uint32_t key = core::appearanceKey(static_cast<uint8_t>(raceId),
+                                                    static_cast<uint8_t>(sexId),
+                                                    static_cast<uint8_t>(variation));
             hairGeosetMap_[key] = static_cast<uint16_t>(useDefaultScalp ? 1 : geosetId);
         }
         LOG_INFO("CharacterPreview: loaded ", hairGeosetMap_.size(), " hair geoset mappings");
@@ -100,16 +107,21 @@ void CharacterPreview::ensureAppearanceGeosetsLoaded() {
     if (auto cfh = assetManager_->loadDBC("CharacterFacialHairStyles.dbc"); cfh && cfh->isLoaded()) {
         const auto* cfhL = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("CharacterFacialHairStyles") : nullptr;
+        const auto fhF = pipeline::detectFacialHairFields(cfh.get(), cfhL);
         for (uint32_t i = 0; i < cfh->getRecordCount(); i++) {
             uint32_t raceId = cfh->getUInt32(i, cfhL ? (*cfhL)["RaceID"] : 0);
             uint32_t sexId = cfh->getUInt32(i, cfhL ? (*cfhL)["SexID"] : 1);
             uint32_t variation = cfh->getUInt32(i, cfhL ? (*cfhL)["Variation"] : 2);
-            uint32_t key = (raceId << 16) | (sexId << 8) | variation;
+            const uint32_t key = core::appearanceKey(static_cast<uint8_t>(raceId),
+                                                    static_cast<uint8_t>(sexId),
+                                                    static_cast<uint8_t>(variation));
 
             FacialHairGeosets geosets;
-            geosets.geoset100 = static_cast<uint16_t>(cfh->getUInt32(i, cfhL ? (*cfhL)["Geoset100"] : 3));
-            geosets.geoset300 = static_cast<uint16_t>(cfh->getUInt32(i, cfhL ? (*cfhL)["Geoset300"] : 4));
-            geosets.geoset200 = static_cast<uint16_t>(cfh->getUInt32(i, cfhL ? (*cfhL)["Geoset200"] : 5));
+            // Whichever columns this copy of the DBC keeps them in - see
+            // detectFacialHairFields, and the same read in EntitySpawner.
+            geosets.geoset100 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset100));
+            geosets.geoset300 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset300));
+            geosets.geoset200 = static_cast<uint16_t>(cfh->getUInt32(i, fhF.geoset200));
             facialHairGeosetMap_[key] = geosets;
         }
         LOG_INFO("CharacterPreview: loaded ", facialHairGeosetMap_.size(), " facial hair geoset mappings");
@@ -120,9 +132,7 @@ uint16_t CharacterPreview::selectedHairScalpGeoset() const {
     const uint8_t raceId = static_cast<uint8_t>(race_);
     const uint8_t sexId = (gender_ == game::Gender::FEMALE ||
                            (gender_ == game::Gender::NONBINARY && useFemaleModel_)) ? 1u : 0u;
-    const uint32_t key = (static_cast<uint32_t>(raceId) << 16) |
-                         (static_cast<uint32_t>(sexId) << 8) |
-                         static_cast<uint32_t>(hairStyle_);
+    const uint32_t key = core::appearanceKey(raceId, sexId, static_cast<uint8_t>(hairStyle_));
 
     auto it = hairGeosetMap_.find(key);
     if (it != hairGeosetMap_.end() && it->second > 0) {
@@ -142,46 +152,42 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
                            (gender_ == game::Gender::NONBINARY && useFemaleModel_)) ? 1u : 0u;
     const uint16_t selectedHairScalp = selectedHairScalpGeoset();
 
-    std::unordered_set<uint16_t> activeGeosets;
-    activeGeosets.insert(0); // body base
-    activeGeosets.insert(selectedHairScalp);
-
-    const uint32_t facialKey = (static_cast<uint32_t>(raceId) << 16) |
-                               (static_cast<uint32_t>(sexId) << 8) |
-                               static_cast<uint32_t>(facialHair_);
-    auto itFacial = facialHairGeosetMap_.find(facialKey);
+    uint16_t facial100 = 1, facial200 = 1, facial300 = 1;
+    auto itFacial = facialHairGeosetMap_.find(
+        core::appearanceKey(raceId, sexId, static_cast<uint8_t>(facialHair_)));
     if (itFacial != facialHairGeosetMap_.end()) {
-        activeGeosets.insert(static_cast<uint16_t>(100 + std::max<uint16_t>(itFacial->second.geoset100, 1)));
-        activeGeosets.insert(static_cast<uint16_t>(200 + std::max<uint16_t>(itFacial->second.geoset200, 1)));
-        activeGeosets.insert(static_cast<uint16_t>(300 + std::max<uint16_t>(itFacial->second.geoset300, 1)));
-    } else {
-        activeGeosets.insert(101);
-        activeGeosets.insert(201);
-        activeGeosets.insert(301);
+        facial100 = itFacial->second.geoset100;
+        facial200 = itFacial->second.geoset200;
+        facial300 = itFacial->second.geoset300;
     }
 
-    activeGeosets.insert(core::kGeosetBareForearms);
-    activeGeosets.insert(core::kGeosetBareShins);
-    activeGeosets.insert(core::kGeosetDefaultEars);
-    activeGeosets.insert(core::kGeosetBareSleeves);
-    activeGeosets.insert(core::kGeosetDefaultKneepads);
-    activeGeosets.insert(core::kGeosetBarePants);
-    activeGeosets.insert(core::kGeosetNoCape);
-    activeGeosets.insert(core::kGeosetBareFeet);
+    // The same bare set the player gets. This used to be its own list and had
+    // drifted: it named one of the two feet variants, so an HD model spelling
+    // its feet the other way stood in the portrait without them, and it named
+    // the no-cloak panel, which the HD models do not carry.
+    std::unordered_set<uint16_t> activeGeosets =
+        core::bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId);
+
     return activeGeosets;
 }
 
-bool CharacterPreview::initialize(pipeline::AssetManager* am) {
+bool CharacterPreview::initialize(pipeline::AssetManager* am, int width, int height) {
     assetManager_ = am;
-
     // If already initialized with valid resources, reuse them.
     // This avoids destroying GPU resources that may still be referenced by
     // an in-flight command buffer (compositePass recorded earlier this frame).
     if (renderTarget_ && renderTarget_->isValid() && charRenderer_ && camera_) {
-        // Mark model as not loaded — loadCharacter() will handle instance cleanup
+        // Mark model as not loaded - loadCharacter() will handle instance cleanup
         modelLoaded_ = false;
         return true;
     }
+
+    // Only where the view is actually being built. The render target, the
+    // camera's aspect ratio and the composite are all sized from these, so
+    // taking a new size while keeping a target built at the old one would put
+    // every one of the three out of step with the image they are drawing into.
+    if (width > 0) fboWidth_ = width;
+    if (height > 0) fboHeight_ = height;
 
     auto* appRenderer = core::Application::getInstance().getRenderer();
     vkCtx_ = appRenderer ? appRenderer->getVkContext() : nullptr;
@@ -259,7 +265,9 @@ void CharacterPreview::createFBO() {
     // the first compositePass runs.
     {
         VkCommandBuffer cmd = vkCtx_->beginSingleTimeCommands();
-        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        VkImageMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -272,19 +280,21 @@ void CharacterPreview::createFBO() {
         barrier.subresourceRange.layerCount = 1;
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo barrierDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        barrierDep.dependencyFlags = 0;
+        barrierDep.imageMemoryBarrierCount = 1;
+        barrierDep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, barrierDep);
         vkCtx_->endSingleTimeCommands(cmd);
     }
 
     // 2. Create 1x1 dummy depth texture (shadow map placeholder, depth=1.0 = no shadow).
     //    Must be a depth format for sampler2DShadow compatibility.
     {
-        VkImageCreateInfo imgCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkImageCreateInfo imgCI{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imgCI.imageType = VK_IMAGE_TYPE_2D;
         imgCI.format = VK_FORMAT_D16_UNORM;
-        imgCI.extent = {1, 1, 1};
+        imgCI.extent = {.width = 1, .height = 1, .depth = 1};
         imgCI.mipLevels = 1;
         imgCI.arrayLayers = 1;
         imgCI.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -297,53 +307,52 @@ void CharacterPreview::createFBO() {
             LOG_ERROR("CharacterPreview: failed to create dummy shadow image");
             return;
         }
-        VkImageViewCreateInfo viewCI{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        VkImageViewCreateInfo viewCI{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewCI.image = dummyShadowImage_;
         viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewCI.format = VK_FORMAT_D16_UNORM;
-        viewCI.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        viewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         if (vkCreateImageView(device, &viewCI, nullptr, &dummyShadowView_) != VK_SUCCESS) {
             LOG_ERROR("CharacterPreview: failed to create dummy shadow image view");
             return;
         }
         // Clear to depth 1.0 and transition to shader-read layout
         vkCtx_->immediateSubmit([&](VkCommandBuffer cmd) {
-            VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            VkImageMemoryBarrier2 toTransfer{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            toTransfer.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            toTransfer.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
             toTransfer.image = dummyShadowImage_;
             toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toTransfer.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            toTransfer.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
             toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &toTransfer);
-            VkClearDepthStencilValue clearVal{1.0f, 0};
-            VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            VkDependencyInfo toTransferDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            toTransferDep.dependencyFlags = 0;
+            toTransferDep.imageMemoryBarrierCount = 1;
+            toTransferDep.pImageMemoryBarriers = &toTransfer;
+            cmdPipelineBarrier2(cmd, toTransferDep);
+            VkClearDepthStencilValue clearVal{.depth = 1.0f, .stencil = 0};
+            VkImageSubresourceRange range{.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
             vkCmdClearDepthStencilImage(cmd, dummyShadowImage_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearVal, 1, &range);
-            VkImageMemoryBarrier toRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            VkImageMemoryBarrier2 toRead{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            toRead.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            toRead.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             toRead.image = dummyShadowImage_;
             toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toRead.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            toRead.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
             toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &toRead);
+            VkDependencyInfo toReadDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            toReadDep.dependencyFlags = 0;
+            toReadDep.imageMemoryBarrierCount = 1;
+            toReadDep.pImageMemoryBarriers = &toRead;
+            cmdPipelineBarrier2(cmd, toReadDep);
         });
-        // Comparison sampler for sampler2DShadow
-        VkSamplerCreateInfo sampCI{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        sampCI.magFilter = VK_FILTER_NEAREST;
-        sampCI.minFilter = VK_FILTER_NEAREST;
-        sampCI.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        sampCI.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        sampCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        sampCI.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-        sampCI.compareEnable = VK_TRUE;
-        sampCI.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-        dummyShadowSampler_ = vkCtx_->getOrCreateSampler(sampCI);
     }
 
     // 3. Create descriptor pool for per-frame sets (2 UBO + 2 sampler)
@@ -354,7 +363,7 @@ void CharacterPreview::createFBO() {
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         sizes[1].descriptorCount = MAX_FRAMES;
 
-        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
         ci.poolSizeCount = 2;
         ci.pPoolSizes = sizes;
@@ -370,7 +379,7 @@ void CharacterPreview::createFBO() {
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         // Create mapped UBO
-        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        VkBufferCreateInfo bufInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bufInfo.size = sizeof(GPUPerFrameData);
         bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
@@ -387,7 +396,7 @@ void CharacterPreview::createFBO() {
         previewUBOMapped_[i] = mapInfo.pMappedData;
 
         // Allocate descriptor set
-        VkDescriptorSetAllocateInfo setAlloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkDescriptorSetAllocateInfo setAlloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         setAlloc.descriptorPool = previewDescPool_;
         setAlloc.descriptorSetCount = 1;
         setAlloc.pSetLayouts = &perFrameLayout;
@@ -403,7 +412,8 @@ void CharacterPreview::createFBO() {
         descBuf.range = sizeof(GPUPerFrameData);
 
         VkDescriptorImageInfo shadowImg{};
-        shadowImg.sampler = dummyShadowSampler_;
+        // sampler is ignored: this set comes from the renderer's per-frame
+        // layout, where binding 1 declares an immutable comparison sampler.
         shadowImg.imageView = dummyShadowView_;
         shadowImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -439,23 +449,16 @@ void CharacterPreview::destroyFBO() {
     VmaAllocator allocator = vkCtx_->getAllocator();
 
     if (imguiTextureId_) {
-        ImGui_ImplVulkan_RemoveTexture(imguiTextureId_);
+        removeImGuiTexture(imguiTextureId_);
         imguiTextureId_ = VK_NULL_HANDLE;
     }
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-        if (previewUBO_[i]) {
-            vmaDestroyBuffer(allocator, previewUBO_[i], previewUBOAlloc_[i]);
-            previewUBO_[i] = VK_NULL_HANDLE;
-        }
+        destroy(allocator, previewUBO_[i], previewUBOAlloc_[i]);
     }
 
-    if (previewDescPool_) {
-        vkDestroyDescriptorPool(device, previewDescPool_, nullptr);
-        previewDescPool_ = VK_NULL_HANDLE;
-    }
+    destroy(device, previewDescPool_);
 
-    // dummyShadowSampler_ is owned by VkContext sampler cache — do NOT destroy
     if (dummyShadowView_) { vkDestroyImageView(device, dummyShadowView_, nullptr); dummyShadowView_ = VK_NULL_HANDLE; }
     if (dummyShadowImage_) { vmaDestroyImage(allocator, dummyShadowImage_, dummyShadowAlloc_); dummyShadowImage_ = VK_NULL_HANDLE; dummyShadowAlloc_ = VK_NULL_HANDLE; }
 
@@ -474,7 +477,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     // Remove existing instance.
-    // Must wait for GPU to finish — compositePass() may have recorded draw commands
+    // Must wait for GPU to finish - compositePass() may have recorded draw commands
     // referencing this instance's bone buffers earlier in the current frame.
     if (instanceId_ > 0) {
         if (vkCtx_) vkDeviceWaitIdle(vkCtx_->getDevice());
@@ -484,21 +487,6 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     std::string m2Path = game::getPlayerModelPath(race, gender, useFemaleModel);
-    std::string modelDir;
-    std::string baseName;
-    {
-        size_t slash = m2Path.rfind('\\');
-        if (slash != std::string::npos) {
-            modelDir = m2Path.substr(0, slash + 1);
-            baseName = m2Path.substr(slash + 1);
-        } else {
-            baseName = m2Path;
-        }
-        size_t dot = baseName.rfind('.');
-        if (dot != std::string::npos) {
-            baseName = baseName.substr(0, dot);
-        }
-    }
 
     auto m2Data = assetManager_->readFile(m2Path);
     if (m2Data.empty()) {
@@ -511,7 +499,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     // M2 version 264+ (WotLK) stores submesh/bone data in external .skin files.
     // Earlier versions (Classic ≤256, TBC ≤263) have skin data embedded in the M2.
-    std::string skinPath = modelDir + baseName + "00.skin";
+    std::string skinPath = pipeline::skinPathForM2(m2Path);
     auto skinData = assetManager_->readFile(skinPath);
     if (!skinData.empty() && model.version >= 264) {
         pipeline::M2Loader::loadSkin(skinData, model);
@@ -542,6 +530,9 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         modelBoundMinZ_ = frameMin.z;
         modelBoundMaxZ_ = frameMax.z;
         fullBodyDistance_ = camera_->getPosition().y;
+        // A player model is framed by its bounds; no creature portrait camera
+        // is in play, and a stale one from the shared preview must not be.
+        portraitCameraValid_ = false;
     }
 
     // Look up CharSections.dbc for all appearance textures
@@ -558,104 +549,78 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
     if (charSectionsDbc) {
-        bool foundSkin = false;
-        bool foundFace = false;
-        bool foundHair = false;
-        bool foundUnderwear = false;
+        const auto* csL = pipeline::getActiveDBCLayout()
+            ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
+        const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
 
-        const auto* csL = pipeline::getActiveDBCLayout() ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
-        auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
+        // The one reader, in pipeline/char_sections.hpp. This copy had no
+        // fallback for a face the table does not carry - a character created
+        // with a face number that has no row simply had no face - and it
+        // matched the skin and underwear rows on variation 0, which the other
+        // readers do not, so a table that numbers those rows any other way
+        // found nothing here and everything there.
+        pipeline::CharacterAppearance who;
+        who.raceId = targetRaceId;
+        who.sexId = targetSexId;
+        who.skinId = static_cast<uint8_t>(skin);
+        who.faceId = static_cast<uint8_t>(face);
+        who.hairStyleId = static_cast<uint8_t>(hairStyle);
+        who.hairColorId = static_cast<uint8_t>(hairColor);
 
-        for (uint32_t r = 0; r < charSectionsDbc->getRecordCount(); r++) {
-            uint32_t raceId = charSectionsDbc->getUInt32(r, csF.raceId);
-            uint32_t sexId = charSectionsDbc->getUInt32(r, csF.sexId);
-            uint32_t baseSection = charSectionsDbc->getUInt32(r, csF.baseSection);
-            uint32_t variationIndex = charSectionsDbc->getUInt32(r, csF.variationIndex);
-            uint32_t colorIndex = charSectionsDbc->getUInt32(r, csF.colorIndex);
+        const auto sections = pipeline::resolveCharacterSections(
+            charSectionsDbc.get(), csF, who,
+            [](const std::string& path, void* ctx) {
+                return static_cast<pipeline::AssetManager*>(ctx)->fileExists(path);
+            },
+            assetManager_);
 
-            if (raceId != targetRaceId || sexId != targetSexId) continue;
+        bodySkinPath_   = sections.bodySkin;
+        skinExtraPath_  = sections.skinExtra;
+        faceLowerPath   = sections.faceLower;
+        faceUpperPath   = sections.faceUpper;
+        hairScalpPath   = sections.hair;
+        underwearPaths  = sections.underwear;
 
-            // Section 0: Body skin (variation=0, colorIndex = skin color)
-            if (baseSection == 0 && !foundSkin &&
-                variationIndex == 0 && colorIndex == static_cast<uint32_t>(skin)) {
-                std::string tex1 = charSectionsDbc->getString(r, csF.texture1);
-                if (!tex1.empty()) {
-                    bodySkinPath_ = tex1;
-                    foundSkin = true;
-                }
-            }
-            // Section 1: Face (variation = face index, colorIndex = skin color)
-            else if (baseSection == 1 && !foundFace &&
-                     variationIndex == static_cast<uint32_t>(face) &&
-                     colorIndex == static_cast<uint32_t>(skin)) {
-                std::string tex1 = charSectionsDbc->getString(r, csF.texture1);
-                std::string tex2 = charSectionsDbc->getString(r, csF.texture2);
-                if (!tex1.empty()) faceLowerPath = tex1;
-                if (!tex2.empty()) faceUpperPath = tex2;
-                foundFace = true;
-            }
-            // Section 3: Hair (variation = hair style, colorIndex = hair color)
-            else if (baseSection == 3 && !foundHair &&
-                     variationIndex == static_cast<uint32_t>(hairStyle) &&
-                     colorIndex == static_cast<uint32_t>(hairColor)) {
-                std::string tex1 = charSectionsDbc->getString(r, csF.texture1);
-                if (!tex1.empty()) {
-                    hairScalpPath = tex1;
-                    foundHair = true;
-                }
-            }
-            // Section 4: Underwear (variation=0, colorIndex = skin color)
-            else if (baseSection == 4 && !foundUnderwear &&
-                     variationIndex == 0 && colorIndex == static_cast<uint32_t>(skin)) {
-                for (uint32_t f = csF.texture1; f <= csF.texture1 + 2; f++) {
-                    std::string tex = charSectionsDbc->getString(r, f);
-                    if (!tex.empty() && assetManager_->fileExists(tex)) {
-                        underwearPaths.push_back(tex);
-                    }
-                }
-                foundUnderwear = !underwearPaths.empty();
-            }
-        }
-
-        LOG_INFO("CharSections lookup: skin=", foundSkin ? bodySkinPath_ : "(not found)",
-                 " face=", foundFace ? (faceLowerPath.empty() ? "(empty)" : faceLowerPath) : "(not found)",
-                 " hair=", foundHair ? (hairScalpPath.empty() ? "(empty)" : hairScalpPath) : "(not found)",
-                 " underwear=", foundUnderwear, " (", underwearPaths.size(), " textures)");
+        LOG_INFO("CharSections lookup: skin=",
+                 bodySkinPath_.empty() ? "(not found)" : bodySkinPath_,
+                 " face=", sections.haveFace
+                     ? (sections.exactFace ? faceLowerPath : faceLowerPath + " (nearest)")
+                     : "(not found)",
+                 " hair=", sections.haveHair ? hairScalpPath : "(not found)",
+                 " underwear=", underwearPaths.size(), " textures");
     } else {
-        LOG_WARNING("CharSections.dbc not loaded — no character textures");
+        LOG_WARNING("CharSections.dbc not loaded - no character textures");
     }
 
     // Assign texture filenames on model before GPU upload
-    for (size_t ti = 0; ti < model.textures.size(); ti++) {
-        auto& tex = model.textures[ti];
-        LOG_INFO("  Model texture[", ti, "]: type=", tex.type,
-                 " filename='", tex.filename, "'");
-        // M2 texture types: 1=character skin, 6=hair/scalp. Empty filename means
-        // the texture is resolved at runtime via CharSections.dbc lookup.
-        if (tex.type == 1 && tex.filename.empty() && !bodySkinPath_.empty()) {
-            tex.filename = bodySkinPath_;
-        } else if (tex.type == 6 && tex.filename.empty() && !hairScalpPath.empty()) {
-            tex.filename = hairScalpPath;
+    // pipeline/char_sections.hpp fills the runtime slots. This copy still
+    // guarded types 1 and 6 with "only if the slot is empty", which is the trap
+    // the skin-extra slot was already fixed for: a name in a runtime slot is not
+    // a filename, and 'Ohren' is what a model in the wild puts there.
+    {
+        pipeline::CharacterSectionTextures resolved;
+        resolved.bodySkin  = bodySkinPath_;
+        resolved.skinExtra = skinExtraPath_;
+        resolved.hair      = hairScalpPath;
+        resolved.underwear = underwearPaths;
+        // The race folder is the second component of the model path:
+        // Character\Human\Female\HumanFemale.m2 -> Human. Taken from the path
+        // rather than restated, so the two cannot disagree.
+        std::string raceFolder;
+        {
+            const size_t first = m2Path.find('\\');
+            const size_t second = (first == std::string::npos)
+                ? std::string::npos : m2Path.find('\\', first + 1);
+            if (first != std::string::npos && second != std::string::npos) {
+                raceFolder = m2Path.substr(first + 1, second - first - 1);
+            }
         }
+        pipeline::applyCharacterTextures(model, resolved, raceFolder);
     }
 
     // Load external .anim files for sequences that store keyframes outside the M2.
     // Flag 0x20 = embedded data; when clear, animation lives in {ModelName}{SeqID}-{Var}.anim
-    for (uint32_t si = 0; si < model.sequences.size(); si++) {
-        if (!(model.sequences[si].flags & 0x20)) {
-            char animFileName[256];
-            snprintf(animFileName, sizeof(animFileName),
-                "%s%s%04u-%02u.anim",
-                modelDir.c_str(),
-                baseName.c_str(),
-                model.sequences[si].id,
-                model.sequences[si].variationIndex);
-            auto animFileData = assetManager_->readFileOptional(animFileName);
-            if (!animFileData.empty()) {
-                pipeline::M2Loader::loadAnimFile(m2Data, animFileData, si, model);
-            }
-        }
-    }
+    pipeline::loadExternalAnimations(*assetManager_, m2Path, m2Data, model);
 
     if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to load model to GPU");
@@ -693,7 +658,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
                 }
             }
         } else {
-            // Single layer (body skin only, no face/underwear overlays) — load directly
+            // Single layer (body skin only, no face/underwear overlays) - load directly
             VkTexture* skinTex = charRenderer_->loadTexture(bodySkinPath_);
             if (skinTex != nullptr) {
                 for (size_t ti = 0; ti < model.textures.size(); ti++) {
@@ -769,7 +734,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     // Weapons first, and unconditionally: they depend on nothing below, while the
     // geoset/skin work that follows bails out early on characters whose body skin
     // could not be composited. Attaching last meant those characters showed no
-    // weapon at all — and kept the previously selected character's weapon and
+    // weapon at all - and kept the previously selected character's weapon and
     // enchant, since detaching happens here too.
     attachWeapons(equipment);
 
@@ -838,18 +803,20 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         }
     }
 
+    // core/geoset_rules.hpp, the same rule the world paths use.
+    //
+    // This copy took a second id as its fallback rather than looking inside the
+    // group, so where the two ids given were the same - which every call below
+    // does - it could only answer "the model has it" or "nothing", and a model
+    // spelling that part with a different variant lost it entirely.
     auto pickGeoset = [&](uint16_t preferred, uint16_t fallback) -> uint16_t {
-        if (preferred != 0 && modelGeosets.count(preferred) > 0) return preferred;
-        if (fallback != 0 && modelGeosets.count(fallback) > 0) return fallback;
-        return 0;
+        const uint16_t chosen = core::resolveGeoset(preferred, modelGeosets);
+        if (chosen != 0) return chosen;
+        return (fallback != 0 && modelGeosets.count(fallback) > 0) ? fallback : 0;
     };
 
     auto lowestInGroup = [&](uint16_t group) -> uint16_t {
-        uint16_t best = 0;
-        for (uint16_t g : modelGeosets) {
-            if (g / 100 == group && (best == 0 || g < best)) best = g;
-        }
-        return best;
+        return core::resolveGeoset(static_cast<uint16_t>(group * 100 + 2), modelGeosets);
     };
 
     uint16_t geosetGloves = pickGeoset(core::kGeosetBareForearms, core::kGeosetBareForearms);
@@ -861,43 +828,46 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     {
         uint32_t did = findDisplayId({4, 5, 20});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetSleeves = pickGeoset(static_cast<uint16_t>(core::kGeosetBareSleeves + gg), core::kGeosetBareSleeves);
+        if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
         // Robe kilt legs
         uint32_t gg3 = getGeosetGroup(did, geosetGroup3Field);
-        if (gg3 > 0) geosetPants = pickGeoset(static_cast<uint16_t>(core::kGeosetBarePants + gg3), core::kGeosetBarePants);
+        if (gg3 > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kRobeKiltBare, gg3), core::kGeosetBarePants);
     }
     // Legs → group 13 (trousers)
     {
         uint32_t did = findDisplayId({7});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetPants = pickGeoset(static_cast<uint16_t>(core::kGeosetBarePants + gg), core::kGeosetBarePants);
+        if (gg > 0) geosetPants = pickGeoset(core::equippedGeoset(core::equipment::kLegsBare, gg), core::kGeosetBarePants);
     }
     // Boots → group 5 (shins)
     {
         uint32_t did = findDisplayId({8});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetBoots = pickGeoset(static_cast<uint16_t>(501 + gg), lowestInGroup(5));
+        if (gg > 0) geosetBoots = pickGeoset(core::equippedGeoset(core::equipment::kBootsBare, gg), lowestInGroup(5));
     }
     // Gloves → group 4 (forearms)
     {
         uint32_t did = findDisplayId({10});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetGloves = pickGeoset(static_cast<uint16_t>(core::kGeosetBareForearms + gg), core::kGeosetBareForearms);
+        if (gg > 0) geosetGloves = pickGeoset(core::equippedGeoset(core::equipment::kGlovesBare, gg), core::kGeosetBareForearms);
     }
     // Wrists/Bracers → group 8 (sleeves, only if chest/shirt didn't set it)
     {
         uint32_t did = findDisplayId({9});
         if (did != 0 && geosetSleeves == pickGeoset(core::kGeosetBareSleeves, core::kGeosetBareSleeves)) {
             uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-            if (gg > 0) geosetSleeves = pickGeoset(static_cast<uint16_t>(core::kGeosetBareSleeves + gg), core::kGeosetBareSleeves);
+            if (gg > 0) geosetSleeves = pickGeoset(core::equippedGeoset(core::equipment::kChestBare, gg), core::kGeosetBareSleeves);
         }
     }
-    // Belt → group 18 (buckle)
+    // Belt → group 18 (buckle), falling back to the base variant so the waist
+    // is not left empty - see the spawner's copy for what that costs.
     uint16_t geosetBelt = 0;
     {
         uint32_t did = findDisplayId({6});
         uint32_t gg = getGeosetGroup(did, geosetGroup1Field);
-        if (gg > 0) geosetBelt = pickGeoset(static_cast<uint16_t>(1801 + gg), 0);
+        geosetBelt = pickGeoset(
+            gg > 0 ? core::equippedGeoset(core::equipment::kBeltBase, gg) : 0,
+            core::equipment::kBeltBase);
     }
 
     eraseGroup(4);
@@ -929,13 +899,8 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     // --- Textures (equipment overlays onto body skin) ---
     if (bodySkinPath_.empty()) return true; // geosets applied, but can't composite
 
-    static constexpr const char* componentDirs[] = {
-        "ArmUpperTexture", "ArmLowerTexture", "HandTexture",
-        "TorsoUpperTexture", "TorsoLowerTexture",
-        "LegUpperTexture", "LegLowerTexture", "FootTexture",
-    };
 
-    // Texture component region fields — use DBC layout when available, fall back to binary offsets.
+    // Texture component region fields - use DBC layout when available, fall back to binary offsets.
     uint32_t texRegionFields[8];
     pipeline::getItemDisplayInfoTextureFields(*displayInfoDbc, idiL, texRegionFields);
 
@@ -951,23 +916,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
             std::string texName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), texRegionFields[region]);
             if (texName.empty()) continue;
 
-            std::string base = "Item\\TextureComponents\\" +
-                std::string(componentDirs[region]) + "\\" + texName;
-
-            std::string genderSuffix = (gender_ == game::Gender::FEMALE) ? "_F.blp" : "_M.blp";
-            std::string genderPath = base + genderSuffix;
-            std::string unisexPath = base + "_U.blp";
-            std::string fullPath;
-            std::string basePath = base + ".blp";
-            if (assetManager_->fileExists(genderPath)) {
-                fullPath = genderPath;
-            } else if (assetManager_->fileExists(unisexPath)) {
-                fullPath = unisexPath;
-            } else if (assetManager_->fileExists(basePath)) {
-                fullPath = basePath;
-            } else {
-                continue;
-            }
+            const std::string fullPath = pipeline::resolveItemRegionTexture(
+                *assetManager_, region, texName, gender_ == game::Gender::FEMALE);
+            if (fullPath.empty()) continue;
             regionLayers.emplace_back(region, fullPath);
         }
     }
@@ -1001,41 +952,15 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
                     addName(rightName);
                 }
 
-                auto hasBlpExt = [](const std::string& p) {
-                    if (p.size() < 4) return false;
-                    std::string ext = p.substr(p.size() - 4);
-                    std::transform(ext.begin(), ext.end(), ext.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    return ext == ".blp";
-                };
+                // pipeline/item_textures.hpp knows where a cape's art is and
+                // in what order to try for it.
                 std::vector<std::string> candidates;
-                auto addCandidate = [&](const std::string& p) {
-                    if (!p.empty() && std::find(candidates.begin(), candidates.end(), p) == candidates.end()) {
-                        candidates.push_back(p);
-                    }
-                };
                 for (const auto& nameRaw : capeNames) {
-                    std::string name = nameRaw;
-                    std::replace(name.begin(), name.end(), '/', '\\');
-                    bool hasDir = (name.find('\\') != std::string::npos);
-                    bool hasExt = hasBlpExt(name);
-                    if (hasDir) {
-                        if (hasExt) addCandidate(name);
-                        else addCandidate(name + ".blp");
-                    } else {
-                        std::string baseObj = "Item\\ObjectComponents\\Cape\\" + name;
-                        std::string baseTex = "Item\\TextureComponents\\Cape\\" + name;
-                        if (hasExt) {
-                            addCandidate(baseObj);
-                            addCandidate(baseTex);
-                        } else {
-                            addCandidate(baseObj + ".blp");
-                            addCandidate(baseTex + ".blp");
+                    for (auto& c : pipeline::capeTextureCandidates(
+                             nameRaw, gender_ == game::Gender::FEMALE)) {
+                        if (std::find(candidates.begin(), candidates.end(), c) == candidates.end()) {
+                            candidates.push_back(std::move(c));
                         }
-                        addCandidate(baseObj + (gender_ == game::Gender::FEMALE ? "_F.blp" : "_M.blp"));
-                        addCandidate(baseObj + "_U.blp");
-                        addCandidate(baseTex + (gender_ == game::Gender::FEMALE ? "_F.blp" : "_M.blp"));
-                        addCandidate(baseTex + "_U.blp");
                     }
                 }
                 VkTexture* whiteTex = charRenderer_->loadTexture("");
@@ -1068,25 +993,131 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     return true;
 }
 
+/// Any model, by path, with none of the appearance work.
+///
+/// loadCharacter builds a player: a race model, a composited skin, geosets
+/// chosen from hair and facial hair, underwear. A creature is none of that -
+/// its M2 names its own textures and has no geoset choices to make - so this
+/// is the same three steps with the middle two thirds left out: read the M2,
+/// frame the camera on its bounds, hand it to the renderer and stand it up.
+///
+/// The renderer is the one that already draws every unit in the world, so a
+/// creature model needs nothing here that the world does not already do.
+bool CharacterPreview::setBakedSkin(const std::string& bakePath) {
+    if (!charRenderer_ || instanceId_ == 0 || bakePath.empty()) return false;
+    // A bake is only right for the model it was baked for. Where an asset pack
+    // has put an HD character model under a display, the bake knows nothing
+    // about its face and the table is the better answer - the same rule, and
+    // the same vertex ceiling, the world spawner applies.
+    constexpr size_t kShippedCharacterVertexCeiling = 12000;
+    if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
+        if (md->vertices.size() > kShippedCharacterVertexCeiling) return false;
+    }
+    VkTexture* tex = charRenderer_->loadTexture(bakePath);
+    if (!tex) return false;
+    charRenderer_->setTextureSlotOverride(
+        instanceId_, static_cast<uint16_t>(skinTextureSlotIndex_), tex);
+    return true;
+}
+
+bool CharacterPreview::loadCreature(
+        const std::string& m2Path,
+        const std::vector<std::pair<uint32_t, std::string>>& skins) {
+    if (!charRenderer_ || !assetManager_ || !assetManager_->isInitialized()) {
+        return false;
+    }
+    if (m2Path.empty()) return false;
+
+    if (instanceId_ > 0) {
+        charRenderer_->removeInstance(instanceId_);
+        instanceId_ = 0;
+    }
+
+    pipeline::M2Model model;
+    if (!loadPreviewM2(m2Path, model)) {
+        LOG_WARNING("CharacterPreview: could not read creature model: ", m2Path);
+        return false;
+    }
+
+    if (camera_) {
+        // The declared bounds where there are any, and the vertices where
+        // there are not - the same choice loadCharacter makes, and for the
+        // same reason: a model whose header bounds are wrong frames wrong.
+        glm::vec3 frameMin = model.boundMin;
+        glm::vec3 frameMax = model.boundMax;
+        if (!model.vertices.empty()) {
+            glm::vec3 tightMin(std::numeric_limits<float>::max());
+            glm::vec3 tightMax(-std::numeric_limits<float>::max());
+            for (const auto& v : model.vertices) {
+                if (!isFiniteVec3(v.position)) continue;
+                tightMin = glm::min(tightMin, v.position);
+                tightMax = glm::max(tightMax, v.position);
+            }
+            if (tightMin.x <= tightMax.x && tightMin.y <= tightMax.y &&
+                tightMin.z <= tightMax.z) {
+                frameMin = tightMin;
+                frameMax = tightMax;
+            }
+        }
+        frameCameraForModelBounds(*camera_, frameMin, frameMax);
+        modelBoundMinZ_ = frameMin.z;
+        modelBoundMaxZ_ = frameMax.z;
+        fullBodyDistance_ = camera_->getPosition().y;
+    }
+
+    // The artist's own portrait framing, where the model carries one.
+    portraitCameraValid_ = false;
+    for (const auto& cam : model.cameras) {
+        if (cam.type != 0) continue;
+        if (!isFiniteVec3(cam.positionBase) || !isFiniteVec3(cam.targetBase)) break;
+        portraitCameraPos_ = cam.positionBase;
+        portraitCameraTarget_ = cam.targetBase;
+        portraitCameraFovDegrees_ =
+            (cam.fov > 0.0f && cam.fov < 3.14159f) ? glm::degrees(cam.fov) : 0.0f;
+        portraitCameraValid_ = true;
+        break;
+    }
+
+    if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
+        LOG_WARNING("CharacterPreview: failed to upload creature model");
+        return false;
+    }
+
+    instanceId_ = charRenderer_->createInstance(PREVIEW_MODEL_ID,
+        glm::vec3(0.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 0.0f, modelYaw_),
+        1.0f);
+    if (instanceId_ == 0) {
+        LOG_WARNING("CharacterPreview: failed to create creature instance");
+        return false;
+    }
+
+    // The display's skins, into the slots the model declared for them. Without
+    // this the geometry draws with no texture at all, which is what the target
+    // frame's portrait showed: a white shape in the right silhouette.
+    if (const auto* data = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
+        for (size_t ti = 0; ti < data->textures.size(); ++ti) {
+            for (const auto& [texType, path] : skins) {
+                if (data->textures[ti].type != texType) continue;
+                if (VkTexture* tex = charRenderer_->loadTexture(path)) {
+                    charRenderer_->setModelTexture(PREVIEW_MODEL_ID,
+                                                   static_cast<uint32_t>(ti), tex);
+                }
+                break;
+            }
+        }
+    }
+
+    // No geoset selection: a creature shows every submesh its skin declares,
+    // which is what leaving the active set alone means.
+    charRenderer_->playAnimation(instanceId_, rendering::anim::STAND, true);
+    modelLoaded_ = true;
+    return true;
+}
+
 bool CharacterPreview::loadPreviewM2(const std::string& m2Path, pipeline::M2Model& outModel) {
     if (!assetManager_) return false;
-
-    auto m2Data = assetManager_->readFile(m2Path);
-    if (m2Data.empty()) return false;
-
-    outModel = pipeline::M2Loader::load(m2Data);
-    if (outModel.name.empty()) outModel.name = m2Path;
-
-    // WotLK-era models (version 264+) keep submesh data in an external .skin.
-    std::string skinPath = m2Path;
-    size_t dot = skinPath.rfind('.');
-    if (dot != std::string::npos) skinPath = skinPath.substr(0, dot);
-    skinPath += "00.skin";
-    auto skinData = assetManager_->readFile(skinPath);
-    if (!skinData.empty() && outModel.version >= 264) {
-        pipeline::M2Loader::loadSkin(skinData, outModel);
-    }
-    return outModel.isValid();
+    return pipeline::loadM2WithSkin(*assetManager_, m2Path, outModel);  // m2_asset_loader.hpp
 }
 
 void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equipment) {
@@ -1099,10 +1130,6 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     auto displayInfoDbc = assetManager_->loadDBC("ItemDisplayInfo.dbc");
     if (!displayInfoDbc || !displayInfoDbc->isLoaded()) return;
 
-    const auto* idiL = pipeline::getActiveDBCLayout()
-        ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
-    const uint32_t modelField   = idiL ? (*idiL)["LeftModel"]        : 1u;
-    const uint32_t textureField = idiL ? (*idiL)["LeftModelTexture"] : 3u;
 
     struct WeaponSlot {
         std::initializer_list<uint8_t> invTypes;
@@ -1110,8 +1137,8 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
     };
     // Main hand also covers two-handers and ranged; off hand covers shields and held items.
     const WeaponSlot slots[] = {
-        { {13, 17, 21, 15, 25, 26}, 1 },
-        { {14, 22, 23},             2 },
+        { .invTypes = {13, 17, 21, 15, 25, 26}, .attachmentId = 1 },
+        { .invTypes = {14, 22, 23},             .attachmentId = 2 },
     };
 
     for (const auto& ws : slots) {
@@ -1134,13 +1161,11 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
         int32_t recIdx = displayInfoDbc->findRecordById(displayId);
         if (recIdx < 0) continue;
 
-        std::string modelName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), modelField);
-        std::string textureName = displayInfoDbc->getString(static_cast<uint32_t>(recIdx), textureField);
-        if (modelName.empty()) continue;
-
-        // DBC names the .mdx; the shipped assets are .m2.
-        size_t dot = modelName.rfind('.');
-        std::string modelFile = (dot != std::string::npos ? modelName.substr(0, dot) : modelName) + ".m2";
+        const auto art = pipeline::readItemDisplayArt(*displayInfoDbc,
+                                                      static_cast<uint32_t>(recIdx));
+        if (art.modelFile.empty()) continue;
+        const std::string& modelFile = art.modelFile;
+        const std::string& textureName = art.textureName;
 
         pipeline::M2Model weaponModel;
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
@@ -1206,6 +1231,11 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
 }
 
 void CharacterPreview::loadRacialBackdrop(game::Race race) {
+    // Nothing to stand in front of when the background is meant to show
+    // through. Skipped here rather than removed afterwards, so a portrait does
+    // not read and build a scene on every rebuild only to discard it.
+    if (transparentBackground_) return;
+
     if (!charRenderer_ || !assetManager_) return;
     if (backdropRace_ == static_cast<int>(race) && backdropInstanceId_ != 0) {
         // Appearance changes recreate the character instance but keep the racial
@@ -1224,7 +1254,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
     modelYaw_ = 90.0f;
     applyPreviewView();
 
-    // The glue screens each stand the character in their racial home — humans in
+    // The glue screens each stand the character in their racial home - humans in
     // Stormwind, orcs in Durotar, and so on. Undead reuse the Scourge scene.
     const char* sceneName = nullptr;
     switch (race) {
@@ -1253,8 +1283,8 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         return;
     }
 
-    // These scenes are authored in their own space — the human one sits ~230 units
-    // from its origin — and carry the camera and the spot the character stands on.
+    // These scenes are authored in their own space - the human one sits ~230 units
+    // from its origin - and carry the camera and the spot the character stands on.
     // Without both there is no way to place the scene, so leave it out entirely
     // rather than drop geometry somewhere off-screen.
     if (sceneModel.cameras.empty()) {
@@ -1306,7 +1336,7 @@ void CharacterPreview::update(float deltaTime) {
 }
 
 void CharacterPreview::render() {
-    // No-op — actual rendering happens in compositePass() called from Renderer::beginFrame()
+    // No-op - actual rendering happens in compositePass() called from Renderer::beginFrame()
 }
 
 void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
@@ -1341,7 +1371,11 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
     std::memcpy(previewUBOMapped_[fi], &ubo, sizeof(GPUPerFrameData));
 
     // Begin off-screen render pass
-    VkClearColorValue clearColor = {{0.05f, 0.05f, 0.1f, 1.0f}};
+    // Nothing at all behind a portrait, so the frame art around it shows
+    // through; the studio backdrop everywhere else.
+    VkClearColorValue clearColor = transparentBackground_
+        ? VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}
+        : VkClearColorValue{{0.05f, 0.05f, 0.1f, 1.0f}};
     renderTarget_->beginPass(cmd, clearColor);
 
     // Preview rendering bypasses Renderer::renderWorld(), so it must run the
@@ -1371,6 +1405,28 @@ void CharacterPreview::zoom(float wheelDelta) {
     applyPreviewView();
 }
 
+void CharacterPreview::setTransparentBackground(bool transparent) {
+    transparentBackground_ = transparent;
+    // The scene model behind the character is as opaque as the clear colour,
+    // so it goes as well.
+    if (transparent && backdropInstanceId_ != 0 && charRenderer_) {
+        charRenderer_->removeInstance(backdropInstanceId_);
+        backdropInstanceId_ = 0;
+        backdropRace_ = -1;
+    }
+}
+
+void CharacterPreview::setPortraitFraming() {
+    zoomLevel_ = 1.0f;
+    // Straight at the character. The model is turned to face the camera in the
+    // same breath, which is the part loadRacialBackdrop would otherwise be the
+    // only place to do.
+    previewViewDirection_ = glm::vec3(0.0f, 1.0f, 0.0f);
+    modelYaw_ = glm::degrees(std::atan2(previewViewDirection_.y,
+                                        previewViewDirection_.x));
+    applyPreviewView();
+}
+
 void CharacterPreview::resetView() {
     zoomLevel_ = 0.0f;
     applyPreviewView();
@@ -1378,6 +1434,44 @@ void CharacterPreview::resetView() {
 
 void CharacterPreview::applyPreviewView() {
     if (!camera_) return;
+
+    // A model that carries its own portrait camera is framed by it. The
+    // fraction-of-height guess below assumes the bind pose is the drawn pose,
+    // which holds for a player and not for a creature that hunches: a gnoll
+    // stands 2.04 tall in bind pose, so 82% of it aimed at 1.67 while the
+    // artist's own camera looks at 0.96, and the portrait showed the top of
+    // its head. The camera is placed in model space, so it is offset by where
+    // the model stands and the model is left in its own orientation.
+    if (zoomLevel_ >= 1.0f && portraitCameraValid_) {
+        // Room for the idle to move in.
+        //
+        // The artist's camera frames the pose Stand opens on, tightly. Left at
+        // exactly that, a gnoll swings its head out of shot for most of the
+        // loop. Backing off along the same axis keeps the framing the artist
+        // chose - the angle, the target, the whole composition - and only
+        // loosens the crop, which is the one thing an animated portrait needs
+        // and a still one does not. One number, tune it by eye.
+        constexpr float kPortraitHeadroom = 1.35f;
+        const glm::vec3 focus = previewStandPosition_ + portraitCameraTarget_;
+        const glm::vec3 camPos =
+            focus + (portraitCameraPos_ - portraitCameraTarget_) * kPortraitHeadroom;
+        camera_->setPosition(camPos);
+        const glm::vec3 forward = glm::normalize(focus - camPos);
+        camera_->setRotation(glm::degrees(std::atan2(forward.y, forward.x)),
+                             glm::degrees(std::asin(std::clamp(forward.z, -1.0f, 1.0f))));
+        if (portraitCameraFovDegrees_ > 0.0f) {
+            if (defaultFovDegrees_ <= 0.0f) defaultFovDegrees_ = camera_->getFovDegrees();
+            camera_->setFov(portraitCameraFovDegrees_);
+        }
+        if (instanceId_ > 0 && charRenderer_) {
+            charRenderer_->setInstancePosition(instanceId_, previewStandPosition_);
+            charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f));
+        }
+        return;
+    }
+
+    // Whatever a portrait camera last set, handed back.
+    if (defaultFovDegrees_ > 0.0f) camera_->setFov(defaultFovDegrees_);
 
     const float modelHeight = std::max(modelBoundMaxZ_ - modelBoundMinZ_, 0.1f);
     const float bodyFocusZ = (modelBoundMinZ_ + modelBoundMaxZ_) * 0.5f;

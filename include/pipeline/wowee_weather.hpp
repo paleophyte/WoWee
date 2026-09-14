@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Weather format (.wow) — novel replacement for WoW's
+// Wowee Open Weather format (.wow) - novel replacement for WoW's
 // WeatherTypes.dbc / WeatherEffect logic. A WOW file holds a list
 // of weather states for one zone (clear / rain / snow / fog / etc.)
 // each tagged with intensity bounds, probability weight, and
@@ -51,11 +51,11 @@ struct WoweeWeather {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    // Total weight across all entries — handy for normalizing
+    // Total weight across all entries - handy for normalizing
     // selection probabilities at the call site.
-    float totalWeight() const;
+    [[nodiscard]] float totalWeight() const;
 
     static const char* typeName(uint32_t typeId);
 };
@@ -68,10 +68,10 @@ public:
     static bool exists(const std::string& basePath);
 
     // Preset emitters used by --gen-weather variants.
-    //   makeTemperate  — clear-dominant + occasional rain + fog
-    //   makeArctic     — snow-dominant + blizzard + fog
-    //   makeDesert     — clear-dominant + sandstorm
-    //   makeStormy     — heavy rain + storm + occasional clear
+    //   makeTemperate  - clear-dominant + occasional rain + fog
+    //   makeArctic     - snow-dominant + blizzard + fog
+    //   makeDesert     - clear-dominant + sandstorm
+    //   makeStormy     - heavy rain + storm + occasional clear
     static WoweeWeather makeTemperate(const std::string& zoneName);
     static WoweeWeather makeArctic(const std::string& zoneName);
     static WoweeWeather makeDesert(const std::string& zoneName);

@@ -7,26 +7,31 @@
 #include "game/entity.hpp"
 #include "game/update_field_table.hpp"
 #include "game/character.hpp"
+#include "game/combat_handler.hpp"
 
 namespace wowee::ui::helpers {
 
-// ---- Duration / aura formatting ----
+// ---- Level difficulty ----
 
-// Format a duration in seconds as compact text: "2h", "3:05", "42"
-inline void fmtDurationCompact(char* buf, size_t sz, int secs) {
-    if (secs >= 3600) snprintf(buf, sz, "%dh", secs / 3600);
-    else if (secs >= 60) snprintf(buf, sz, "%d:%02d", secs / 60, secs % 60);
-    else snprintf(buf, sz, "%d", secs);
-}
+/// The colour WoW draws a hostile mob's level in: grey once it stops giving
+/// experience, then green, yellow, orange and red as it gets harder.
+///
+/// Written out three times - the target frame's name, the focus frame's name,
+/// and the selection circle on the ground - and the circle's copy was missing
+/// the rule for an unlevelled mob. A raid boss reports level 0, so the
+/// subtraction gave it a difference of minus the player's level and it came out
+/// green: the one mob in the game that should read as unkillable drew the circle
+/// that means trivial, while its name two inches away was skull red.
+inline ImVec4 levelDifficultyColor(uint32_t playerLevel, uint32_t mobLevel) {
+    // Level 0 is "??" - a boss, or a unit whose level has not arrived yet.
+    if (mobLevel == 0) return colors::kSkullRed;
+    if (game::CombatHandler::killXp(playerLevel, mobLevel) == 0) return colors::kGray;
 
-// Render "Remaining: Xs" or "Remaining: Xm Ys" in a tooltip (light gray)
-inline void renderAuraRemaining(int remainMs) {
-    if (remainMs <= 0) return;
-    int s = remainMs / 1000;
-    char buf[32];
-    if (s < 60) snprintf(buf, sizeof(buf), "Remaining: %ds", s);
-    else snprintf(buf, sizeof(buf), "Remaining: %dm %ds", s / 60, s % 60);
-    ImGui::TextColored(colors::kLightGray, "%s", buf);
+    const int32_t diff = static_cast<int32_t>(mobLevel) - static_cast<int32_t>(playerLevel);
+    if (diff >= 10) return colors::kSkullRed;
+    if (diff >= 5) return colors::kDifficultOrange;
+    if (diff >= -2) return colors::kEvenYellow;
+    return colors::kBrightGreen;
 }
 
 // ---- Class color / name helpers ----

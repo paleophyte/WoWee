@@ -4,8 +4,10 @@
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
+#include "core/coordinates.hpp"
 #include "math/spline.hpp"
 #include "core/logger.hpp"
+#include <algorithm>
 #include <glm/gtc/constants.hpp>
 #include <cmath>
 
@@ -20,6 +22,28 @@ bool TransportClockSync::computePathTime(
 {
     uint32_t nowMs = static_cast<uint32_t>(elapsedTime * 1000.0);
     uint32_t durationMs = spline.durationMs();
+
+    // The server's own route clock wins over anything the client worked out for
+    // itself. It publishes the phase as a fraction of the route period, so it
+    // maps onto whatever timeline this spline happens to have without needing the
+    // two periods to agree - and it keeps agreeing as the ride goes on, because
+    // the phase advances at the server's rate rather than one derived from
+    // distance over speed.
+    //
+    // Without it the client picked its own period, and a ferry whose period came
+    // out shorter than the server's simply lapped its shore until the server's
+    // schedule caught up.
+    if (transport.hasServerRouteClock && transport.routePeriodMs > 0 && durationMs > 0) {
+        const double sinceSampleMs =
+            std::max(0.0, (elapsedTime - transport.routePhaseAtTime) * 1000.0);
+        const double serverMs =
+            static_cast<double>(transport.routePhase) * transport.routePeriodMs + sinceSampleMs;
+        double wrapped = std::fmod(serverMs, static_cast<double>(transport.routePeriodMs));
+        if (wrapped < 0.0) wrapped += transport.routePeriodMs;
+        const double fraction = wrapped / static_cast<double>(transport.routePeriodMs);
+        outPathTimeMs = static_cast<uint32_t>(fraction * durationMs) % durationMs;
+        return true;
+    }
 
     if (transport.hasServerClock) {
         // Predict server time using clock offset (works for both client and server-driven modes)
@@ -91,14 +115,14 @@ void TransportClockSync::processServerUpdate(
         glm::vec3 pd = position - transport.position;
         float posDeltaSq = glm::dot(pd, pd);
         if (posDeltaSq > 1.0f) {
-            // Server sent a meaningfully different position — it's actively driving this transport
+            // Server sent a meaningfully different position - it's actively driving this transport
             transport.useClientAnimation = false;
             LOG_INFO("Transport 0x", std::hex, transport.guid, std::dec,
                      " switching to server-driven (posDeltaSq=", posDeltaSq, ")");
         }
         // Otherwise keep client animation (server just echoed spawn pos or sent small jitter)
     } else if (!hasPath || !pathEntry->fromDBC) {
-        // No DBC path — purely server-driven
+        // No DBC path - purely server-driven
         transport.useClientAnimation = false;
     }
     transport.clientAnimationReverse = false;
@@ -199,7 +223,18 @@ void TransportClockSync::updateYawAlignment(
     float hLenSq = glm::dot(horizontalV, horizontalV);
     if (hLenSq > 0.04f) {
         horizontalV *= glm::inversesqrt(hLenSq);
-        glm::vec2 heading(std::cos(transport.serverYaw), std::sin(transport.serverYaw));
+        // The velocity is canonical, so the heading has to be too. A server yaw s
+        // is canonical yaw s - PI/2, and canonical yaw is atan2(-dy, dx), which
+        // puts the direction at (sin s, cos s) - see core/coordinates.hpp.
+        //
+        // This read it as (cos s, sin s), the two components swapped. That is a
+        // reflection, not a rotation, so the dot product it produced was not the
+        // alignment of anything: a transport facing exactly along its travel
+        // measured as sin(2s), which is +1 near a heading of 45 degrees and -1
+        // near 135. The check then flipped correctly-oriented transports through
+        // 180 degrees purely on which way their route happened to run.
+        const float canonicalYaw = core::coords::serverToCanonicalYaw(transport.serverYaw);
+        glm::vec2 heading(std::cos(canonicalYaw), -std::sin(canonicalYaw));
         float alignDot = glm::dot(heading, horizontalV);
 
         if (alignDot < -0.35f) {

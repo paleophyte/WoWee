@@ -1,4 +1,5 @@
 #include "network/world_socket.hpp"
+#include "core/env_flag.hpp"
 #include "network/packet.hpp"
 #include "network/net_platform.hpp"
 #include "game/opcode_table.hpp"
@@ -102,12 +103,6 @@ inline bool isLoginPipelineCmsg(uint16_t opcode) {
     }
 }
 
-inline bool envFlagEnabled(const char* key, bool defaultValue = false) {
-    const char* raw = std::getenv(key);
-    if (!raw || !*raw) return defaultValue;
-    return !(raw[0] == '0' || raw[0] == 'f' || raw[0] == 'F' ||
-             raw[0] == 'n' || raw[0] == 'N');
-}
 
 const char* opcodeNameForTrace(uint16_t wireOpcode) {
     const auto* table = wowee::game::getActiveOpcodeTable();
@@ -136,9 +131,9 @@ WorldSocket::WorldSocket() {
     net::ensureInit();
     // Always reserve baseline receive capacity (safe, behavior-preserving).
     receiveBuffer.reserve(64 * 1024);
-    useFastRecvAppend_ = envFlagEnabled("WOWEE_NET_FAST_RECV_APPEND", true);
-    useParseScratchQueue_ = envFlagEnabled("WOWEE_NET_PARSE_SCRATCH", false);
-    useAsyncPump_ = envFlagEnabled("WOWEE_NET_ASYNC_PUMP", true);
+    useFastRecvAppend_ = core::envFlagEnabled("WOWEE_NET_FAST_RECV_APPEND", true);
+    useParseScratchQueue_ = core::envFlagEnabled("WOWEE_NET_PARSE_SCRATCH", false);
+    useAsyncPump_ = core::envFlagEnabled("WOWEE_NET_ASYNC_PUMP", true);
     if (useParseScratchQueue_) {
         LOG_WARNING("WOWEE_NET_PARSE_SCRATCH is temporarily disabled (known unstable); forcing off");
         useParseScratchQueue_ = false;
@@ -162,35 +157,10 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
 
     stopAsyncPump();
 
-    // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == INVALID_SOCK) {
-        LOG_ERROR("Failed to create socket");
-        return false;
-    }
-
-    // Set non-blocking
-    net::setNonBlocking(sockfd);
-
-    // Resolve host
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
-        LOG_ERROR("Failed to resolve host: ", host);
-        net::closeSocket(sockfd);
-        sockfd = INVALID_SOCK;
-        return false;
-    }
-
-    // Connect
+    // Socket open, non-blocking, and the address resolved.
     struct sockaddr_in serverAddr;
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr = reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr;
-    serverAddr.sin_port = htons(port);
-    freeaddrinfo(res);
+    sockfd = net::openResolvedSocket(host, port, serverAddr);
+    if (sockfd == INVALID_SOCK) return false;
 
     int result = ::connect(sockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
     if (result < 0) {
@@ -202,7 +172,7 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
             return false;
         }
 
-        // Non-blocking connect in progress — wait up to 10s for completion.
+        // Non-blocking connect in progress - wait up to 10s for completion.
         // On Windows, calling recv() before the connect completes returns
         // WSAENOTCONN; we must poll writability before declaring connected.
         fd_set writefds, errfds;
@@ -223,7 +193,7 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
             return false;
         }
 
-        // Verify the socket error code — writeable doesn't guarantee success on all platforms
+        // Verify the socket error code - writeable doesn't guarantee success on all platforms
         int sockErr = 0;
         socklen_t errLen = sizeof(sockErr);
         getsockopt(sockfd, SOL_SOCKET, SO_ERROR,
@@ -236,7 +206,7 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
         }
     }
 
-    // Disable Nagle's algorithm — send small packets immediately.
+    // Disable Nagle's algorithm - send small packets immediately.
     int one = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&one), sizeof(one));
@@ -322,8 +292,8 @@ void WorldSocket::dumpRecentPacketHistoryLocked(const char* reason, size_t buffe
 }
 
 void WorldSocket::send(const Packet& packet) {
-    static const bool kLogCharCreatePayload = envFlagEnabled("WOWEE_NET_LOG_CHAR_CREATE", false);
-    static const bool kLogSwapItemPackets = envFlagEnabled("WOWEE_NET_LOG_SWAP_ITEM", false);
+    static const bool kLogCharCreatePayload = core::envFlagEnabled("WOWEE_NET_LOG_CHAR_CREATE", false);
+    static const bool kLogSwapItemPackets = core::envFlagEnabled("WOWEE_NET_LOG_SWAP_ITEM", false);
     std::lock_guard<std::mutex> lock(ioMutex_);
     if (!connected || sockfd == INVALID_SOCK) return;
 
@@ -460,7 +430,7 @@ void WorldSocket::send(const Packet& packet) {
         if (sent < 0) {
             int err = net::lastError();
             if (net::isWouldBlock(err)) {
-                // Kernel buffer full — yield briefly and retry.
+                // Kernel buffer full - yield briefly and retry.
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
                 continue;
             }
@@ -617,7 +587,7 @@ void WorldSocket::pumpNetworkIO() {
             break;
         }
         if (net::isConnectionClosed(err)) {
-            // Peer closed the connection — treat the same as recv() returning 0
+            // Peer closed the connection - treat the same as recv() returning 0
             sawClose = true;
             break;
         }
@@ -713,7 +683,7 @@ void WorldSocket::tryParsePackets() {
             closeSocketNoJoin();
             return;
         }
-        constexpr uint16_t kMaxWorldPacketSize = 0x8000;  // 32KB — allows large guild rosters, auction lists
+        constexpr uint16_t kMaxWorldPacketSize = 0x8000;  // 32KB - allows large guild rosters, auction lists
         if (size > kMaxWorldPacketSize) {
             LOG_ERROR("World packet framing desync: oversized packet size=", size,
                       " rawHdr=", std::hex,

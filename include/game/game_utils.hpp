@@ -1,9 +1,12 @@
 #pragma once
 
 #include "game/expansion_profile.hpp"
+#include "game/item_text.hpp"
 #include "core/application.hpp"
 #include <cstdlib>
 #include <string>
+
+#include <cstdint>
 
 namespace wowee {
 namespace game {
@@ -28,24 +31,40 @@ inline bool isPreWotlk() {
     return isClassicLikeExpansion() || isActiveExpansion("tbc");
 }
 
-// Shared item link formatter used by inventory, quest, spell, and social handlers.
-// Centralised here so quality color table changes propagate everywhere.
+// Shared item link formatter used by inventory, quest, spell, and social
+// handlers. It is a second name for itemChatLink and not a second copy: this
+// one carried its own quality table, which is how the colours came to be
+// written out in six places for one set of eight values.
 inline std::string buildItemLink(uint32_t itemId, uint32_t quality, const std::string& name) {
-    static const char* kQualHex[] = {
-        "9d9d9d",  // 0 Poor
-        "ffffff",  // 1 Common
-        "1eff00",  // 2 Uncommon
-        "0070dd",  // 3 Rare
-        "a335ee",  // 4 Epic
-        "ff8000",  // 5 Legendary
-        "e6cc80",  // 6 Artifact
-        "e6cc80",  // 7 Heirloom
+    return itemChatLink(itemId, quality, name);
+}
+
+/// Whether a map 0 position is the corrupted one rather than real ground.
+///
+/// A faulty area-trigger destination leaves the server holding a position at
+/// the origin, and it persists across sessions: on re-login it arrives in
+/// LOGIN_VERIFY_WORLD, and heartbeats sent from there write it back. Several
+/// paths refuse it - the teleport ack, the player's own update blocks, the
+/// heartbeat, the area-trigger sweep - and all of them ask this.
+///
+/// The test used to be a thousand units square, which is not "the origin" on
+/// map 0: Hillsbrad sits inside it. Standing in Southshore, every heartbeat
+/// was blocked, so the server went on believing the player was wherever they
+/// had been before - and streamed that place's creatures instead. An empty
+/// Southshore was this box, not a missing spawn.
+///
+/// Ten units on each axis, height included. A zeroed position matches; ground
+/// a player is standing on does not, the origin's own terrain being some way
+/// below or above z = 0 wherever the two coincide.
+///
+/// The axis test is not called `near`: windows.h defines that as a macro, and
+/// the name compiled everywhere except the two Windows targets.
+constexpr bool isCorruptOriginPosition(uint32_t mapId, float x, float y, float z) {
+    constexpr float kNearOrigin = 10.0f;
+    const auto withinOrigin = [](float v) {
+        return v < kNearOrigin && v > -kNearOrigin;
     };
-    uint32_t qi = quality < 8 ? quality : 1u;
-    char buf[512];
-    snprintf(buf, sizeof(buf), "|cff%s|Hitem:%u:0:0:0:0:0:0:0:0|h[%s]|h|r",
-             kQualHex[qi], itemId, name.c_str());
-    return buf;
+    return mapId == 0 && withinOrigin(x) && withinOrigin(y) && withinOrigin(z);
 }
 
 } // namespace game

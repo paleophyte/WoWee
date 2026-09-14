@@ -49,25 +49,6 @@ bool AudioCoordinator::initialize() {
     LOG_INFO("AudioCoordinator initialized with ", 11, " audio managers");
     return true;
 }
-
-void AudioCoordinator::initializeWithAssets(pipeline::AssetManager* assetManager) {
-    if (!audioAvailable_ || !assetManager) return;
-
-    if (musicManager_) musicManager_->initialize(assetManager);
-    if (footstepManager_) footstepManager_->initialize(assetManager);
-    if (activitySoundManager_) activitySoundManager_->initialize(assetManager);
-    if (mountSoundManager_) mountSoundManager_->initialize(assetManager);
-    if (npcVoiceManager_) npcVoiceManager_->initialize(assetManager);
-    if (playerVoiceManager_) playerVoiceManager_->initialize(assetManager);
-    if (ambientSoundManager_) ambientSoundManager_->initialize(assetManager);
-    if (uiSoundManager_) uiSoundManager_->initialize(assetManager);
-    if (combatSoundManager_) combatSoundManager_->initialize(assetManager);
-    if (spellSoundManager_) spellSoundManager_->initialize(assetManager);
-    if (movementSoundManager_) movementSoundManager_->initialize(assetManager);
-
-    LOG_INFO("AudioCoordinator initialized with asset manager");
-}
-
 void AudioCoordinator::shutdown() {
     // Reset all managers first (they may reference AudioEngine)
     movementSoundManager_.reset();
@@ -98,6 +79,10 @@ void AudioCoordinator::playZoneMusic(const std::string& music) {
     } else {
         musicManager_->crossfadeTo(music);
     }
+}
+
+void AudioCoordinator::setZoneMusicLooping(bool loop) {
+    if (musicManager_) musicManager_->setLooping(loop);
 }
 
 void AudioCoordinator::onOriginalSoundtrackDisabled(game::ZoneManager* zm) {
@@ -191,8 +176,16 @@ void AudioCoordinator::updateZoneAudio(const ZoneAudioContext& ctx) {
             wmoModelId == 220 || wmoModelId == 221 ||
             wmoModelId == 5392 || wmoModelId == 5393) {
             insideTavern = true;
-            static const std::vector<std::string> tavernTracks = {
-                "Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance01.mp3",
+            // The first slot is our own tavern track. It falls back to the
+            // Blizzard one it replaces when the file is missing, and the
+            // original-soundtrack setting drops it the same way zone music does.
+            static const std::string tavernRemix =
+                game::ZoneManager::resolveOriginalMusicFile("TavernAllianceREMIX.mp3");
+            const bool useRemix = !tavernRemix.empty() &&
+                (!ctx.zoneManager || ctx.zoneManager->getUseOriginalSoundtrack());
+            const std::vector<std::string> tavernTracks = {
+                useRemix ? tavernRemix
+                         : std::string("Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance01.mp3"),
                 "Sound\\Music\\ZoneMusic\\TavernAlliance\\TavernAlliance02.mp3",
                 "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern1A.mp3",
                 "Sound\\Music\\ZoneMusic\\TavernHuman\\RA_HumanTavern2A.mp3",

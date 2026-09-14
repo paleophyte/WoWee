@@ -1,4 +1,5 @@
 #include "rendering/sky_system.hpp"
+#include "rendering/sun_direction.hpp"
 #include "rendering/skybox.hpp"
 #include "rendering/celestial.hpp"
 #include "rendering/starfield.hpp"
@@ -32,14 +33,14 @@ bool SkySystem::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout)
         return false;
     }
 
-    // Celestial bodies — sun + 2 moons (Vulkan)
+    // Celestial bodies - sun + 2 moons (Vulkan)
     celestial_ = std::make_unique<Celestial>();
     if (!celestial_->initialize(ctx, perFrameLayout)) {
         LOG_ERROR("Failed to initialize celestial bodies");
         return false;
     }
 
-    // Procedural stars — fallback / debug (Vulkan)
+    // Procedural stars - fallback / debug (Vulkan)
     starField_ = std::make_unique<StarField>();
     if (!starField_->initialize(ctx, perFrameLayout)) {
         LOG_ERROR("Failed to initialize star field");
@@ -112,17 +113,24 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // Original client sky M2s supply their own celestial bodies, clouds, and
     // nebula layers. The caller draws that model over the gradient underlay.
-    if (params.useOriginalSkybox) {
-        if (starField_) starField_->setEnabled(false);
-        return;
-    }
 
-    // --- Procedural stars (debug / fallback) ---
+    // --- Procedural stars ---
+    // Not only a fallback any more: with sharp stars on, the sky model keeps
+    // its clouds and planets while M2Renderer drops its star layer, and these
+    // are drawn in that layer's place. So the original-skybox path continues
+    // here rather than returning, and skyboxHasStars stops meaning "do not".
     bool renderProceduralStars = false;
     if (debugSkyMode_) {
         renderProceduralStars = true;
     } else if (proceduralStarsEnabled_) {
+        renderProceduralStars = true;
+    } else if (!params.useOriginalSkybox) {
         renderProceduralStars = !params.skyboxHasStars;
+    }
+
+    if (params.useOriginalSkybox && !renderProceduralStars) {
+        if (starField_) starField_->setEnabled(false);
+        return;
     }
 
     if (starField_) {
@@ -164,39 +172,22 @@ void SkySystem::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         glm::vec3 sunPos = getSunPosition(params);
         lensFlare_->render(cmd, camera, sunPos, params.timeOfDay,
                            params.fogDensity, params.cloudDensity,
-                           params.weatherIntensity);
+                           params.weatherIntensity, params.sunOcclusion);
     }
 }
 
 glm::vec3 SkySystem::getSunPosition(const SkyParams& params) const {
-    float dirLenSq = glm::dot(params.directionalDir, params.directionalDir);
-    glm::vec3 dir = (dirLenSq > 1e-8f) ? params.directionalDir * glm::inversesqrt(dirLenSq) : glm::vec3(0.0f);
-    if (dirLenSq < 1e-8f) {
-        dir = glm::vec3(0.0f, 0.0f, -1.0f);
-    }
-    glm::vec3 sunDir = -dir;
-    if (sunDir.z < 0.0f) {
-        sunDir = dir;
-    }
-    return sunDir * 800.0f;
+    // Below the horizon it stays below - see sun_direction.hpp for what the
+    // mirror that used to be here cost.
+    return sunDirectionFromLightDir(params.directionalDir) * 800.0f;
 }
 
 void SkySystem::setMoonPhaseCycling(bool enabled) {
     if (celestial_) celestial_->setMoonPhaseCycling(enabled);
 }
-
-void SkySystem::setWhiteLadyPhase(float phase) {
-    if (celestial_) celestial_->setMoonPhase(phase);
-}
-
 void SkySystem::setBlueChildPhase(float phase) {
     if (celestial_) celestial_->setBlueChildPhase(phase);
 }
-
-float SkySystem::getWhiteLadyPhase() const {
-    return celestial_ ? celestial_->getMoonPhase() : 0.5f;
-}
-
 float SkySystem::getBlueChildPhase() const {
     return celestial_ ? celestial_->getBlueChildPhase() : 0.25f;
 }

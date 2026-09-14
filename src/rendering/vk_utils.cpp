@@ -1,7 +1,10 @@
 #include "rendering/vk_utils.hpp"
+
+#include <cstdio>
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
 #include <cstring>
+#include <vector>
 
 namespace wowee {
 namespace rendering {
@@ -32,26 +35,22 @@ AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
 }
 
 void destroyBuffer(VmaAllocator allocator, AllocatedBuffer& buffer) {
-    if (buffer.buffer) {
-        vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
-        buffer.buffer = VK_NULL_HANDLE;
-        buffer.allocation = VK_NULL_HANDLE;
-    }
+    destroy(allocator, buffer.buffer, buffer.allocation);
 }
 
 AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
     uint32_t width, uint32_t height, VkFormat format,
-    VkImageUsageFlags usage, VkSampleCountFlagBits samples, uint32_t mipLevels)
-{
+    VkImageUsageFlags usage, VkSampleCountFlagBits samples, uint32_t mipLevels,
+    std::source_location where) {
     AllocatedImage result{};
-    result.extent = {width, height};
+    result.extent = {.width = width, .height = height};
     result.format = format;
 
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType = VK_IMAGE_TYPE_2D;
     imgInfo.format = format;
-    imgInfo.extent = {width, height, 1};
+    imgInfo.extent = {.width = width, .height = height, .depth = 1};
     imgInfo.mipLevels = mipLevels;
     imgInfo.arrayLayers = 1;
     imgInfo.samples = samples;
@@ -67,6 +66,20 @@ AllocatedImage createImage(VkDevice device, VmaAllocator allocator,
             &result.image, &result.allocation, nullptr) != VK_SUCCESS) {
         LOG_ERROR("Failed to create VMA image (", width, "x", height, ")");
         return result;
+    }
+
+    // Name it by shape, so an allocation that survives shutdown can be traced
+    // back from the leak dump to whatever asked for an image this size.
+    {
+        char name[64];
+        const char* file = where.file_name();
+        if (const char* slash = std::strrchr(file, '/')) file = slash + 1;
+        std::snprintf(name, sizeof(name), "img %ux%u mips=%u fmt=%d from %s:%u",
+                      width, height, mipLevels, static_cast<int>(format),
+                      file, where.line());
+        vmaSetAllocationName(allocator, result.allocation, name);
+        setObjectName(device, VK_OBJECT_TYPE_IMAGE,
+                      reinterpret_cast<uint64_t>(result.image), name);
     }
 
     // Create image view
@@ -107,12 +120,134 @@ void destroyImage(VkDevice device, VmaAllocator allocator, AllocatedImage& image
     }
 }
 
+namespace {
+
+/// The device's vkCmdPipelineBarrier2KHR, or nullptr for the legacy path.
+PFN_vkCmdPipelineBarrier2KHR gPipelineBarrier2 = nullptr;
+
+/// vkSetDebugUtilsObjectNameEXT, or nullptr when validation is off.
+PFN_vkSetDebugUtilsObjectNameEXT gSetObjectName = nullptr;
+
+/// synchronization2 stage and access masks are 64 bits and the legacy ones
+/// are 32. The bits above 32 are the stages synchronization2 added and have
+/// no legacy spelling, so a mask that uses one is widened to the coarsest
+/// legacy equivalent instead. That waits for more than it needs, never less.
+VkPipelineStageFlags lowerStages(VkPipelineStageFlags2 stages, bool isSource) {
+    if ((stages >> 32) != 0) return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (stages == 0) {
+        // VK_PIPELINE_STAGE_2_NONE is legal; a legacy mask of zero is not.
+        return isSource ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                        : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+    return static_cast<VkPipelineStageFlags>(stages);
+}
+
+VkAccessFlags lowerAccess(VkAccessFlags2 access) {
+    if ((access >> 32) != 0) {
+        return VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    }
+    return static_cast<VkAccessFlags>(access);
+}
+
+} // namespace
+
+void setPipelineBarrier2Fn(PFN_vkCmdPipelineBarrier2KHR fn) {
+    gPipelineBarrier2 = fn;
+}
+
+void setObjectNameFn(PFN_vkSetDebugUtilsObjectNameEXT fn) {
+    gSetObjectName = fn;
+}
+
+bool isObjectNamingActive() { return gSetObjectName != nullptr; }
+
+void setObjectName(VkDevice device, VkObjectType type, uint64_t handle, const char* name) {
+    if (gSetObjectName == nullptr || handle == 0) return;
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.objectType = type;
+    info.objectHandle = handle;
+    info.pObjectName = name;
+    gSetObjectName(device, &info);
+}
+
+void cmdPipelineBarrier2(VkCommandBuffer cmd, const VkDependencyInfo& dep) {
+    if (gPipelineBarrier2 != nullptr) {
+        gPipelineBarrier2(cmd, &dep);
+        return;
+    }
+
+    VkPipelineStageFlags2 srcStages = 0;
+    VkPipelineStageFlags2 dstStages = 0;
+
+    std::vector<VkMemoryBarrier> mems;
+    mems.reserve(dep.memoryBarrierCount);
+    for (uint32_t i = 0; i < dep.memoryBarrierCount; ++i) {
+        const VkMemoryBarrier2& b = dep.pMemoryBarriers[i];
+        srcStages |= b.srcStageMask;
+        dstStages |= b.dstStageMask;
+        mems.push_back({.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = lowerAccess(b.srcAccessMask),
+                        .dstAccessMask = lowerAccess(b.dstAccessMask)});
+    }
+
+    std::vector<VkBufferMemoryBarrier> bufs;
+    bufs.reserve(dep.bufferMemoryBarrierCount);
+    for (uint32_t i = 0; i < dep.bufferMemoryBarrierCount; ++i) {
+        const VkBufferMemoryBarrier2& b = dep.pBufferMemoryBarriers[i];
+        srcStages |= b.srcStageMask;
+        dstStages |= b.dstStageMask;
+        bufs.push_back({.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = lowerAccess(b.srcAccessMask),
+                        .dstAccessMask = lowerAccess(b.dstAccessMask),
+                        .srcQueueFamilyIndex = b.srcQueueFamilyIndex,
+                        .dstQueueFamilyIndex = b.dstQueueFamilyIndex,
+                        .buffer = b.buffer,
+                        .offset = b.offset,
+                        .size = b.size});
+    }
+
+    std::vector<VkImageMemoryBarrier> imgs;
+    imgs.reserve(dep.imageMemoryBarrierCount);
+    for (uint32_t i = 0; i < dep.imageMemoryBarrierCount; ++i) {
+        const VkImageMemoryBarrier2& b = dep.pImageMemoryBarriers[i];
+        srcStages |= b.srcStageMask;
+        dstStages |= b.dstStageMask;
+        imgs.push_back({.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = lowerAccess(b.srcAccessMask),
+                        .dstAccessMask = lowerAccess(b.dstAccessMask),
+                        .oldLayout = b.oldLayout,
+                        .newLayout = b.newLayout,
+                        .srcQueueFamilyIndex = b.srcQueueFamilyIndex,
+                        .dstQueueFamilyIndex = b.dstQueueFamilyIndex,
+                        .image = b.image,
+                        .subresourceRange = b.subresourceRange});
+    }
+
+    vkCmdPipelineBarrier(cmd,
+                         lowerStages(srcStages, true),
+                         lowerStages(dstStages, false),
+                         dep.dependencyFlags,
+                         static_cast<uint32_t>(mems.size()), mems.empty() ? nullptr : mems.data(),
+                         static_cast<uint32_t>(bufs.size()), bufs.empty() ? nullptr : bufs.data(),
+                         static_cast<uint32_t>(imgs.size()), imgs.empty() ? nullptr : imgs.data());
+}
+
 void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
     VkImageLayout oldLayout, VkImageLayout newLayout,
     VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
 {
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    // The stage masks are the caller's legacy flags widened. synchronization2
+    // defines its first 32 stage and access bits to the same values, so a
+    // VK_PIPELINE_STAGE_* constant is already a valid VK_PIPELINE_STAGE_2_*
+    // one and no call site has to change.
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = srcStage;
+    barrier.dstStageMask = dstStage;
     barrier.oldLayout = oldLayout;
     barrier.newLayout = newLayout;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -170,8 +305,11 @@ void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
             break;
     }
 
-    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0,
-        0, nullptr, 0, nullptr, 1, &barrier);
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    cmdPipelineBarrier2(cmd, dep);
 }
 
 AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
@@ -206,6 +344,38 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
     }
 
     return gpuBuffer;
+}
+
+bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
+                      VkBuffer target) {
+    if (target == VK_NULL_HANDLE || size == 0) return false;
+
+    AllocatedBuffer staging = createBuffer(ctx.getAllocator(), size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    if (staging.buffer == VK_NULL_HANDLE) return false;
+
+    void* mapped = nullptr;
+    if (vmaMapMemory(ctx.getAllocator(), staging.allocation, &mapped) != VK_SUCCESS) {
+        destroyBuffer(ctx.getAllocator(), staging);
+        return false;
+    }
+    std::memcpy(mapped, data, size);
+    vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
+
+    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy region{};
+        region.size = size;
+        vkCmdCopyBuffer(cmd, staging.buffer, target, 1, &region);
+    });
+
+    // See the header: the copy may not have been submitted yet, so the staging
+    // buffer goes when the frame it was recorded in is done with it.
+    const VmaAllocator allocator = ctx.getAllocator();
+    AllocatedBuffer pending = staging;
+    ctx.deferAfterFrameFence([allocator, pending]() mutable {
+        destroyBuffer(allocator, pending);
+    });
+    return true;
 }
 
 } // namespace rendering

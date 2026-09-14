@@ -1,4 +1,5 @@
 #include "pipeline/wowee_weather.hpp"
+#include "pipeline/wowee_binary_io.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -11,24 +12,7 @@ namespace {
 
 constexpr char kMagic[4] = {'W', 'O', 'W', 'A'};
 constexpr uint32_t kVersion = 1;
-
-template <typename T>
-void writePOD(std::ofstream& os, const T& v) {
-    os.write(reinterpret_cast<const char*>(&v), sizeof(T));
-}
-
-template <typename T>
-bool readPOD(std::ifstream& is, T& v) {
-    is.read(reinterpret_cast<char*>(&v), sizeof(T));
-    return is.gcount() == static_cast<std::streamsize>(sizeof(T));
-}
-
-std::string normalizePath(std::string base) {
-    if (base.size() < 4 || base.substr(base.size() - 4) != ".wow") {
-        base += ".wow";
-    }
-    return base;
-}
+constexpr char kExtension[] = ".wow";
 
 } // namespace
 
@@ -52,48 +36,27 @@ const char* WoweeWeather::typeName(uint32_t typeId) {
 }
 
 bool WoweeWeatherLoader::save(const WoweeWeather& w,
-                              const std::string& basePath) {
-    std::ofstream os(normalizePath(basePath), std::ios::binary);
-    if (!os) return false;
-    os.write(kMagic, 4);
-    writePOD(os, kVersion);
-    uint32_t nameLen = static_cast<uint32_t>(w.name.size());
-    writePOD(os, nameLen);
-    if (nameLen > 0) os.write(w.name.data(), nameLen);
-    uint32_t entryCount = static_cast<uint32_t>(w.entries.size());
-    writePOD(os, entryCount);
-    for (const auto& e : w.entries) {
+                     const std::string& basePath) {
+    return saveCatalog(w, basePath, kMagic, kVersion, kExtension,
+                       [](std::ofstream& os, const WoweeWeather::Entry& e) {
         writePOD(os, e.weatherTypeId);
         writePOD(os, e.minIntensity);
         writePOD(os, e.maxIntensity);
         writePOD(os, e.weight);
         writePOD(os, e.minDurationSec);
         writePOD(os, e.maxDurationSec);
-    }
-    return os.good();
+                       });
 }
 
 WoweeWeather WoweeWeatherLoader::load(const std::string& basePath) {
     WoweeWeather out;
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
+    std::ifstream is(normalizePath(basePath, kExtension), std::ios::binary);
     if (!is) return out;
-    char magic[4];
-    is.read(magic, 4);
-    if (std::memcmp(magic, kMagic, 4) != 0) return out;
-    uint32_t version = 0;
-    if (!readPOD(is, version) || version != kVersion) return out;
-    uint32_t nameLen = 0;
-    if (!readPOD(is, nameLen)) return out;
-    if (nameLen > 0) {
-        out.name.resize(nameLen);
-        is.read(out.name.data(), nameLen);
-        if (is.gcount() != static_cast<std::streamsize>(nameLen)) {
-            out.name.clear();
-            return out;
-        }
-    }
+    // The name length used to be read with no cap, and the entry count with no
+    // cap either - this format wrote its own header rather than using the one
+    // every other format uses, and so missed both.
     uint32_t entryCount = 0;
-    if (!readPOD(is, entryCount)) return out;
+    if (!readCatalogHeader(is, kMagic, kVersion, out.name, entryCount)) return out;
     out.entries.resize(entryCount);
     for (auto& e : out.entries) {
         if (!readPOD(is, e.weatherTypeId) ||
@@ -110,44 +73,43 @@ WoweeWeather WoweeWeatherLoader::load(const std::string& basePath) {
 }
 
 bool WoweeWeatherLoader::exists(const std::string& basePath) {
-    std::ifstream is(normalizePath(basePath), std::ios::binary);
-    return is.good();
+    return catalogExists(basePath, kExtension);
 }
 
 WoweeWeather WoweeWeatherLoader::makeTemperate(const std::string& zoneName) {
     WoweeWeather w;
     w.name = zoneName;
-    w.entries.push_back({WoweeWeather::Clear, 0.0f, 0.0f, 6.0f, 300, 1800});
-    w.entries.push_back({WoweeWeather::Rain,  0.3f, 0.7f, 2.0f, 120, 900});
-    w.entries.push_back({WoweeWeather::Fog,   0.4f, 0.8f, 1.0f, 180, 600});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Clear, .minIntensity = 0.0f, .maxIntensity = 0.0f, .weight = 6.0f, .minDurationSec = 300, .maxDurationSec = 1800});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Rain,  .minIntensity = 0.3f, .maxIntensity = 0.7f, .weight = 2.0f, .minDurationSec = 120, .maxDurationSec = 900});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Fog,   .minIntensity = 0.4f, .maxIntensity = 0.8f, .weight = 1.0f, .minDurationSec = 180, .maxDurationSec = 600});
     return w;
 }
 
 WoweeWeather WoweeWeatherLoader::makeArctic(const std::string& zoneName) {
     WoweeWeather w;
     w.name = zoneName;
-    w.entries.push_back({WoweeWeather::Snow,     0.3f, 0.7f, 5.0f, 300, 1800});
-    w.entries.push_back({WoweeWeather::Blizzard, 0.7f, 1.0f, 2.0f, 120, 600});
-    w.entries.push_back({WoweeWeather::Fog,      0.5f, 0.9f, 2.0f, 180, 900});
-    w.entries.push_back({WoweeWeather::Clear,    0.0f, 0.0f, 1.0f, 180, 600});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Snow,     .minIntensity = 0.3f, .maxIntensity = 0.7f, .weight = 5.0f, .minDurationSec = 300, .maxDurationSec = 1800});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Blizzard, .minIntensity = 0.7f, .maxIntensity = 1.0f, .weight = 2.0f, .minDurationSec = 120, .maxDurationSec = 600});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Fog,      .minIntensity = 0.5f, .maxIntensity = 0.9f, .weight = 2.0f, .minDurationSec = 180, .maxDurationSec = 900});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Clear,    .minIntensity = 0.0f, .maxIntensity = 0.0f, .weight = 1.0f, .minDurationSec = 180, .maxDurationSec = 600});
     return w;
 }
 
 WoweeWeather WoweeWeatherLoader::makeDesert(const std::string& zoneName) {
     WoweeWeather w;
     w.name = zoneName;
-    w.entries.push_back({WoweeWeather::Clear,     0.0f, 0.0f, 8.0f, 600, 2400});
-    w.entries.push_back({WoweeWeather::Sandstorm, 0.5f, 0.9f, 2.0f, 120, 600});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Clear,     .minIntensity = 0.0f, .maxIntensity = 0.0f, .weight = 8.0f, .minDurationSec = 600, .maxDurationSec = 2400});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Sandstorm, .minIntensity = 0.5f, .maxIntensity = 0.9f, .weight = 2.0f, .minDurationSec = 120, .maxDurationSec = 600});
     return w;
 }
 
 WoweeWeather WoweeWeatherLoader::makeStormy(const std::string& zoneName) {
     WoweeWeather w;
     w.name = zoneName;
-    w.entries.push_back({WoweeWeather::Rain,  0.5f, 0.9f, 5.0f, 300, 1200});
-    w.entries.push_back({WoweeWeather::Storm, 0.6f, 1.0f, 3.0f, 180, 600});
-    w.entries.push_back({WoweeWeather::Fog,   0.4f, 0.7f, 1.0f, 120, 300});
-    w.entries.push_back({WoweeWeather::Clear, 0.0f, 0.0f, 1.0f, 60, 240});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Rain,  .minIntensity = 0.5f, .maxIntensity = 0.9f, .weight = 5.0f, .minDurationSec = 300, .maxDurationSec = 1200});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Storm, .minIntensity = 0.6f, .maxIntensity = 1.0f, .weight = 3.0f, .minDurationSec = 180, .maxDurationSec = 600});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Fog,   .minIntensity = 0.4f, .maxIntensity = 0.7f, .weight = 1.0f, .minDurationSec = 120, .maxDurationSec = 300});
+    w.entries.push_back({.weatherTypeId = WoweeWeather::Clear, .minIntensity = 0.0f, .maxIntensity = 0.0f, .weight = 1.0f, .minDurationSec = 60, .maxDurationSec = 240});
     return w;
 }
 

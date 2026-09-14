@@ -7,13 +7,13 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Companion Pet catalog (.wcmp) — novel
+// Wowee Open Companion Pet catalog (.wcmp) - novel
 // replacement for the companion-pet portions of CreatureFamily
 // .dbc plus the AzerothCore-style critter / vanity-pet SQL
 // data. Distinct from WPET (which covers hunter combat pets
 // and warlock minions); this format covers non-combat
 // "vanity" pets that follow the player around for cosmetic
-// reasons — Mechanical Squirrel, Mini Diablo, Panda Cub,
+// reasons - Mechanical Squirrel, Mini Diablo, Panda Cub,
 // dragon hatchlings, etc.
 //
 // Each companion binds a creature template (the rendered
@@ -86,9 +86,9 @@ struct WoweeCompanion {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t companionId) const;
+    [[nodiscard]] const Entry* findById(uint32_t companionId) const;
 
     static const char* companionKindName(uint8_t k);
     static const char* rarityName(uint8_t r);
@@ -104,13 +104,13 @@ public:
 
     // Preset emitters used by --gen-cmp* variants.
     //
-    //   makeStarter — 3 common vendor-bought companions
+    //   makeStarter - 3 common vendor-bought companions
     //                  (Mechanical Squirrel / Cat / Prairie
-    //                  Dog) — Common rarity, no faction gate.
-    //   makeRare    — 4 rare promo / collector pets (Mini
+    //                  Dog) - Common rarity, no faction gate.
+    //   makeRare    - 4 rare promo / collector pets (Mini
     //                  Diablo / Panda Cub / Zergling / Murky)
     //                  with Epic / Rare rarity.
-    //   makeFaction — 3 faction-specific (Alliance Lion Cub /
+    //   makeFaction - 3 faction-specific (Alliance Lion Cub /
     //                  Horde Mottled Boar / Argent Squire)
     //                  using AllianceOnly + HordeOnly +
     //                  AnyFaction.

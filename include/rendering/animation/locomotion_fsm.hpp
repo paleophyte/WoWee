@@ -13,7 +13,7 @@ namespace rendering {
 // Pure logic state machine for movement animation. No renderer dependency.
 // States: IDLE · WALK · RUN · JUMP_START · JUMP_MID · JUMP_END · SWIM_IDLE · SWIM
 //
-// Grace timer is internal — no external locomotionStopGraceTimer_ needed.
+// Grace timer is internal - no external locomotionStopGraceTimer_ needed.
 // ============================================================================
 class LocomotionFSM {
 public:
@@ -34,7 +34,7 @@ public:
         bool jumping = false;
         bool swimming = false;
         bool sitting = false;
-        bool sprintAura = false;      // Sprint/Dash aura — use SPRINT anim
+        bool sprintAura = false;      // Sprint/Dash aura - use SPRINT anim
         float deltaTime = 0.0f;
         // Animation state for one-shot completion detection (jump start/end)
         uint32_t currentAnimId = 0;
@@ -50,7 +50,7 @@ public:
     /// Returns AnimOutput with valid=false if no change needed (STAY policy).
     AnimOutput resolve(const Input& in, const AnimCapabilitySet& caps);
 
-    State getState() const { return state_; }
+    [[nodiscard]] State getState() const { return state_; }
     void setState(State s) { state_ = s; }
     void reset();
 
@@ -72,7 +72,7 @@ private:
 
     /// Internal: update state transitions based on input.
     void updateTransitions(const Input& in, const AnimCapabilitySet& caps);
-    bool oneShotComplete(const Input& in, uint32_t expectedAnimId) const;
+    [[nodiscard]] bool oneShotComplete(const Input& in, uint32_t expectedAnimId) const;
 };
 
 } // namespace rendering

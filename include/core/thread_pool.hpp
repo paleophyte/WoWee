@@ -17,7 +17,7 @@ namespace core {
 // Persistent worker pool for short-lived parallel jobs that run every frame
 // (bone matrix computation, secondary command buffer recording, collision
 // floor queries). Replaces per-frame std::async calls, which create and
-// destroy an OS thread per invocation on libstdc++/libc++ — hundreds of
+// destroy an OS thread per invocation on libstdc++/libc++ - hundreds of
 // thread spawns per second at typical frame rates.
 //
 // Tasks submitted to the pool must not block waiting on other pool tasks,
@@ -76,7 +76,7 @@ public:
         return fut;
     }
 
-    size_t threadCount() const { return workers_.size(); }
+    [[nodiscard]] size_t threadCount() const { return workers_.size(); }
 
 private:
     static size_t defaultThreadCount() {

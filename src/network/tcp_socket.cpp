@@ -17,35 +17,10 @@ TCPSocket::~TCPSocket() {
 bool TCPSocket::connect(const std::string& host, uint16_t port) {
     LOG_INFO("Connecting to ", host, ":", port);
 
-    // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == INVALID_SOCK) {
-        LOG_ERROR("Failed to create socket");
-        return false;
-    }
-
-    // Set non-blocking
-    net::setNonBlocking(sockfd);
-
-    // Resolve host
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
-        LOG_ERROR("Failed to resolve host: ", host);
-        net::closeSocket(sockfd);
-        sockfd = INVALID_SOCK;
-        return false;
-    }
-
-    // Connect
+    // Socket open, non-blocking, and the address resolved.
     struct sockaddr_in serverAddr;
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr = reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr;
-    serverAddr.sin_port = htons(port);
-    freeaddrinfo(res);
+    sockfd = net::openResolvedSocket(host, port, serverAddr);
+    if (sockfd == INVALID_SOCK) return false;
 
     int result = ::connect(sockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
     if (result < 0) {
@@ -57,7 +32,7 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
             return false;
         }
 
-        // Non-blocking connect in progress — wait for it to complete
+        // Non-blocking connect in progress - wait for it to complete
         fd_set writefds;
         FD_ZERO(&writefds);
         FD_SET(sockfd, &writefds);
@@ -86,7 +61,7 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
         }
     }
 
-    // Disable Nagle's algorithm — send small packets immediately.
+    // Disable Nagle's algorithm - send small packets immediately.
     int one = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&one), sizeof(one));
@@ -139,7 +114,7 @@ void TCPSocket::update() {
     bool sawClose = false;
     bool receivedAny = false;
     for (;;) {
-        // 4 KB per recv() call — large enough for any single game packet while keeping
+        // 4 KB per recv() call - large enough for any single game packet while keeping
         // stack usage reasonable. Typical WoW packets are 20-500 bytes; UPDATE_OBJECT
         // can reach ~2 KB in crowded zones.
         uint8_t buffer[4096];
@@ -162,7 +137,7 @@ void TCPSocket::update() {
             break;
         }
         if (net::isConnectionClosed(err)) {
-            // Peer closed the connection — treat the same as recv() returning 0
+            // Peer closed the connection - treat the same as recv() returning 0
             sawClose = true;
             break;
         }
@@ -184,7 +159,7 @@ void TCPSocket::update() {
 
 void TCPSocket::tryParsePackets() {
     // For auth packets, we need at least 1 byte (opcode)
-    while (receiveBuffer.size() >= 1) {
+    while (!receiveBuffer.empty()) {
         uint8_t opcode = receiveBuffer[0];
 
         // Determine expected packet size based on opcode
@@ -255,10 +230,9 @@ size_t TCPSocket::getExpectedPacketSize(uint8_t opcode) {
                         }
                     }
                     return 0;  // Need more data
-                } else {
-                    // Failure - just opcode + unknown + status
+                }                     // Failure - just opcode + unknown + status
                     return 3;
-                }
+               
             }
             return 0;  // Need more data to determine
 
@@ -267,7 +241,7 @@ size_t TCPSocket::getExpectedPacketSize(uint8_t opcode) {
             //   Build >= 8089: cmd(1)+error(1)+M2(20)+accountFlags(4)+surveyId(4)+loginFlags(2) = 32
             //   Build 6299-8088: cmd(1)+error(1)+M2(20)+surveyId(4)+loginFlags(2) = 28
             //   Build < 6299: cmd(1)+error(1)+M2(20)+surveyId(4) = 26
-            // Failure: varies by server — minimum 2 bytes (opcode + status), some send 4
+            // Failure: varies by server - minimum 2 bytes (opcode + status), some send 4
             if (receiveBuffer.size() >= 2) {
                 uint8_t status = receiveBuffer[1];
                 if (status == 0x00) {
@@ -275,10 +249,9 @@ size_t TCPSocket::getExpectedPacketSize(uint8_t opcode) {
                     if (receiveBuffer.size() >= 28) return 28;
                     if (receiveBuffer.size() >= 26) return 26;
                     return 0;
-                } else {
-                    // Consume up to 4 bytes if available, minimum 2
+                }                     // Consume up to 4 bytes if available, minimum 2
                     return (receiveBuffer.size() >= 4) ? 4 : 2;
-                }
+               
             }
             return 0;  // Need more data
 

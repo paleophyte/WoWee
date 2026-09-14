@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -11,10 +12,16 @@
 #include <glm/glm.hpp>
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
+#include "rendering/pass_ablation.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
+
+#include "pipeline/grass_biomes.hpp"
+#include "pipeline/grass_clearing.hpp"
+#include "pipeline/grass_population.hpp"
+#include "pipeline/grass_profile.hpp"
 
 namespace wowee {
 namespace core { class Window; }
@@ -62,6 +69,7 @@ class SwimEffects;
 class RenderGraph;
 class OverlaySystem;
 class HiZSystem;
+class GrassRenderer;
 
 class Renderer {
 public:
@@ -93,6 +101,15 @@ public:
      * without loading any ADT tile.  Used by WMO-only maps (dungeons/raids/BGs).
      */
     bool initializeRenderers(pipeline::AssetManager* assetManager, const std::string& mapName);
+    /// The map every sub-renderer is looking at.
+    ///
+    /// initializeRenderers set this on all four when it built them, and it
+    /// builds them once - so on every later map change the two the loader
+    /// remembered by hand moved and the two it did not stayed on the map the
+    /// session started in. The minimap was one of those: in a dungeon it went
+    /// on asking for the tiles of wherever the player had logged in, and got
+    /// none, which is a minimap with no dungeon on it.
+    void setActiveMapName(const std::string& name);
 
     /**
      * Enable/disable terrain rendering
@@ -104,19 +121,7 @@ public:
      */
     void setWireframeMode(bool enabled);
 
-    /**
-     * Load terrain tiles around position
-     * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
-     * @param centerX Center tile X coordinate
-     * @param centerY Center tile Y coordinate
-     * @param radius Load radius in tiles
-     */
-    bool loadTerrainArea(const std::string& mapName, int centerX, int centerY, int radius = 1);
 
-    /**
-     * Enable/disable terrain streaming
-     */
-    void setTerrainStreaming(bool enabled);
 
     /**
      * Render performance HUD
@@ -146,6 +151,9 @@ public:
     SkySystem* getSkySystem() const { return skySystem.get(); }
     const std::string& getCurrentZoneName() const;
     uint32_t getCurrentZoneId() const;
+    /// The area under the player, asked of AreaTable rather than resolved to a
+    /// zone first - the world PvP flag is on the subzone. See ZoneManager.
+    bool isOnOutdoorPvpObjective() const;
     bool isPlayerIndoors() const { return playerIndoors_; }
     VkContext* getVkContext() const { return vkCtx; }
     VkDescriptorSetLayout getPerFrameSetLayout() const { return perFrameSetLayout; }
@@ -158,7 +166,7 @@ public:
     float getCharacterYaw() const { return characterYaw; }
     void setCharacterYaw(float yawDeg) { characterYaw = yawDeg; }
 
-    // Screenshot capture — copies swapchain image to PNG file
+    // Screenshot capture - copies swapchain image to PNG file
     bool captureScreenshot(const std::string& outputPath);
 
     // Spell visual effects (SMSG_PLAY_SPELL_VISUAL / SMSG_PLAY_SPELL_IMPACT)
@@ -185,7 +193,7 @@ public:
     double getLastTerrainRenderMs() const { return lastTerrainRenderMs; }
     double getLastWMORenderMs() const { return lastWMORenderMs; }
     double getLastM2RenderMs() const { return lastM2RenderMs; }
-    // Audio coordinator — owned by Application, set via setAudioCoordinator().
+    // Audio coordinator - owned by Application, set via setAudioCoordinator().
     void setAudioCoordinator(audio::AudioCoordinator* ac) { audioCoordinator_ = ac; }
     audio::AudioCoordinator* getAudioCoordinator() { return audioCoordinator_; }
     game::ZoneManager* getZoneManager() { return zoneManager.get(); }
@@ -194,12 +202,52 @@ public:
     const std::vector<pipeline::CustomZoneInfo>& getCustomZones() const { return customZones_; }
 
 private:
+    // True when water is drawn in the scene continuation pass rather than in
+    // the scene pass itself (see renderWorld).
+    bool waterDrawsInContinuePass() const;
+
+    /// Ghost tint, brightness and the minimap, in that order, at the end of
+    /// the scene pass. The threaded and single-threaded paths both finish this
+    /// way and differ only in which command buffer they are recording into.
+    /// The underwater tint and its waterline. One implementation, called
+    /// from both the parallel and the fallback recording paths, which had
+    /// carried different ones.
+    void renderUnderwaterOverlay(VkCommandBuffer cmd);
+    void renderPostSceneOverlays(VkCommandBuffer cmd, game::GameHandler* gameHandler);
+    void renderMinimapOverlay(VkCommandBuffer cmd, game::GameHandler* gameHandler);
+
+    /// Point the swim spray at whichever pass the water ends up drawing in, so
+    /// it can be recorded after the water rather than under it. Must run before
+    /// the spray's pipelines are built, and again whenever they are rebuilt.
+    void syncSwimEffectsTargetPass();
+    /// syncSwimEffectsTargetPass, then rebuild the spray or the minimap if the
+    /// answer moved either of them. Runs from beginFrame every frame, once the
+    /// post-process target for the frame is settled; free when nothing moved.
+    void refreshSwimEffectsPass();
+
+    /// True when the spray's pipelines were built for the water continuation
+    /// pass. Draw sites test this rather than waterDrawsInContinuePass() so a
+    /// mid-run mode change cannot record a pipeline into an incompatible pass.
+    bool swimEffectsDrawWithWater_ = false;
+    /// Whether the minimap follows water out of the scene pass, for the same
+    /// reason the spray does - see syncSwimEffectsTargetPass.
+    bool minimapDrawsWithWater_ = false;
+
     void runDeferredWorldInitStep(float deltaTime);
 
     core::Window* window = nullptr;
     std::unique_ptr<Camera> camera;
     std::unique_ptr<CameraController> cameraController;
     std::unique_ptr<TerrainRenderer> terrainRenderer;
+    /// How much of the line from the eye to the sun is blocked, smoothed.
+    ///
+    /// Sampled once a frame in update() and eased, because the raw answer is a
+    /// yes or a no and a hill edge crossing it would snap the flare on and off.
+    float sunOcclusion_ = 0.0f;
+
+    /// That line, asked of the terrain, the buildings and where the camera is.
+    [[nodiscard]] float sampleSunOcclusion() const;
+
     std::unique_ptr<TerrainManager> terrainManager;
     std::unique_ptr<PerformanceHUD> performanceHUD;
     std::unique_ptr<WaterRenderer> waterRenderer;
@@ -219,9 +267,24 @@ private:
     std::unique_ptr<CharacterRenderer> characterRenderer;
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
-    std::unique_ptr<M2Renderer> outlandSkyRenderer_;
-    std::string outlandSkyPath_;
-    uint32_t outlandSkyInstanceId_ = 0;
+    std::unique_ptr<M2Renderer> skyboxModelRenderer_;
+    /// The last zone a terrain chunk actually named. Many chunks carry an area
+    /// id of zero, and a tile being loaded carries none at all, so the lookup
+    /// answers "do not know" often - and answering from somewhere else instead
+    /// made the zone flip at chunk boundaries while walking. Mutable because
+    /// getCurrentZoneId() is const and this is a cache of what it last learnt.
+    mutable uint32_t lastResolvedZoneId_ = 0;
+    /// The map that answer belongs to, so it is dropped on a
+    /// continent change rather than held across one.
+    mutable uint32_t lastResolvedZoneMapId_ = 0xFFFFFFFFu;
+
+    std::string skyboxModelPath_;
+    uint32_t skyboxModelInstanceId_ = 0;
+    /// Sky paths that did not resolve to a usable model. The swap is atomic -
+    /// the old sky is kept when a new one cannot be loaded - so without this
+    /// the failing path would be read off disk again on every frame it was
+    /// active.
+    std::unordered_set<std::string> failedSkyboxPaths_;
     std::unique_ptr<Minimap> minimap;
     std::unique_ptr<WorldMap> worldMap;
     std::unique_ptr<QuestMarkerRenderer> questMarkerRenderer;
@@ -230,7 +293,21 @@ private:
     std::unique_ptr<AnimationController> animationController_;  // §4.2
     std::unique_ptr<game::ZoneManager> zoneManager;
     // Shadow mapping (Vulkan)
-    static constexpr uint32_t SHADOW_MAP_SIZE = 4096;
+    /// The shadow map is square and this is its side, chosen before the
+    /// per-frame resources are built and not changed after.
+    ///
+    /// Deliberately not live. Those resources are created once at start-up and
+    /// destroyed at shutdown - they are not part of the swapchain-resize path,
+    /// so rebuilding them mid-session would be a new and unexercised one, and
+    /// this renderer has lost a device to exactly that before. The setting is
+    /// marked as needing a restart in the panel instead, which is what the
+    /// original client does for the settings it cannot change live.
+    uint32_t SHADOW_MAP_SIZE = 4096;
+    void setShadowMapSize(uint32_t side) {
+        // Powers of two between 512 and 4096: the quality slider has five
+        // steps and these are they.
+        SHADOW_MAP_SIZE = std::clamp(side, 512u, 4096u);
+    }
     // Per-frame shadow resources: each in-flight frame has its own depth image and
     // framebuffer so that frame N's shadow read and frame N+1's shadow write don't
     // race on the same image across concurrent GPU submissions.
@@ -248,7 +325,9 @@ private:
     bool shadowsEnabled = true;
     float shadowDistance_ = 300.0f;  // Shadow frustum half-extent (default: 300 units)
     float viewDistance_ = 1200.0f;
-    uint32_t shadowFrameCounter_ = 0;
+    bool sharpStars_ = true;
+    float diagTerrainFurthest_ = -1.0f;
+    float diagM2Furthest_ = -1.0f;
 
 
 public:
@@ -256,27 +335,37 @@ public:
     void registerPreview(CharacterPreview* preview);
     void unregisterPreview(CharacterPreview* preview);
 
-    void setShadowsEnabled(bool enabled) { shadowsEnabled = enabled; }
+    /// Held on. Turning shadows off loses the device within a second - see
+    /// the note in settings_schema.cpp - so a saved 0 from before that was
+    /// known, or any other caller, cannot switch them off.
+    void setShadowsEnabled(bool /*enabled*/) { shadowsEnabled = true; }
     bool areShadowsEnabled() const { return shadowsEnabled; }
     void setShadowDistance(float dist) { shadowDistance_ = glm::clamp(dist, 40.0f, 500.0f); }
     float getShadowDistance() const { return shadowDistance_; }
     void setViewDistance(float distance);
     float getViewDistance() const { return viewDistance_; }
+    /// Draw the client's own point stars in place of the sky model's baked
+    /// star layer, which is a 256x256 compressed texture stretched across the
+    /// whole dome. See Renderer::setSharpStars.
+    /// WOWEE_VIEW_DIAG=1: one line naming how far terrain and doodads each
+    /// actually drew, so the two can be compared rather than reasoned about.
+    void logViewDistanceDiag();
+    void setSharpStars(bool enabled);
+    bool areSharpStars() const { return sharpStars_; }
     int getTerrainLoadRadius() const;
     int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
     void setMsaaSamples(VkSampleCountFlagBits samples);
 
-    // Post-process pipeline API — delegates to PostProcessPipeline (§4.3)
+    // Post-process pipeline API - delegates to PostProcessPipeline (§4.3)
     PostProcessPipeline* getPostProcessPipeline() const;
     void setFSREnabled(bool enabled);
     void setFSR2Enabled(bool enabled);
 
     void setWaterRefractionEnabled(bool enabled);
-    bool isWaterRefractionEnabled() const;
 
 private:
     void applyMsaaChange();
-    bool ensureOutlandSkybox();
+    bool ensureSkyboxModel();
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
@@ -285,10 +374,10 @@ private:
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
 
-    // Spell visual effects — owned SpellVisualSystem (extracted from Renderer §4.4)
+    // Spell visual effects - owned SpellVisualSystem (extracted from Renderer §4.4)
     std::unique_ptr<SpellVisualSystem> spellVisualSystem_;
 
-    // Post-process pipeline — owns all FSR/FXAA/FSR2 state (extracted §4.3)
+    // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
     bool playerIndoors_ = false;  // Cached WMO inside state for macro conditionals
@@ -301,6 +390,14 @@ private:
     glm::vec3 characterPosition = glm::vec3(0.0f);
     uint32_t characterInstanceId = 0;
     float characterYaw = 0.0f;
+
+    // Where the player was, for shaders that react to them moving through the
+    // world. playerWakePos_ chases characterPosition with a fixed time
+    // constant; the lag is what gives brushed-past foliage its springback.
+    glm::vec3 playerWakePos_ = glm::vec3(0.0f);
+    glm::vec3 prevPlayerPos_ = glm::vec3(0.0f);
+    float playerSpeed_ = 0.0f;
+    bool playerMotionTracked_ = false;
 
 
 
@@ -358,7 +455,13 @@ private:
     VkCommandBuffer secondaryCmds_[NUM_SECONDARIES][MAX_FRAMES] = {};
 
     bool parallelRecordingEnabled_ = false;  // set true after pools/buffers created
-    bool endFrameInlineMode_ = false;       // true when endFrame switched to INLINE render pass
+    // WOWEE_PASS_ABLATION: switches one world pass off at a time and reports
+    // what the frame did without it. See pass_ablation.hpp for why the GPU's
+    // own timestamps cannot answer that on this platform.
+    std::unique_ptr<PassAblation> passAblation_;
+    bool passAblationReported_ = false;
+    bool worldDrawnLastFrame_ = false;
+    std::chrono::steady_clock::time_point lastFrameStart_{};
     float lastDeltaTime_ = 0.0f;           // cached for post-process pipeline
     bool createSecondaryCommandResources();
     void destroySecondaryCommandResources();
@@ -368,7 +471,7 @@ private:
     // Cached render pass state for secondary buffer inheritance
     VkRenderPass activeRenderPass_ = VK_NULL_HANDLE;
     VkFramebuffer activeFramebuffer_ = VK_NULL_HANDLE;
-    VkExtent2D activeRenderExtent_ = {0, 0};
+    VkExtent2D activeRenderExtent_ = {.width = 0, .height = 0};
 
     // Active character previews for off-screen rendering
     std::vector<CharacterPreview*> activePreviews_;
@@ -378,12 +481,65 @@ private:
 
     bool ghostMode_ = false;  // set each frame from gameHandler->isPlayerGhost()
 
-    // Render Graph — declarative pass ordering with automatic barriers
+    // Render Graph - declarative pass ordering with automatic barriers
     std::unique_ptr<RenderGraph> renderGraph_;
     void buildFrameGraph(game::GameHandler* gameHandler);
 
-    // HiZ occlusion culling — builds depth pyramid each frame
+    // HiZ occlusion culling - builds depth pyramid each frame
     std::unique_ptr<HiZSystem> hizSystem_;
+
+    // GPU-driven grass: compute cull with atomic compaction feeding an
+    // indirect draw, over a population generated from terrain suitability.
+    std::unique_ptr<GrassRenderer> grassRenderer_;
+    // Where the live population was generated for. Rebuilt when the player
+    // leaves it; the generator's lattice is world-anchored, so a rebuild
+    // reproduces every blade that is still in range rather than reshuffling.
+    glm::vec3 grassWindowCenter_{0.0f};
+    bool grassWindowValid_ = false;
+    // The window being generated, a bounded number of lattice cells per
+    // frame. Small windows still finish inside one; the ones the distance
+    // slider allows take as many frames as they take, and upload when done.
+    pipeline::GrassPopulationBuilder grassBuilder_;
+    glm::vec3 grassBuildCenter_{0.0f};
+    // Clearings around placed WMOs and props for the window being built,
+    // gathered once per rebuild from the renderers that own the instances.
+    pipeline::GrassClearingField grassClearing_;
+    void updateGrassPopulation();
+public:
+    /** Grass density and height, as fractions of the generator's defaults.
+     * Set from the settings panel; either changing rebuilds the field. */
+    void setGrassScales(float density, float height);
+    /** How far out grass draws, in yards. Density thins with distance past
+     * the near field, so range costs blades logarithmically, not by area. */
+    void setGrassDistance(float yards);
+    /** Turn grass on or off. Off is the default: it is new, it costs
+     * generation time on the main thread, and turning it off has to release
+     * what it was holding rather than merely stop drawing. */
+    void setGrassEnabled(bool enabled);
+private:
+    bool grassEnabled_ = false;
+    float grassDensityScale_ = 1.0f;
+    float grassHeightScale_ = 1.0f;
+    float grassDistance_ = 150.0f;
+    // (biome, effectId) -> index into the profile table, built as effects are
+    // met. Grass profiles are a blend of five categories crossed with the
+    // biome overrides, so distinct ones stay far fewer than the hundreds of
+    // ground effects that map onto them.
+    std::unordered_map<uint64_t, uint32_t> grassProfileIndex_;
+    std::vector<pipeline::GrassProfile> grassProfiles_;
+    uint32_t grassProfileFor(uint32_t effectId, uint32_t areaId);
+    // The per-zone look table from assets/grass_biomes.json, loaded on first
+    // use, and a memo of which biome each area resolved to - resolution walks
+    // AreaTable parentage and runs per blade sample without it.
+    pipeline::GrassBiomeSet grassBiomes_;
+    bool grassBiomesLoaded_ = false;
+    std::unordered_map<uint32_t, uint32_t> grassBiomeForArea_;
+    // Session totals, reported once at shutdown. The log is bounded and the
+    // per-rebuild lines rotate out of it whenever the player stands still for
+    // a minute, so the tail is the only place a "check the log" can rely on.
+    uint32_t grassRebuilds_ = 0;
+    size_t grassLastCount_ = 0;
+    double grassWorstGenerateMs_ = 0.0;
 
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;

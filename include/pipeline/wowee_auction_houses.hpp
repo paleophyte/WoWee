@@ -8,7 +8,7 @@ namespace wowee {
 namespace pipeline {
 
 // Wowee Open Auction House Configuration catalog
-// (.wauh) — novel replacement for the implicit
+// (.wauh) - novel replacement for the implicit
 // per-faction auction-house policy vanilla WoW
 // carried in AuctionHouse.dbc + the hard-coded
 // deposit/cut rate constants in the server's
@@ -37,28 +37,28 @@ namespace pipeline {
 //   entries (each):
 //     ahId (uint32)
 //     nameLen + name
-//     factionAccess (uint8)        — 0=Both /
+//     factionAccess (uint8)        - 0=Both /
 //                                     1=Alliance /
 //                                     2=Horde /
 //                                     3=Neutral
 //     pad0 (uint8)
-//     depositRatePct (uint16)      — basis points
+//     depositRatePct (uint16)      - basis points
 //                                     0..10000 (% of
 //                                     vendor sell
 //                                     price held as
 //                                     deposit)
-//     cutPct (uint16)              — basis points
+//     cutPct (uint16)              - basis points
 //                                     0..10000 (AH
 //                                     cut from final
 //                                     sale price)
 //     minListingDurationHours (uint16)
 //     maxListingDurationHours (uint16)
 //     pad1 (uint16)
-//     feePerSlot (uint32)          — flat copper fee
+//     feePerSlot (uint32)          - flat copper fee
 //                                     per listing
 //                                     slot (0 = no
 //                                     fee)
-//     npcAuctioneerId (uint32)     — WCRT creature
+//     npcAuctioneerId (uint32)     - WCRT creature
 //                                     entry
 struct WoweeAuctionHouses {
     enum FactionAccess : uint8_t {
@@ -85,19 +85,19 @@ struct WoweeAuctionHouses {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t ahId) const;
+    [[nodiscard]] const Entry* findById(uint32_t ahId) const;
 
     // Returns the AH entry an auctioneer NPC opens
     // when right-clicked. Used by the gossip handler
     // to dispatch to the correct AH config.
-    const Entry* findByNpc(uint32_t npcId) const;
+    [[nodiscard]] const Entry* findByNpc(uint32_t npcId) const;
 
     // Returns all AH entries accessible to a faction.
     // Used by the AH-finder UI to suggest reachable
     // auctioneers.
-    std::vector<const Entry*> findByFaction(uint8_t faction) const;
+    [[nodiscard]] std::vector<const Entry*> findByFaction(uint8_t faction) const;
 };
 
 class WoweeAuctionHousesLoader {
@@ -109,15 +109,15 @@ public:
 
     // Preset emitters used by --gen-auh* variants.
     //
-    //   makeStormwindAH   — Alliance Stormwind AH
+    //   makeStormwindAH   - Alliance Stormwind AH
     //                        with vanilla rates (5%
     //                        deposit / 5% cut / 12-48
     //                        hr listing).
-    //   makeOrgrimmarAH   — Horde Orgrimmar AH with
+    //   makeOrgrimmarAH   - Horde Orgrimmar AH with
     //                        same vanilla rates as
     //                        Stormwind. Demonstrates
     //                        a paired faction-AH set.
-    //   makeBootyBayAH    — Neutral Booty Bay AH with
+    //   makeBootyBayAH    - Neutral Booty Bay AH with
     //                        the famous 15% deposit
     //                        + 15% cut neutral rates
     //                        (penalty for cross-

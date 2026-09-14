@@ -1,4 +1,4 @@
-// coordinate_projection.cpp — Pure coordinate math for world map UV projection.
+// coordinate_projection.cpp - Pure coordinate math for world map UV projection.
 // Extracted from WorldMap::renderPosToMapUV, findBestContinentForPlayer,
 // findZoneForPlayer, zoneBelongsToContinent, getContinentProjectionBounds,
 // isRootContinent, isLeafContinent (Phase 2 of refactoring plan).
@@ -33,6 +33,28 @@ bool isLeafContinent(const std::vector<Zone>& zones, int idx) {
     return c.parentWorldMapID != 0;
 }
 
+int continentZoneIndex(const std::vector<Zone>& zones, uint32_t mapId) {
+    int firstWithNoArea = -1;
+    int firstNotRoot = -1;
+
+    for (int i = 0; i < static_cast<int>(zones.size()); ++i) {
+        if (zones[static_cast<size_t>(i)].mapID != mapId) continue;
+        if (zones[static_cast<size_t>(i)].areaID != 0) continue;
+
+        // A leaf is the best answer where one exists: its parent is the map
+        // above it and the zones hang off it.
+        if (isLeafContinent(zones, i)) return i;
+        if (firstWithNoArea < 0) firstWithNoArea = i;
+        if (firstNotRoot < 0 && !isRootContinent(zones, i)) firstNotRoot = i;
+    }
+
+    // Then one that is not a root - a root has leaf children, and the children
+    // are where the zones are. Then whatever row has no area at all, which is
+    // the shape 3.3.5 actually ships.
+    if (firstNotRoot >= 0) return firstNotRoot;
+    return firstWithNoArea;
+}
+
 // ── UV projection ────────────────────────────────────────────
 
 glm::vec2 renderPosToMapUV(const glm::vec3& renderPos,
@@ -54,6 +76,23 @@ glm::vec2 renderPosToMapUV(const glm::vec3& renderPos,
 }
 
 // ── Continent projection bounds ──────────────────────────────
+
+ZoneBounds projectionBoundsFor(const std::vector<Zone>& zones, int zoneIdx,
+                               bool& isContinent) {
+    isContinent = false;
+    if (zoneIdx < 0 || static_cast<size_t>(zoneIdx) >= zones.size()) return {};
+
+    const Zone& zone = zones[static_cast<size_t>(zoneIdx)];
+    ZoneBounds bounds = zone.bounds;
+    isContinent = (zone.areaID == 0);
+    if (isContinent) {
+        float left, right, top, bottom;
+        if (getContinentProjectionBounds(zones, zoneIdx, left, right, top, bottom)) {
+            bounds = {.locLeft = left, .locRight = right, .locTop = top, .locBottom = bottom};
+        }
+    }
+    return bounds;
+}
 
 bool getContinentProjectionBounds(const std::vector<Zone>& zones,
                                    int contIdx,
@@ -145,8 +184,22 @@ int findBestContinentForPlayer(const std::vector<Zone>& zones,
     return bestIdx;
 }
 
+int findZoneByAreaId(const std::vector<Zone>& zones, uint32_t areaId) {
+    if (areaId == 0) return -1;
+    for (int i = 0; i < static_cast<int>(zones.size()); i++) {
+        if (zones[i].areaID == areaId) return i;
+    }
+    return -1;
+}
+
 int findZoneForPlayer(const std::vector<Zone>& zones,
-                       const glm::vec3& playerRenderPos) {
+                       const glm::vec3& playerRenderPos,
+                       uint32_t authoritativeZoneId) {
+    // The server tells us which zone the player is in. When that names a zone on
+    // this map, it is the answer and there is nothing to work out.
+    const int known = findZoneByAreaId(zones, authoritativeZoneId);
+    if (known >= 0) return known;
+
     float wowX = playerRenderPos.y;
     float wowY = playerRenderPos.x;
 
@@ -155,7 +208,7 @@ int findZoneForPlayer(const std::vector<Zone>& zones,
     // Winterspring's). Picking the smallest-area containing box mis-resolved a player
     // standing deep in a large zone to a smaller neighbor whose box merely reached them,
     // which left the real zone fogged. Instead pick the box the player sits deepest
-    // inside — the largest normalized distance to the nearest edge — which favors the
+    // inside - the largest normalized distance to the nearest edge - which favors the
     // zone genuinely containing them over one they only clip at the border. Smaller area
     // breaks ties so a subzone still wins over its parent when equally central.
     int bestIdx = -1;

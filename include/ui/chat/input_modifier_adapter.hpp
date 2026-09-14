@@ -1,4 +1,4 @@
-// InputModifierAdapter — wraps core::Input to implement IModifierState.
+// InputModifierAdapter - wraps core::Input to implement IModifierState.
 // Phase 4.3 of chat_panel_ref.md.
 #pragma once
 
@@ -13,9 +13,9 @@ namespace ui {
  */
 class InputModifierAdapter : public IModifierState {
 public:
-    bool isShiftHeld() const override;
-    bool isCtrlHeld() const override;
-    bool isAltHeld() const override;
+    [[nodiscard]] bool isShiftHeld() const override;
+    [[nodiscard]] bool isCtrlHeld() const override;
+    [[nodiscard]] bool isAltHeld() const override;
 };
 
 } // namespace ui

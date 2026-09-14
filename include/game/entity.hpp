@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/protocol_constants.hpp"
+#include "game/update_field_table.hpp"
 
 #include <cstdint>
 #include <cmath>
@@ -74,6 +75,23 @@ enum class UpdateType : uint8_t {
     NEAR_OBJECTS = 5         // Objects entered view range
 };
 
+/// The update type's own name, for a log line.
+///
+/// Beside the enum rather than in the two parsers that print it - the WotLK one
+/// and the vanilla one had an identical copy each, and they are the two files
+/// where a value added to this list would need noticing.
+inline const char* updateTypeName(UpdateType type) {
+    switch (type) {
+        case UpdateType::VALUES:               return "VALUES";
+        case UpdateType::MOVEMENT:             return "MOVEMENT";
+        case UpdateType::CREATE_OBJECT:        return "CREATE_OBJECT";
+        case UpdateType::CREATE_OBJECT2:       return "CREATE_OBJECT2";
+        case UpdateType::OUT_OF_RANGE_OBJECTS: return "OUT_OF_RANGE_OBJECTS";
+        case UpdateType::NEAR_OBJECTS:         return "NEAR_OBJECTS";
+    }
+    return "UNKNOWN";
+}
+
 /**
  * Base entity class for all game objects
  */
@@ -84,14 +102,14 @@ public:
     virtual ~Entity() = default;
 
     // GUID access
-    uint64_t getGuid() const { return guid; }
+    [[nodiscard]] uint64_t getGuid() const { return guid; }
     void setGuid(uint64_t g) { guid = g; }
 
     // Position
-    float getX() const { return x; }
-    float getY() const { return y; }
-    float getZ() const { return z; }
-    float getOrientation() const { return orientation; }
+    [[nodiscard]] float getX() const { return x; }
+    [[nodiscard]] float getY() const { return y; }
+    [[nodiscard]] float getZ() const { return z; }
+    [[nodiscard]] float getOrientation() const { return orientation; }
     // Update orientation only, without disrupting an in-progress movement interpolation.
     void setOrientation(float o) { orientation = o; }
 
@@ -113,7 +131,7 @@ public:
             return;
         }
         // Build cumulative distances for proportional time assignment.
-        // (Stored in a tiny stack/heap vector — typical N is <=15 waypoints,
+        // (Stored in a tiny stack/heap vector - typical N is <=15 waypoints,
         // and keeping float precision matters for the timeMs rescale below.)
         std::vector<float> cumDist(path.size(), 0.0f);
         float totalDist = 0.0f;
@@ -201,7 +219,7 @@ public:
         float impliedVX = (destX - fromX) / durationSec;
         float impliedVY = (destY - fromY) / durationSec;
         float impliedVZ = (destZ - fromZ) / durationSec;
-        // Exponential moving average on velocity — 65% new sample, 35% previous.
+        // Exponential moving average on velocity - 65% new sample, 35% previous.
         // Smooths out jitter from irregular server update intervals (~200-600ms)
         // without introducing visible lag on direction changes.
         const float alpha = 0.65f;
@@ -246,7 +264,7 @@ public:
                 y = moveEndY_ + velY_ * overrun;
                 z = moveEndZ_ + velZ_ * overrun;
             } else {
-                // Two intervals with no update — entity has probably stopped.
+                // Two intervals with no update - entity has probably stopped.
                 x = moveEndX_; y = moveEndY_; z = moveEndZ_;
                 velX_ = 0.0f; velY_ = 0.0f; velZ_ = 0.0f;
                 isMoving_ = false;
@@ -254,44 +272,44 @@ public:
         }
     }
 
-    bool isEntityMoving() const { return isMoving_; }
+    [[nodiscard]] bool isEntityMoving() const { return isMoving_; }
 
     /// True only during the active interpolation phase (before reaching destination).
     /// Unlike isEntityMoving(), this does NOT include the dead-reckoning overrun window,
     /// so animations (Run/Walk) should use this to avoid "running in place" after arrival.
-    bool isActivelyMoving() const {
+    [[nodiscard]] bool isActivelyMoving() const {
         return isMoving_ && moveElapsed_ < moveDuration_;
     }
 
     // Returns the latest server-authoritative position: destination if moving, current if not.
     // Unlike getX/Y/Z (which only update via updateMovement), this always reflects the
     // last known server position regardless of distance culling.
-    float getLatestX() const { return isMoving_ ? moveEndX_ : x; }
-    float getLatestY() const { return isMoving_ ? moveEndY_ : y; }
-    float getLatestZ() const { return isMoving_ ? moveEndZ_ : z; }
+    [[nodiscard]] float getLatestX() const { return isMoving_ ? moveEndX_ : x; }
+    [[nodiscard]] float getLatestY() const { return isMoving_ ? moveEndY_ : y; }
+    [[nodiscard]] float getLatestZ() const { return isMoving_ ? moveEndZ_ : z; }
 
     // Object type
-    ObjectType getType() const { return type; }
+    [[nodiscard]] ObjectType getType() const { return type; }
     void setType(ObjectType t) { type = t; }
 
     /// True if this entity is a Unit or Player (both derive from Unit).
-    bool isUnit() const { return type == ObjectType::UNIT || type == ObjectType::PLAYER; }
+    [[nodiscard]] bool isUnit() const { return type == ObjectType::UNIT || type == ObjectType::PLAYER; }
 
     // Fields (for update values)
     void setField(uint16_t index, uint32_t value) {
         fields[index] = value;
     }
 
-    uint32_t getField(uint16_t index) const {
+    [[nodiscard]] uint32_t getField(uint16_t index) const {
         auto it = fields.find(index);
         return (it != fields.end()) ? it->second : 0;
     }
 
-    bool hasField(uint16_t index) const {
+    [[nodiscard]] bool hasField(uint16_t index) const {
         return fields.find(index) != fields.end();
     }
 
-    const FlatFieldMap& getFields() const {
+    [[nodiscard]] const FlatFieldMap& getFields() const {
         return fields;
     }
 
@@ -305,7 +323,7 @@ protected:
     float z = 0.0f;
     float orientation = 0.0f;
 
-    // Update fields (dynamic values) — flat sorted vector. See FlatFieldMap docs.
+    // Update fields (dynamic values) - flat sorted vector. See FlatFieldMap docs.
     FlatFieldMap fields;
 
     // Movement interpolation state
@@ -330,81 +348,88 @@ public:
     explicit Unit(uint64_t guid) : Entity(guid) { type = ObjectType::UNIT; }
 
     // Name
-    const std::string& getName() const { return name; }
+    [[nodiscard]] const std::string& getName() const { return name; }
     void setName(const std::string& n) { name = n; }
 
     // Health
-    uint32_t getHealth() const { return health; }
+    [[nodiscard]] uint32_t getHealth() const { return health; }
     void setHealth(uint32_t h) { health = h; }
 
-    uint32_t getMaxHealth() const { return maxHealth; }
+    [[nodiscard]] uint32_t getMaxHealth() const { return maxHealth; }
     void setMaxHealth(uint32_t h) { maxHealth = h; }
 
-    // Power (mana/rage/energy) — indexed by power type (0-6)
-    uint32_t getPower() const { return powers[powerType < 7 ? powerType : 0]; }
+    // Power (mana/rage/energy) - indexed by power type (0-6)
+    [[nodiscard]] uint32_t getPower() const { return powers[powerType < 7 ? powerType : 0]; }
     void setPower(uint32_t p) { powers[powerType < 7 ? powerType : 0] = p; }
     void setPowerByType(uint8_t type, uint32_t p) { if (type < 7) powers[type] = p; }
 
-    uint32_t getMaxPower() const { return maxPowers[powerType < 7 ? powerType : 0]; }
+    [[nodiscard]] uint32_t getMaxPower() const { return maxPowers[powerType < 7 ? powerType : 0]; }
     void setMaxPower(uint32_t p) { maxPowers[powerType < 7 ? powerType : 0] = p; }
     void setMaxPowerByType(uint8_t type, uint32_t p) { if (type < 7) maxPowers[type] = p; }
 
-    uint32_t getPowerByType(uint8_t type) const { return type < 7 ? powers[type] : 0; }
-    uint32_t getMaxPowerByType(uint8_t type) const { return type < 7 ? maxPowers[type] : 0; }
+    [[nodiscard]] uint32_t getPowerByType(uint8_t type) const { return type < 7 ? powers[type] : 0; }
+    [[nodiscard]] uint32_t getMaxPowerByType(uint8_t type) const { return type < 7 ? maxPowers[type] : 0; }
 
-    uint8_t getPowerType() const { return powerType; }
+    [[nodiscard]] uint8_t getPowerType() const { return powerType; }
     void setPowerType(uint8_t t) { powerType = t; }
 
-    uint32_t getAuraState() const { return auraState; }
+    [[nodiscard]] uint32_t getAuraState() const { return auraState; }
     void setAuraState(uint32_t state) { auraState = state; }
 
     // Level
-    uint32_t getLevel() const { return level; }
+    [[nodiscard]] uint32_t getLevel() const { return level; }
     void setLevel(uint32_t l) { level = l; }
 
     // Entry ID (creature template entry)
-    uint32_t getEntry() const { return entry; }
+    [[nodiscard]] uint32_t getEntry() const { return entry; }
     void setEntry(uint32_t e) { entry = e; }
 
     // Display ID (model display)
-    uint32_t getDisplayId() const { return displayId; }
+    [[nodiscard]] uint32_t getDisplayId() const { return displayId; }
     void setDisplayId(uint32_t id) { displayId = id; }
+    /// How far this unit's edge is from its centre, and how far past that it
+    /// can reach. Range between two units is measured edge to edge, so both
+    /// come off the centre distance - see UNIT_FIELD_COMBATREACH.
+    [[nodiscard]] float getCombatReach() const { return combatReach; }
+    void setCombatReach(float r) { combatReach = r; }
+    [[nodiscard]] float getBoundingRadius() const { return boundingRadius; }
+    void setBoundingRadius(float r) { boundingRadius = r; }
 
     // Mount display ID (UNIT_FIELD_MOUNTDISPLAYID, index 69)
-    uint32_t getMountDisplayId() const { return mountDisplayId; }
+    [[nodiscard]] uint32_t getMountDisplayId() const { return mountDisplayId; }
     void setMountDisplayId(uint32_t id) { mountDisplayId = id; }
 
     // Unit flags (UNIT_FIELD_FLAGS, index 59)
-    uint32_t getUnitFlags() const { return unitFlags; }
+    [[nodiscard]] uint32_t getUnitFlags() const { return unitFlags; }
     void setUnitFlags(uint32_t f) { unitFlags = f; }
 
     // Client presentation flags (byte 2 of UNIT_FIELD_BYTES_1).
-    uint8_t getVisibilityFlags() const { return visibilityFlags; }
+    [[nodiscard]] uint8_t getVisibilityFlags() const { return visibilityFlags; }
     void setVisibilityFlags(uint8_t f) { visibilityFlags = f; }
-    bool hasCreepVisibility() const { return (visibilityFlags & UNIT_VIS_FLAG_CREEP) != 0; }
+    [[nodiscard]] bool hasCreepVisibility() const { return (visibilityFlags & UNIT_VIS_FLAG_CREEP) != 0; }
     void clearCreepVisibility() {
         visibilityFlags &= static_cast<uint8_t>(~UNIT_VIS_FLAG_CREEP);
     }
 
     // Dynamic flags (UNIT_DYNAMIC_FLAGS, index 147)
-    uint32_t getDynamicFlags() const { return dynamicFlags; }
+    [[nodiscard]] uint32_t getDynamicFlags() const { return dynamicFlags; }
     void setDynamicFlags(uint32_t f) { dynamicFlags = f; }
 
     // NPC flags (UNIT_NPC_FLAGS, index 82)
-    uint32_t getNpcFlags() const { return npcFlags; }
+    [[nodiscard]] uint32_t getNpcFlags() const { return npcFlags; }
     void setNpcFlags(uint32_t f) { npcFlags = f; }
 
-    // NPC emote state (UNIT_NPC_EMOTESTATE) — persistent looping animation for NPCs
-    uint32_t getNpcEmoteState() const { return npcEmoteState; }
+    // NPC emote state (UNIT_NPC_EMOTESTATE) - persistent looping animation for NPCs
+    [[nodiscard]] uint32_t getNpcEmoteState() const { return npcEmoteState; }
     void setNpcEmoteState(uint32_t e) { npcEmoteState = e; }
 
     // Returns true if NPC has interaction flags (gossip/vendor/quest/trainer)
-    bool isInteractable() const { return npcFlags != 0; }
+    [[nodiscard]] bool isInteractable() const { return npcFlags != 0; }
 
     // Faction-based hostility
-    uint32_t getFactionTemplate() const { return factionTemplate; }
+    [[nodiscard]] uint32_t getFactionTemplate() const { return factionTemplate; }
     void setFactionTemplate(uint32_t f) { factionTemplate = f; }
-    bool isHostile() const { return hostile; }
+    [[nodiscard]] bool isHostile() const { return hostile; }
     void setHostile(bool h) { hostile = h; }
 
 protected:
@@ -418,6 +443,11 @@ protected:
     uint32_t level = 1;
     uint32_t entry = 0;
     uint32_t displayId = 0;
+    // Zero until the server says otherwise, which is the right default: it
+    // makes an edge-to-edge distance fall back to centre to centre rather
+    // than inventing reach for a unit whose size has not arrived.
+    float combatReach = 0.0f;
+    float boundingRadius = 0.0f;
     uint32_t mountDisplayId = 0;
     uint32_t unitFlags = 0;
     uint8_t visibilityFlags = 0;
@@ -430,7 +460,7 @@ protected:
 
 /**
  * Player entity
- * Name is inherited from Unit — do NOT redeclare it here or the
+ * Name is inherited from Unit - do NOT redeclare it here or the
  * shadowed field will diverge from Unit::name, causing nameplates
  * and other Unit*-based lookups to read an empty string.
  */
@@ -448,13 +478,13 @@ public:
     GameObject() { type = ObjectType::GAMEOBJECT; }
     explicit GameObject(uint64_t guid) : Entity(guid) { type = ObjectType::GAMEOBJECT; }
 
-    const std::string& getName() const { return name; }
+    [[nodiscard]] const std::string& getName() const { return name; }
     void setName(const std::string& n) { name = n; }
 
-    uint32_t getEntry() const { return entry; }
+    [[nodiscard]] uint32_t getEntry() const { return entry; }
     void setEntry(uint32_t e) { entry = e; }
 
-    uint32_t getDisplayId() const { return displayId; }
+    [[nodiscard]] uint32_t getDisplayId() const { return displayId; }
     void setDisplayId(uint32_t id) { displayId = id; }
 
 protected:
@@ -462,6 +492,32 @@ protected:
     uint32_t entry = 0;
     uint32_t displayId = 0;
 };
+
+/// What to call this entity on screen, whatever kind it turns out to be.
+///
+/// The name lives on Unit and on GameObject and not on Entity, so anything
+/// wanting to write one down has to ask which kind it is holding first. Five
+/// places did that for themselves - the four files GameScreen was split into
+/// and the chat commands - in identical copies, and two of the four never
+/// called their own.
+///
+/// "Unknown" rather than an empty string, because every caller is putting this
+/// in a sentence: an entity whose name has not arrived yet reads as a gap in
+/// the line otherwise, with nothing to say a name was expected.
+inline std::string entityDisplayName(const std::shared_ptr<Entity>& entity) {
+    if (!entity) return "Unknown";
+    if (entity->getType() == ObjectType::PLAYER) {
+        auto player = std::static_pointer_cast<Player>(entity);
+        if (!player->getName().empty()) return player->getName();
+    } else if (entity->getType() == ObjectType::UNIT) {
+        auto unit = std::static_pointer_cast<Unit>(entity);
+        if (!unit->getName().empty()) return unit->getName();
+    } else if (entity->getType() == ObjectType::GAMEOBJECT) {
+        auto go = std::static_pointer_cast<GameObject>(entity);
+        if (!go->getName().empty()) return go->getName();
+    }
+    return "Unknown";
+}
 
 /**
  * Entity manager for tracking all entities in view
@@ -533,6 +589,42 @@ private:
     mutable std::chrono::steady_clock::time_point lastSpatialRebuild_{};
     mutable bool spatialDirty_ = true;
 };
+
+/// Who a unit has selected, from the two halves the wire splits the guid into.
+///
+/// UNIT_FIELD_TARGET arrives as a low and a high update field, and reading it
+/// was written out separately in six files - the combat handler, two unit
+/// APIs, the target frames, the nameplates and a slash command. Six copies of
+/// a two-field read is how one of them comes to be missing its high half, and
+/// a guid missing its high half matches nothing on a server that uses one.
+inline uint64_t unitTargetGuid(const Entity& entity) {
+    const auto& fields = entity.getFields();
+    auto lo = fields.find(fieldIndex(UF::UNIT_FIELD_TARGET_LO));
+    if (lo == fields.end()) return 0;
+    uint64_t guid = lo->second;
+    auto hi = fields.find(fieldIndex(UF::UNIT_FIELD_TARGET_HI));
+    if (hi != fields.end()) guid |= (static_cast<uint64_t>(hi->second) << 32);
+    return guid;
+}
+
+inline uint64_t unitTargetGuid(const std::shared_ptr<Entity>& entity) {
+    return entity ? unitTargetGuid(*entity) : 0;
+}
+
+/// Who summoned this unit, or 0 for a unit nobody did.
+///
+/// Answers 0 on an expansion whose table has no entry for the field, which is
+/// the same answer as "nobody summoned it" on purpose: the callers use it to
+/// decide whether a unit is somebody's pet, and not knowing has to read as no.
+inline uint64_t unitSummonedByGuid(const Entity& entity) {
+    const auto& fields = entity.getFields();
+    auto lo = fields.find(fieldIndex(UF::UNIT_FIELD_SUMMONEDBY_LO));
+    if (lo == fields.end()) return 0;
+    uint64_t guid = lo->second;
+    auto hi = fields.find(fieldIndex(UF::UNIT_FIELD_SUMMONEDBY_HI));
+    if (hi != fields.end()) guid |= (static_cast<uint64_t>(hi->second) << 32);
+    return guid;
+}
 
 } // namespace game
 } // namespace wowee

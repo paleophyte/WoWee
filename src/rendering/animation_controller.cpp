@@ -1,3 +1,6 @@
+#include <span>
+
+#include "rendering/animation/melee_anim_chains.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/animation/emote_registry.hpp"
 #include "rendering/animation/anim_capability_probe.hpp"
@@ -86,6 +89,18 @@ void AnimationController::playEmote(const std::string& emoteName) {
         }
     }
 
+    // What an emote resolved to, and whether the model can play it. An emote
+    // that does nothing is either a name that resolved to no animation or an
+    // animation the model does not carry, and from outside those look the same.
+    {
+        auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+        uint32_t ci = renderer_ ? renderer_->getCharacterInstanceId() : 0;
+        const bool has = (cr && ci > 0) ? cr->hasAnimation(ci, animId) : false;
+        LOG_WARNING("Emote '", emoteName, "' -> animation ", animId,
+                    (loop ? " (looping)" : " (one shot)"),
+                    " model has it: ", (has ? "yes" : "NO"));
+    }
+
     // Forward to CharacterAnimator (ActivityFSM handles emote state)
     characterAnimator_.playEmote(animId, loop);
 
@@ -144,13 +159,6 @@ std::string AnimationController::getEmoteTextByDbcId(uint32_t dbcId, const std::
     registry.loadFromDbc();
     return registry.textByDbcId(dbcId, senderName, targetName);
 }
-
-uint32_t AnimationController::getEmoteAnimByDbcId(uint32_t dbcId) {
-    auto& registry = EmoteRegistry::instance();
-    registry.loadFromDbc();
-    return registry.animByDbcId(dbcId);
-}
-
 uint32_t AnimationController::getEmoteAnimByEmotesId(uint32_t emoteId) {
     auto& registry = EmoteRegistry::instance();
     registry.loadFromDbc();
@@ -222,7 +230,8 @@ void AnimationController::setStealthed(bool stealth) {
 // ── Sprint aura ──────────────────────────────────────────────────────────────
 
 void AnimationController::setSprintAuraActive(bool active) {
-    sprintAuraActive_ = active;
+    // Straight through. The animator keeps the copy the locomotion state
+    // machine reads; this class kept one of its own and read it nowhere.
     characterAnimator_.setSprintAuraActive(active);
 }
 
@@ -291,12 +300,16 @@ void AnimationController::triggerMeleeSwing() {
 
 void AnimationController::setEquippedWeaponType(uint32_t inventoryType, bool is2HLoose,
                                                  bool isFist, bool isDagger,
-                                                 bool hasOffHand, bool hasShield) {
+                                                 bool hasOffHand, bool hasShield,
+                                                 bool offHandIsFist,
+                                                 bool offHandIsDagger) {
     weaponLoadout_.inventoryType = inventoryType;
     weaponLoadout_.is2HLoose = is2HLoose;
     weaponLoadout_.isFist = isFist;
     weaponLoadout_.isDagger = isDagger;
     weaponLoadout_.hasOffHand = hasOffHand;
+    weaponLoadout_.offHandIsFist = offHandIsFist;
+    weaponLoadout_.offHandIsDagger = offHandIsDagger;
     weaponLoadout_.hasShield = hasShield;
     meleeAnimId_ = 0;  // Force re-resolve on next swing
     characterAnimator_.setEquippedWeaponType(weaponLoadout_);
@@ -328,7 +341,7 @@ void AnimationController::triggerSpecialAttack(uint32_t /*spellId*/) {
     }
 
     if (specAnim == 0) {
-        // No special animation available — fall back to regular melee swing
+        // No special animation available - fall back to regular melee swing
         triggerMeleeSwing();
         return;
     }
@@ -397,6 +410,18 @@ void AnimationController::triggerRangedShot() {
         case RangedWeaponType::THROWN:
             if (has(anim::ATTACK_THROWN))    shootAnim = anim::ATTACK_THROWN;
             break;
+        case RangedWeaponType::WAND: {
+            // WOWEE_WAND_ANIM=<id> overrides the shot animation, for comparing
+            // candidates on screen: 32 cast, 49 rifle, 53 directed, 54 omni.
+            static const uint32_t kForced = []() -> uint32_t {
+                const char* v = std::getenv("WOWEE_WAND_ANIM");
+                return v ? static_cast<uint32_t>(std::atoi(v)) : 0;
+            }();
+            if (kForced != 0 && has(kForced))        shootAnim = kForced;
+            else if (has(anim::SPELL_CAST_DIRECTED)) shootAnim = anim::SPELL_CAST_DIRECTED;
+            else if (has(anim::ATTACK_RIFLE))        shootAnim = anim::ATTACK_RIFLE;
+            break;
+        }
         default: break;
     }
     if (shootAnim == 0) return;  // Model has no ranged animation
@@ -451,60 +476,42 @@ uint32_t AnimationController::resolveMeleeAnimId() {
         return 0.0f;
     };
 
-    const uint32_t* attackCandidates;
-    size_t candidateCount;
-    static const uint32_t candidates2H[] = {anim::ATTACK_2H, anim::ATTACK_1H, anim::ATTACK_UNARMED, anim::ATTACK_2H_LOOSE, anim::PARRY_UNARMED, anim::PARRY_1H};
-    static const uint32_t candidates2HLoosePierce[] = {anim::ATTACK_2H_LOOSE_PIERCE, anim::ATTACK_2H_LOOSE, anim::ATTACK_2H, anim::ATTACK_1H, anim::ATTACK_UNARMED};
-    static const uint32_t candidates1H[] = {anim::ATTACK_1H, anim::ATTACK_2H, anim::ATTACK_UNARMED, anim::ATTACK_2H_LOOSE, anim::PARRY_UNARMED, anim::PARRY_1H};
-    static const uint32_t candidatesDagger[] = {anim::ATTACK_1H_PIERCE, anim::ATTACK_1H, anim::ATTACK_UNARMED};
-    static const uint32_t candidatesUnarmed[] = {anim::ATTACK_UNARMED, anim::ATTACK_1H, anim::ATTACK_2H, anim::ATTACK_2H_LOOSE, anim::PARRY_UNARMED, anim::PARRY_1H};
-    static const uint32_t candidatesFist[] = {anim::ATTACK_FIST_1H, anim::ATTACK_FIST_1H_OFF, anim::ATTACK_1H, anim::ATTACK_UNARMED, anim::PARRY_FIST_1H, anim::PARRY_1H};
-    // Off-hand attack variants (used when dual-wielding on off-hand turn)
-    static const uint32_t candidatesOffHand[] = {anim::ATTACK_OFF, anim::ATTACK_1H, anim::ATTACK_UNARMED};
-    static const uint32_t candidatesOffHandPierce[] = {anim::ATTACK_OFF_PIERCE, anim::ATTACK_OFF, anim::ATTACK_1H_PIERCE, anim::ATTACK_1H};
-    static const uint32_t candidatesOffHandFist[] = {anim::ATTACK_FIST_1H_OFF, anim::ATTACK_OFF, anim::ATTACK_FIST_1H, anim::ATTACK_1H};
-    static const uint32_t candidatesOffHandUnarmed[] = {anim::ATTACK_UNARMED_OFF, anim::ATTACK_UNARMED, anim::ATTACK_OFF, anim::ATTACK_1H};
+    std::span<const uint32_t> chain;
+    // The chains live in melee_anim_chains.hpp, which the capability probe
+    // reads too - it used to keep its own copies under a comment saying they
+    // matched these.
+    using anim::MeleeChain;
 
     // Dual-wield: alternate main-hand and off-hand swings
     bool useOffHand = weaponLoadout_.hasOffHand && meleeOffHandTurn_;
     meleeOffHandTurn_ = weaponLoadout_.hasOffHand ? !meleeOffHandTurn_ : false;
 
     if (useOffHand) {
-        if (weaponLoadout_.isFist) {
-            attackCandidates = candidatesOffHandFist;
-            candidateCount = 4;
-        } else if (weaponLoadout_.isDagger) {
-            attackCandidates = candidatesOffHandPierce;
-            candidateCount = 4;
+        // The off-hand weapon's kind, not the main hand's.
+        if (weaponLoadout_.offHandIsFist) {
+            chain = anim::meleeAnimChain(MeleeChain::OffHandFist);
+        } else if (weaponLoadout_.offHandIsDagger) {
+            chain = anim::meleeAnimChain(MeleeChain::OffHandPierce);
         } else if (weaponLoadout_.inventoryType == game::InvType::NON_EQUIP) {
-            attackCandidates = candidatesOffHandUnarmed;
-            candidateCount = 4;
+            chain = anim::meleeAnimChain(MeleeChain::OffHandUnarmed);
         } else {
-            attackCandidates = candidatesOffHand;
-            candidateCount = 3;
+            chain = anim::meleeAnimChain(MeleeChain::OffHand);
         }
     } else if (weaponLoadout_.isFist) {
-        attackCandidates = candidatesFist;
-        candidateCount = 6;
+        chain = anim::meleeAnimChain(MeleeChain::Fist);
     } else if (weaponLoadout_.isDagger) {
-        attackCandidates = candidatesDagger;
-        candidateCount = 3;
+        chain = anim::meleeAnimChain(MeleeChain::Dagger);
     } else if (weaponLoadout_.is2HLoose) {
         // Polearm thrust uses pierce variant
-        attackCandidates = candidates2HLoosePierce;
-        candidateCount = 5;
+        chain = anim::meleeAnimChain(MeleeChain::TwoHandLoose);
     } else if (weaponLoadout_.inventoryType == game::InvType::TWO_HAND) {
-        attackCandidates = candidates2H;
-        candidateCount = 6;
+        chain = anim::meleeAnimChain(MeleeChain::TwoHand);
     } else if (weaponLoadout_.inventoryType == game::InvType::NON_EQUIP) {
-        attackCandidates = candidatesUnarmed;
-        candidateCount = 6;
+        chain = anim::meleeAnimChain(MeleeChain::Unarmed);
     } else {
-        attackCandidates = candidates1H;
-        candidateCount = 6;
+        chain = anim::meleeAnimChain(MeleeChain::OneHand);
     }
-    for (size_t ci = 0; ci < candidateCount; ci++) {
-        uint32_t id = attackCandidates[ci];
+    for (uint32_t id : chain) {
         if (characterRenderer->hasAnimation(characterInstanceId, id)) {
             meleeAnimId_ = id;
             meleeAnimDurationMs_ = findDuration(id);
@@ -759,7 +766,7 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
     mountAnims.runLeft   = findFirst({anim::MOUNT_RUN_LEFT, anim::RUN_LEFT});
     mountAnims.runRight  = findFirst({anim::MOUNT_RUN_RIGHT, anim::RUN_RIGHT});
     mountAnims.stand     = findFirst({anim::STAND});
-    // Discover flight animations (flying mounts only — may all be 0 for ground mounts)
+    // Discover flight animations (flying mounts only - may all be 0 for ground mounts)
     mountAnims.flyIdle      = findFirst({anim::FLY_IDLE});
     mountAnims.flyForward   = findFirst({anim::FLY_FORWARD, anim::FLY_RUN_2});
     mountAnims.flyBackwards = findFirst({anim::FLY_BACKWARDS, anim::FLY_WALK_BACKWARDS});
@@ -829,13 +836,12 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
         " stand=", mountAnims.stand,
         " fidgets=", mountAnims.fidgets.size());
 
-    // Configure MountFSM via CharacterAnimator
-    // MountFSM caches taxiFlight_ once here and never re-reads it per-frame
-    // (Input.taxiFlight is populated in updateMountedAnimation() but unused) -
-    // if this fires again mid-flight with taxiFlight_ momentarily false (e.g. a
-    // server mount-display-id update racing ahead of the taxi state flipping
-    // true), the whole taxi flight animation branch gets skipped for the rest
-    // of this mount instance, falling back to regular ground/fly resolution.
+    // Configure MountFSM via CharacterAnimator.
+    //
+    // What is passed here is only what was true at this moment. The FSM takes
+    // the per-frame answer as well now, and either counts - a taxi sets the
+    // mount up before it says the flight has begun, so this one is false on
+    // every flight.
     LOG_INFO("Mount configured: displayId=", mountDisplayId, " taxiFlight=", taxiFlight_);
     characterAnimator_.configureMountFSM(mountAnims, taxiFlight_);
 
@@ -897,6 +903,11 @@ void AnimationController::updateMeleeTimers(float deltaTime) {
 
 // ── Mount positioning helper ─────────────────────────────────────────────────
 
+// A seat that shifts more than this between frames is being carried, not
+// jittering: standing still on solid ground moves it by a fraction of this,
+// while a ferry at speed moves it by several times as much in a single frame.
+static constexpr float kSeatCarriedStepSq = 0.05f * 0.05f;
+
 void AnimationController::applyMountPositioning(float mountBob, float mountRoll, float characterYaw) {
     auto* characterRenderer = renderer_->getCharacterRenderer();
     uint32_t characterInstanceId = renderer_->getCharacterInstanceId();
@@ -923,10 +934,10 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
             haveSeat = characterRenderer->getAttachmentTransform(
                 mountInstanceId_, static_cast<uint32_t>(mountSeatAttachmentId_), mountSeatTransform);
         }
-        if (!haveSeat) {
-            mountSeatAttachmentId_ = -2;
-        }
-
+        // A failed lookup is "not yet", not "never". The seat is read off the
+        // mount's model, and a mount summoned before its M2 has finished
+        // loading answers no on the first frame or two - latching that closed
+        // left the rider on the guessed height for the whole ride.
         if (haveSeat) {
             glm::vec3 targetRiderPos = glm::vec3(mountSeatTransform[3]) + glm::vec3(0.0f, 0.0f, 0.02f);
             mountSeatSmoothingInit_ = false;
@@ -963,16 +974,32 @@ void AnimationController::applyMountPositioning(float mountBob, float mountRoll,
                 break;
             }
         }
-        if (!haveSeat) {
-            mountSeatAttachmentId_ = -2;
-        }
+        // Left at -1 on failure, so the next frame probes again - see the note
+        // in the taxi branch above.
     }
 
     if (haveSeat) {
         glm::vec3 mountSeatPos = glm::vec3(mountSeatTransform[3]);
         glm::vec3 seatOffset = glm::vec3(0.0f, 0.0f, taxiFlight_ ? 0.04f : 0.08f);
         glm::vec3 targetRiderPos = mountSeatPos + seatOffset;
-        if (moving) {
+
+        // The smoothing below is for a rider sitting still, where it damps the
+        // jitter of a bone-driven seat. `moving` only reports movement *input*,
+        // though, and a player standing on a boat presses nothing while the world
+        // carries them at the ship's speed. The filter then trailed the rider
+        // behind the seat by its own time constant - about two yards at ferry
+        // speed, swinging out to one side as the hull turned. Reported as the
+        // character riding behind the direction of travel, alongside its mount.
+        //
+        // So ask whether the seat is actually moving in the world rather than
+        // whether the player asked for it to. This covers anything that carries a
+        // rider - ships, elevators, a moving platform - without naming any of them.
+        const glm::vec3 seatStep = targetRiderPos - lastMountSeatTarget_;
+        const bool seatCarried = mountSeatSmoothingInit_ &&
+                                 glm::dot(seatStep, seatStep) > kSeatCarriedStepSq;
+        lastMountSeatTarget_ = targetRiderPos;
+
+        if (moving || seatCarried) {
             mountSeatSmoothingInit_ = false;
             smoothedMountSeatPos_ = targetRiderPos;
         } else if (!mountSeatSmoothingInit_) {
@@ -1043,7 +1070,7 @@ void AnimationController::updateMountedAnimation(float deltaTime) {
         characterRenderer->playAnimation(mountInstanceId_, mountOut.mountAnimId, mountOut.mountAnimLoop);
     }
 
-    // Rider animation — defaults to MOUNT, but uses MOUNT_FLIGHT_* variants when flying
+    // Rider animation - defaults to MOUNT, but uses MOUNT_FLIGHT_* variants when flying
     uint32_t riderAnim = anim::MOUNT;
     if (cameraController->isFlyingActive()) {
         auto hasRider = [&](uint32_t id) { return characterRenderer->hasAnimation(characterInstanceId, id); };
@@ -1126,7 +1153,6 @@ void AnimationController::updateCharacterAnimation() {
     fi.sprinting = cameraController->isSprinting();
     fi.movingForward = cameraController->isMovingForward();
     fi.movingBackward = cameraController->isMovingBackward();
-    fi.autoRunning = cameraController->isAutoRunning();
     fi.strafeLeft = cameraController->isStrafingLeft();
     fi.strafeRight = cameraController->isStrafingRight();
     // See setM2TransportRiding() comment: real physics correctly reports "not grounded"
@@ -1136,7 +1162,6 @@ void AnimationController::updateCharacterAnimation() {
     fi.jumping = cameraController->isJumping();
     fi.swimming = cameraController->isSwimming();
     fi.sitting = cameraController->isSitting();
-    fi.flyingActive = cameraController->isFlyingActive();
     fi.ascending = cameraController->isAscending();
     fi.descending = cameraController->isDescending();
     fi.jumpKeyPressed = cameraController->isJumpKeyPressed();
@@ -1173,7 +1198,7 @@ void AnimationController::updateCharacterAnimation() {
     const bool requestChanged = (lastPlayerAnimRequest_ != animId) || (lastPlayerAnimLoopRequest_ != loop);
     // Only re-assert looping animations if the renderer drifted (e.g., external
     // playAnimation call).  One-shot animations must NOT be re-asserted after the
-    // renderer auto-resets them to STAND on completion — the FSM detects the ID
+    // renderer auto-resets them to STAND on completion - the FSM detects the ID
     // change via oneShotComplete and transitions to the next state in the same frame.
     const bool drifted = haveState && currentAnimId != animId && loop;
     const bool shouldPlay = requestChanged || drifted;

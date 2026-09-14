@@ -1,7 +1,11 @@
 #include "cli_mesh_info.hpp"
+#include "zone_manifest.hpp"
 #include "cli_weld.hpp"
 
 #include "pipeline/wowee_model.hpp"
+
+#include "cli_paths.hpp"
+#include "wom_mesh_stats.hpp"
 #include "pipeline/wowee_building.hpp"
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
@@ -116,7 +120,7 @@ int handleListZoneMeshesDetail(int& i, int argc, char** argv) {
     // sorted by triangle count descending so the heaviest
     // meshes float to the top. Complements
     // --list-zone-meshes (per-zone summary) by surfacing
-    // individual mesh metrics — useful for spotting
+    // individual mesh metrics - useful for spotting
     // outliers ("which mesh is using 80% of my triangle
     // budget?") and for content audits.
     std::string zoneDir = argv[++i];
@@ -129,35 +133,17 @@ int handleListZoneMeshesDetail(int& i, int argc, char** argv) {
             "list-zone-meshes-detail: %s does not exist\n", zoneDir.c_str());
         return 1;
     }
-    struct Row {
+    struct Row : WomMeshStats {
         std::string path;
-        size_t verts;
-        size_t tris;
-        size_t bones;
-        size_t batches;
-        size_t textures;
         uint64_t bytes;
-        uint32_t version;
     };
     std::vector<Row> rows;
-    std::error_code ec;
-    for (const auto& e : fs::recursive_directory_iterator(zoneDir, ec)) {
-        if (!e.is_regular_file()) continue;
-        if (e.path().extension() != ".wom") continue;
-        std::string base = e.path().string();
-        if (base.size() >= 4) base = base.substr(0, base.size() - 4);
-        auto wom = wowee::pipeline::WoweeModelLoader::load(base);
+    for (const auto& found : findFilesByExtension(zoneDir, ".wom")) {
+        const auto wom = wowee::pipeline::WoweeModelLoader::load(found.base);
         Row r;
-        r.path = fs::relative(e.path(), zoneDir, ec).string();
-        if (ec) r.path = e.path().filename().string();
-        r.verts = wom.vertices.size();
-        r.tris = wom.indices.size() / 3;
-        r.bones = wom.bones.size();
-        r.batches = wom.batches.size();
-        r.textures = wom.texturePaths.size();
-        r.bytes = e.file_size(ec);
-        if (ec) r.bytes = 0;
-        r.version = wom.version;
+        r.path = found.relative;
+        r.bytes = found.bytes;
+        setMeshStats(r, wom);
         rows.push_back(r);
     }
     std::sort(rows.begin(), rows.end(),
@@ -333,7 +319,7 @@ int handleInfoMeshStats(int& i, int argc, char** argv) {
     // always read as "not watertight" at the index level even when
     // visually closed. Pass --weld <eps> to first map vertices that
     // share a position (within eps) to a canonical representative
-    // before edge analysis — this measures topological closure of
+    // before edge analysis - this measures topological closure of
     // the actual surface, which is what collision baking checks.
     std::string base = argv[++i];
     bool jsonOut = false;
@@ -495,13 +481,13 @@ int handleInfoMeshStorageBudget(int& i, int argc, char** argv) {
     // Estimated bytes-per-category breakdown for a WOM.
     // Numbers are based on the in-memory struct sizes, not
     // the actual on-disk encoding (which has framing
-    // overhead) — but the relative shares are accurate and
+    // overhead) - but the relative shares are accurate and
     // help users decide where shrinking efforts pay off.
     //
     // For example: a heightmap mesh's bytes are dominated by
     // vertices, so reducing vertex count is the lever to
     // pull. A skeletal mesh's animation keyframes can dwarf
-    // the geometry itself — surfacing that lets the user
+    // the geometry itself - surfacing that lets the user
     // know to consider --strip-mesh --anims.
     std::string base = argv[++i];
     bool jsonOut = (i + 1 < argc &&
@@ -629,13 +615,9 @@ int handleInfoProjectModelsTotal(int& i, int argc, char** argv) {
             projectDir.c_str());
         return 1;
     }
-    std::vector<std::string> zones;
-    for (const auto& entry : fs::directory_iterator(projectDir)) {
-        if (!entry.is_directory()) continue;
-        if (!fs::exists(entry.path() / "zone.json")) continue;
-        zones.push_back(entry.path().string());
-    }
-    std::sort(zones.begin(), zones.end());
+    // What counts as a zone, and the order they are reported in,
+    // from one place.
+    std::vector<std::string> zones = wowee::editor::projectZoneDirs(projectDir);
     struct ZRow {
         std::string name;
         int womCount = 0, wobCount = 0;

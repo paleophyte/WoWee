@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Holiday catalog (.whol) — novel replacement for
+// Wowee Open Holiday catalog (.whol) - novel replacement for
 // Blizzard's Holidays.dbc + HolidayDescriptions.dbc +
 // HolidayNames.dbc plus the AzerothCore-style game_event SQL
 // tables. The 44th open format added to the editor.
@@ -82,9 +82,9 @@ struct WoweeHoliday {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t holidayId) const;
+    [[nodiscard]] const Entry* findById(uint32_t holidayId) const;
 
     static const char* holidayKindName(uint8_t k);
     static const char* recurrenceName(uint8_t r);
@@ -99,13 +99,13 @@ public:
 
     // Preset emitters used by --gen-holidays* variants.
     //
-    //   makeStarter  — 3 seasonal holidays (Hallow's End /
+    //   makeStarter  - 3 seasonal holidays (Hallow's End /
     //                   Brewfest / Winter Veil) with boss /
     //                   reward / quest cross-refs.
-    //   makeWeekly   — 3 weekly call-to-arms windows
+    //   makeWeekly   - 3 weekly call-to-arms windows
     //                   (Warsong Gulch / Arathi Basin / Eye
     //                   of the Storm BG bonuses).
-    //   makeSpecial  — 3 special / world-PvP events
+    //   makeSpecial  - 3 special / world-PvP events
     //                   (Wintergrasp / Lunar Festival /
     //                   Children's Week).
     static WoweeHoliday makeStarter(const std::string& catalogName);

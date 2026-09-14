@@ -32,7 +32,7 @@ public:
      */
     bool readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) const;
 
-    bool isLoaded() const { return loaded_; }
+    [[nodiscard]] bool isLoaded() const { return loaded_; }
 
     /**
      * Search PE image for a byte pattern matching HMAC-SHA1(seed, pattern).
@@ -41,7 +41,7 @@ public:
      * @param expectedHash 20-byte expected HMAC-SHA1 digest
      * @param patternLen Length of the pattern to search for
      * @param imageOnly If true, search only executable sections (.text)
-     * @param hintOffset RVA hint from PAGE_A request — check this position first
+     * @param hintOffset RVA hint from PAGE_A request - check this position first
      * @return true if a matching pattern was found in the PE image
      */
     bool searchCodePattern(const uint8_t seed[4], const uint8_t expectedHash[20],
@@ -68,7 +68,7 @@ private:
     void patchTurtleWowBinary();
     void verifyWardenScanEntries();
     bool isTurtle_ = false;
-    std::string findWowExe(uint16_t build) const;
+    [[nodiscard]] std::string findWowExe(uint16_t build) const;
     static uint32_t expectedImageSizeForBuild(uint16_t build, bool isTurtle);
 
     // Cache for searchCodePattern results to avoid repeated 5-second brute-force searches.

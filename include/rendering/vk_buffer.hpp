@@ -31,18 +31,16 @@ public:
     [[nodiscard]] bool createMapped(VmaAllocator allocator, VkDeviceSize size,
         VkBufferUsageFlags usage);
 
-    // Update mapped buffer contents (only valid for mapped buffers)
-    void updateMapped(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
 
     void destroy();
 
-    ::VkBuffer getBuffer() const { return buf_.buffer; }
-    VkDeviceSize getSize() const { return size_; }
-    void* getMappedData() const { return buf_.info.pMappedData; }
-    bool isValid() const { return buf_.buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] ::VkBuffer getBuffer() const { return buf_.buffer; }
+    [[nodiscard]] VkDeviceSize getSize() const { return size_; }
+    [[nodiscard]] void* getMappedData() const { return buf_.info.pMappedData; }
+    [[nodiscard]] bool isValid() const { return buf_.buffer != VK_NULL_HANDLE; }
 
     // Descriptor info for uniform/storage buffer binding
-    VkDescriptorBufferInfo descriptorInfo(VkDeviceSize offset = 0,
+    [[nodiscard]] VkDescriptorBufferInfo descriptorInfo(VkDeviceSize offset = 0,
         VkDeviceSize range = VK_WHOLE_SIZE) const;
 
 private:

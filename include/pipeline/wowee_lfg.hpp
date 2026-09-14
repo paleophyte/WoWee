@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Looking-For-Group Dungeon catalog (.wlfg) —
+// Wowee Open Looking-For-Group Dungeon catalog (.wlfg) -
 // novel replacement for Blizzard's LFGDungeons.dbc plus
 // the AzerothCore-style dungeon-finder reward tables.
 // Defines the dungeons / raids that the LFG / Dungeon
@@ -53,7 +53,7 @@ struct WoweeLFGDungeon {
         TurtleWoW = 3,
     };
 
-    // requiredRolesMask bits — combine to require multiple
+    // requiredRolesMask bits - combine to require multiple
     // role types in the queue-formed group.
     static constexpr uint8_t kRoleTank = 0x01;
     static constexpr uint8_t kRoleHeal = 0x02;
@@ -81,9 +81,9 @@ struct WoweeLFGDungeon {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t dungeonId) const;
+    [[nodiscard]] const Entry* findById(uint32_t dungeonId) const;
 
     static const char* difficultyName(uint8_t d);
     static const char* expansionRequiredName(uint8_t e);
@@ -98,14 +98,14 @@ public:
 
     // Preset emitters used by --gen-lfg* variants.
     //
-    //   makeStarter — 3 classic-era dungeons (Ragefire
+    //   makeStarter - 3 classic-era dungeons (Ragefire
     //                  Chasm 13-18, Wailing Caverns
     //                  17-24, Deadmines 18-23).
-    //   makeHeroic  — 5 WotLK 80-level heroics with
+    //   makeHeroic  - 5 WotLK 80-level heroics with
     //                  emblem rewards (Halls of Lightning
     //                  Heroic, Halls of Stone, Utgarde
     //                  Pinnacle, Violet Hold, Old Kingdom).
-    //   makeRaid    — 3 raid catalog entries (Naxxramas-25,
+    //   makeRaid    - 3 raid catalog entries (Naxxramas-25,
     //                  Ulduar-25 with Hardmode, ToC-25)
     //                  with achievement cross-refs and
     //                  larger groupSize.

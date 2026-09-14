@@ -1,4 +1,4 @@
-// PostProcessPipeline — FSR 1.0, FXAA, FSR 2.2/3 state and passes (§4.3)
+// PostProcessPipeline - FSR 1.0, FXAA, FSR 2.2/3 state and passes (§4.3)
 // Extracted from Renderer to isolate post-processing concerns.
 
 #include "rendering/post_process_pipeline.hpp"
@@ -59,7 +59,7 @@ void PostProcessPipeline::manageResources() {
         }
     }
 
-    // FXAA resource management — FXAA can coexist with FSR1 and FSR3.
+    // FXAA resource management - FXAA can coexist with FSR1 and FSR3.
     // When both FXAA and FSR3 are enabled, FXAA runs as a post-FSR3 pass.
     // Do not force this pass for ghost mode; keep AA quality strictly user-controlled.
     const bool useFXAA = needsFXAAPass();
@@ -138,20 +138,42 @@ VkFramebuffer PostProcessPipeline::getSceneFramebuffer() const {
 
 VkExtent2D PostProcessPipeline::getSceneRenderExtent() const {
     if (fsr2_.enabled && fsr2_.sceneFramebuffer)
-        return { fsr2_.internalWidth, fsr2_.internalHeight };
+        return { .width = fsr2_.internalWidth, .height = fsr2_.internalHeight };
     if (needsFXAAPass() && fxaa_.sceneFramebuffer)
-        return vkCtx_->getSwapchainExtent();  // native resolution — no downscaling
+        return vkCtx_->getSwapchainExtent();  // native resolution - no downscaling
     if (fsr_.enabled && fsr_.sceneFramebuffer)
-        return { fsr_.internalWidth, fsr_.internalHeight };
+        return { .width = fsr_.internalWidth, .height = fsr_.internalHeight };
     return vkCtx_->getSwapchainExtent();
 }
-
-bool PostProcessPipeline::hasActivePostProcess() const {
-    return (fsr2_.enabled && fsr2_.sceneFramebuffer)
-        || (needsFXAAPass() && fxaa_.sceneFramebuffer)
-        || (fsr_.enabled && fsr_.sceneFramebuffer);
+VkImage PostProcessPipeline::getSceneColorImage() const {
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return fsr2_.sceneColor.image;
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer) return fxaa_.sceneColor.image;
+    if (fsr_.enabled && fsr_.sceneFramebuffer) return fsr_.sceneColor.image;
+    return VK_NULL_HANDLE;
 }
 
+VkImage PostProcessPipeline::getSceneDepthImage() const {
+    // Prefer the resolved depth where MSAA produced one: it is single-sampled and
+    // can be copied directly.
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return fsr2ReadDepth().image;
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer)
+        return fxaa_.sceneDepthResolve.image ? fxaa_.sceneDepthResolve.image : fxaa_.sceneDepth.image;
+    if (fsr_.enabled && fsr_.sceneFramebuffer)
+        return fsr_.sceneDepthResolve.image ? fsr_.sceneDepthResolve.image : fsr_.sceneDepth.image;
+    return VK_NULL_HANDLE;
+}
+
+bool PostProcessPipeline::isFsr2BlockingMsaa() const {
+    return fsr2_.enabled && vkCtx_ && !vkCtx_->isDepthResolveSupported();
+}
+
+bool PostProcessPipeline::sceneDepthIsMsaa() const {
+    if (!vkCtx_ || vkCtx_->getMsaaSamples() == VK_SAMPLE_COUNT_1_BIT) return false;
+    if (fsr2_.enabled && fsr2_.sceneFramebuffer) return fsr2_.sceneDepthResolve.image == VK_NULL_HANDLE;
+    if (needsFXAAPass() && fxaa_.sceneFramebuffer) return fxaa_.sceneDepthResolve.image == VK_NULL_HANDLE;
+    if (fsr_.enabled && fsr_.sceneFramebuffer) return fsr_.sceneDepthResolve.image == VK_NULL_HANDLE;
+    return true;
+}
 bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t imageIndex,
                                                   Camera* camera, float deltaTime) {
     ZoneScopedN("PostProcess::execute");
@@ -196,52 +218,60 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         }
 
-        // FSR3+FXAA combined: re-point FXAA's descriptor to the FSR3 temporal output
-        // so renderFXAAPass() applies spatial AA on the temporally-stabilized frame.
-        // This must happen outside the render pass (descriptor updates are CPU-side).
-        // Use per-frame descriptor set to avoid race with in-flight command buffers.
-        uint32_t fxaaFrameIdx = vkCtx_->getCurrentFrame();
-        if (needsFXAAPass() && fxaa_.descSet[fxaaFrameIdx] && fxaa_.sceneSampler) {
-            VkImageView fsr3OutputView = VK_NULL_HANDLE;
-            if (fsr2_.useAmdBackend) {
-                if (fsr2_.amdFsr3FramegenRuntimeActive && fsr2_.framegenOutput.image)
-                    fsr3OutputView = fsr2_.framegenOutput.imageView;
-                else if (fsr2_.history[fsr2_.currentHistory].image)
-                    fsr3OutputView = fsr2_.history[fsr2_.currentHistory].imageView;
-            } else if (fsr2_.history[fsr2_.currentHistory].image) {
-                fsr3OutputView = fsr2_.history[fsr2_.currentHistory].imageView;
-            }
-            if (fsr3OutputView) {
-                VkDescriptorImageInfo imgInfo{};
-                imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                imgInfo.imageView   = fsr3OutputView;
-                imgInfo.sampler     = fxaa_.sceneSampler;
-                VkWriteDescriptorSet write{};
-                write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet           = fxaa_.descSet[fxaaFrameIdx];
-                write.dstBinding       = 0;
-                write.descriptorCount  = 1;
-                write.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo       = &imgInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
+        // With FXAA on as well, the two run in sequence: RCAS sharpens the
+        // upscaler's output into FXAA's own full-resolution scene image, which
+        // is idle while the upscaler owns the scene, and FXAA reads that from
+        // its usual descriptor and writes the swapchain. FXAA used to stand in
+        // for the sharpening pass instead, with a weak unsharp mask of its own,
+        // which gave up the distant detail the temporal upscaler is for.
+        const uint32_t fxaaFrameIdx = vkCtx_->getCurrentFrame();
+        const bool fxaaAfterSharpen = needsFXAAPass() && fxaa_.pipeline &&
+                                      fxaa_.descSet[fxaaFrameIdx] && fxaa_.sharpenFramebuffer &&
+                                      fxaa_.sceneColor.image;
+        if (fxaaAfterSharpen) {
+            VkRenderPassBeginInfo sharpenRp{};
+            sharpenRp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            sharpenRp.renderPass = vkCtx_->getOverlayClearRenderPass();
+            sharpenRp.framebuffer = fxaa_.sharpenFramebuffer;
+            sharpenRp.renderArea.offset = {.x = 0, .y = 0};
+            sharpenRp.renderArea.extent = vkCtx_->getSwapchainExtent();
+            VkClearValue sharpenClear[1]{};
+            sharpenClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            sharpenRp.clearValueCount = 1;
+            sharpenRp.pClearValues = sharpenClear;
+            vkCmdBeginRenderPass(currentCmd_, &sharpenRp, VK_SUBPASS_CONTENTS_INLINE);
+            VkExtent2D sharpenExt = vkCtx_->getSwapchainExtent();
+            VkViewport sharpenVp{};
+            sharpenVp.width = static_cast<float>(sharpenExt.width);
+            sharpenVp.height = static_cast<float>(sharpenExt.height);
+            sharpenVp.maxDepth = 1.0f;
+            vkCmdSetViewport(currentCmd_, 0, 1, &sharpenVp);
+            VkRect2D sharpenSc{};
+            sharpenSc.extent = sharpenExt;
+            vkCmdSetScissor(currentCmd_, 0, 1, &sharpenSc);
+            renderFSR2Sharpen();
+            vkCmdEndRenderPass(currentCmd_);
+            // The pass leaves it in PRESENT_SRC; FXAA samples it as read-only.
+            transitionImageLayout(currentCmd_, fxaa_.sceneColor.image,
+                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         }
 
         // Begin swapchain render pass at full resolution for sharpening + ImGui
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpInfo.renderPass = vkCtx_->getImGuiRenderPass();
-        rpInfo.framebuffer = vkCtx_->getSwapchainFramebuffers()[imageIndex];
-        rpInfo.renderArea.offset = {0, 0};
+        // Output goes through the single-sampled overlay pass. The scene pass
+        // carries the scene's sample count, and these quads are 1x.
+        rpInfo.renderPass = vkCtx_->getOverlayClearRenderPass();
+        rpInfo.framebuffer = vkCtx_->getOverlayFramebuffers()[imageIndex];
+        rpInfo.renderArea.offset = {.x = 0, .y = 0};
         rpInfo.renderArea.extent = vkCtx_->getSwapchainExtent();
 
-        bool msaaOn = (vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT);
-        VkClearValue clearValues[4]{};
+        // The overlay pass has one attachment whatever the scene's MSAA is.
+        VkClearValue clearValues[1]{};
         clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
-        clearValues[2].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[3].depthStencil = {1.0f, 0};
-        rpInfo.clearValueCount = msaaOn ? (vkCtx_->getDepthResolveImageView() ? 4u : 3u) : 2u;
+        rpInfo.clearValueCount = 1;
         rpInfo.pClearValues = clearValues;
 
         inlineMode = true; vkCmdBeginRenderPass(currentCmd_, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -256,32 +286,12 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         sc.extent = ext;
         vkCmdSetScissor(currentCmd_, 0, 1, &sc);
 
-        // When FXAA is also enabled: apply FXAA on the FSR3 temporal output instead
-        // of RCAS sharpening. FXAA descriptor is temporarily pointed to the FSR3
-        // history buffer (which is already in SHADER_READ_ONLY_OPTIMAL). This gives
-        // FSR3 temporal stability + FXAA spatial edge smoothing ("ultra quality native").
-        if (needsFXAAPass() && fxaa_.pipeline && fxaa_.descSet[fxaaFrameIdx]) {
+        if (fxaaAfterSharpen) {
+            // Over the sharpened image RCAS just wrote.
             renderFXAAPass();
         } else {
             // Draw RCAS sharpening from accumulated history buffer
             renderFSR2Sharpen();
-        }
-
-        // Restore this frame's FXAA descriptor to its normal scene color source
-        // so standalone FXAA frames are not affected by the FSR3 history pointer.
-        if (needsFXAAPass() && fxaa_.descSet[fxaaFrameIdx] && fxaa_.sceneSampler && fxaa_.sceneColor.imageView) {
-            VkDescriptorImageInfo restoreInfo{};
-            restoreInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            restoreInfo.imageView   = fxaa_.sceneColor.imageView;
-            restoreInfo.sampler     = fxaa_.sceneSampler;
-            VkWriteDescriptorSet restoreWrite{};
-            restoreWrite.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            restoreWrite.dstSet          = fxaa_.descSet[fxaaFrameIdx];
-            restoreWrite.dstBinding      = 0;
-            restoreWrite.descriptorCount = 1;
-            restoreWrite.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            restoreWrite.pImageInfo      = &restoreInfo;
-            vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &restoreWrite, 0, nullptr);
         }
 
         // Maintain frame bookkeeping
@@ -304,19 +314,18 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-        // Begin swapchain render pass (1x — no MSAA on the output pass)
+        // Begin swapchain render pass (1x - no MSAA on the output pass)
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpInfo.renderPass = vkCtx_->getImGuiRenderPass();
-        rpInfo.framebuffer = vkCtx_->getSwapchainFramebuffers()[imageIndex];
-        rpInfo.renderArea.offset = {0, 0};
+        // Output goes through the single-sampled overlay pass. The scene pass
+        // carries the scene's sample count, and these quads are 1x.
+        rpInfo.renderPass = vkCtx_->getOverlayClearRenderPass();
+        rpInfo.framebuffer = vkCtx_->getOverlayFramebuffers()[imageIndex];
+        rpInfo.renderArea.offset = {.x = 0, .y = 0};
         rpInfo.renderArea.extent = vkCtx_->getSwapchainExtent();
-        // The swapchain render pass always has 2 attachments when MSAA is off;
-        // FXAA output goes to the non-MSAA swapchain directly.
-        VkClearValue fxaaClear[2]{};
+        VkClearValue fxaaClear[1]{};
         fxaaClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        fxaaClear[1].depthStencil = {1.0f, 0};
-        rpInfo.clearValueCount = 2;
+        rpInfo.clearValueCount = 1;
         rpInfo.pClearValues = fxaaClear;
 
         vkCmdBeginRenderPass(currentCmd_, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -336,7 +345,7 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
 
     } else if (fsr_.enabled && fsr_.sceneFramebuffer) {
         inlineMode = true;
-        // FSR1 upscale path — only runs when FXAA is not active.
+        // FSR1 upscale path - only runs when FXAA is not active.
         // When both FSR1 and FXAA are enabled, FXAA took priority above.
         vkCmdEndRenderPass(currentCmd_);
 
@@ -349,23 +358,16 @@ bool PostProcessPipeline::executePostProcessing(VkCommandBuffer cmd, uint32_t im
         // Begin swapchain render pass at full resolution
         VkRenderPassBeginInfo fsrRpInfo{};
         fsrRpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        fsrRpInfo.renderPass = vkCtx_->getImGuiRenderPass();
-        fsrRpInfo.framebuffer = vkCtx_->getSwapchainFramebuffers()[imageIndex];
-        fsrRpInfo.renderArea.offset = {0, 0};
+        // Output goes through the single-sampled overlay pass. The scene pass
+        // carries the scene's sample count, and these quads are 1x.
+        fsrRpInfo.renderPass = vkCtx_->getOverlayClearRenderPass();
+        fsrRpInfo.framebuffer = vkCtx_->getOverlayFramebuffers()[imageIndex];
+        fsrRpInfo.renderArea.offset = {.x = 0, .y = 0};
         fsrRpInfo.renderArea.extent = vkCtx_->getSwapchainExtent();
 
-        bool fsrMsaaOn = (vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT);
-        VkClearValue fsrClearValues[4]{};
+        VkClearValue fsrClearValues[1]{};
         fsrClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        fsrClearValues[1].depthStencil = {1.0f, 0};
-        fsrClearValues[2].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        fsrClearValues[3].depthStencil = {1.0f, 0};
-        if (fsrMsaaOn) {
-            bool depthRes = (vkCtx_->getDepthResolveImageView() != VK_NULL_HANDLE);
-            fsrRpInfo.clearValueCount = depthRes ? 4 : 3;
-        } else {
-            fsrRpInfo.clearValueCount = 2;
-        }
+        fsrRpInfo.clearValueCount = 1;
         fsrRpInfo.pClearValues = fsrClearValues;
 
         vkCmdBeginRenderPass(currentCmd_, &fsrRpInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -398,13 +400,11 @@ void PostProcessPipeline::destroyAllResources() {
 
 void PostProcessPipeline::setFXAAEnabled(bool enabled) {
     if (fxaa_.enabled == enabled) return;
-    // FXAA is a post-process AA pass intended to supplement FSR temporal output.
-    // It conflicts with MSAA (which resolves AA during the scene render pass), so
-    // refuse to enable FXAA when hardware MSAA is active.
-    if (enabled && vkCtx_ && vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
-        LOG_INFO("FXAA: blocked while MSAA is active — disable MSAA first");
-        return;
-    }
+    // Not refused under multisampling any more. It used to be, at info level,
+    // so the switch in the panel turned on and nothing happened. Over an MSAA
+    // resolve FXAA has little left to find and softens what it touches, which
+    // is why no preset combines them - but that is the player's to weigh, and
+    // a control that says one thing and does another is worse than either.
     fxaa_.enabled = enabled;
     if (!enabled) {
         fxaa_.needsRecreate = true;  // defer destruction to next beginFrame()
@@ -417,13 +417,13 @@ MsaaChangeRequest PostProcessPipeline::setFSREnabled(bool enabled) {
     fsr_.enabled = enabled;
 
     if (enabled) {
-        // FSR1 upscaling renders its own AA — disable MSAA to avoid redundant work
+        // FSR1 upscaling renders its own AA - disable MSAA to avoid redundant work
         if (vkCtx_ && vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
             req.requested = true;
             req.samples = VK_SAMPLE_COUNT_1_BIT;
         }
     } else {
-        // Defer destruction to next beginFrame() — can't destroy mid-render
+        // Defer destruction to next beginFrame() - can't destroy mid-render
         fsr_.needsRecreate = true;
     }
     // Resources created/destroyed lazily in beginFrame()
@@ -434,7 +434,7 @@ void PostProcessPipeline::setFSRQuality(float scaleFactor) {
     scaleFactor = glm::clamp(scaleFactor, 0.5f, 1.0f);
     fsr_.scaleFactor = scaleFactor;
     fsr2_.scaleFactor = scaleFactor;
-    // Don't destroy/recreate mid-frame — mark for lazy recreation in next beginFrame()
+    // Don't destroy/recreate mid-frame - mark for lazy recreation in next beginFrame()
     if (fsr_.enabled && fsr_.sceneFramebuffer) {
         fsr_.needsRecreate = true;
     }
@@ -467,8 +467,13 @@ MsaaChangeRequest PostProcessPipeline::setFSR2Enabled(bool enabled, Camera* came
             fsr_.enabled = false;
             fsr_.needsRecreate = true;
         }
-        // FSR2 requires non-MSAA render pass (its framebuffer has 2 attachments)
-        if (vkCtx_ && vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT) {
+        // The upscaler reads a single-sampled depth. With MSAA on that is the
+        // render pass's depth resolve, so multisampling stays as the player
+        // set it; only a device that cannot resolve depth has to give it up.
+        if (vkCtx_ && vkCtx_->getMsaaSamples() > VK_SAMPLE_COUNT_1_BIT &&
+            !vkCtx_->isDepthResolveSupported()) {
+            LOG_WARNING("FSR2: this device cannot resolve depth, so multisampling is"
+                        " off while the upscaler is on");
             req.requested = true;
             req.samples = VK_SAMPLE_COUNT_1_BIT;
         }
@@ -554,10 +559,11 @@ bool PostProcessPipeline::initFSRResources() {
     VkFormat colorFmt = vkCtx_->getSwapchainFormat();
     VkFormat depthFmt = vkCtx_->getDepthFormat();
 
-    // sceneColor: always 1x, always sampled — this is what FSR reads
+    // sceneColor: always 1x, always sampled - this is what FSR reads
     // Non-MSAA: direct render target. MSAA: resolve target.
     fsr_.sceneColor = createImage(device, alloc, fsr_.internalWidth, fsr_.internalHeight,
-        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!fsr_.sceneColor.image) {
         LOG_ERROR("FSR: failed to create scene color image");
         return false;
@@ -565,7 +571,8 @@ bool PostProcessPipeline::initFSRResources() {
 
     // sceneDepth: matches current MSAA sample count
     fsr_.sceneDepth = createImage(device, alloc, fsr_.internalWidth, fsr_.internalHeight,
-        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, msaa);
+        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, msaa);
     if (!fsr_.sceneDepth.image) {
         LOG_ERROR("FSR: failed to create scene depth image");
         destroyFSRResources();
@@ -584,7 +591,8 @@ bool PostProcessPipeline::initFSRResources() {
 
         if (useDepthResolve) {
             fsr_.sceneDepthResolve = createImage(device, alloc, fsr_.internalWidth, fsr_.internalHeight,
-                depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+                depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
             if (!fsr_.sceneDepthResolve.image) {
                 LOG_ERROR("FSR: failed to create depth resolve image");
                 destroyFSRResources();
@@ -722,10 +730,10 @@ bool PostProcessPipeline::initFSRResources() {
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         .setNoDepthTest()
         .setColorBlendAttachment(PipelineBuilder::blendDisabled())
-        .setMultisample(msaa)
+        .setMultisample(VK_SAMPLE_COUNT_1_BIT)
         .setLayout(fsr_.pipelineLayout)
-        .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+        .setRenderPass(vkCtx_->getOverlayRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
 
     vertMod.destroy();
@@ -748,10 +756,10 @@ void PostProcessPipeline::destroyFSRResources() {
     VmaAllocator alloc = vkCtx_->getAllocator();
     vkDeviceWaitIdle(device);
 
-    if (fsr_.pipeline) { vkDestroyPipeline(device, fsr_.pipeline, nullptr); fsr_.pipeline = VK_NULL_HANDLE; }
-    if (fsr_.pipelineLayout) { vkDestroyPipelineLayout(device, fsr_.pipelineLayout, nullptr); fsr_.pipelineLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr_.pipeline);
+    destroy(device, fsr_.pipelineLayout);
     if (fsr_.descPool) { vkDestroyDescriptorPool(device, fsr_.descPool, nullptr); fsr_.descPool = VK_NULL_HANDLE; fsr_.descSet = VK_NULL_HANDLE; }
-    if (fsr_.descSetLayout) { vkDestroyDescriptorSetLayout(device, fsr_.descSetLayout, nullptr); fsr_.descSetLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr_.descSetLayout);
     if (fsr_.sceneFramebuffer) { vkDestroyFramebuffer(device, fsr_.sceneFramebuffer, nullptr); fsr_.sceneFramebuffer = VK_NULL_HANDLE; }
     fsr_.sceneSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
     destroyImage(device, alloc, fsr_.sceneDepthResolve);
@@ -833,7 +841,6 @@ bool PostProcessPipeline::initFSR2Resources() {
     fsr2_.amdFsr3UpscaleDispatchCount = 0;
     fsr2_.amdFsr3FramegenDispatchCount = 0;
     fsr2_.amdFsr3FallbackCount = 0;
-    fsr2_.amdFsr3InteropSyncValue = 1;
 #if WOWEE_HAS_AMD_FSR2
     LOG_INFO("FSR2: AMD FidelityFX SDK detected at build time.");
 #else
@@ -842,16 +849,40 @@ bool PostProcessPipeline::initFSR2Resources() {
 
     VkFormat colorFmt = vkCtx_->getSwapchainFormat();
     VkFormat depthFmt = vkCtx_->getDepthFormat();
+    const VkSampleCountFlagBits msaa = vkCtx_->getMsaaSamples();
+    const bool useMsaa = msaa > VK_SAMPLE_COUNT_1_BIT;
+    const bool useDepthResolve = vkCtx_->getDepthResolveImageView() != VK_NULL_HANDLE;
+    if (useMsaa && !useDepthResolve) {
+        // setFSR2Enabled turns multisampling off ahead of this on such a device,
+        // so reaching here is an ordering bug rather than a configuration.
+        LOG_ERROR("FSR2: multisampling is on but the device has no depth resolve");
+        return false;
+    }
 
-    // Scene color (internal resolution, 1x — FSR2 replaces MSAA)
+    // Scene colour, always 1x and always what the upscaler reads: the render
+    // target without MSAA, the resolve target with it.
     fsr2_.sceneColor = createImage(device, alloc, fsr2_.internalWidth, fsr2_.internalHeight,
-        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!fsr2_.sceneColor.image) { LOG_ERROR("FSR2: failed to create scene color"); return false; }
 
-    // Scene depth (internal resolution, 1x, sampled for motion vectors)
+    // Scene depth at the scene's own sample count. Without MSAA this is also
+    // what the motion vectors and the upscaler sample.
     fsr2_.sceneDepth = createImage(device, alloc, fsr2_.internalWidth, fsr2_.internalHeight,
-        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, msaa);
     if (!fsr2_.sceneDepth.image) { LOG_ERROR("FSR2: failed to create scene depth"); destroyFSR2Resources(); return false; }
+
+    if (useMsaa) {
+        fsr2_.sceneMsaaColor = createImage(device, alloc, fsr2_.internalWidth, fsr2_.internalHeight,
+            colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, msaa);
+        if (!fsr2_.sceneMsaaColor.image) { LOG_ERROR("FSR2: failed to create MSAA color"); destroyFSR2Resources(); return false; }
+        // The single-sampled depth the passes read, resolved by the render pass.
+        fsr2_.sceneDepthResolve = createImage(device, alloc, fsr2_.internalWidth, fsr2_.internalHeight,
+            depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (!fsr2_.sceneDepthResolve.image) { LOG_ERROR("FSR2: failed to create depth resolve"); destroyFSR2Resources(); return false; }
+    }
 
     // Motion vector buffer (internal resolution)
     fsr2_.motionVectors = createImage(device, alloc, fsr2_.internalWidth, fsr2_.internalHeight,
@@ -869,13 +900,25 @@ bool PostProcessPipeline::initFSR2Resources() {
         VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     if (!fsr2_.framegenOutput.image) { LOG_ERROR("FSR2: failed to create framegen output"); destroyFSR2Resources(); return false; }
 
-    // Scene framebuffer (non-MSAA: [color, depth])
-    // Must use the same render pass as the swapchain — which must be non-MSAA when FSR2 is active
-    VkImageView fbAttachments[2] = { fsr2_.sceneColor.imageView, fsr2_.sceneDepth.imageView };
+    // Scene framebuffer, in the scene render pass's own attachment order:
+    //   1x:    [color, depth]
+    //   MSAA:  [msaaColor, depth, colorResolve, depthResolve]
+    VkImageView fbAttachments[4]{};
+    uint32_t fbCount = 2;
+    if (useMsaa) {
+        fbAttachments[0] = fsr2_.sceneMsaaColor.imageView;
+        fbAttachments[1] = fsr2_.sceneDepth.imageView;
+        fbAttachments[2] = fsr2_.sceneColor.imageView;
+        fbAttachments[3] = fsr2_.sceneDepthResolve.imageView;
+        fbCount = 4;
+    } else {
+        fbAttachments[0] = fsr2_.sceneColor.imageView;
+        fbAttachments[1] = fsr2_.sceneDepth.imageView;
+    }
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.renderPass = vkCtx_->getImGuiRenderPass();
-    fbInfo.attachmentCount = 2;
+    fbInfo.attachmentCount = fbCount;
     fbInfo.pAttachments = fbAttachments;
     fbInfo.width = fsr2_.internalWidth;
     fbInfo.height = fsr2_.internalHeight;
@@ -994,7 +1037,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         bindings[1].descriptorCount = 1;
         bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        VkDescriptorSetLayoutCreateInfo layoutInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         layoutInfo.bindingCount = 2;
         layoutInfo.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fsr2_.motionVecDescSetLayout);
@@ -1004,7 +1047,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         pc.offset = 0;
         pc.size = 2 * sizeof(glm::mat4);  // 128 bytes
 
-        VkPipelineLayoutCreateInfo plCI{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         plCI.setLayoutCount = 1;
         plCI.pSetLayouts = &fsr2_.motionVecDescSetLayout;
         plCI.pushConstantRangeCount = 1;
@@ -1018,7 +1061,7 @@ bool PostProcessPipeline::initFSR2Resources() {
             return false;
         }
 
-        VkComputePipelineCreateInfo cpCI{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.motionVecPipelineLayout;
         if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.motionVecPipeline) != VK_SUCCESS) {
@@ -1031,15 +1074,15 @@ bool PostProcessPipeline::initFSR2Resources() {
 
         // Descriptor pool + set
         VkDescriptorPoolSize poolSizes[2] = {};
-        poolSizes[0] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
-        poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolSizes[0] = {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1};
+        poolSizes[1] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 1;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = poolSizes;
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &fsr2_.motionVecDescPool);
 
-        VkDescriptorSetAllocateInfo dsAI{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dsAI.descriptorPool = fsr2_.motionVecDescPool;
         dsAI.descriptorSetCount = 1;
         dsAI.pSetLayouts = &fsr2_.motionVecDescSetLayout;
@@ -1048,7 +1091,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         // Write descriptors
         VkDescriptorImageInfo depthImgInfo{};
         depthImgInfo.sampler = fsr2_.nearestSampler;
-        depthImgInfo.imageView = fsr2_.sceneDepth.imageView;
+        depthImgInfo.imageView = fsr2ReadDepth().imageView;
         depthImgInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo mvImgInfo{};
@@ -1088,7 +1131,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         bindings[4].descriptorCount = 1;
         bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        VkDescriptorSetLayoutCreateInfo layoutInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         layoutInfo.bindingCount = 5;
         layoutInfo.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fsr2_.accumulateDescSetLayout);
@@ -1098,7 +1141,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         pc.offset = 0;
         pc.size = 4 * sizeof(glm::vec4);  // 64 bytes
 
-        VkPipelineLayoutCreateInfo plCI{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         plCI.setLayoutCount = 1;
         plCI.pSetLayouts = &fsr2_.accumulateDescSetLayout;
         plCI.pushConstantRangeCount = 1;
@@ -1112,7 +1155,7 @@ bool PostProcessPipeline::initFSR2Resources() {
             return false;
         }
 
-        VkComputePipelineCreateInfo cpCI{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
         cpCI.layout = fsr2_.accumulatePipelineLayout;
         if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &fsr2_.accumulatePipeline) != VK_SUCCESS) {
@@ -1125,9 +1168,9 @@ bool PostProcessPipeline::initFSR2Resources() {
 
         // Descriptor pool: 2 sets (ping-pong), each with 4 samplers + 1 storage image
         VkDescriptorPoolSize poolSizes[2] = {};
-        poolSizes[0] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8};
-        poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolSizes[0] = {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 8};
+        poolSizes[1] = {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 2};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 2;
         poolInfo.poolSizeCount = 2;
         poolInfo.pPoolSizes = poolSizes;
@@ -1135,7 +1178,7 @@ bool PostProcessPipeline::initFSR2Resources() {
 
         // Allocate 2 descriptor sets (one per ping-pong direction)
         VkDescriptorSetLayout layouts[2] = { fsr2_.accumulateDescSetLayout, fsr2_.accumulateDescSetLayout };
-        VkDescriptorSetAllocateInfo dsAI{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dsAI.descriptorPool = fsr2_.accumulateDescPool;
         dsAI.descriptorSetCount = 2;
         dsAI.pSetLayouts = layouts;
@@ -1148,11 +1191,11 @@ bool PostProcessPipeline::initFSR2Resources() {
 
             // The accumulation shader already performs custom Lanczos reconstruction.
             // Use nearest here to avoid double filtering (linear + Lanczos) softening.
-            VkDescriptorImageInfo colorInfo{fsr2_.nearestSampler, fsr2_.sceneColor.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            VkDescriptorImageInfo depthInfo{fsr2_.nearestSampler, fsr2_.sceneDepth.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
-            VkDescriptorImageInfo mvInfo{fsr2_.nearestSampler, fsr2_.motionVectors.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            VkDescriptorImageInfo histInInfo{fsr2_.linearSampler, fsr2_.history[inputHistory].imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            VkDescriptorImageInfo histOutInfo{VK_NULL_HANDLE, fsr2_.history[outputHistory].imageView, VK_IMAGE_LAYOUT_GENERAL};
+            VkDescriptorImageInfo colorInfo{.sampler = fsr2_.nearestSampler, .imageView = fsr2_.sceneColor.imageView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo depthInfo{.sampler = fsr2_.nearestSampler, .imageView = fsr2ReadDepth().imageView, .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo mvInfo{.sampler = fsr2_.nearestSampler, .imageView = fsr2_.motionVectors.imageView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo histInInfo{.sampler = fsr2_.linearSampler, .imageView = fsr2_.history[inputHistory].imageView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo histOutInfo{.sampler = VK_NULL_HANDLE, .imageView = fsr2_.history[outputHistory].imageView, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
             VkWriteDescriptorSet writes[5] = {};
             for (int w = 0; w < 5; w++) {
@@ -1179,7 +1222,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         binding.descriptorCount = 1;
         binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        VkDescriptorSetLayoutCreateInfo layoutInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         layoutInfo.bindingCount = 1;
         layoutInfo.pBindings = &binding;
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fsr2_.sharpenDescSetLayout);
@@ -1189,7 +1232,7 @@ bool PostProcessPipeline::initFSR2Resources() {
         pc.offset = 0;
         pc.size = sizeof(glm::vec4);
 
-        VkPipelineLayoutCreateInfo plCI{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         plCI.setLayoutCount = 1;
         plCI.pSetLayouts = &fsr2_.sharpenDescSetLayout;
         plCI.pushConstantRangeCount = 1;
@@ -1214,8 +1257,11 @@ bool PostProcessPipeline::initFSR2Resources() {
             .setColorBlendAttachment(PipelineBuilder::blendDisabled())
             .setMultisample(VK_SAMPLE_COUNT_1_BIT)
             .setLayout(fsr2_.sharpenPipelineLayout)
-            .setRenderPass(vkCtx_->getImGuiRenderPass())
-            .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+            // The output quad is single-sampled, so it belongs to the overlay
+            // pass. getImGuiRenderPass() is the scene pass, which carries the
+            // scene's sample count - an 8x pass for a 1x pipeline.
+            .setRenderPass(vkCtx_->getOverlayRenderPass())
+            .setDynamicStates(viewportAndScissorDynamic())
             .build(device, vkCtx_->getPipelineCache());
 
         vertMod.destroy();
@@ -1228,15 +1274,15 @@ bool PostProcessPipeline::initFSR2Resources() {
         }
 
         // Descriptor pool + sets for sharpen pass (double-buffered to avoid race condition)
-        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 2};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 2;
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &fsr2_.sharpenDescPool);
 
         VkDescriptorSetLayout layouts[2] = {fsr2_.sharpenDescSetLayout, fsr2_.sharpenDescSetLayout};
-        VkDescriptorSetAllocateInfo dsAI{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         dsAI.descriptorPool = fsr2_.sharpenDescPool;
         dsAI.descriptorSetCount = 2;
         dsAI.pSetLayouts = layouts;
@@ -1273,7 +1319,6 @@ void PostProcessPipeline::destroyFSR2Resources() {
     fsr2_.framegenOutputValid = false;
     fsr2_.amdFsr3RuntimePath = "Path C";
     fsr2_.amdFsr3RuntimeLastError.clear();
-    fsr2_.amdFsr3InteropSyncValue = 1;
 #if WOWEE_HAS_AMD_FSR3_FRAMEGEN
     if (fsr2_.amdFsr3Runtime) {
         fsr2_.amdFsr3Runtime->shutdown();
@@ -1281,28 +1326,30 @@ void PostProcessPipeline::destroyFSR2Resources() {
     }
 #endif
 
-    if (fsr2_.sharpenPipeline) { vkDestroyPipeline(device, fsr2_.sharpenPipeline, nullptr); fsr2_.sharpenPipeline = VK_NULL_HANDLE; }
-    if (fsr2_.sharpenPipelineLayout) { vkDestroyPipelineLayout(device, fsr2_.sharpenPipelineLayout, nullptr); fsr2_.sharpenPipelineLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.sharpenPipeline);
+    destroy(device, fsr2_.sharpenPipelineLayout);
     if (fsr2_.sharpenDescPool) { vkDestroyDescriptorPool(device, fsr2_.sharpenDescPool, nullptr); fsr2_.sharpenDescPool = VK_NULL_HANDLE; fsr2_.sharpenDescSets[0] = fsr2_.sharpenDescSets[1] = VK_NULL_HANDLE; }
-    if (fsr2_.sharpenDescSetLayout) { vkDestroyDescriptorSetLayout(device, fsr2_.sharpenDescSetLayout, nullptr); fsr2_.sharpenDescSetLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.sharpenDescSetLayout);
 
-    if (fsr2_.accumulatePipeline) { vkDestroyPipeline(device, fsr2_.accumulatePipeline, nullptr); fsr2_.accumulatePipeline = VK_NULL_HANDLE; }
-    if (fsr2_.accumulatePipelineLayout) { vkDestroyPipelineLayout(device, fsr2_.accumulatePipelineLayout, nullptr); fsr2_.accumulatePipelineLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.accumulatePipeline);
+    destroy(device, fsr2_.accumulatePipelineLayout);
     if (fsr2_.accumulateDescPool) { vkDestroyDescriptorPool(device, fsr2_.accumulateDescPool, nullptr); fsr2_.accumulateDescPool = VK_NULL_HANDLE; fsr2_.accumulateDescSets[0] = fsr2_.accumulateDescSets[1] = VK_NULL_HANDLE; }
-    if (fsr2_.accumulateDescSetLayout) { vkDestroyDescriptorSetLayout(device, fsr2_.accumulateDescSetLayout, nullptr); fsr2_.accumulateDescSetLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.accumulateDescSetLayout);
 
-    if (fsr2_.motionVecPipeline) { vkDestroyPipeline(device, fsr2_.motionVecPipeline, nullptr); fsr2_.motionVecPipeline = VK_NULL_HANDLE; }
-    if (fsr2_.motionVecPipelineLayout) { vkDestroyPipelineLayout(device, fsr2_.motionVecPipelineLayout, nullptr); fsr2_.motionVecPipelineLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.motionVecPipeline);
+    destroy(device, fsr2_.motionVecPipelineLayout);
     if (fsr2_.motionVecDescPool) { vkDestroyDescriptorPool(device, fsr2_.motionVecDescPool, nullptr); fsr2_.motionVecDescPool = VK_NULL_HANDLE; fsr2_.motionVecDescSet = VK_NULL_HANDLE; }
-    if (fsr2_.motionVecDescSetLayout) { vkDestroyDescriptorSetLayout(device, fsr2_.motionVecDescSetLayout, nullptr); fsr2_.motionVecDescSetLayout = VK_NULL_HANDLE; }
+    destroy(device, fsr2_.motionVecDescSetLayout);
 
     if (fsr2_.sceneFramebuffer) { vkDestroyFramebuffer(device, fsr2_.sceneFramebuffer, nullptr); fsr2_.sceneFramebuffer = VK_NULL_HANDLE; }
     fsr2_.linearSampler = VK_NULL_HANDLE;  // Owned by VkContext sampler cache
     fsr2_.nearestSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
 
     destroyImage(device, alloc, fsr2_.motionVectors);
-    for (int i = 0; i < 2; i++) destroyImage(device, alloc, fsr2_.history[i]);
+    for (auto& img : fsr2_.history) destroyImage(device, alloc, img);
     destroyImage(device, alloc, fsr2_.framegenOutput);
+    destroyImage(device, alloc, fsr2_.sceneDepthResolve);
+    destroyImage(device, alloc, fsr2_.sceneMsaaColor);
     destroyImage(device, alloc, fsr2_.sceneDepth);
     destroyImage(device, alloc, fsr2_.sceneColor);
 
@@ -1313,8 +1360,8 @@ void PostProcessPipeline::destroyFSR2Resources() {
 void PostProcessPipeline::dispatchMotionVectors() {
     if (!fsr2_.motionVecPipeline || currentCmd_ == VK_NULL_HANDLE) return;
 
-    // Transition depth: DEPTH_STENCIL_ATTACHMENT → DEPTH_STENCIL_READ_ONLY
-    transitionImageLayout(currentCmd_, fsr2_.sceneDepth.image,
+    // Transition the depth the passes read: DEPTH_STENCIL_ATTACHMENT → DEPTH_STENCIL_READ_ONLY
+    transitionImageLayout(currentCmd_, fsr2ReadDepth().image,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -1354,76 +1401,6 @@ void PostProcessPipeline::dispatchMotionVectors() {
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 }
-
-void PostProcessPipeline::dispatchTemporalAccumulate() {
-    if (!fsr2_.accumulatePipeline || currentCmd_ == VK_NULL_HANDLE) return;
-
-    VkExtent2D swapExtent = vkCtx_->getSwapchainExtent();
-    uint32_t outputIdx = fsr2_.currentHistory;
-    uint32_t inputIdx = 1 - outputIdx;
-
-    // Transition scene color: PRESENT_SRC_KHR → SHADER_READ_ONLY
-    transitionImageLayout(currentCmd_, fsr2_.sceneColor.image,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-    // History layout lifecycle:
-    //   First frame: both in UNDEFINED
-    //   Subsequent frames: both in SHADER_READ_ONLY (output was transitioned for sharpen,
-    //                      input was left in SHADER_READ_ONLY from its sharpen read)
-    VkImageLayout historyOldLayout = fsr2_.needsHistoryReset
-        ? VK_IMAGE_LAYOUT_UNDEFINED
-        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    // Transition history input: SHADER_READ_ONLY → SHADER_READ_ONLY (barrier for sync)
-    transitionImageLayout(currentCmd_, fsr2_.history[inputIdx].image,
-        historyOldLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,  // sharpen read in previous frame
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-    // Transition history output: SHADER_READ_ONLY → GENERAL (for compute write)
-    transitionImageLayout(currentCmd_, fsr2_.history[outputIdx].image,
-        historyOldLayout, VK_IMAGE_LAYOUT_GENERAL,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-    vkCmdBindPipeline(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE, fsr2_.accumulatePipeline);
-    vkCmdBindDescriptorSets(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE,
-        fsr2_.accumulatePipelineLayout, 0, 1, &fsr2_.accumulateDescSets[outputIdx], 0, nullptr);
-
-    // Push constants
-    struct {
-        glm::vec4 internalSize;
-        glm::vec4 displaySize;
-        glm::vec4 jitterOffset;
-        glm::vec4 params;
-    } pc;
-
-    pc.internalSize = glm::vec4(
-        static_cast<float>(fsr2_.internalWidth), static_cast<float>(fsr2_.internalHeight),
-        1.0f / fsr2_.internalWidth, 1.0f / fsr2_.internalHeight);
-    pc.displaySize = glm::vec4(
-        static_cast<float>(swapExtent.width), static_cast<float>(swapExtent.height),
-        1.0f / swapExtent.width, 1.0f / swapExtent.height);
-    glm::vec2 jitter = camera_->getJitter();
-    pc.jitterOffset = glm::vec4(jitter.x, jitter.y, 0.0f, 0.0f);
-    pc.params = glm::vec4(
-        fsr2_.needsHistoryReset ? 1.0f : 0.0f,
-        fsr2_.sharpness,
-        static_cast<float>(fsr2_.convergenceFrame),
-        0.0f);
-
-    vkCmdPushConstants(currentCmd_, fsr2_.accumulatePipelineLayout,
-        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-
-    uint32_t gx = (swapExtent.width + 7) / 8;
-    uint32_t gy = (swapExtent.height + 7) / 8;
-    vkCmdDispatch(currentCmd_, gx, gy, 1);
-
-    fsr2_.needsHistoryReset = false;
-}
-
 void PostProcessPipeline::dispatchAmdFsr2() {
     if (currentCmd_ == VK_NULL_HANDLE || !camera_) return;
 #if WOWEE_HAS_AMD_FSR2
@@ -1440,7 +1417,7 @@ void PostProcessPipeline::dispatchAmdFsr2() {
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transitionImageLayout(currentCmd_, fsr2_.sceneDepth.image,
+    transitionImageLayout(currentCmd_, fsr2ReadDepth().image,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1457,7 +1434,7 @@ void PostProcessPipeline::dispatchAmdFsr2() {
         fsr2_.internalWidth, fsr2_.internalHeight, vkCtx_->getSwapchainFormat(),
         L"FSR2_InputColor", FFX_RESOURCE_STATE_COMPUTE_READ);
     desc.depth = ffxGetTextureResourceVK(&fsr2_.amdContext,
-        fsr2_.sceneDepth.image, fsr2_.sceneDepth.imageView,
+        fsr2ReadDepth().image, fsr2ReadDepth().imageView,
         fsr2_.internalWidth, fsr2_.internalHeight, vkCtx_->getDepthFormat(),
         L"FSR2_InputDepth", FFX_RESOURCE_STATE_COMPUTE_READ);
     desc.motionVectors = ffxGetTextureResourceVK(&fsr2_.amdContext,
@@ -1518,7 +1495,7 @@ void PostProcessPipeline::dispatchAmdFsr3Framegen() {
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transitionImageLayout(currentCmd_, fsr2_.sceneDepth.image,
+    transitionImageLayout(currentCmd_, fsr2ReadDepth().image,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1538,7 +1515,7 @@ void PostProcessPipeline::dispatchAmdFsr3Framegen() {
     AmdFsr3RuntimeDispatchDesc fgDispatch{};
     fgDispatch.commandBuffer = currentCmd_;
     fgDispatch.colorImage = fsr2_.sceneColor.image;
-    fgDispatch.depthImage = fsr2_.sceneDepth.image;
+    fgDispatch.depthImage = fsr2ReadDepth().image;
     fgDispatch.motionVectorImage = fsr2_.motionVectors.image;
     fgDispatch.outputImage = fsr2_.history[fsr2_.currentHistory].image;
     fgDispatch.renderWidth = fsr2_.internalWidth;
@@ -1626,7 +1603,7 @@ void PostProcessPipeline::renderFSR2Sharpen() {
     }
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = descSet;
     write.dstBinding = 0;
     write.descriptorCount = 1;
@@ -1663,9 +1640,10 @@ bool PostProcessPipeline::initFXAAResources() {
     VkFormat colorFmt = vkCtx_->getSwapchainFormat();
     VkFormat depthFmt = vkCtx_->getDepthFormat();
 
-    // sceneColor: 1x resolved color target — FXAA reads from here
+    // sceneColor: 1x resolved color target - FXAA reads from here
     fxaa_.sceneColor = createImage(device, alloc, ext.width, ext.height,
-        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        colorFmt, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!fxaa_.sceneColor.image) {
         LOG_ERROR("FXAA: failed to create scene color image");
         return false;
@@ -1673,7 +1651,8 @@ bool PostProcessPipeline::initFXAAResources() {
 
     // sceneDepth: depth buffer at current MSAA sample count
     fxaa_.sceneDepth = createImage(device, alloc, ext.width, ext.height,
-        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, msaa);
+        depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, msaa);
     if (!fxaa_.sceneDepth.image) {
         LOG_ERROR("FXAA: failed to create scene depth image");
         destroyFXAAResources();
@@ -1690,7 +1669,8 @@ bool PostProcessPipeline::initFXAAResources() {
         }
         if (useDepthResolve) {
             fxaa_.sceneDepthResolve = createImage(device, alloc, ext.width, ext.height,
-                depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+                depthFmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
             if (!fxaa_.sceneDepthResolve.image) {
                 LOG_ERROR("FXAA: failed to create depth resolve image");
                 destroyFXAAResources();
@@ -1699,7 +1679,7 @@ bool PostProcessPipeline::initFXAAResources() {
         }
     }
 
-    // Framebuffer — same attachment layout as main render pass
+    // Framebuffer - same attachment layout as main render pass
     VkImageView fbAttachments[4]{};
     uint32_t fbCount;
     if (useMsaa) {
@@ -1729,6 +1709,24 @@ bool PostProcessPipeline::initFXAAResources() {
         LOG_ERROR("FXAA: failed to create scene framebuffer");
         destroyFXAAResources();
         return false;
+    }
+
+    // The same image as a colour target of its own, for RCAS to sharpen into
+    // when the temporal upscaler and FXAA are both on. Through the overlay
+    // clear pass, which is single-sampled and colour-only in this format.
+    if (vkCtx_->getOverlayClearRenderPass() != VK_NULL_HANDLE) {
+        VkFramebufferCreateInfo sharpenFb{};
+        sharpenFb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        sharpenFb.renderPass = vkCtx_->getOverlayClearRenderPass();
+        sharpenFb.attachmentCount = 1;
+        sharpenFb.pAttachments = &fxaa_.sceneColor.imageView;
+        sharpenFb.width = ext.width;
+        sharpenFb.height = ext.height;
+        sharpenFb.layers = 1;
+        if (vkCreateFramebuffer(device, &sharpenFb, nullptr, &fxaa_.sharpenFramebuffer) != VK_SUCCESS) {
+            LOG_WARNING("FXAA: no sharpen target; with the upscaler on, FXAA runs without RCAS");
+            fxaa_.sharpenFramebuffer = VK_NULL_HANDLE;
+        }
     }
 
     // Sampler
@@ -1771,7 +1769,7 @@ bool PostProcessPipeline::initFXAAResources() {
     vkCreateDescriptorPool(device, &poolInfo, nullptr, &fxaa_.descPool);
 
     VkDescriptorSetLayout layouts[setCount];
-    for (uint32_t i = 0; i < setCount; i++) layouts[i] = fxaa_.descSetLayout;
+    for (auto& layout : layouts) layout = fxaa_.descSetLayout;
     VkDescriptorSetAllocateInfo dsAllocInfo{};
     dsAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     dsAllocInfo.descriptorPool = fxaa_.descPool;
@@ -1784,10 +1782,10 @@ bool PostProcessPipeline::initFXAAResources() {
     imgInfo.sampler = fxaa_.sceneSampler;
     imgInfo.imageView = fxaa_.sceneColor.imageView;
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    for (uint32_t i = 0; i < setCount; i++) {
+    for (auto& descSet : fxaa_.descSet) {
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = fxaa_.descSet[i];
+        write.dstSet = descSet;
         write.dstBinding = 0;
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1795,7 +1793,7 @@ bool PostProcessPipeline::initFXAAResources() {
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
-    // Pipeline layout — push constant holds vec4(rcpFrame.xy, sharpness, pad)
+    // Pipeline layout - push constant holds vec4(rcpFrame.xy, sharpness, pad)
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
@@ -1808,7 +1806,7 @@ bool PostProcessPipeline::initFXAAResources() {
     plCI.pPushConstantRanges = &pc;
     vkCreatePipelineLayout(device, &plCI, nullptr, &fxaa_.pipelineLayout);
 
-    // FXAA pipeline — fullscreen triangle into the swapchain render pass
+    // FXAA pipeline - fullscreen triangle into the swapchain render pass
     // Uses VK_SAMPLE_COUNT_1_BIT: it always runs after MSAA resolve.
     VkShaderModule vertMod, fragMod;
     if (!vertMod.loadFromFile(device, "assets/shaders/postprocess.vert.spv") ||
@@ -1826,10 +1824,10 @@ bool PostProcessPipeline::initFXAAResources() {
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         .setNoDepthTest()
         .setColorBlendAttachment(PipelineBuilder::blendDisabled())
-        .setMultisample(VK_SAMPLE_COUNT_1_BIT)  // swapchain pass is always 1x
+        .setMultisample(VK_SAMPLE_COUNT_1_BIT)  // the overlay pass is always 1x
         .setLayout(fxaa_.pipelineLayout)
-        .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+        .setRenderPass(vkCtx_->getOverlayRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
 
     vertMod.destroy();
@@ -1851,11 +1849,12 @@ void PostProcessPipeline::destroyFXAAResources() {
     VmaAllocator alloc = vkCtx_->getAllocator();
     vkDeviceWaitIdle(device);
 
-    if (fxaa_.pipeline)       { vkDestroyPipeline(device, fxaa_.pipeline, nullptr);             fxaa_.pipeline = VK_NULL_HANDLE; }
-    if (fxaa_.pipelineLayout) { vkDestroyPipelineLayout(device, fxaa_.pipelineLayout, nullptr); fxaa_.pipelineLayout = VK_NULL_HANDLE; }
+    destroy(device, fxaa_.pipeline);
+    destroy(device, fxaa_.pipelineLayout);
     if (fxaa_.descPool)       { vkDestroyDescriptorPool(device, fxaa_.descPool, nullptr);       fxaa_.descPool = VK_NULL_HANDLE; for (auto& s : fxaa_.descSet) s = VK_NULL_HANDLE; }
-    if (fxaa_.descSetLayout)  { vkDestroyDescriptorSetLayout(device, fxaa_.descSetLayout, nullptr); fxaa_.descSetLayout = VK_NULL_HANDLE; }
+    destroy(device, fxaa_.descSetLayout);
     if (fxaa_.sceneFramebuffer) { vkDestroyFramebuffer(device, fxaa_.sceneFramebuffer, nullptr); fxaa_.sceneFramebuffer = VK_NULL_HANDLE; }
+    if (fxaa_.sharpenFramebuffer) { vkDestroyFramebuffer(device, fxaa_.sharpenFramebuffer, nullptr); fxaa_.sharpenFramebuffer = VK_NULL_HANDLE; }
     fxaa_.sceneSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
     destroyImage(device, alloc, fxaa_.sceneDepthResolve);
     destroyImage(device, alloc, fxaa_.sceneMsaaColor);
@@ -1872,10 +1871,10 @@ void PostProcessPipeline::renderFXAAPass() {
     vkCmdBindDescriptorSets(currentCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             fxaa_.pipelineLayout, 0, 1, &fxaa_.descSet[fi], 0, nullptr);
 
-    // Pass rcpFrame + sharpness + effect flag (vec4, 16 bytes).
-    // When FSR2/FSR3 is active alongside FXAA, forward FSR2's sharpness so the
-    // post-FXAA unsharp-mask step restores the crispness that FXAA's blur removes.
-    float sharpness = fsr2_.enabled ? fsr2_.sharpness : 0.0f;
+    // Pass rcpFrame + sharpness + effect flag (vec4, 16 bytes). The sharpness
+    // slot drove an unsharp mask that stood in for RCAS while FXAA replaced
+    // it under the upscaler; RCAS runs ahead of FXAA now, so it stays at zero.
+    const float sharpness = 0.0f;
     float pc[4] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),

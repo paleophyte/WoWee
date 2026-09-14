@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Token / Currency catalog (.wtkn) — novel
+// Wowee Open Token / Currency catalog (.wtkn) - novel
 // replacement for Blizzard's Currency.dbc +
 // CurrencyCategory.dbc + CurrencyTypes.dbc + the
 // AzerothCore-style player_currency SQL tables. The 28th
@@ -23,7 +23,7 @@ namespace pipeline {
 // Cross-references with previously-added formats:
 //   WTRN.item.extendedCost → WTKN.entry.tokenId
 //                            (vendors can charge in tokens
-//                             instead of copper — when
+//                             instead of copper - when
 //                             extendedCost > 0 the runtime
 //                             looks up the corresponding token)
 //
@@ -73,9 +73,9 @@ struct WoweeToken {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t tokenId) const;
+    [[nodiscard]] const Entry* findById(uint32_t tokenId) const;
 
     static const char* categoryName(uint8_t c);
 };
@@ -89,12 +89,12 @@ public:
 
     // Preset emitters used by --gen-tokens* variants.
     //
-    //   makeStarter — 3 tokens covering Pvp / Reputation /
+    //   makeStarter - 3 tokens covering Pvp / Reputation /
     //                  Misc categories with realistic caps.
-    //   makePvp     — full PvP currency set: Honor (75k cap)
+    //   makePvp     - full PvP currency set: Honor (75k cap)
     //                  + Arena Points (5k cap, weekly) + Marks
     //                  of Honor for 6 classic battlegrounds.
-    //   makeSeasonal — 4 holiday-event tokens (Hallow's End
+    //   makeSeasonal - 4 holiday-event tokens (Hallow's End
     //                   masks, Brewfest tokens, Winter's Veil
     //                   coins, etc.) all flagged ResetsOnLogout
     //                   to be event-bound.

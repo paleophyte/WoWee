@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <limits>
+#include <set>
 
 namespace wowee {
 namespace rendering {
@@ -31,7 +33,7 @@ float M2Renderer::interpFloat(const pipeline::M2AnimationTrack& track, float ani
 
 // Interpolate an M2 FBlock (particle lifetime curve) at a given life ratio [0..1].
 // FBlocks store per-lifetime keyframes for particle color, alpha, and scale.
-// NOTE: interpFBlockFloat and interpFBlockVec3 share identical interpolation logic —
+// NOTE: interpFBlockFloat and interpFBlockVec3 share identical interpolation logic -
 // if you fix a bug in one, update the other to match.
 float M2Renderer::interpFBlockFloat(const pipeline::M2FBlock& fb, float lifeRatio) {
     if (fb.floatValues.empty()) return 1.0f;
@@ -72,7 +74,11 @@ glm::vec3 M2Renderer::interpFBlockVec3(const pipeline::M2FBlock& fb, float lifeR
 std::vector<glm::vec3> M2Renderer::getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const {
     std::vector<glm::vec3> result;
     float maxDistSq = maxDist * maxDist;
-    for (const auto& inst : instances) {
+    // The same list, for the same reason; see renderM2Particles. A ribbon
+    // emitter is a particle emitter as far as this list is concerned.
+    for (size_t idx : particleInstanceIndices_) {
+        if (idx >= instances.size()) continue;
+        const auto& inst = instances[idx];
         if (!inst.cachedModel || !inst.cachedModel->isWaterVegetation) continue;
         glm::vec3 diff = inst.position - camPos;
         if (glm::dot(diff, diff) <= maxDistSq) {
@@ -101,8 +107,14 @@ void M2Renderer::emitParticles(M2Instance& inst, const M2ModelGPU& gpu, float dt
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
         float life = interpFloat(em.lifespan, inst.animTime, inst.globalSequenceTime,
                                  inst.currentSequenceIndex, gpu.globalSequenceDurations);
+        // What the player asked to see of it, before the floor below. The order
+        // is the whole point: thinning first and flooring second lets a low
+        // setting take smoke, dust and spell effects down while a candle is
+        // pulled back up to the handful of particles that still reads as fire.
+        rate *= particleDensity_;
+
         // A flame reads as a flame only when enough particles are alive at once.
-        // Authored rates vary wildly for the same visual intent — a candle asks
+        // Authored rates vary wildly for the same visual intent - a candle asks
         // for 40/s over half a second, CHANDELIER01 for 1/s over six seconds,
         // which sustains a single speck per candle and looks like a bare glow.
         // Steady-state population is rate x lifespan, so floor the rate against
@@ -233,8 +245,8 @@ void M2Renderer::updateParticles(M2Instance& inst, float dt) {
     const auto& gpu = *inst.cachedModel;
 
     // Hoist per-emitter gravity out of the per-particle loop. Gravity (and the
-    // emissionSpeed fallback) depends only on the emitter and animation time —
-    // not on the particle itself — so interpFloat was being re-evaluated for
+    // emissionSpeed fallback) depends only on the emitter and animation time -
+    // not on the particle itself - so interpFloat was being re-evaluated for
     // every particle even when 100s of particles share one emitter.
     constexpr size_t kMaxStackEmitters = 16;
     float emitterGravStack[kMaxStackEmitters];
@@ -363,8 +375,13 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
                 e.worldPos    = spineWorld;
                 e.color       = color;
                 e.alpha       = alpha;
-                e.heightAbove = heightAbove;
-                e.heightBelow = heightBelow;
+                // Scaled into world units here, where the instance is at hand.
+                // The spine is a world position the model matrix produced, and
+                // these two were model-space lengths added straight to it - so
+                // a doodad placed at any scale but 1 got a trail the right
+                // length and the wrong width.
+                e.heightAbove = heightAbove * inst.scale;
+                e.heightBelow = heightBelow * inst.scale;
                 e.age         = 0.0f;
                 edges.push_back(e);
 
@@ -391,10 +408,21 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     if (!ribbonPipeline_ || !ribbonAdditivePipeline_ || !ribbonVB_ || !ribbonVBMapped_) return;
+    // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
+    static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
+    if (kNoRibbons) return;
 
-    // Build camera right vector for billboard orientation
-    // For ribbons we orient the quad strip along the spine with screen-space up.
-    // Simple approach: use world-space Z=up for the ribbon cross direction.
+    // A ribbon's width runs across the trail and across the view, and it has to
+    // be computed per edge from the direction the trail is actually going.
+    //
+    // This used a fixed world Z, which is only right for a trail travelling
+    // horizontally. A flame licks upward, so its spine ran along the very axis
+    // the strip was being widened on: the top and bottom vertices of every
+    // edge landed on the spine itself, the quad collapsed, and the whole trail
+    // drew as one tall thin sliver with the fire texture smeared up it. That
+    // is the bonfire at Grom'gol standing four times the height of the huts
+    // behind it.
+    const glm::vec3 camPos = cachedCamPos_;
     const glm::vec3 upWorld(0.0f, 0.0f, 1.0f);
 
     float* dst     = static_cast<float*>(ribbonVBMapped_);
@@ -431,7 +459,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                     static bool ribbonTexWarn = false;
                     if (!ribbonTexWarn) {
                         LOG_WARNING("SpellEffect: ribbon[", ri, "] for '", gpu.name,
-                                    "' has null texSet — descriptor pool may be exhausted");
+                                    "' has null texSet - descriptor pool may be exhausted");
                         ribbonTexWarn = true;
                     }
                 }
@@ -449,8 +477,25 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 float a = e.alpha * t;
                 float u = static_cast<float>(ei) / static_cast<float>(edges.size() - 1);
 
-                // Top vertex (above spine along upWorld)
-                glm::vec3 top = e.worldPos + upWorld * e.heightAbove;
+                // The trail's own direction here, from the edges either side.
+                const glm::vec3& prev = edges[ei > 0 ? ei - 1 : ei].worldPos;
+                const glm::vec3& next = edges[ei + 1 < edges.size() ? ei + 1 : ei].worldPos;
+                glm::vec3 spineDir = next - prev;
+                float spineLen = glm::length(spineDir);
+                // Widen across the trail and across the line of sight. Where
+                // the trail doubles back on itself or points straight at the
+                // eye there is no such direction, and world up is as good an
+                // answer as any.
+                glm::vec3 side = upWorld;
+                if (spineLen > 1e-5f) {
+                    glm::vec3 toEye = camPos - e.worldPos;
+                    glm::vec3 cross = glm::cross(spineDir / spineLen, toEye);
+                    float crossLen = glm::length(cross);
+                    if (crossLen > 1e-5f) side = cross / crossLen;
+                }
+
+                // Top vertex (one side of the spine)
+                glm::vec3 top = e.worldPos + side * e.heightAbove;
                 dst[written * 9 + 0] = top.x;
                 dst[written * 9 + 1] = top.y;
                 dst[written * 9 + 2] = top.z;
@@ -462,8 +507,8 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 dst[written * 9 + 8] = 0.0f; // v = top
                 written++;
 
-                // Bottom vertex (below spine)
-                glm::vec3 bot = e.worldPos - upWorld * e.heightBelow;
+                // Bottom vertex (the other side)
+                glm::vec3 bot = e.worldPos - side * e.heightBelow;
                 dst[written * 9 + 0] = bot.x;
                 dst[written * 9 + 1] = bot.y;
                 dst[written * 9 + 2] = bot.z;
@@ -478,7 +523,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
             uint32_t vertCount = static_cast<uint32_t>(written) - firstVert;
             if (vertCount >= 4) {
-                draws.push_back({texSet, pipe, firstVert, vertCount});
+                draws.push_back({.texSet = texSet, .pipeline = pipe, .firstVertex = firstVert, .vertexCount = vertCount});
             } else {
                 // Rollback if too few verts
                 written = firstVert;
@@ -494,10 +539,10 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
             size_t spellRibbonVerts = 0;
             for (const auto& inst : instances) {
                 if (!inst.cachedModel || !inst.cachedModel->isSpellEffect) continue;
-                for (size_t ri = 0; ri < inst.ribbonEdges.size(); ri++) {
-                    if (inst.ribbonEdges[ri].size() >= 2) {
+                for (const auto& ribbonEdge : inst.ribbonEdges) {
+                    if (ribbonEdge.size() >= 2) {
                         spellRibbonDraws++;
-                        spellRibbonVerts += inst.ribbonEdges[ri].size() * 2;
+                        spellRibbonVerts += ribbonEdge.size() * 2;
                     }
                 }
             }
@@ -518,7 +563,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     vp.height = static_cast<float>(ext.height);
     vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
     VkRect2D sc{};
-    sc.offset = {0, 0};
+    sc.offset = {.x = 0, .y = 0};
     sc.extent = ext;
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
@@ -541,18 +586,39 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
 void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     if (!particlePipeline_ || !m2ParticleVB_) return;
+    // Diagnostic: WOWEE_M2_NO_PARTICLES=1 drops every M2 particle draw, which
+    // tells a particle artifact apart from a skinned-geometry one.
+    static const bool kNoParticles = envFlagEnabled("WOWEE_M2_NO_PARTICLES");
+    if (kNoParticles) return;
 
-    // Collect all particles from all instances, grouped by texture+blend
-    // Reuse persistent map — clear each group's vertex data but keep bucket structure.
+    // Collect all particles from all instances, grouped by texture+blend.
+    // Reuse persistent map - keep the bucket structure, drop last frame's set.
     for (auto& [k, g] : particleGroups_) {
-        g.vertexData.clear();
         g.preAllocSet = VK_NULL_HANDLE;
     }
     auto& groups = particleGroups_;
 
+    // Written straight into the mapped buffer rather than accumulated into a
+    // vector per group and copied in afterwards; see ParticleRun.
+    if (!m2ParticleVBMapped_) return;
+    float* const vbBase = static_cast<float*>(m2ParticleVBMapped_);
+    uint32_t vbWritten = 0;
+    particleRuns_.clear();
+    ParticleGroup* runGroup = nullptr;
+
     size_t totalParticles = 0;
 
-    for (auto& inst : instances) {
+    // Only the instances that carry emitters, not every instance in the world.
+    //
+    // particleInstanceIndices_ is built and maintained for exactly this and
+    // the update path above already uses it; this pass walked all 66211
+    // instances instead, asking each whether its particle vector was empty.
+    // That walk was 2.0ms of a 16ms frame - two thirds of the M2 worker,
+    // which is the critical path of renderWorld. The smoke pass beside this
+    // one does the same kind of work against a flat list and costs 0.003ms.
+    for (size_t idx : particleInstanceIndices_) {
+        if (idx >= instances.size()) continue;
+        auto& inst = instances[idx];
         if (inst.particles.empty()) continue;
         if (!inst.cachedModel) continue;
         const auto& gpu = *inst.cachedModel;
@@ -560,7 +626,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
 
         // Cache the last emitter's per-emitter state so adjacent particles
-        // sharing an emitter (the common case — particles from one source
+        // sharing an emitter (the common case - particles from one source
         // cluster together) skip the texture/key/map-lookup work entirely.
         int lastEmitterIdx = -1;
         VkTexture* cachedTex = nullptr;
@@ -575,6 +641,14 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         float cachedTilesFloat = 1.0f;
         bool cachedIsTiled = false;
         float invAnimMs = 1.0f / 1000.0f;
+
+        // How far this instance's particles actually reach, against how far
+        // the model says it extends. A fire twice the height of the hut behind
+        // it is either particles outliving their authored lifespan, flying at
+        // the wrong speed, or drawn at the wrong size - and none of those says
+        // which model it is. This does.
+        float highestParticleZ = -std::numeric_limits<float>::max();
+        float widestParticle = 0.0f;
 
         for (const auto& p : inst.particles) {
             if (p.emitterIndex < 0 || p.emitterIndex >= static_cast<int>(gpu.particleEmitters.size())) continue;
@@ -592,7 +666,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 cachedTotalTiles = static_cast<uint32_t>(cachedTilesX) *
                                    static_cast<uint32_t>(cachedTilesY);
                 cachedBlendType = cachedEm->blendingType;
-                ParticleGroupKey key{cachedTex, static_cast<uint8_t>(cachedBlendType), cachedTilesX, cachedTilesY};
+                ParticleGroupKey key{.texture = cachedTex, .blendType = static_cast<uint8_t>(cachedBlendType), .tilesX = cachedTilesX, .tilesY = cachedTilesY};
                 cachedGroup = &groups[key];
                 cachedGroup->texture = cachedTex;
                 cachedGroup->blendType = cachedBlendType;
@@ -627,7 +701,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             // Flame fixtures: the authored curves can leave a particle with
             // effectively no colour or alpha for most of its life. CHANDELIER01
             // ramps scale from zero over a six second life and its candles spend
-            // nearly all of that time contributing nothing — and because these
+            // nearly all of that time contributing nothing - and because these
             // draw additively, a near-black particle adds literally nothing to
             // the frame. Floor colour and alpha so a lit fixture always shows
             // flame. Floors only lift the dim end, leaving torches and candles
@@ -644,7 +718,7 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
             } else if (!gpu.isFireflyEffect) {
                 scale = std::min(rawScale, 1.5f);
                 // Candle flames are authored at a fraction of a unit, which lands
-                // sub-pixel at any normal viewing distance — the fixture glows
+                // sub-pixel at any normal viewing distance - the fixture glows
                 // with no visible flame. Small effect-heavy models dodge this by
                 // being classified as spell effects (three or more emitters and
                 // few vertices) and picking up that path's floor, but a
@@ -658,15 +732,26 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                 }
             }
 
-            auto& vd = cachedGroup->vertexData;
-            vd.push_back(p.position.x);
-            vd.push_back(p.position.y);
-            vd.push_back(p.position.z);
-            vd.push_back(color.r);
-            vd.push_back(color.g);
-            vd.push_back(color.b);
-            vd.push_back(alpha);
-            vd.push_back(scale);
+            if (vbWritten >= MAX_M2_PARTICLE_VERTS) break;
+            // A run per stretch of particles sharing a group. The group only
+            // changes when the emitter does, and particles from one emitter
+            // are adjacent, so this closes a run about once per emitter.
+            if (cachedGroup != runGroup) {
+                runGroup = cachedGroup;
+                particleRuns_.push_back({.group = cachedGroup, .first = vbWritten, .count = 0});
+            }
+            highestParticleZ = std::max(highestParticleZ, p.position.z);
+            widestParticle = std::max(widestParticle, scale);
+
+            float* vd = vbBase + static_cast<size_t>(vbWritten) * 9;
+            vd[0] = p.position.x;
+            vd[1] = p.position.y;
+            vd[2] = p.position.z;
+            vd[3] = color.r;
+            vd[4] = color.g;
+            vd[5] = color.b;
+            vd[6] = alpha;
+            vd[7] = scale;
             float tileIndex = p.tileIndex;
             if (cachedIsTiled) {
                 tileIndex = p.tileIndex + static_cast<float>(cachedAnimFrame);
@@ -674,8 +759,29 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
                     tileIndex -= cachedTilesFloat;
                 }
             }
-            vd.push_back(tileIndex);
+            vd[8] = tileIndex;
+            ++vbWritten;
+            ++particleRuns_.back().count;
             totalParticles++;
+        }
+
+        // Said once per model, on an absolute reach rather than a ratio
+        // against the model's own bounds. A bonfire's authored box is 25 to 32
+        // yards tall - it has to hold the flame's full extent - so a ratio
+        // test can never trip on the one model anybody is complaining about.
+        // Nothing that stands on the ground should be throwing particles eight
+        // yards into the air.
+        if (highestParticleZ > -std::numeric_limits<float>::max()) {
+            const float reach = highestParticleZ - inst.position.z;
+            if (reach > 8.0f) {
+                static std::set<std::string> saidTall;
+                if (saidTall.insert(gpu.name).second) {
+                    LOG_WARNING("Particles reach ", reach, " yd above '", gpu.name,
+                                "' (model bound ", gpu.boundMax.z, " yd, scale ", inst.scale,
+                                ", ", gpu.particleEmitters.size(), " emitters, ",
+                                inst.particles.size(), " live, largest ", widestParticle, " yd)");
+                }
+            }
         }
     }
 
@@ -706,8 +812,9 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
     VkPipeline currentPipeline = VK_NULL_HANDLE;
 
-    for (auto& [key, group] : groups) {
-        if (group.vertexData.empty()) continue;
+    for (auto& run : particleRuns_) {
+        if (run.count == 0 || !run.group) continue;
+        ParticleGroup& group = *run.group;
 
         uint8_t blendType = group.blendType;
         VkPipeline desiredPipeline = (blendType == 3 || blendType == 4)
@@ -720,15 +827,17 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
         // Use pre-allocated stable descriptor set; fall back to per-frame alloc only if unavailable
         VkDescriptorSet texSet = group.preAllocSet;
         if (texSet == VK_NULL_HANDLE) {
-            // Fallback: allocate per-frame (pool exhaustion risk — should not happen in practice)
-            VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            // Fallback: allocate per-frame (pool exhaustion risk - should not happen in practice)
+            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             ai.descriptorPool = materialDescPool_;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &particleTexLayout_;
             if (vkAllocateDescriptorSets(vkCtx_->getDevice(), &ai, &texSet) == VK_SUCCESS) {
-                VkTexture* tex = group.texture ? group.texture : whiteTexture_.get();
+                VkTexture* tex = (group.texture && group.texture->isValid())
+                    ? group.texture : whiteTexture_.get();
+                if (!tex || !tex->isValid()) continue;
                 VkDescriptorImageInfo imgInfo = tex->descriptorInfo();
-                VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 write.dstSet = texSet;
                 write.dstBinding = 0;
                 write.descriptorCount = 1;
@@ -744,21 +853,17 @@ void M2Renderer::renderM2Particles(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
         // Push constants: tileCount + alphaKey
         struct { float tileX, tileY; int alphaKey; } pc = {
-            static_cast<float>(group.tilesX), static_cast<float>(group.tilesY),
-            (blendType == 1) ? 1 : 0
+            .tileX = static_cast<float>(group.tilesX), .tileY = static_cast<float>(group.tilesY),
+            .alphaKey = (blendType == 1) ? 1 : 0
         };
         vkCmdPushConstants(cmd, particlePipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(pc), &pc);
 
-        // Upload and draw in chunks
-        size_t count = group.vertexData.size() / 9;
-        size_t offset = 0;
-        while (offset < count) {
-            size_t batch = std::min(count - offset, MAX_M2_PARTICLES);
-            memcpy(m2ParticleVBMapped_, &group.vertexData[offset * 9], batch * 9 * sizeof(float));
-            vkCmdDraw(cmd, static_cast<uint32_t>(batch), 1, 0, 0);
-            offset += batch;
-        }
+        // The vertices are already in the buffer, at this run's own offset.
+        // Both used to be wrong: every group copied to offset zero and drew
+        // from vertex zero, so with more than one group up they all drew
+        // whatever had been copied last.
+        vkCmdDraw(cmd, run.count, 1, run.first, 0);
     }
 }
 

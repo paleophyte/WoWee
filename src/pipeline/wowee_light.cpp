@@ -1,4 +1,5 @@
 #include "pipeline/wowee_light.hpp"
+#include "pipeline/wowee_binary_io.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -12,36 +13,15 @@ namespace {
 
 constexpr char kMagic[4] = {'W', 'O', 'L', 'A'};
 constexpr uint32_t kVersion = 1;
-
-template <typename T>
-void writePOD(std::ofstream& os, const T& v) {
-    os.write(reinterpret_cast<const char*>(&v), sizeof(T));
-}
-
-template <typename T>
-bool readPOD(std::ifstream& is, T& v) {
-    is.read(reinterpret_cast<char*>(&v), sizeof(T));
-    return is.gcount() == static_cast<std::streamsize>(sizeof(T));
-}
+constexpr char kExtension[] = ".wol";
 
 } // namespace
 
 bool WoweeLightLoader::save(const WoweeLight& light,
                             const std::string& basePath) {
-    std::string path = basePath;
-    if (path.size() < 4 || path.substr(path.size() - 4) != ".wol") {
-        path += ".wol";
-    }
-    std::ofstream os(path, std::ios::binary);
-    if (!os) return false;
-    os.write(kMagic, 4);
-    writePOD(os, kVersion);
-    uint32_t nameLen = static_cast<uint32_t>(light.name.size());
-    writePOD(os, nameLen);
-    if (nameLen > 0) os.write(light.name.data(), nameLen);
-    uint32_t kfCount = static_cast<uint32_t>(light.keyframes.size());
-    writePOD(os, kfCount);
-    for (const auto& kf : light.keyframes) {
+    return saveCatalogEntries(basePath, kMagic, kVersion, kExtension,
+                              light.name, light.keyframes,
+                              [](std::ofstream& os, const auto& kf) {
         writePOD(os, kf.timeOfDayMin);
         writePOD(os, kf.ambientColor);
         writePOD(os, kf.directionalColor);
@@ -49,36 +29,17 @@ bool WoweeLightLoader::save(const WoweeLight& light,
         writePOD(os, kf.fogColor);
         writePOD(os, kf.fogStart);
         writePOD(os, kf.fogEnd);
-    }
-    return os.good();
+    });
 }
 
 WoweeLight WoweeLightLoader::load(const std::string& basePath) {
     WoweeLight out;
-    std::string path = basePath;
-    if (path.size() < 4 || path.substr(path.size() - 4) != ".wol") {
-        path += ".wol";
-    }
-    std::ifstream is(path, std::ios::binary);
+    std::ifstream is(normalizePath(basePath, kExtension), std::ios::binary);
     if (!is) return out;
-    char magic[4];
-    is.read(magic, 4);
-    if (std::memcmp(magic, kMagic, 4) != 0) return out;
-    uint32_t version = 0;
-    if (!readPOD(is, version)) return out;
-    if (version != kVersion) return out;
-    uint32_t nameLen = 0;
-    if (!readPOD(is, nameLen)) return out;
-    if (nameLen > 0) {
-        out.name.resize(nameLen);
-        is.read(out.name.data(), nameLen);
-        if (is.gcount() != static_cast<std::streamsize>(nameLen)) {
-            out.name.clear();
-            return out;
-        }
-    }
+    // Was a hand-written header whose name length had no cap at all: a corrupt
+    // file naming four billion characters got a resize() for them.
     uint32_t kfCount = 0;
-    if (!readPOD(is, kfCount)) return out;
+    if (!readCatalogHeader(is, kMagic, kVersion, out.name, kfCount)) return out;
     out.keyframes.resize(kfCount);
     for (auto& kf : out.keyframes) {
         if (!readPOD(is, kf.timeOfDayMin) ||
@@ -96,12 +57,7 @@ WoweeLight WoweeLightLoader::load(const std::string& basePath) {
 }
 
 bool WoweeLightLoader::exists(const std::string& basePath) {
-    std::string path = basePath;
-    if (path.size() < 4 || path.substr(path.size() - 4) != ".wol") {
-        path += ".wol";
-    }
-    std::ifstream is(path, std::ios::binary);
-    return is.good();
+    return catalogExists(basePath, kExtension);
 }
 
 WoweeLight::Keyframe WoweeLightLoader::sampleAtTime(
@@ -157,12 +113,12 @@ WoweeLight WoweeLightLoader::makeCave(const std::string& zoneName) {
     out.name = zoneName;
     // Single dim keyframe (caves don't change with time-of-day).
     out.keyframes.push_back({
-        720,                                    // noon (arbitrary)
-        glm::vec3(0.05f, 0.05f, 0.07f),         // very dim cool ambient
-        glm::vec3(0.10f, 0.10f, 0.14f),         // faint indirect bounce
-        glm::vec3(0.0f, -1.0f, 0.0f),
-        glm::vec3(0.04f, 0.05f, 0.07f),         // near-black fog
-        15.0f, 80.0f                            // heavy short-range fog
+        .timeOfDayMin = 720,                                    // noon (arbitrary)
+        .ambientColor = glm::vec3(0.05f, 0.05f, 0.07f),         // very dim cool ambient
+        .directionalColor = glm::vec3(0.10f, 0.10f, 0.14f),         // faint indirect bounce
+        .directionalDir = glm::vec3(0.0f, -1.0f, 0.0f),
+        .fogColor = glm::vec3(0.04f, 0.05f, 0.07f),         // near-black fog
+        .fogStart = 15.0f, .fogEnd = 80.0f                            // heavy short-range fog
     });
     return out;
 }
@@ -172,12 +128,12 @@ WoweeLight WoweeLightLoader::makeDungeon(const std::string& zoneName) {
     out.name = zoneName;
     // Single moody warm-torchlit keyframe.
     out.keyframes.push_back({
-        720,
-        glm::vec3(0.18f, 0.14f, 0.10f),         // warm dim ambient
-        glm::vec3(0.55f, 0.40f, 0.25f),         // amber torchlight tint
-        glm::vec3(0.0f, -1.0f, 0.0f),
-        glm::vec3(0.10f, 0.08f, 0.06f),         // dark warm fog
-        25.0f, 200.0f                           // medium fog range
+        .timeOfDayMin = 720,
+        .ambientColor = glm::vec3(0.18f, 0.14f, 0.10f),         // warm dim ambient
+        .directionalColor = glm::vec3(0.55f, 0.40f, 0.25f),         // amber torchlight tint
+        .directionalDir = glm::vec3(0.0f, -1.0f, 0.0f),
+        .fogColor = glm::vec3(0.10f, 0.08f, 0.06f),         // dark warm fog
+        .fogStart = 25.0f, .fogEnd = 200.0f                           // medium fog range
     });
     return out;
 }
@@ -188,12 +144,12 @@ WoweeLight WoweeLightLoader::makeNight(const std::string& zoneName) {
     // Single dark-night keyframe (e.g., always-night zones like
     // some druid graves or shadow-realm scenes).
     out.keyframes.push_back({
-        0,
-        glm::vec3(0.06f, 0.07f, 0.12f),         // cold dim blue ambient
-        glm::vec3(0.18f, 0.20f, 0.32f),         // moonlight-tinted directional
-        glm::vec3(0.30f, -0.94f, 0.0f),         // moon at low angle
-        glm::vec3(0.05f, 0.06f, 0.10f),         // near-black blue fog
-        80.0f, 500.0f                           // far fog (open night air)
+        .timeOfDayMin = 0,
+        .ambientColor = glm::vec3(0.06f, 0.07f, 0.12f),         // cold dim blue ambient
+        .directionalColor = glm::vec3(0.18f, 0.20f, 0.32f),         // moonlight-tinted directional
+        .directionalDir = glm::vec3(0.30f, -0.94f, 0.0f),         // moon at low angle
+        .fogColor = glm::vec3(0.05f, 0.06f, 0.10f),         // near-black blue fog
+        .fogStart = 80.0f, .fogEnd = 500.0f                           // far fog (open night air)
     });
     return out;
 }
@@ -205,39 +161,39 @@ WoweeLight WoweeLightLoader::makeDefaultDayNight(
     // Midnight: cold + dim, blue-tinted ambient, sun straight down
     // (it's behind the world).
     out.keyframes.push_back({
-        0,
-        glm::vec3(0.06f, 0.07f, 0.10f),
-        glm::vec3(0.10f, 0.12f, 0.20f),
-        glm::vec3(0.0f, -1.0f, 0.0f),
-        glm::vec3(0.05f, 0.06f, 0.10f),
-        40.0f, 200.0f
+        .timeOfDayMin = 0,
+        .ambientColor = glm::vec3(0.06f, 0.07f, 0.10f),
+        .directionalColor = glm::vec3(0.10f, 0.12f, 0.20f),
+        .directionalDir = glm::vec3(0.0f, -1.0f, 0.0f),
+        .fogColor = glm::vec3(0.05f, 0.06f, 0.10f),
+        .fogStart = 40.0f, .fogEnd = 200.0f
     });
     // Dawn (6:00): warm horizon glow, sun rising from -X.
     out.keyframes.push_back({
-        360,
-        glm::vec3(0.30f, 0.25f, 0.20f),
-        glm::vec3(0.95f, 0.70f, 0.55f),
-        glm::vec3(0.86f, -0.50f, 0.0f),
-        glm::vec3(0.80f, 0.55f, 0.45f),
-        100.0f, 600.0f
+        .timeOfDayMin = 360,
+        .ambientColor = glm::vec3(0.30f, 0.25f, 0.20f),
+        .directionalColor = glm::vec3(0.95f, 0.70f, 0.55f),
+        .directionalDir = glm::vec3(0.86f, -0.50f, 0.0f),
+        .fogColor = glm::vec3(0.80f, 0.55f, 0.45f),
+        .fogStart = 100.0f, .fogEnd = 600.0f
     });
     // Noon (12:00): bright + neutral, sun overhead.
     out.keyframes.push_back({
-        720,
-        glm::vec3(0.40f, 0.42f, 0.44f),
-        glm::vec3(1.00f, 0.97f, 0.92f),
-        glm::vec3(0.0f, -1.0f, 0.0f),
-        glm::vec3(0.65f, 0.72f, 0.82f),
-        120.0f, 800.0f
+        .timeOfDayMin = 720,
+        .ambientColor = glm::vec3(0.40f, 0.42f, 0.44f),
+        .directionalColor = glm::vec3(1.00f, 0.97f, 0.92f),
+        .directionalDir = glm::vec3(0.0f, -1.0f, 0.0f),
+        .fogColor = glm::vec3(0.65f, 0.72f, 0.82f),
+        .fogStart = 120.0f, .fogEnd = 800.0f
     });
     // Dusk (18:00): orange-red glow, sun setting toward +X.
     out.keyframes.push_back({
-        1080,
-        glm::vec3(0.32f, 0.22f, 0.18f),
-        glm::vec3(0.95f, 0.55f, 0.30f),
-        glm::vec3(-0.86f, -0.50f, 0.0f),
-        glm::vec3(0.85f, 0.50f, 0.35f),
-        100.0f, 500.0f
+        .timeOfDayMin = 1080,
+        .ambientColor = glm::vec3(0.32f, 0.22f, 0.18f),
+        .directionalColor = glm::vec3(0.95f, 0.55f, 0.30f),
+        .directionalDir = glm::vec3(-0.86f, -0.50f, 0.0f),
+        .fogColor = glm::vec3(0.85f, 0.50f, 0.35f),
+        .fogStart = 100.0f, .fogEnd = 500.0f
     });
     return out;
 }

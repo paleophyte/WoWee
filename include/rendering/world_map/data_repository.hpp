@@ -1,6 +1,6 @@
-// data_repository.hpp — DBC data loading, ZMP pixel map, and zone/POI/overlay storage.
+// data_repository.hpp - DBC data loading, ZMP pixel map, and zone/POI/overlay storage.
 // Extracted from WorldMap::loadZonesFromDBC, loadPOIData, buildCosmicView
-// (Phase 5 of refactoring plan). SRP — all DBC parsing lives here.
+// (Phase 5 of refactoring plan). SRP - all DBC parsing lives here.
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
@@ -35,37 +35,36 @@ public:
                          pipeline::AssetManager& assetManager);
 
     /// Determine expansion level from the active expansion profile.
-    static int getExpansionLevel();
 
     // --- Accessors ---
     std::vector<Zone>& zones() { return zones_; }
-    const std::vector<Zone>& zones() const { return zones_; }
-    int cosmicIdx() const { return cosmicIdx_; }
-    int worldIdx() const { return worldIdx_; }
-    int currentMapId() const { return currentMapId_; }
-    const std::vector<CosmicMapEntry>& cosmicMaps() const { return cosmicMaps_; }
-    const std::vector<CosmicMapEntry>& azerothRegions() const { return azerothRegions_; }
-    bool cosmicEnabled() const { return cosmicEnabled_; }
-    const std::vector<POI>& poiMarkers() const { return poiMarkers_; }
+    [[nodiscard]] const std::vector<Zone>& zones() const { return zones_; }
+    [[nodiscard]] int cosmicIdx() const { return cosmicIdx_; }
+    [[nodiscard]] int worldIdx() const { return worldIdx_; }
+    [[nodiscard]] int currentMapId() const { return currentMapId_; }
+    [[nodiscard]] const std::vector<CosmicMapEntry>& cosmicMaps() const { return cosmicMaps_; }
+    [[nodiscard]] const std::vector<CosmicMapEntry>& azerothRegions() const { return azerothRegions_; }
+    [[nodiscard]] bool cosmicEnabled() const { return cosmicEnabled_; }
+    [[nodiscard]] const std::vector<POI>& poiMarkers() const { return poiMarkers_; }
 
-    const std::unordered_map<uint32_t, uint32_t>& exploreFlagByAreaId() const { return exploreFlagByAreaId_; }
-    const std::unordered_map<uint32_t, std::string>& areaNameByAreaId() const { return areaNameByAreaId_; }
+    [[nodiscard]] const std::unordered_map<uint32_t, uint32_t>& exploreFlagByAreaId() const { return exploreFlagByAreaId_; }
+    [[nodiscard]] const std::unordered_map<uint32_t, std::string>& areaNameByAreaId() const { return areaNameByAreaId_; }
 
     /// ZMP pixel map accessors.
     static constexpr int ZMP_SIZE = 128;
-    const std::array<uint32_t, 128 * 128>& zmpGrid() const { return zmpGrid_; }
-    bool hasZmpData() const { return zmpLoaded_; }
+    [[nodiscard]] const std::array<uint32_t, 128 * 128>& zmpGrid() const { return zmpGrid_; }
+    [[nodiscard]] bool hasZmpData() const { return zmpLoaded_; }
 
     /// Look up zone index from an AreaTable ID (from ZMP). Returns -1 if not found.
-    int zoneIndexForAreaId(uint32_t areaId) const;
+    [[nodiscard]] int zoneIndexForAreaId(uint32_t areaId) const;
 
     /// Convert a render-space position from a physical map into the currently
     /// loaded display map using WorldMapTransforms.dbc.
-    glm::vec3 transformRenderPosition(uint32_t sourceMapId,
+    [[nodiscard]] glm::vec3 transformRenderPosition(uint32_t sourceMapId,
                                       const glm::vec3& renderPos) const;
 
     /// ZMP-derived bounding rectangles per zone index (UV [0,1] on display).
-    const std::unordered_map<int, ZmpRect>& zmpZoneBounds() const { return zmpZoneBounds_; }
+    [[nodiscard]] const std::unordered_map<int, ZmpRect>& zmpZoneBounds() const { return zmpZoneBounds_; }
 
     /// Reset all data (called on map change).
     void clear();

@@ -3,11 +3,15 @@
 //                 /clearmainassist, /raidinfo, /raidconvert, /lootmethod,
 //                 /lootthreshold, /mark, /roll
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
+#include "game/group_defines.hpp"
+#include "ui/chat/chat_utils.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
 #include <algorithm>
 #include <cctype>
+#include <ctime>
+#include <string>
 
 namespace wowee { namespace ui {
 
@@ -18,8 +22,8 @@ public:
         ctx.gameHandler.initiateReadyCheck();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"readycheck", "rc"}; }
-    std::string helpText() const override { return "Initiate ready check"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"readycheck", "rc"}; }
+    [[nodiscard]] std::string helpText() const override { return "Initiate ready check"; }
 };
 
 // --- /ready ---
@@ -29,8 +33,8 @@ public:
         ctx.gameHandler.respondToReadyCheck(true);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"ready"}; }
-    std::string helpText() const override { return "Respond yes to ready check"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"ready"}; }
+    [[nodiscard]] std::string helpText() const override { return "Respond yes to ready check"; }
 };
 
 // --- /notready, /nr ---
@@ -40,8 +44,8 @@ public:
         ctx.gameHandler.respondToReadyCheck(false);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"notready", "nr"}; }
-    std::string helpText() const override { return "Respond no to ready check"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"notready", "nr"}; }
+    [[nodiscard]] std::string helpText() const override { return "Respond no to ready check"; }
 };
 
 // --- /yield, /forfeit, /surrender ---
@@ -51,8 +55,8 @@ public:
         ctx.gameHandler.forfeitDuel();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"yield", "forfeit", "surrender"}; }
-    std::string helpText() const override { return "Forfeit current duel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"yield", "forfeit", "surrender"}; }
+    [[nodiscard]] std::string helpText() const override { return "Forfeit current duel"; }
 };
 
 // --- /afk, /away ---
@@ -62,8 +66,8 @@ public:
         ctx.gameHandler.toggleAfk(ctx.args);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"afk", "away"}; }
-    std::string helpText() const override { return "Toggle AFK status"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"afk", "away"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle AFK status"; }
 };
 
 // --- /dnd, /busy ---
@@ -73,8 +77,8 @@ public:
         ctx.gameHandler.toggleDnd(ctx.args);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"dnd", "busy"}; }
-    std::string helpText() const override { return "Toggle Do Not Disturb"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"dnd", "busy"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle Do Not Disturb"; }
 };
 
 // --- /uninvite, /kick ---
@@ -92,25 +96,25 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"uninvite", "kick"}; }
-    std::string helpText() const override { return "Remove player from group"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"uninvite", "kick"}; }
+    [[nodiscard]] std::string helpText() const override { return "Remove player from group"; }
 };
 
 // --- /leave, /leaveparty ---
-// /leave — leave party (no args) or leave channel (with args, WoW-style overload)
+// /leave - leave party (no args) or leave channel (with args, WoW-style overload)
 class LeavePartyCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            // /leave ChannelName — leave a chat channel
+            // /leave ChannelName - leave a chat channel
             ctx.gameHandler.leaveChannel(ctx.args);
         } else {
             ctx.gameHandler.leaveParty();
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"leave", "leaveparty"}; }
-    std::string helpText() const override { return "Leave party/raid or channel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"leave", "leaveparty"}; }
+    [[nodiscard]] std::string helpText() const override { return "Leave party/raid or channel"; }
 };
 
 // --- /maintank, /mt ---
@@ -128,8 +132,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"maintank", "mt"}; }
-    std::string helpText() const override { return "Set target as main tank"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"maintank", "mt"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set target as main tank"; }
 };
 
 // --- /mainassist, /ma ---
@@ -147,8 +151,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"mainassist", "ma"}; }
-    std::string helpText() const override { return "Set target as main assist"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"mainassist", "ma"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set target as main assist"; }
 };
 
 // --- /clearmaintank ---
@@ -158,8 +162,8 @@ public:
         ctx.gameHandler.clearMainTank();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"clearmaintank"}; }
-    std::string helpText() const override { return "Clear main tank assignment"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"clearmaintank"}; }
+    [[nodiscard]] std::string helpText() const override { return "Clear main tank assignment"; }
 };
 
 // --- /clearmainassist ---
@@ -169,19 +173,53 @@ public:
         ctx.gameHandler.clearMainAssist();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"clearmainassist"}; }
-    std::string helpText() const override { return "Clear main assist assignment"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"clearmainassist"}; }
+    [[nodiscard]] std::string helpText() const override { return "Clear main assist assignment"; }
 };
 
 // --- /raidinfo ---
 class RaidInfoCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        // Asked again first, for the next time this is run. The reply is a
+        // packet and arrives well after this returns, so what is printed is
+        // what the last request brought back - the one the interface makes at
+        // login, which is why there is something to print at all.
         ctx.gameHandler.requestRaidInfo();
+        const auto& lockouts = ctx.gameHandler.getInstanceLockouts();
+        if (lockouts.empty()) {
+            ctx.gameHandler.addSystemChatMessage("You are not saved to any instances.");
+            return {};
+        }
+        ctx.gameHandler.addSystemChatMessage("Saved instances:");
+        const auto now = static_cast<uint64_t>(std::time(nullptr));
+        for (const auto& lo : lockouts) {
+            std::string name = ctx.gameHandler.getMapName(lo.mapId);
+            if (name.empty()) name = "Instance " + std::to_string(lo.mapId);
+            if (const char* difficulty = game::instanceDifficultyName(lo.difficulty)) {
+                name += " (";
+                name += difficulty;
+                name += ")";
+            }
+            // Days and hours, which is the granularity a lockout is read at.
+            // A reset already past is possible - the server sends the time it
+            // was set to, and nothing here is told when it comes round.
+            std::string when = "expired";
+            if (lo.resetTime > now) {
+                const uint64_t left = lo.resetTime - now;
+                const uint64_t days = left / 86400;
+                const uint64_t hours = (left % 86400) / 3600;
+                when = days > 0 ? std::to_string(days) + "d " + std::to_string(hours) + "h"
+                                : std::to_string(hours) + "h";
+            }
+            ctx.gameHandler.addSystemChatMessage(
+                "  " + name + " - resets in " + when +
+                (lo.extended ? " (extended)" : ""));
+        }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"raidinfo"}; }
-    std::string helpText() const override { return "Show raid instance lockouts"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"raidinfo"}; }
+    [[nodiscard]] std::string helpText() const override { return "Show raid instance lockouts"; }
 };
 
 // --- /raidconvert ---
@@ -191,8 +229,8 @@ public:
         ctx.gameHandler.convertToRaid();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"raidconvert"}; }
-    std::string helpText() const override { return "Convert party to raid"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"raidconvert"}; }
+    [[nodiscard]] std::string helpText() const override { return "Convert party to raid"; }
 };
 
 // --- /lootmethod, /grouploot, /setloot ---
@@ -204,11 +242,8 @@ public:
             return {};
         }
         if (ctx.args.empty()) {
-            static constexpr const char* kMethodNames[] = {
-                "Free for All", "Round Robin", "Master Looter", "Group Loot", "Need Before Greed"
-            };
             const auto& pd = ctx.gameHandler.getPartyData();
-            const char* cur = (pd.lootMethod < 5) ? kMethodNames[pd.lootMethod] : "Unknown";
+            const char* cur = game::lootMethodName(pd.lootMethod);
             game::MessageChatData msg;
             msg.type = game::ChatType::SYSTEM;
             msg.language = game::ChatLanguage::UNIVERSAL;
@@ -236,8 +271,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"lootmethod", "grouploot", "setloot"}; }
-    std::string helpText() const override { return "Set loot method"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"lootmethod", "grouploot", "setloot"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set loot method"; }
 };
 
 // --- /lootthreshold ---
@@ -287,8 +322,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"lootthreshold"}; }
-    std::string helpText() const override { return "Set loot quality threshold"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"lootthreshold"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set loot quality threshold"; }
 };
 
 // --- /mark, /marktarget, /raidtarget ---
@@ -303,21 +338,28 @@ public:
             ctx.gameHandler.addLocalChatMessage(noTgt);
             return {};
         }
-        static constexpr const char* kMarkWords[] = {
-            "star", "circle", "diamond", "triangle", "moon", "square", "cross", "skull"
-        };
+        // The eight names, lowercased for matching and for the line that
+        // lists them. They are spelled once, in group_defines.hpp.
+        std::string markList;
+        for (uint32_t mi = 0; mi < game::kRaidMarkCount; ++mi) {
+            if (!markList.empty()) markList += ' ';
+            markList += ui::chat_utils::toLower(game::raidMarkName(static_cast<uint8_t>(mi)));
+        }
         uint8_t icon = 7; // default: skull
         if (!ctx.args.empty()) {
-            std::string argLow = ctx.args;
-            for (auto& c : argLow) c = static_cast<char>(std::tolower(c));
+            std::string argLow = ui::chat_utils::toLower(ctx.args);
             while (!argLow.empty() && argLow.front() == ' ') argLow.erase(argLow.begin());
             if (argLow == "clear" || argLow == "0" || argLow == "none") {
                 ctx.gameHandler.setRaidMark(ctx.gameHandler.getTargetGuid(), 0xFF);
                 return {};
             }
             bool found = false;
-            for (int mi = 0; mi < 8; ++mi) {
-                if (argLow == kMarkWords[mi]) { icon = static_cast<uint8_t>(mi); found = true; break; }
+            for (uint32_t mi = 0; mi < game::kRaidMarkCount; ++mi) {
+                if (argLow == ui::chat_utils::toLower(game::raidMarkName(static_cast<uint8_t>(mi)))) {
+                    icon = static_cast<uint8_t>(mi);
+                    found = true;
+                    break;
+                }
             }
             if (!found && !argLow.empty() && argLow[0] >= '1' && argLow[0] <= '8') {
                 icon = static_cast<uint8_t>(argLow[0] - '1');
@@ -327,7 +369,7 @@ public:
                 game::MessageChatData badArg;
                 badArg.type = game::ChatType::SYSTEM;
                 badArg.language = game::ChatLanguage::UNIVERSAL;
-                badArg.message = "Unknown mark. Use: star circle diamond triangle moon square cross skull";
+                badArg.message = "Unknown mark. Use: " + markList;
                 ctx.gameHandler.addLocalChatMessage(badArg);
                 return {};
             }
@@ -335,8 +377,8 @@ public:
         ctx.gameHandler.setRaidMark(ctx.gameHandler.getTargetGuid(), icon);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"mark", "marktarget", "raidtarget"}; }
-    std::string helpText() const override { return "Set raid target mark on target"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"mark", "marktarget", "raidtarget"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set raid target mark on target"; }
 };
 
 // --- /roll, /random, /rnd ---
@@ -365,8 +407,8 @@ public:
         ctx.gameHandler.randomRoll(minRoll, maxRoll);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"roll", "random", "rnd"}; }
-    std::string helpText() const override { return "Random dice roll"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"roll", "random", "rnd"}; }
+    [[nodiscard]] std::string helpText() const override { return "Random dice roll"; }
 };
 
 // --- Registration ---

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Item Flag Set catalog (.wifs) — novel
+// Wowee Open Item Flag Set catalog (.wifs) - novel
 // replacement for the bit-flag meanings used in
 // Item.dbc / item_template.Flags. Documents every
 // individual bit of the 32-bit item flags field with a
@@ -16,7 +16,7 @@ namespace pipeline {
 //
 // WoW's Item.dbc Flags field packs ~25 bits of metadata
 // like Heroic, Lootable, NoLoot, Conjured, Unique,
-// AccountBound, BindOnPickup, BindOnEquip — each
+// AccountBound, BindOnPickup, BindOnEquip - each
 // controlling a specific gameplay behavior. The hardcoded
 // client knows what each bit means via a switch
 // statement; this catalog exposes that table to
@@ -73,17 +73,17 @@ struct WoweeItemFlags {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t flagId) const;
-    const Entry* findByBit(uint32_t bitMask) const;
+    [[nodiscard]] const Entry* findById(uint32_t flagId) const;
+    [[nodiscard]] const Entry* findByBit(uint32_t bitMask) const;
 
     // Decode an item.flags integer into the list of
     // matching entries. Returns the entries whose bitMask
     // is set in the input. Used by tooltip generators
     // to expand 0x40240000 -> ["Heroic", "BindOnPickup",
     // "Unique"].
-    std::vector<const Entry*> decode(uint32_t flagsValue) const;
+    [[nodiscard]] std::vector<const Entry*> decode(uint32_t flagsValue) const;
 
     static const char* flagKindName(uint8_t k);
 };
@@ -97,16 +97,16 @@ public:
 
     // Preset emitters used by --gen-ifs* variants.
     //
-    //   makeStandard  — 8 canonical Item.dbc flag bits
+    //   makeStandard  - 8 canonical Item.dbc flag bits
     //                    (NoLoot / Conjured / Lootable /
     //                    Wrapped / Heroic / Deprecated /
     //                    NoUserDestroy / NoEquipCooldown).
-    //   makeBinding   — 5 binding-related flags
+    //   makeBinding   - 5 binding-related flags
     //                    (BindOnPickup / BindOnEquip /
     //                    BindOnUse / BindToAccount /
     //                    Soulbound) with isPositive=0
     //                    (these flags restrict trading).
-    //   makeServer    — 5 server-custom flag bits in the
+    //   makeServer    - 5 server-custom flag bits in the
     //                    high range (Donator / EventReward
     //                    / Anniversary / Honored /
     //                    Heroic25man) demonstrating

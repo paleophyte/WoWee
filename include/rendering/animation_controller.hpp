@@ -18,7 +18,7 @@ namespace rendering {
 class Renderer;
 
 // ============================================================================
-// AnimationController — thin adapter wrapping CharacterAnimator
+// AnimationController - thin adapter wrapping CharacterAnimator
 //
 // Bridges the Renderer world (camera state, CharacterRenderer, audio)
 // and the pure-logic CharacterAnimator + sub-FSMs. Public API unchanged.
@@ -42,7 +42,7 @@ public:
     /// Probe (or re-probe) animation capabilities for the current character model.
     /// Called once during initialize() / onCharacterFollow() and after model changes.
     void probeCapabilities();
-    const AnimCapabilitySet& getCapabilities() const { return characterAnimator_.getCapabilities(); }
+    [[nodiscard]] const AnimCapabilitySet& getCapabilities() const { return characterAnimator_.getCapabilities(); }
 
     // ── Per-frame update hooks (called from Renderer::update) ──────────────
     // Runs the character animation state machine (mounted + unmounted).
@@ -65,14 +65,13 @@ public:
     /// Play the one-shot reach animation used by the manual Z sheath toggle.
     void playWeaponSheathAnimation(bool sheathing);
     void cancelEmote();
-    bool isEmoteActive() const { return characterAnimator_.getActivity().isEmoteActive(); }
+    [[nodiscard]] bool isEmoteActive() const { return characterAnimator_.getActivity().isEmoteActive(); }
     static std::string getEmoteText(const std::string& emoteName,
                                     const std::string* targetName = nullptr);
     static uint32_t getEmoteDbcId(const std::string& emoteName);
     static std::string getEmoteTextByDbcId(uint32_t dbcId,
                                            const std::string& senderName,
                                            const std::string* targetName = nullptr);
-    static uint32_t getEmoteAnimByDbcId(uint32_t dbcId);
     static uint32_t getEmoteAnimByEmotesId(uint32_t emoteId);
     /// True if the Emotes.dbc entry is a persistent STATE_ emote (loops until
     /// cleared) rather than a one-shot.
@@ -81,18 +80,22 @@ public:
     // ── Targeting / combat ─────────────────────────────────────────────────
     void setTargetPosition(const glm::vec3* pos);
     void setInCombat(bool combat);
-    bool isInCombat() const { return inCombat_; }
-    const glm::vec3* getTargetPosition() const { return targetPosition_; }
+    [[nodiscard]] bool isInCombat() const { return inCombat_; }
+    [[nodiscard]] const glm::vec3* getTargetPosition() const { return targetPosition_; }
     void resetCombatVisualState();
-    bool isMoving() const;
+    [[nodiscard]] bool isMoving() const;
 
     // ── Melee combat ───────────────────────────────────────────────────────
     void triggerMeleeSwing();
     /// inventoryType: WoW inventory type (0=unarmed, 13=1H, 17=2H, 21=main-hand, …)
     /// is2HLoose: true for polearms/staves (use ATTACK_2H_LOOSE instead of ATTACK_2H)
+    /// isFist/isDagger describe the main hand; offHandIsFist/offHandIsDagger
+    /// describe the off-hand weapon, which picks the off-hand swing.
     void setEquippedWeaponType(uint32_t inventoryType, bool is2HLoose = false,
                                bool isFist = false, bool isDagger = false,
-                               bool hasOffHand = false, bool hasShield = false);
+                               bool hasOffHand = false, bool hasShield = false,
+                               bool offHandIsFist = false,
+                               bool offHandIsDagger = false);
     /// Play a special attack animation for a melee ability (spellId → SPECIAL_1H/2H/SHIELD_BASH/WHIRLWIND)
     void triggerSpecialAttack(uint32_t spellId);
 
@@ -107,9 +110,9 @@ public:
     }
     /// Trigger a ranged shot animation (Auto Shot, Shoot, Throw)
     void triggerRangedShot();
-    RangedWeaponType getEquippedRangedType() const { return weaponLoadout_.rangedType; }
+    [[nodiscard]] RangedWeaponType getEquippedRangedType() const { return weaponLoadout_.rangedType; }
     void setCharging(bool charging);
-    bool isCharging() const { return charging_; }
+    [[nodiscard]] bool isCharging() const { return charging_; }
 
     // ── Spell casting ──────────────────────────────────────────────────────
     /// Enter spell cast animation sequence:
@@ -134,7 +137,7 @@ public:
     // ── Crowd control ──────────────────────────────────────────────────────
     /// Enter/exit stunned state (loops STUN animation until cleared).
     void setStunned(bool stunned);
-    bool isStunned() const { return stunned_; }
+    [[nodiscard]] bool isStunned() const { return stunned_; }
 
     // ── Health-based idle ──────────────────────────────────────────────────
     /// When true, idle/combat-idle will prefer STAND_WOUND if the model has it.
@@ -182,14 +185,14 @@ public:
     void setM2TransportRiding(bool riding) { m2TransportRiding_ = riding; }
     void setMountPitchRoll(float pitch, float roll) { mountPitch_ = pitch; mountRoll_ = roll; }
     void clearMount();
-    bool isMounted() const { return mountInstanceId_ != 0; }
-    uint32_t getMountInstanceId() const { return mountInstanceId_; }
+    [[nodiscard]] bool isMounted() const { return mountInstanceId_ != 0; }
+    [[nodiscard]] uint32_t getMountInstanceId() const { return mountInstanceId_; }
 
     // ── Query helpers (used by Renderer) ───────────────────────────────────
-    bool isFootstepAnimationState() const;
-    float getMeleeSwingTimer() const { return meleeSwingTimer_; }
-    float getMountHeightOffset() const { return mountHeightOffset_; }
-    bool isTaxiFlight() const { return taxiFlight_; }
+    [[nodiscard]] bool isFootstepAnimationState() const;
+    [[nodiscard]] float getMeleeSwingTimer() const { return meleeSwingTimer_; }
+    [[nodiscard]] float getMountHeightOffset() const { return mountHeightOffset_; }
+    [[nodiscard]] bool isTaxiFlight() const { return taxiFlight_; }
 
 private:
     Renderer* renderer_ = nullptr;
@@ -238,9 +241,12 @@ private:
     int mountSeatAttachmentId_ = -1;
     glm::vec3 smoothedMountSeatPos_ = glm::vec3(0.0f);
     bool mountSeatSmoothingInit_ = false;
+    // Last frame's seat target, so the smoothing can tell a rider standing still
+    // from one being carried. Pressing no movement keys is not the same as not
+    // moving through the world, and on a boat the difference is the whole bug.
+    glm::vec3 lastMountSeatTarget_ = glm::vec3(0.0f);
     bool taxiFlight_ = false;
     bool m2TransportRiding_ = false;
-    bool sprintAuraActive_ = false;
 
     // ── Private helpers ──────────────────────────────────────────────────
     uint32_t resolveMeleeAnimId();

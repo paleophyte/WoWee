@@ -1,14 +1,18 @@
 #pragma once
 
 #include "core/window.hpp"
+#include "ui/unit_portrait.hpp"
+#include "ui/widget_renderer.hpp"
 #include "core/input.hpp"
 #include "core/entity_spawner.hpp"
 #include "core/appearance_composer.hpp"
 #include "core/world_loader.hpp"
 #include "game/character.hpp"
 #include "game/game_services.hpp"
+#include "pipeline/asset_inventory.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 #include <deque>
@@ -27,7 +31,7 @@ namespace wowee {
 namespace rendering { class Renderer; }
 namespace ui { class UIManager; }
 namespace auth { class AuthHandler; }
-namespace game { class GameHandler; class World; class ExpansionRegistry; }
+namespace game { class GameHandler; class World; class ExpansionRegistry; struct ExpansionProfile; }
 namespace pipeline { class AssetManager; class DBCLayout; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; }
@@ -72,8 +76,10 @@ public:
     void beatWatchdog();
 
     // State management
-    AppState getState() const { return state; }
+    [[nodiscard]] AppState getState() const { return state; }
     void setState(AppState newState);
+    /// The world connection dropped: tear the world down and say so.
+    void handleWorldDisconnect();
 
     // Accessors
     Window* getWindow() { return window.get(); }
@@ -85,10 +91,18 @@ public:
     pipeline::AssetManager* getAssetManager() { return assetManager.get(); }
     addons::AddonManager* getAddonManager() { return addonManager_.get(); }
     game::ExpansionRegistry* getExpansionRegistry() { return expansionRegistry_.get(); }
+
+    /// What assets were found at startup. Taken once, because it walks the
+    /// override tree and no screen should do that while it is being drawn.
+    const pipeline::AssetInventory& getAssetInventory() const { return assetInventory_; }
     pipeline::DBCLayout* getDBCLayout() { return dbcLayout_.get(); }
     bool setAssetExpansionOverride(const std::string& id);
-    const std::string& getAssetExpansionOverride() const { return assetExpansionOverrideId_; }
-    void reloadExpansionData(); // Reload DBC layouts, opcodes, etc. after expansion change
+    [[nodiscard]] const std::string& getAssetExpansionOverride() const { return assetExpansionOverrideId_; }
+    void reloadExpansionData();
+    /// The opcode table, update fields, packet parsers and DBC layouts a
+    /// protocol profile brings with it. Loaded at startup and on every
+    /// expansion change, which used to be two copies.
+    void loadExpansionTables(const game::ExpansionProfile& profile); // Reload DBC layouts, opcodes, etc. after expansion change
 
     // Singleton access
     static Application& getInstance() { return *instance; }
@@ -98,18 +112,24 @@ public:
     // Logout to login screen
     void logoutToLogin();
 
-    // Render bounds lookup (for click targeting / selection) — delegates to EntitySpawner
+    // Render bounds lookup (for click targeting / selection) - delegates to EntitySpawner
     bool getRenderBoundsForGuid(uint64_t guid, glm::vec3& outCenter, float& outRadius) const;
     bool getRenderFootZForGuid(uint64_t guid, float& outFootZ) const;
+    /// Light a game object's model while the player is pressing on it.
+    ///
+    /// A game object is used rather than selected, so it has no circle under
+    /// it; the press lighting the model is what says the click landed on this
+    /// one. Guid 0 takes the light off whatever had it.
+    void setPressedGameObject(uint64_t guid);
     bool getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) const;
 
-    // Character skin composite state — delegated to AppearanceComposer
-    const std::string& getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
-    const std::vector<std::string>& getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
-    uint32_t getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
-    uint32_t getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
-    uint32_t getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
-    uint32_t getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
+    // Character skin composite state - delegated to AppearanceComposer
+    [[nodiscard]] const std::string& getBodySkinPath() const { return appearanceComposer_ ? appearanceComposer_->getBodySkinPath() : emptyString_; }
+    [[nodiscard]] const std::vector<std::string>& getUnderwearPaths() const { return appearanceComposer_ ? appearanceComposer_->getUnderwearPaths() : emptyStringVec_; }
+    [[nodiscard]] uint32_t getSkinTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getSkinTextureSlotIndex() : 0; }
+    [[nodiscard]] uint32_t getCloakTextureSlotIndex() const { return appearanceComposer_ ? appearanceComposer_->getCloakTextureSlotIndex() : 0; }
+    [[nodiscard]] uint32_t getGryphonDisplayId() const { return entitySpawner_ ? entitySpawner_->getGryphonDisplayId() : 0; }
+    [[nodiscard]] uint32_t getWyvernDisplayId() const { return entitySpawner_ ? entitySpawner_->getWyvernDisplayId() : 0; }
 
     // Entity spawner access
     EntitySpawner* getEntitySpawner() { return entitySpawner_.get(); }
@@ -125,9 +145,68 @@ public:
 
 private:
     void update(float deltaTime);
+
+    /// One frame of being in the world - the largest arm of update()'s state
+    /// switch. updateCheckpoint travels by reference because the caller's catch
+    /// reports it: an exception here has to say where here was.
+    void updateInGame(float deltaTime, const char*& updateCheckpoint);
+
+    /// Everything the server says about how the player moves - speeds, rooting,
+    /// gravity, feather fall, water walking - handed to the camera that owns it.
+    void applyServerMovementState(float deltaTime);
+
+    /// Keep render instances on top of what the server says. A model is placed
+    /// once at spawn and would otherwise stay there while its target circle
+    /// follows the entity, which reads as a ring sliding off a still NPC.
+    void syncRenderInstancesToEntities(float deltaTime);
     void render();
     void performLogoutToLogin();
     void processDeferredLogoutToLogin();
+
+    /// Take the interface down, because the character it belongs to is leaving.
+    ///
+    /// The frames hold that character - their bags, their spells, their saved
+    /// layout - and whoever logs in next must not find any of it still there.
+    /// Beyond the data, the widget tree appends rather than replaces, so an
+    /// interface left standing is one the next world entry builds a second
+    /// copy on top of: every frame twice over, one sitting exactly on the
+    /// other. Clearing addonsLoaded_ without this is what made a second login
+    /// in one session come up doubled.
+    void unloadInterface();
+    /// Records how long one named stage of a frame took.
+    ///
+    /// The per-stage timings only ever spoke up above 50ms, which says which
+    /// stage stalled and nothing about where a frame's time normally goes. On
+    /// a phone the whole budget is 33ms, so every stage was silent and the
+    /// client was slow for reasons nothing reported. This keeps a running
+    /// average and worst case per stage and prints the breakdown periodically.
+    void noteStageTime(const char* stage, float milliseconds);
+    void reportStageTimes();
+
+    struct StageStat {
+        double totalMs = 0.0;
+        float worstMs = 0.0f;
+        int frames = 0;
+    };
+    /// WOWEE_FRAME_PROFILE. The breakdown below is reported at info, which the
+    /// log a bug report arrives with does not carry - so the one measurement
+    /// that answers "where does the frame go" was never in the logs it was
+    /// built for. With the flag set it is reported at warning instead.
+    bool frameProfileEnabled_ = false;
+    std::map<std::string, StageStat> stageStats_;
+    std::chrono::steady_clock::time_point stageStatsSince_{};
+    /// What assets were found at startup, so the login screen can say so
+    /// rather than every screen finding out separately.
+    pipeline::AssetInventory assetInventory_;
+
+
+    int stageStatFrames_ = 0;
+
+    /// WOWEE_SCREENSHOT: frames drawn before the picture is taken, so the
+    /// interface has settled into what it will actually look like.
+    static constexpr int kScreenshotFrame = 30;
+    int screenshotFrames_ = 0;
+
     void setupUICallbacks();
     void spawnPlayerCharacter();
     // Re-spawn the in-world player model in place after a live appearance change
@@ -147,6 +226,77 @@ private:
     std::unique_ptr<game::World> world;
     std::unique_ptr<pipeline::AssetManager> assetManager;
     std::unique_ptr<addons::AddonManager> addonManager_;
+    // Set by ReloadUI() from inside Lua, acted on between frames - the reload
+    // destroys the state that asked for it.
+    bool reloadUiPending_ = false;
+    /// Draws the widget tree addons build through CreateFrame/CreateTexture.
+    /// Holds the texture cache for Interface\ art, so it lives as long as the app.
+    ui::WidgetRenderer widgetRenderer_;
+    /// The live head-and-shoulders view the interface's portrait draws.
+    ui::UnitPortrait unitPortrait_;
+    /// Where the portrait's widget was found last time. Ids are stable, so
+    /// this saves a scan of every widget by name on every frame; the name is
+    /// still checked, because reloading the interface rebuilds the tree and
+    /// the id could then belong to something else.
+    uint32_t portraitWidgetId_ = 0;
+    /// The FrameXML frame the real minimap is drawn into, when the original
+    /// interface owns it. Looked up by name and remembered, the same as the
+    /// portrait.
+    uint32_t minimapWidgetId_ = 0;
+    /// The FrameXML frame the world map is drawn into, when the original
+    /// interface owns it. WorldMapDetailFrame rather than WorldMapFrame: the
+    /// first is the map area, the second is the panel around it.
+    uint32_t worldMapWidgetId_ = 0;
+    /// The target's face, on the same terms as the player's. A third offscreen
+    /// pass because all three are on screen at once and each holds a different
+    /// model - the alternative is reloading a model per frame, which is what a
+    /// shared view would amount to.
+    ui::UnitPortrait targetPortrait_;
+    /// And the focus, which is deliberate enough to be worth its own pass.
+    ui::UnitPortrait focusPortrait_;
+    /// The dressing room's figure, and its frame. The player plus whatever
+    /// has been tried on, which is the paperdoll with an overlay.
+    ui::UnitPortrait dressUpModel_;
+    uint32_t dressUpWidgetId_ = 0;
+    /// The auction house's own dressing room, which is a second frame with a
+    /// second try-on list rather than the same one reused.
+    ui::UnitPortrait auctionDressUpModel_;
+    uint32_t auctionDressUpWidgetId_ = 0;
+    /// The pet tab's figure. A creature by display id, like its portrait.
+    ui::UnitPortrait petModel_;
+    uint32_t petModelWidgetId_ = 0;
+    /// The stable's preview, which shows whichever slot the window selected
+    /// rather than the pet that is out.
+    ui::UnitPortrait stableModel_;
+    uint32_t stableModelWidgetId_ = 0;
+    /// The mount or critter the companion tab has selected.
+    ui::UnitPortrait companionModel_;
+    uint32_t companionModelWidgetId_ = 0;
+    /// The inspect window's figure, and the frame it is drawn into. Whole
+    /// body at the paperdoll's size, because that is what it is: someone
+    /// else's paperdoll.
+    ui::UnitPortrait inspectModel_;
+    uint32_t inspectModelWidgetId_ = 0;
+    /// And whoever this client is dealing with - the face in the gossip,
+    /// quest, merchant, flight master and trade panels. One view for all of
+    /// them because only one such window is open at a time.
+    ui::UnitPortrait npcPortrait_;
+    /// And the four party members. Affordable now that a portrait is sized for
+    /// the circle it is drawn into rather than for the paperdoll: at 160x200 a
+    /// party face is a sixteenth of the pixels the paperdoll's target is, and
+    /// four of them together cost a quarter of one of it.
+    std::array<ui::UnitPortrait, 4> partyPortraits_;
+    /// And the pet's, which is always a creature and so always has one.
+    ui::UnitPortrait petPortrait_;
+
+    /// The paperdoll's model view, and the frame it is drawn into. A second
+    /// offscreen pass rather than a shared one: the portrait shows the face
+    /// and this shows the whole figure, and they are on screen together.
+    ui::UnitPortrait paperdollModel_;
+    /// The facing already applied to the paperdoll, so only the change since
+    /// last frame is turned.
+    float paperdollFacing_ = 0.0f;
+    uint32_t paperdollWidgetId_ = 0;
     bool addonsLoaded_ = false;
     std::unique_ptr<game::ExpansionRegistry> expansionRegistry_;
     // Empty means assets follow the active protocol profile. "legacy" selects
@@ -176,6 +326,8 @@ private:
     bool running = false;
     bool renderingFrame_ = false;
     bool logoutToLoginPending_ = false;
+    /// Why the player is back at the login screen, when it was not their idea.
+    std::string disconnectNotice_;
     bool playerCharacterSpawned = false;
     bool npcsSpawned = false;
     bool spawnSnapToGround = true;
@@ -194,8 +346,7 @@ private:
     static inline const std::vector<std::string> emptyStringVec_;
 
     float facingSendCooldown_ = 0.0f;        // Rate-limits MSG_MOVE_SET_FACING
-    float lastSentCanonicalYaw_ = 1000.0f;   // Sentinel — triggers first send
-    float taxiStreamCooldown_ = 0.0f;
+    float lastSentCanonicalYaw_ = 1000.0f;   // Sentinel - triggers first send
     bool idleYawned_ = false;
 
     // M2 transport riding: last frame's locked (canonical) render position, used to
@@ -210,12 +361,15 @@ private:
     uint64_t lastWMORideTransportGuid_ = 0;
     uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
     // Set when a rider boards or transfers onto a WMO ship whose deck collision hasn't
-    // finished loading yet — holds the boarding-time offset (and freezes camera follow)
+    // finished loading yet - holds the boarding-time offset (and freezes camera follow)
     // until this exact transport instance's deck floor exists, instead of letting gravity
     // fold into the attachment and drop the rider through the hull.
     bool deckFloorPending_ = false;
 
     bool wasAutoAttacking_ = false;
+    /// Whether the player was swimming last frame, so weapons are put away
+    /// once on entering the water rather than every frame in it.
+    bool wasSwimmingForSheath_ = false;
 
     // Quest marker billboard sprites (above NPCs)
     void loadQuestMarkerModels();  // Now loads BLP textures

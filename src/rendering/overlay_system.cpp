@@ -1,4 +1,5 @@
 #include "rendering/overlay_system.hpp"
+#include "core/coordinates.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -21,20 +22,22 @@ OverlaySystem::~OverlaySystem() {
 void OverlaySystem::cleanup() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
-    if (selCirclePipeline_) { vkDestroyPipeline(device, selCirclePipeline_, nullptr); selCirclePipeline_ = VK_NULL_HANDLE; }
-    if (selCirclePipelineLayout_) { vkDestroyPipelineLayout(device, selCirclePipelineLayout_, nullptr); selCirclePipelineLayout_ = VK_NULL_HANDLE; }
-    if (selCircleVertBuf_) { vmaDestroyBuffer(vkCtx_->getAllocator(), selCircleVertBuf_, selCircleVertAlloc_); selCircleVertBuf_ = VK_NULL_HANDLE; selCircleVertAlloc_ = VK_NULL_HANDLE; }
-    if (selCircleIdxBuf_) { vmaDestroyBuffer(vkCtx_->getAllocator(), selCircleIdxBuf_, selCircleIdxAlloc_); selCircleIdxBuf_ = VK_NULL_HANDLE; selCircleIdxAlloc_ = VK_NULL_HANDLE; }
-    if (overlayPipeline_) { vkDestroyPipeline(device, overlayPipeline_, nullptr); overlayPipeline_ = VK_NULL_HANDLE; }
-    if (overlayPipelineLayout_) { vkDestroyPipelineLayout(device, overlayPipelineLayout_, nullptr); overlayPipelineLayout_ = VK_NULL_HANDLE; }
+    destroy(device, selCirclePipeline_);
+    destroy(device, selCirclePipelineLayout_);
+    destroy(vkCtx_->getAllocator(), selCircleVertBuf_, selCircleVertAlloc_);
+    destroy(vkCtx_->getAllocator(), selCircleIdxBuf_, selCircleIdxAlloc_);
+    destroy(device, overlayPipeline_);
+    destroy(device, brightnessPipeline_);
+    destroy(device, overlayPipelineLayout_);
 }
 
 void OverlaySystem::recreatePipelines() {
     if (!vkCtx_) return;
     VkDevice device = vkCtx_->getDevice();
     // Destroy only pipelines (keep geometry buffers)
-    if (selCirclePipeline_) { vkDestroyPipeline(device, selCirclePipeline_, nullptr); selCirclePipeline_ = VK_NULL_HANDLE; }
-    if (overlayPipeline_) { vkDestroyPipeline(device, overlayPipeline_, nullptr); overlayPipeline_ = VK_NULL_HANDLE; }
+    destroy(device, selCirclePipeline_);
+    destroy(device, overlayPipeline_);
+    destroy(device, brightnessPipeline_);
 }
 
 void OverlaySystem::setSelectionCircle(const glm::vec3& pos, float radius, const glm::vec3& color) {
@@ -73,8 +76,8 @@ void OverlaySystem::initSelectionCircle() {
     selCirclePipelineLayout_ = createPipelineLayout(device, {}, {pcRange});
 
     // Vertex input: binding 0, stride 12, vec3 at location 0
-    VkVertexInputBindingDescription vertBind{0, 12, VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription vertAttr{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
+    VkVertexInputBindingDescription vertBind{.binding = 0, .stride = 12, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription vertAttr{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0};
 
     // Build disc geometry as TRIANGLE_LIST (N=48 segments)
     constexpr int SEGMENTS = 48;
@@ -84,7 +87,7 @@ void OverlaySystem::initSelectionCircle() {
     verts.insert(verts.end(), {0.0f, 0.0f, 0.0f});
     // Ring vertices
     for (int i = 0; i <= SEGMENTS; ++i) {
-        float angle = 2.0f * 3.14159265f * static_cast<float>(i) / static_cast<float>(SEGMENTS);
+        float angle = core::coords::TWO_PI * static_cast<float>(i) / static_cast<float>(SEGMENTS);
         verts.push_back(std::cos(angle));
         verts.push_back(std::sin(angle));
         verts.push_back(0.0f);
@@ -125,7 +128,7 @@ void OverlaySystem::initSelectionCircle() {
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(selCirclePipelineLayout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
 
     vertShader.destroy();
@@ -138,9 +141,9 @@ void OverlaySystem::initSelectionCircle() {
 
 void OverlaySystem::renderSelectionCircle(const glm::mat4& view, const glm::mat4& projection,
                                            VkCommandBuffer cmd,
-                                           HeightQuery2D terrainHeight,
-                                           HeightQuery3D wmoHeight,
-                                           HeightQuery3D m2Height) {
+                                           const HeightQuery2D& terrainHeight,
+                                           const HeightQuery3D& wmoHeight,
+                                           const HeightQuery3D& m2Height) {
     if (!selCircleVisible_) return;
     initSelectionCircle();
     if (selCirclePipeline_ == VK_NULL_HANDLE || cmd == VK_NULL_HANDLE) return;
@@ -200,7 +203,7 @@ void OverlaySystem::initOverlayPipeline() {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 16;
+    pc.size = 112;  // mat4 invViewProj + vec4 colour + vec4 plane + vec4 params
 
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -227,7 +230,7 @@ void OverlaySystem::initOverlayPipeline() {
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(overlayPipelineLayout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
 
     vertMod.destroy(); fragMod.destroy();
@@ -235,12 +238,116 @@ void OverlaySystem::initOverlayPipeline() {
     if (overlayPipeline_) LOG_INFO("OverlaySystem: overlay pipeline initialized");
 }
 
+namespace {
+
+/// overlay.frag's push block. One definition, because there are two entry
+/// points into that shader and only one of them was keeping up with it.
+struct OverlayPush {
+    glm::mat4 invViewProj;
+    glm::vec4 color;
+    glm::vec4 plane;
+    glm::vec4 params;
+};
+static_assert(sizeof(OverlayPush) == 112, "must match overlay.frag's push block");
+
+OverlayPush makeOverlayPush(const glm::vec4& color, const glm::mat4& invViewProj,
+                            float waterZ, float softness, float rippleAmp,
+                            float time, bool hasSeam) {
+    OverlayPush p{};
+    p.invViewProj = invViewProj;
+    p.color = color;
+    p.plane = glm::vec4(0.0f, 0.0f, 0.0f, waterZ);
+    p.params = glm::vec4(softness, time, rippleAmp, hasSeam ? 1.0f : 0.0f);
+    return p;
+}
+
+}  // namespace
+
 void OverlaySystem::renderOverlay(const glm::vec4& color, VkCommandBuffer cmd) {
+    // Whole screen: no seam, so the shader skips the surface test entirely and
+    // the matrix and height below are never read.
+    renderWaterline(color, glm::mat4(1.0f), 0.0f, 0.0f, 0.0f, 0.0f, false, cmd);
+}
+
+void OverlaySystem::renderWaterline(const glm::vec4& color, const glm::mat4& invViewProj,
+                                    float waterZ, float softness, float rippleAmp,
+                                    float time, bool hasSeam, VkCommandBuffer cmd) {
     if (!overlayPipeline_) initOverlayPipeline();
     if (!overlayPipeline_ || cmd == VK_NULL_HANDLE) return;
+    OverlayPush push = makeOverlayPush(color, invViewProj, waterZ, softness, rippleAmp,
+                                       time, hasSeam);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, overlayPipeline_);
     vkCmdPushConstants(cmd, overlayPipelineLayout_,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, &color[0]);
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+void OverlaySystem::initBrightnessPipeline() {
+    if (brightnessPipeline_ != VK_NULL_HANDLE) return;
+    if (!vkCtx_) return;
+    // Reuse the overlay pipeline's layout (same fragment push constant); only
+    // the blend state differs.
+    if (!overlayPipeline_) initOverlayPipeline();
+    if (!overlayPipelineLayout_) return;
+    VkDevice device = vkCtx_->getDevice();
+
+    VkShaderModule vertMod, fragMod;
+    if (!vertMod.loadFromFile(device, "assets/shaders/postprocess.vert.spv") ||
+        !fragMod.loadFromFile(device, "assets/shaders/overlay.frag.spv")) {
+        LOG_ERROR("OverlaySystem: failed to load brightness shaders");
+        vertMod.destroy(); fragMod.destroy();
+        return;
+    }
+
+    // result.rgb = src.rgb * dst.rgb + dst.rgb * 1 = dst.rgb * (1 + src.rgb).
+    // Pushing src.rgb = (scale - 1) yields dst.rgb * scale - a true luminance
+    // multiply. Alpha is left untouched (dst passes through).
+    VkPipelineColorBlendAttachmentState mul{};
+    mul.blendEnable = VK_TRUE;
+    mul.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+    mul.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    mul.colorBlendOp = VK_BLEND_OP_ADD;
+    mul.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    mul.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    mul.alphaBlendOp = VK_BLEND_OP_ADD;
+    mul.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    brightnessPipeline_ = PipelineBuilder()
+        .setShaders(vertMod.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragMod.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({}, {})
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setNoDepthTest()
+        .setColorBlendAttachment(mul)
+        .setMultisample(vkCtx_->getMsaaSamples())
+        .setLayout(overlayPipelineLayout_)
+        .setRenderPass(vkCtx_->getImGuiRenderPass())
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx_->getPipelineCache());
+
+    vertMod.destroy(); fragMod.destroy();
+    if (brightnessPipeline_) LOG_INFO("OverlaySystem: brightness pipeline initialized");
+}
+
+void OverlaySystem::renderBrightnessScale(float scale, VkCommandBuffer cmd) {
+    if (scale <= 1.0f) return; // darkening handled by the black overlay path
+    if (!brightnessPipeline_) initBrightnessPipeline();
+    if (!brightnessPipeline_ || cmd == VK_NULL_HANDLE) return;
+    // overlay.frag outputs the pushed color; the blend multiplies it by dst.
+    //
+    // The whole block, not just the colour. This pushed sixteen bytes back when
+    // the block started with one, and kept doing it after a mat4 was put in
+    // front: the colour landed in the matrix's first row and everything the
+    // shader actually reads was whatever the last draw had left there. It runs
+    // whenever brightness is above neutral, so the screen flashed green or red
+    // by the frame.
+    const glm::vec4 tint(scale - 1.0f, scale - 1.0f, scale - 1.0f, 1.0f);
+    OverlayPush push = makeOverlayPush(tint, glm::mat4(1.0f), 0.0f, 0.0f, 0.0f, 0.0f, false);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, brightnessPipeline_);
+    vkCmdPushConstants(cmd, overlayPipelineLayout_,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 

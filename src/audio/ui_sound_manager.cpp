@@ -1,4 +1,5 @@
 #include "audio/ui_sound_manager.hpp"
+#include "audio/sample_load.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -12,6 +13,7 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
         return false;
     }
 
+    assets_ = assets;
     LOG_INFO("UISoundManager: Initializing...");
 
     // Load window sounds
@@ -90,14 +92,8 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
     pickupBookSounds_.resize(1);
     bool pickupBookLoaded = loadSound("Sound\\Interface\\PickUp\\PickUpBook.wav", pickupBookSounds_[0], assets);
 
-    pickupClothSounds_.resize(1);
-    loadSound("Sound\\Interface\\PickUp\\PickUpCloth_Leather01.wav", pickupClothSounds_[0], assets);
 
-    pickupFoodSounds_.resize(1);
-    loadSound("Sound\\Interface\\PickUp\\PickUpFoodGeneric.wav", pickupFoodSounds_[0], assets);
 
-    pickupGemSounds_.resize(1);
-    loadSound("Sound\\Interface\\PickUp\\PickUpGems.wav", pickupGemSounds_[0], assets);
 
     // Load eating/drinking sounds
     eatingSounds_.resize(1);
@@ -135,6 +131,12 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
         }
     }
 
+    // New-mail notification (dedicated cue, falling back to the whisper sound)
+    mailSounds_.resize(1);
+    if (!loadSound("Sound\\Interface\\iTellMessage.wav", mailSounds_[0], assets)) {
+        mailSounds_ = whisperSounds_;
+    }
+
     // Minimap ping sound
     minimapPingSounds_.resize(1);
     if (!loadSound("Sound\\Interface\\MapPing.wav", minimapPingSounds_[0], assets)) {
@@ -167,20 +169,97 @@ void UiSoundManager::shutdown() {
 }
 
 bool UiSoundManager::loadSound(const std::string& path, UISample& sample, pipeline::AssetManager* assets) {
-    sample.path = path;
-    sample.loaded = false;
+    return loadSampleFile(path, sample, assets, "UISoundManager");
+}
 
-    try {
-        sample.data = assets->readFile(path);
-        if (!sample.data.empty()) {
-            sample.loaded = true;
-            return true;
+void UiSoundManager::ensureSoundEntriesLoaded() {
+    if (soundEntriesBuilt_) return;
+    soundEntriesBuilt_ = true;          // once, whether or not it works
+    if (!assets_) return;
+
+    auto dbc = assets_->loadDBC("SoundEntries.dbc");
+    if (!dbc || !dbc->isLoaded()) {
+        LOG_WARNING("UISoundManager: SoundEntries.dbc not available; "
+                    "PlaySound falls back to the names mapped by hand");
+        return;
+    }
+    // 3.3.5a layout: 0 ID, 1 SoundType, 2 Name, 3..12 File[0..9],
+    // 13..22 Freq[0..9], 23 DirectoryBase. The same reading zone_manager and
+    // npc_voice_manager already make of this table.
+    if (dbc->getFieldCount() < 24) {
+        LOG_WARNING("UISoundManager: SoundEntries.dbc has ", dbc->getFieldCount(),
+                    " fields, expected at least 24");
+        return;
+    }
+    for (uint32_t row = 0; row < dbc->getRecordCount(); ++row) {
+        std::string name = dbc->getString(row, 2);
+        if (name.empty()) continue;
+        for (char& ch : name) {
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
         }
-    } catch (const std::exception& e) {
-        LOG_ERROR("UISoundManager: Failed to load ", path, ": ", e.what());
+        const std::string dir = dbc->getString(row, 23);
+        std::vector<std::string> paths;
+        for (uint32_t f = 3; f <= 12; ++f) {
+            const std::string file = dbc->getString(row, f);
+            if (file.empty()) continue;
+            paths.push_back(dir.empty() ? file : dir + "\\" + file);
+        }
+        // The first row wins. Names repeat in this table and the later rows
+        // are variants; a UI click wants one sound, not a different one each
+        // time.
+        if (!paths.empty()) soundPathsByName_.emplace(name, std::move(paths));
+    }
+    LOG_INFO("UISoundManager: ", soundPathsByName_.size(),
+             " sound names from SoundEntries.dbc");
+}
+
+bool UiSoundManager::playByName(const std::string& soundName) {
+    if (!initialized_ || soundName.empty()) return false;
+    ensureSoundEntriesLoaded();
+
+    std::string key = soundName;
+    for (char& ch : key) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     }
 
-    return false;
+    auto cached = namedSamples_.find(key);
+    if (cached == namedSamples_.end()) {
+        auto it = soundPathsByName_.find(key);
+        if (it == soundPathsByName_.end()) return false;
+        UISample sample;
+        sample.loaded = false;
+        for (const std::string& path : it->second) {
+            if (loadSound(path, sample, assets_)) break;
+        }
+        // Remembered even when nothing loaded, so a name whose file this
+        // install does not have is looked for once rather than on every click.
+        cached = namedSamples_.emplace(key, std::move(sample)).first;
+    }
+    if (!cached->second.loaded) return false;
+
+    // What happened, not what was attempted. playSound2D decodes WAV and
+    // answers false for anything else, and SoundEntries lists a couple of
+    // thousand mp3s among its wavs - claiming success for one of those would
+    // skip the fallback below this and play nothing at all.
+    return AudioEngine::instance().playSound2D(cached->second.data,
+                                               0.7f * volumeScale_, 1.0f);
+}
+
+bool UiSoundManager::playFile(const std::string& path) {
+    if (!initialized_ || path.empty() || !assets_) return false;
+
+    auto cached = namedSamples_.find(path);
+    if (cached == namedSamples_.end()) {
+        UISample sample;
+        sample.loaded = false;
+        loadSound(path, sample, assets_);
+        // Remembered either way, so a path this install does not have is read
+        // for once rather than on every call.
+        cached = namedSamples_.emplace(path, std::move(sample)).first;
+    }
+    if (!cached->second.loaded) return false;
+    return AudioEngine::instance().playSound2D(cached->second.data,
+                                               0.7f * volumeScale_, 1.0f);
 }
 
 void UiSoundManager::playSound(const std::vector<UISample>& library) {
@@ -201,11 +280,10 @@ void UiSoundManager::playQuestLogOpen() { playSound(questLogOpenSounds_); }
 void UiSoundManager::playQuestLogClose() { playSound(questLogCloseSounds_); }
 void UiSoundManager::playCharacterSheetOpen() { playSound(characterSheetOpenSounds_); }
 void UiSoundManager::playCharacterSheetClose() { playSound(characterSheetCloseSounds_); }
-void UiSoundManager::playAuctionHouseOpen() { playSound(auctionOpenSounds_); }
-void UiSoundManager::playAuctionHouseClose() { playSound(auctionCloseSounds_); }
 void UiSoundManager::playGuildBankOpen() { playSound(guildBankOpenSounds_); }
 void UiSoundManager::playGuildBankClose() { playSound(guildBankCloseSounds_); }
-
+void UiSoundManager::playAuctionHouseOpen() { playSound(auctionOpenSounds_); }
+void UiSoundManager::playAuctionHouseClose() { playSound(auctionCloseSounds_); }
 // Button sounds
 void UiSoundManager::playButtonClick() { playSound(buttonClickSounds_); }
 void UiSoundManager::playMenuButtonClick() { playSound(menuButtonSounds_); }
@@ -226,10 +304,6 @@ void UiSoundManager::playLootItem() { playSound(lootItemSounds_); }
 void UiSoundManager::playDropOnGround() { playSound(dropSounds_); }
 void UiSoundManager::playPickupBag() { playSound(pickupBagSounds_); }
 void UiSoundManager::playPickupBook() { playSound(pickupBookSounds_); }
-void UiSoundManager::playPickupCloth() { playSound(pickupClothSounds_); }
-void UiSoundManager::playPickupFood() { playSound(pickupFoodSounds_); }
-void UiSoundManager::playPickupGem() { playSound(pickupGemSounds_); }
-
 // Eating/drinking
 void UiSoundManager::playEating() { playSound(eatingSounds_); }
 void UiSoundManager::playDrinking() { playSound(drinkingSounds_); }
@@ -247,6 +321,7 @@ void UiSoundManager::playTargetDeselect() { playSound(deselectTargetSounds_); }
 
 // Chat notifications
 void UiSoundManager::playWhisperReceived() { playSound(whisperSounds_); }
+void UiSoundManager::playMailReceived() { playSound(mailSounds_); }
 
 // Minimap ping
 void UiSoundManager::playMinimapPing() { playSound(minimapPingSounds_); }

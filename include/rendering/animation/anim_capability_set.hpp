@@ -29,11 +29,11 @@ struct AnimOutput {
 
     /// Construct a valid output.
     static AnimOutput ok(uint32_t id, bool looping) {
-        return {id, looping, true};
+        return {.animId = id, .loop = looping, .valid = true};
     }
     /// Construct an invalid output (STAY policy).
     static AnimOutput stay() {
-        return {0, false, false};
+        return {.animId = 0, .loop = false, .valid = false};
     }
 };
 
@@ -83,12 +83,16 @@ struct AnimCapabilitySet {
     uint32_t resolvedReadyRifle = 0;
     uint32_t resolvedReadyCrossbow = 0;
     uint32_t resolvedReadyThrown = 0;
+    /// A wand's stance: the directed spell pose, arm out in front.
+    uint32_t resolvedReadyWand = 0;
 
     // ── Ranged attack resolved IDs ──────────────────────────────────────
     uint32_t resolvedFireBow = 0;
     uint32_t resolvedAttackRifle = 0;
     uint32_t resolvedAttackCrossbow = 0;
     uint32_t resolvedAttackThrown = 0;
+    /// A wand's shot, which is a directed cast rather than a shouldered shot.
+    uint32_t resolvedAttackWand = 0;
     uint32_t resolvedLoadBow = 0;
     uint32_t resolvedLoadRifle = 0;
 
@@ -120,23 +124,21 @@ struct AnimCapabilitySet {
     uint32_t resolvedLoot = 0;
 
     // ── Capability flags (bitfield) ─────────────────────────────────────
-    bool hasStand : 1;
-    bool hasWalk : 1;
-    bool hasRun : 1;
-    bool hasSprint : 1;
-    bool hasWalkBackwards : 1;
-    bool hasJump : 1;
-    bool hasSwim : 1;
-    bool hasMelee : 1;
-    bool hasStealth : 1;
-    bool hasDeath : 1;
-    bool hasMount : 1;
+    bool hasStand : 1 = false;
+    bool hasWalk : 1 = false;
+    bool hasRun : 1 = false;
+    bool hasSprint : 1 = false;
+    bool hasWalkBackwards : 1 = false;
+    bool hasJump : 1 = false;
+    bool hasSwim : 1 = false;
+    bool hasMelee : 1 = false;
+    bool hasStealth : 1 = false;
+    bool hasDeath : 1 = false;
+    bool hasMount : 1 = false;
 
     // Default-initialize all flags to false
     AnimCapabilitySet()
-        : hasStand(false), hasWalk(false), hasRun(false), hasSprint(false),
-          hasWalkBackwards(false), hasJump(false), hasSwim(false),
-          hasMelee(false), hasStealth(false), hasDeath(false), hasMount(false) {}
+         {}
 };
 
 } // namespace rendering

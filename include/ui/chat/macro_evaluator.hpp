@@ -1,4 +1,4 @@
-// MacroEvaluator — WoW macro conditional parser and evaluator.
+// MacroEvaluator - WoW macro conditional parser and evaluator.
 // Extracted from evaluateMacroConditionals() in chat_panel_commands.cpp.
 // Phase 4.4 of chat_panel_ref.md.
 #pragma once
@@ -41,13 +41,13 @@ private:
     bool evalCondition(const std::string& cond, uint64_t& tgt) const;
 
     /** Resolve effective target GUID (follows @/target= overrides). */
-    uint64_t resolveEffectiveTarget(uint64_t tgt) const;
+    [[nodiscard]] uint64_t resolveEffectiveTarget(uint64_t tgt) const;
 
     IGameState& gameState_;
     IModifierState& modState_;
 };
 
-// Convenience free function — thin wrapper over MacroEvaluator.
+// Convenience free function - thin wrapper over MacroEvaluator.
 // Used by command modules (combat_commands, system_commands, target_commands).
 std::string evaluateMacroConditionals(const std::string& rawArg,
                                       game::GameHandler& gameHandler,

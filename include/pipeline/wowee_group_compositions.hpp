@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Group Composition catalog (.wgrp) — novel
+// Wowee Open Group Composition catalog (.wgrp) - novel
 // replacement for the hardcoded LFG / Dungeon Finder
 // group-composition rules. Defines per-instance role
 // quotas: how many tanks, healers, and damage dealers a
@@ -65,20 +65,20 @@ struct WoweeGroupComposition {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t compId) const;
+    [[nodiscard]] const Entry* findById(uint32_t compId) const;
 
     // Returns all compositions registered for one instance
     // (typically the per-difficulty variants). Used by the
     // LFG UI to populate the difficulty/comp picker.
-    std::vector<const Entry*> findByMap(uint32_t mapId) const;
+    [[nodiscard]] std::vector<const Entry*> findByMap(uint32_t mapId) const;
 
     // Returns true if a queueing party of (tanks, healers,
     // dps) satisfies the composition's role requirements.
     // Used by the matchmaker to decide if a group is ready
     // to launch.
-    bool partyMeetsComp(uint32_t compId,
+    [[nodiscard]] bool partyMeetsComp(uint32_t compId,
                          uint8_t haveTanks,
                          uint8_t haveHealers,
                          uint8_t haveDps) const;
@@ -93,16 +93,16 @@ public:
 
     // Preset emitters used by --gen-grp* variants.
     //
-    //   makeFiveMan — 3 5-man composition variants
+    //   makeFiveMan - 3 5-man composition variants
     //                  (Classic 1T/1H/3D, Heavy-Heal
     //                  1T/2H/2D for trash, Roleless 5D
     //                  speed runs with requireSpec=0).
-    //   makeRaid10  — 3 10-man comps (Standard 2T/3H/5D,
+    //   makeRaid10  - 3 10-man comps (Standard 2T/3H/5D,
     //                  Weighted 2T/4H/4D for healing-
     //                  heavy fights, MeleeStack 1T/2H/7D
     //                  for melee-cleave fights without
     //                  a tank swap mechanic).
-    //   makeRaid25  — 3 25-man comps (Standard 2T/6H/17D,
+    //   makeRaid25  - 3 25-man comps (Standard 2T/6H/17D,
     //                  HealingHeavy 1T/8H/16D for ICC,
     //                  ZergDPS 0T/4H/21D for tank-immune
     //                  bosses).

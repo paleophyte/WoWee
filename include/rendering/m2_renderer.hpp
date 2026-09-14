@@ -1,7 +1,12 @@
 #pragma once
 
+#include "rendering/collision_geometry.hpp"
+#include "rendering/spatial_grid.hpp"
+#include "rendering/shadow_params.hpp"
+
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/grass_clearing.hpp"
 #include "rendering/m2_model_classifier.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
@@ -32,6 +37,13 @@ class VkContext;
 class VkTexture;
 class HiZSystem;
 
+// Ceiling on the bone matrices computed and uploaded for one M2 instance.
+// WoW models run well past a hundred bones - the largest shipped model has
+// 315 - and a vertex weighted to a bone above this ceiling would read outside
+// its instance's range in the mega bone buffer, which is what threw stray
+// spikes out of water elementals and other high-bone-count creatures.
+inline constexpr uint32_t kMaxBonesPerInstance = 512;
+
 /**
  * GPU representation of an M2 model
  */
@@ -45,7 +57,10 @@ struct M2ModelGPU {
         uint32_t indexStart = 0;   // offset in indices (not bytes)
         uint32_t indexCount = 0;
         bool hasAlpha = false;
+        /// The alpha is a real silhouette, not an atlas leftover.
+        bool alphaIsSilhouette = false;
         bool colorKeyBlack = false;
+        glm::vec3 tint{1.0f};  ///< the batch's authored colour
         uint16_t textureAnimIndex = 0xFFFF; // 0xFFFF = no texture animation
         uint16_t blendMode = 0;   // 0=Opaque, 1=AlphaKey, 2=Alpha, 3=Add, etc.
         uint16_t materialFlags = 0; // M2 material flags (0x01=Unlit, 0x04=TwoSided, 0x10=NoDepthWrite)
@@ -55,6 +70,21 @@ struct M2ModelGPU {
         bool lanternGlowHint = false; // Texture/model hints this batch is a glow-card billboard
         bool glowCardLike = false; // Batch likely is a flat emissive card that should be sprite-replaced
         bool preserveGlowMesh = false; // Keep emissive glass/fixture mesh below its glow sprite
+        // Forge fire card: the flame/coals/glow batches of a forge, as opposed
+        // to the masonry and ironwork the rest of the model is made of.
+        bool forgeFireCard = false;
+        // A sky model's star-point layer. Suppressed when the client draws its
+        // own stars instead: the authored layer is a 256x256 compressed texture
+        // magnified across the whole dome, which is soft at any resolution and
+        // softer at a high one.
+        bool starLayer = false;
+        /// A cone of light drawn as geometry, picked out by its texture.
+        ///
+        /// Per batch rather than per model, because the model that carries the
+        /// zeppelin's searchlight also carries its fins, its engine, a bike
+        /// and a goblin pedlar - flagging the whole of HordeZepAnimation
+        /// would have softened all of them and cut haze holes in the crew.
+        bool volumetricBeam = false;
         uint8_t glowTint = 0; // 0=warm, 1=cool, 2=red
         float batchOpacity = 1.0f; // Resolved texture weight opacity (0=transparent, skip batch)
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
@@ -120,11 +150,17 @@ struct M2ModelGPU {
         std::vector<std::vector<uint32_t>> cellWallTris;
 
         void build();
+        /// The triangles of one of the two cell arrays that a query box
+        /// reaches. The two queries below differ only in which they pass.
+        void gatherTrisInRange(const std::vector<std::vector<uint32_t>>& cells,
+                               float minX, float minY, float maxX, float maxY,
+                               std::vector<uint32_t>& out) const;
+
         void getFloorTrisInRange(float minX, float minY, float maxX, float maxY,
                                  std::vector<uint32_t>& out) const;
         void getWallTrisInRange(float minX, float minY, float maxX, float maxY,
                                 std::vector<uint32_t>& out) const;
-        bool valid() const { return triCount > 0; }
+        [[nodiscard]] bool valid() const { return triCount > 0; }
     };
     CollisionMesh collision;
 
@@ -140,13 +176,31 @@ struct M2ModelGPU {
     bool isInstancePortal = false; // Instance portal model (spin + glow)
     bool disableAnimation = false; // Keep foliage/tree doodads visually stable
     bool shadowWindFoliage = false; // Apply wind sway in shadow pass for foliage/tree cards
+    bool isHangingCloth = false;    // Banner/flag/tapestry: sways from the end it is held by
+    bool isStandingCloth = false;   // ...and that end is the foot of a planted pole
     bool isFoliageLike = false;     // Model name matches foliage/tree/bush/grass etc (precomputed)
     bool isElvenLike = false;       // Model name matches elf/elven/quel (precomputed)
     bool isLanternLike = false;     // Model name matches lantern/lamp/light (precomputed)
     bool isKoboldFlame = false;     // Model name matches kobold+(candle/torch/mine) (precomputed)
     bool isLavaModel = false;       // Model name contains lava/molten/magma (UV scroll fallback)
-    bool isSkyBird = false;         // Flying bird/bat doodad — hide until animation range
-    bool isLightBeam = false;       // Lighthouse/light-ray beam — distant bones must keep updating
+    bool isSkyBird = false;         // Flying bird/bat doodad - hide until animation range
+    bool isLightBeam = false;       // Lighthouse/light-ray beam - distant bones must keep updating
+    bool isVolumetricBeam = false;  // Light drawn as geometry; softened at its silhouette
+    /// Play the sequence forward, then backward, rather than looping it.
+    ///
+    /// A searchlight sweeps one way and then the other. Wrapping its timeline
+    /// at the end of the sequence throws the beam back to where it started in
+    /// a single frame, which reads as a jump - the light is at one side of the
+    /// arc and then, without crossing the middle, at the other. Reversing
+    /// instead is what the sweep actually is.
+    bool pingPongAnim = false;
+    /// Which bones the reversing clock applies to, one byte per bone.
+    ///
+    /// The searchlight shares HordeZepAnimation with the zeppelin's fins and
+    /// propeller, and reversing the whole timeline turned the propeller
+    /// backwards for half of every cycle. Only the bones the beam is actually
+    /// skinned to run backward; everything else keeps looping forward.
+    std::vector<uint8_t> pingPongBones;
     bool isTransportDoodad = false; // Animated ship sail/paddle child
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
@@ -167,7 +221,7 @@ struct M2ModelGPU {
     std::vector<uint16_t> textureTransformLookup;
     std::vector<int> idleVariationIndices;  // Sequence indices for idle variations (animId 0)
 
-    bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
+    [[nodiscard]] bool isValid() const { return vertexBuffer != VK_NULL_HANDLE && indexCount > 0; }
 };
 
 /**
@@ -209,6 +263,21 @@ struct M2Instance {
     float variationTimer = 0.0f; // Time until next variation attempt (ms)
     bool playingVariation = false;// Currently playing a one-shot variation
 
+    /// Stop at the end of the sequence and stay there.
+    ///
+    /// A door is a pose, not a performance: the server says open or closed and
+    /// the model holds that. Without this a one-shot ran to its end and went
+    /// back to the idle sequence, which for a door is the closed pose - so an
+    /// open door swung open and shut itself, over and over.
+    bool holdAtEnd = false;
+
+    /// Lit while the player is pressing on this instance: 0 none, 1 full.
+    ///
+    /// A game object has no selection circle - it is used rather than selected
+    /// - so the press is the only thing that can say the click landed on this
+    /// one and not the scenery beside it.
+    float highlight = 0.0f;
+
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
     std::vector<M2Particle> particles;
@@ -247,12 +316,18 @@ struct M2Instance {
     // bound radius), populated by recomputeCachedCullFactors(). The per-frame SSBO
     // upload just multiplies by the smoothed render distance and packs the rest.
     float cachedEffectiveMaxDistSqFactor = 1.0f;  // multiplied by maxRenderDistanceSq each frame
+    /// +1 playing forward, -1 playing back. See M2ModelGPU::pingPongAnim.
+    float animDir = 1.0f;
+    /// The reversing clock, for the bones named in pingPongBones. The ordinary
+    /// animTime beside it keeps looping, so the same model can sweep a beam
+    /// back and forth while its propeller turns one way.
+    float animTimeAlt = 0.0f;
     float cachedPaddedRadius = 0.0f;              // sphere radius used by the cull compute
     float portalSpinAngle = 0.0f;  // Accumulated spin angle for portal rotation
     const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
 
     // Result of the most recent GPU cull dispatch that actually covered this
-    // instance, matched back by instance ID (never by array index — see
+    // instance, matched back by instance ID (never by array index - see
     // cullSubmittedIds_).  Defaults to visible so an instance created after the
     // in-flight dispatch draws immediately instead of waiting ~2 frames for its
     // first cull result.
@@ -278,13 +353,13 @@ struct M2Instance {
     // skip the memcpy when the bones are unchanged and still at the same slot.
     uint32_t megaBoneUploadedSlot[2] = {0, 0};
 
-    // Per-instance bone SSBO (double-buffered) — legacy; see mega bone SSBO in M2Renderer
+    // Per-instance bone SSBO (double-buffered) - legacy; see mega bone SSBO in M2Renderer
     ::VkBuffer boneBuffer[2] = {};
     VmaAllocation boneAlloc[2] = {};
     void* boneMapped[2] = {};
     VkDescriptorSet boneSet[2] = {};
 
-    // Mega bone SSBO offset — base bone index for this instance (set per-frame in prepareRender)
+    // Mega bone SSBO offset - base bone index for this instance (set per-frame in prepareRender)
     uint32_t megaBoneOffset = 0;
 
     void updateModelMatrix();
@@ -303,7 +378,7 @@ struct SmokeParticle {
     uint32_t instanceId = 0;
 };
 
-// M2 material UBO — matches M2Material in m2.frag.glsl (set 1, binding 2)
+// M2 material UBO - matches M2Material in m2.frag.glsl (set 1, binding 2)
 struct M2MaterialUBO {
     int32_t hasTexture;
     int32_t alphaTest;
@@ -315,9 +390,22 @@ struct M2MaterialUBO {
     float interiorDarken;
     float specularIntensity;
     float emissiveBoost;
+    // The batch's authored colour, from the M2's colour track, with any
+    // flicker already folded in. Three scalars rather than a vec3 so the
+    // std140 rules stay trivial.
+    float tintR;
+    float tintG;
+    float tintB;
+    /// Light drawn as geometry - a searchlight cone, a god ray, a shaft
+    /// through a window. The fragment shader fades it out where the surface
+    /// turns away from the eye, so the mesh's silhouette stops being an edge.
+    int32_t volumetricBeam;
+    /// A flame card. Fades out over the top of its own model, so the card's
+    /// upper edge is not where the fire stops.
+    int32_t fireCard;
 };
 
-// M2 params UBO — matches M2Params in m2.vert.glsl (set 1, binding 1)
+// M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
 struct M2ParamsUBO {
     float uvOffsetX;
     float uvOffsetY;
@@ -341,16 +429,22 @@ public:
     void setSkyMode(bool enabled) { skyMode_ = enabled; }
     void shutdown();
 
-    bool hasModel(uint32_t modelId) const;
+    [[nodiscard]] bool hasModel(uint32_t modelId) const;
     bool loadModel(const pipeline::M2Model& model, uint32_t modelId);
     /** Force-remove a model and all its GPU resources. Caller must ensure no instances reference it. */
     void unloadModel(uint32_t modelId);
     /** Mark a loaded model as a spell effect (full-brightness particles, no collision). */
     void markModelAsSpellEffect(uint32_t modelId);
 
+    /// Instances of the same model at the same spot are treated as one placement,
+    /// which is right for the static world and wrong for anything whose position
+    /// arrives later from a parent. Pass allowPositionDedup=false for a child
+    /// instance created at a placeholder position - see the note in
+    /// setInstanceTransform on why the placeholder key outlives the placement.
     uint32_t createInstance(uint32_t modelId, const glm::vec3& position,
                             const glm::vec3& rotation = glm::vec3(0.0f),
-                            float scale = 1.0f);
+                            float scale = 1.0f,
+                            bool allowPositionDedup = true);
     uint32_t createInstanceWithMatrix(uint32_t modelId, const glm::mat4& modelMatrix,
                                        const glm::vec3& position);
 
@@ -383,7 +477,7 @@ public:
      * Initialize shadow pipeline (Phase 7)
      */
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
-    bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
+    [[nodiscard]] bool hasShadowPipeline() const { return shadowPipeline_ != VK_NULL_HANDLE; }
 
     /**
      * Render depth-only pass for shadow casting
@@ -407,23 +501,61 @@ public:
     void renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
+    /// WOWEE_M2_CENSUS: what a model is actually drawn at, said once each.
+    void censusInstance(const M2Instance& instance);
+
     void setInstanceTransform(uint32_t instanceId, const glm::mat4& transform);
     void setInstanceAnimationFrozen(uint32_t instanceId, bool frozen);
+    /// Play an animation once and stay on its last frame.
+    ///
+    /// skipToEnd puts the model there immediately, which is what a door that
+    /// was already open when it came into view wants - the swing belongs to
+    /// the moment it opens, not to the moment it is first seen.
+    void setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
+                                  bool skipToEnd);
+
+    /// Light an instance while it is being pressed on. 0 clears it.
+    void setInstanceHighlight(uint32_t instanceId, float amount);
+    /// Take the light off whatever has it, whichever instance that was.
+    void clearInstanceHighlights();
     /// Set the animation sequence by animation ID (e.g. anim::OPEN, anim::CLOSE).
     /// Finds the first sequence with matching ID. Unfreezes the instance and resets time.
     void setInstanceAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true);
     /// Check if a model instance has a specific animation ID in its sequence table.
-    bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
-    float getInstanceAnimDuration(uint32_t instanceId) const;
+    [[nodiscard]] bool hasAnimation(uint32_t instanceId, uint32_t animationId) const;
+    [[nodiscard]] float getInstanceAnimDuration(uint32_t instanceId) const;
     /// World-space visual bounding sphere of an instance (center + radius),
     /// used for cursor picking and selection circles. Returns false for an
     /// unknown instance or a degenerate (zero-radius) model.
     bool getInstanceBounds(uint32_t instanceId, glm::vec3& outCenter, float& outRadius) const;
+
+    /// The world-space box of an instance's collision geometry.
+    ///
+    /// What a lift's deck actually covers, as opposed to how far its origin is
+    /// from you. Boarding a generic M2 transport is decided on a radius around
+    /// that origin, which is why standing beside an Undercity lift shaft
+    /// attaches you to the car.
+    bool getInstanceWorldBounds(uint32_t instanceId, glm::vec3& outMin, glm::vec3& outMax) const;
+
+    /// The floor one named instance offers under a point, ignoring every other.
+    ///
+    /// Asked of a lift car, this is "is its deck under your feet" - which a box
+    /// around the car cannot answer, because an axis-aligned box covers the
+    /// doorway and the ground just outside it.
+    std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
+                                                float glX, float glY, float glZ) const;
+
+    /// The id of an instance's only animation, where it has exactly one.
+    ///
+    /// A door with no OPEN or CLOSE sequence of its own carries one animation
+    /// and that animation is the opening. Undercity's lift doors are the case:
+    /// one bone, one sequence, id 0, 3333ms.
+    [[nodiscard]] std::optional<uint32_t> soleSequenceId(uint32_t instanceId) const;
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
-    /// that was dropped underneath them — e.g. by a renderer-wide clear — and
+    /// that was dropped underneath them - e.g. by a renderer-wide clear - and
     /// respawn it instead of silently addressing a dead handle forever.
-    bool hasInstance(uint32_t instanceId) const {
+    [[nodiscard]] bool hasInstance(uint32_t instanceId) const {
         return instanceIndexById.find(instanceId) != instanceIndexById.end();
     }
     void removeInstance(uint32_t instanceId);
@@ -440,7 +572,7 @@ public:
     void cleanupUnusedModels();
     /// Keep a model resident even while it has no instances. Game object models
     /// are a small, bounded set (one per display ID actually encountered) that
-    /// goes instance-free every time the player leaves an area and comes back —
+    /// goes instance-free every time the player leaves an area and comes back -
     /// exactly the reap/reload churn seen in the field. Pinning them keeps that
     /// cycle out of the picture entirely; ambient doodads still get reaped.
     void setModelPinned(uint32_t modelId, bool pinned);
@@ -451,22 +583,42 @@ public:
     bool checkCollision(const glm::vec3& from, const glm::vec3& to,
                         glm::vec3& adjustedPos, float playerRadius = 0.5f) const;
     std::optional<float> getFloorHeight(float glX, float glY, float glZ, float* outNormalZ = nullptr) const;
-    float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
+
+    /// Every doodad the floor query would consider here, and what each one
+    /// contributes. The WMO side has had debugDumpGroupsAtPosition for this
+    /// since the Undercity pull was first chased; the M2 side had nothing, so
+    /// a floor that should have come from a lift deck and did not left no
+    /// trace at all beyond "m2=-99999".
+    void debugDumpFloorCandidatesAt(float glX, float glY, float glZ) const;
+    [[nodiscard]] float raycastBoundingBoxes(const glm::vec3& origin, const glm::vec3& direction, float maxDistance) const;
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
-    void clearCollisionFocus();
 
     void resetQueryStats();
-    double getQueryTimeMs() const { return queryTimeMs; }
-    uint32_t getQueryCallCount() const { return queryCallCount; }
+    [[nodiscard]] double getQueryTimeMs() const { return queryTimeMs; }
+    [[nodiscard]] uint32_t getQueryCallCount() const { return queryCallCount; }
 
     void recreatePipelines();
 
+    /// Build the nine main-pass pipelines. Called by initialize() and again by
+    /// recreatePipelines() after a device loss, which is the reason it exists:
+    /// the two used to be separate copies of the same 190 lines.
+    bool buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout);
+
     // Stats
-    bool isInitialized() const { return initialized_; }
-    uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
-    uint32_t getInstanceCount() const { return static_cast<uint32_t>(instances.size()); }
-    uint32_t getTotalTriangleCount() const;
-    uint32_t getDrawCallCount() const { return lastDrawCallCount; }
+    [[nodiscard]] bool isInitialized() const { return initialized_; }
+    [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
+    [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(instances.size()); }
+    [[nodiscard]] uint32_t getTotalTriangleCount() const;
+    [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
+
+    /**
+     * Append the 2D footprints of placed props touching the given window,
+     * for the grass generator's clearings. Ground detail is skipped - it is
+     * the clutter itself - and the footprint radius is capped so a tree
+     * clears the ground at its trunk, not under its whole crown.
+     */
+    void collectGrassClearings(float minX, float minY, float maxX, float maxY,
+                               std::vector<pipeline::GrassClearingSource>& out) const;
 
     // Lighting/fog/shadow are now in per-frame UBO; these are no-ops for API compat
     void setFog(const glm::vec3& /*color*/, float /*start*/, float /*end*/) {}
@@ -475,13 +627,82 @@ public:
     void setShadowMap(uint32_t /*depthTex*/, const glm::mat4& /*lightSpace*/) {}
     void clearShadowMap() {}
 
+    /// How far the furthest doodad drawn this frame was. See
+    /// Renderer::logViewDistanceDiag.
+    [[nodiscard]] float getFurthestDrawnDistance() const { return std::sqrt(furthestDrawnSq_); }
+    /// How many particles to emit, as a fraction of what a model asks for -
+    /// the game's Particle Density.
+    ///
+    /// Applied to the authored rate before the floor that holds flames
+    /// together, so turning it down thins smoke, dust and spell effects while
+    /// a candle keeps enough particles alive to still read as a flame. See the
+    /// note in m2_renderer_particles.cpp: below that floor a fire does not get
+    /// smaller, it disappears.
+    void setParticleDensity(float density) {
+        particleDensity_ = std::clamp(density, 0.05f, 1.0f);
+    }
+    [[nodiscard]] float particleDensity() const { return particleDensity_; }
+
+    void setSuppressBakedStars(bool suppress) { suppressBakedStars_ = suppress; }
     void setInsideInterior(bool inside) { insideInterior = inside; }
-    void setOnTaxi(bool onTaxi) { onTaxi_ = onTaxi; }
+
+    /// Drop the ground clutter from this pass, for the ablation's clutter
+    /// phase. Clutter is drawn by the thousand and shares this renderer with
+    /// the world's doodads, so switching the whole pass off says what the two
+    /// cost together and nothing about which of them it was.
+    void setSkipGroundDetail(bool skip) { skipGroundDetail_ = skip; }
+
+    /// Hold the doodads to this many yards, on top of whatever the density
+    /// rule and the instance's own size allow. Zero lifts it.
+    ///
+    /// The ablation's far-doodad phase: these models have no LOD skins, so a
+    /// tree a thousand yards off is drawn with every triangle it has to cover
+    /// a few pixels. Whether that is where the time goes is a question about
+    /// distance alone, and switching the whole pass off cannot answer it.
+    void setDoodadDistanceCap(float yards) { doodadDistanceCapYards_ = yards; }
+
+    /// The doodad view distance with that cap applied.
+    float cappedViewDistance() const {
+        return doodadDistanceCapYards_ > 0.0f
+                   ? std::min(viewDistanceAbsolute_, doodadDistanceCapYards_)
+                   : viewDistanceAbsolute_;
+    }
     void setViewDistance(float distance) {
-        viewDistanceScale_ = std::clamp(distance, 400.0f, 2400.0f) / 1200.0f;
+        viewDistanceRaw_ = std::clamp(distance, 400.0f, 2400.0f);
+        // And the distance itself, as a ceiling. The scale multiplies a
+        // constant tuned for scene density - 2800 yards where models are
+        // sparse - so at 2400 it put doodads 5600 yards out while the terrain
+        // and the WMOs both stop at the 2400 the player asked for. Distant
+        // trees and buildings then stood on nothing.
+        viewDistanceAbsolute_ = viewDistanceRaw_;
+        recomputeViewDistanceScale();
     }
 
-    std::vector<glm::vec3> getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const;
+    /// How far the world's clutter is drawn, against how far the world is -
+    /// the game's Environment Detail.
+    ///
+    /// View distance is how far there is anything to see; this is how much of
+    /// the scenery inside that is worth drawing, and it only ever takes away.
+    /// Above 1 it changes nothing: the ceiling above is the terrain's own, and
+    /// a doodad past that is a tree standing on nothing, which is the fault
+    /// that ceiling was added for.
+    /// How far the ground cover is drawn - the game's Ground Clutter Radius.
+    ///
+    /// Its own distance rather than a share of the doodad one: grass stops
+    /// between 70 and 140 yards in the original client while doodads run to
+    /// the horizon, and the setting names those yards outright.
+    void setGroundDetailDistance(float yards) {
+        groundDetailMaxDistance_ = std::clamp(yards, 0.0f, 500.0f);
+    }
+    [[nodiscard]] float groundDetailDistance() const { return groundDetailMaxDistance_; }
+
+    void setEnvironmentDetail(float detail) {
+        environmentDetail_ = std::clamp(detail, 0.25f, 1.5f);
+        recomputeViewDistanceScale();
+    }
+    [[nodiscard]] float environmentDetail() const { return environmentDetail_; }
+
+    [[nodiscard]] std::vector<glm::vec3> getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const;
 
     // Pre-decoded BLP cache: set by terrain manager before calling loadModel()
     // so loadTexture() can skip the expensive assetManager->loadTexture() call.
@@ -490,7 +711,6 @@ public:
 private:
     bool initialized_ = false;
     bool insideInterior = false;
-    bool onTaxi_ = false;
     pipeline::AssetManager* assetManager = nullptr;
 
     // Vulkan context
@@ -498,6 +718,19 @@ private:
 
     // Vulkan pipelines (one per blend mode)
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;       // blend mode 0
+    /// Cutout: leaves, ground clutter, anything the fragment shader alpha-tests.
+    /// Blend disabled with alpha-to-coverage on, which is what turns the
+    /// shader's sharpened alpha into per-sample coverage.
+    VkPipeline cutoutPipeline_ = VK_NULL_HANDLE;
+    /// The ablation's clutter phase; see setSkipGroundDetail.
+    bool skipGroundDetail_ = false;
+    /// The ablation's far-doodad phase; see setDoodadDistanceCap.
+    float doodadDistanceCapYards_ = 0.0f;
+    /// Said once: a foliage batch reached the shadow pass with no texture.
+    bool warnedShadowNoTexture_ = false;
+    /// Foliage casters drawn into the shadow map last frame, for spotting a
+    /// caster count that swings while nothing is moving.
+    uint32_t lastFoliageCasters_ = 0;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 3+
@@ -506,11 +739,9 @@ private:
     // Shadow rendering (Phase 7)
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout shadowParamsLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool shadowParamsPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet shadowParamsSet_ = VK_NULL_HANDLE;
-    ::VkBuffer shadowParamsUBO_ = VK_NULL_HANDLE;
-    VmaAllocation shadowParamsAlloc_ = VK_NULL_HANDLE;
+    /// The set the shadow pass binds. Five separate members before,
+    /// built and torn down here and in three other renderers.
+    ShadowParamsSet shadowParams_;
     // Per-frame pools for foliage shadow texture descriptor sets (one per frame-in-flight)
     static constexpr uint32_t kShadowTexPoolFrames = 2;
     VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
@@ -526,6 +757,9 @@ private:
     VkPipeline ribbonPipeline_ = VK_NULL_HANDLE;          // Alpha-blend ribbons
     VkPipeline ribbonAdditivePipeline_ = VK_NULL_HANDLE;  // Additive ribbons
     VkPipelineLayout ribbonPipelineLayout_ = VK_NULL_HANDLE;
+    /// The per-frame set layout initialize() was given. recreatePipelines()
+    /// runs long after that call and needs the same one.
+    VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;  // set 1
@@ -547,16 +781,20 @@ private:
     VmaAllocation dummyBoneAlloc_ = VK_NULL_HANDLE;
     VkDescriptorSet dummyBoneSet_ = VK_NULL_HANDLE;
 
-    // Mega bone SSBO — consolidates all per-instance bone matrices into a single buffer per frame.
+    // Mega bone SSBO - consolidates all per-instance bone matrices into a single buffer per frame.
     // Replaces per-instance bone SSBOs for fewer descriptor binds and enables GPU instancing.
     static constexpr uint32_t MEGA_BONE_MAX_INSTANCES = 4096;
-    static constexpr uint32_t MAX_BONES_PER_INSTANCE = 128;
+    // Per-instance bone ranges are packed at their model's true bone count
+    // rather than at a fixed stride, so the buffer is sized in matrices. The
+    // budget matches the old 4096 x 128 slots; models under the old stride
+    // now leave room for the ones above it.
+    static constexpr uint32_t MEGA_BONE_MATRIX_CAPACITY = MEGA_BONE_MAX_INSTANCES * 128;
     ::VkBuffer megaBoneBuffer_[2] = {};
     VmaAllocation megaBoneAlloc_[2] = {};
     void* megaBoneMapped_[2] = {};
     VkDescriptorSet megaBoneSet_[2] = {};
 
-    // GPU instance data SSBO — per-instance transforms, fade, bones for instanced draws.
+    // GPU instance data SSBO - per-instance transforms, fade, bones for instanced draws.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
     struct M2InstanceGPU {
         glm::mat4 model;           // 64 bytes @ offset 0
@@ -564,9 +802,17 @@ private:
         float fadeAlpha;           //  4 bytes @ offset 72
         int32_t useBones;          //  4 bytes @ offset 76
         int32_t boneBase;          //  4 bytes @ offset 80
-        int32_t _pad[3] = {};      // 12 bytes @ offset 84 — align to 96 (std430)
+        int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
+        float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
+        int32_t _pad = {};         //  4 bytes @ offset 92 - align to 96 (std430)
     };
-    static constexpr uint32_t MAX_INSTANCE_DATA = 16384;
+    // How many instances one frame may hand the GPU, not how many exist. Ground
+    // clutter is what fills it: it is drawn by the thousand and every tuft
+    // takes a slot of its own, so at 16384 a dwarf standing in Dun Morogh
+    // grass was already losing whole models for a frame at a time - which reads
+    // as clutter blinking rather than as anything being over budget. Two
+    // buffers of 96 bytes a slot, so this costs 6 MB rather than 3.
+    static constexpr uint32_t MAX_INSTANCE_DATA = 32768;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
     ::VkBuffer instanceBuffer_[2] = {};
@@ -613,7 +859,7 @@ private:
     VmaAllocation cullOutputAlloc_[2] = {};
     void* cullOutputMapped_[2] = {};
 
-    // HiZ occlusion culling (Phase 6.3) — optional, driven by Renderer
+    // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
     HiZSystem* hizSystem_ = nullptr;
 
     // Previous frame's view-projection for temporal reprojection in HiZ culling.
@@ -626,7 +872,7 @@ private:
     // The visibility SSBO is read back one full slot cycle after it is written:
     // dispatchCullCompute() records a dispatch into this frame's command buffer,
     // and render() reads the mapped output of the dispatch recorded on the SAME
-    // slot ~2 frames earlier.  Array indices are not stable across that gap —
+    // slot ~2 frames earlier.  Array indices are not stable across that gap -
     // createInstance() appends and removeInstance() swap-removes, so slot i can
     // easily describe a different object by the time it is read.  Recording the
     // IDs lets render() match each result back to the instance it was computed
@@ -696,19 +942,32 @@ private:
         std::unique_ptr<VkTexture> texture;
         size_t approxBytes = 0;
         uint64_t lastUse = 0;
-        bool hasAlpha = true;
-        bool colorKeyBlack = false;
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
     struct TextureProperties {
         bool hasAlpha = false;
+        bool alphaIsSilhouette = false;
         bool colorKeyBlack = false;
     };
     std::unordered_map<VkTexture*, TextureProperties> texturePropsByPtr_;
     size_t textureCacheBytes_ = 0;
     uint64_t textureCacheCounter_ = 0;
     size_t textureCacheBudgetBytes_ = 2048ull * 1024 * 1024;
+    /// Make room for `bytesNeeded` by dropping textures nothing is looking at,
+    /// oldest first. Returns what it actually freed.
+    ///
+    /// The cache hands out raw VkTexture* and a model's batches, particle
+    /// emitters and ribbons all keep one, so age alone cannot decide: a
+    /// referenced texture would leave those pointers dangling whatever
+    /// lastUse says about it. What model unloading leaves behind is exactly
+    /// what this collects.
+    size_t evictUnreferencedTextures(size_t bytesNeeded);
+
     std::unordered_set<std::string> failedTextureCache_;
+    /// Keys refused for want of budget rather than because the file is bad.
+    /// Cleared when eviction frees something, so they are retried at once
+    /// instead of waiting out a timer set when the cache was full.
+    std::unordered_set<std::string> budgetRejected_;
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
     uint64_t textureLookupSerial_ = 0;
@@ -718,37 +977,21 @@ private:
     VkDescriptorSet glowTexDescSet_ = VK_NULL_HANDLE;  // cached glow texture descriptor (allocated once)
 
     // Optional query-space culling for collision/raycast hot paths.
-    bool collisionFocusEnabled = false;
-    glm::vec3 collisionFocusPos = glm::vec3(0.0f);
-    float collisionFocusRadius = 0.0f;
-    float collisionFocusRadiusSq = 0.0f;
+    CollisionFocus collisionFocus;
 
-    struct GridCell {
-        int x;
-        int y;
-        int z;
-        bool operator==(const GridCell& other) const {
-            return x == other.x && y == other.y && z == other.z;
-        }
-    };
-    struct GridCellHash {
-        size_t operator()(const GridCell& c) const {
-            size_t h1 = std::hash<int>()(c.x);
-            size_t h2 = std::hash<int>()(c.y);
-            size_t h3 = std::hash<int>()(c.z);
-            return h1 ^ (h2 * 0x9e3779b9u) ^ (h3 * 0x85ebca6bu);
-        }
-    };
-    GridCell toCell(const glm::vec3& p) const;
     void rebuildSpatialIndex();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
-    static constexpr float SPATIAL_CELL_SIZE = 64.0f;
-    std::unordered_map<GridCell, std::vector<uint32_t>, GridCellHash> spatialGrid;
+    SpatialGrid spatialGrid;
     std::unordered_map<uint32_t, size_t> instanceIndexById;
+    // Instance to copy bone matrices from when spawning another of the same
+    // model. Finding one by scanning every instance is O(n) per spawn, which
+    // became 18ms for a single createInstance once a zone held tens of
+    // thousands of them.
+    std::unordered_map<uint32_t, uint32_t> boneSeedInstanceByModel_;
     // Collision scratch buffers are thread_local (see m2_renderer.cpp) for thread-safety.
 
-    // Collision query profiling — atomic because getFloorHeight is dispatched
+    // Collision query profiling - atomic because getFloorHeight is dispatched
     // on async threads from camera_controller while the main thread reads these.
     mutable std::atomic<double> queryTimeMs{0.0};
     mutable std::atomic<uint32_t> queryCallCount{0};
@@ -771,6 +1014,17 @@ private:
 
     // Shadow-pass texture descriptor cache (reused each frame, cleared via pool reset)
     std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
+    /// The casters this frame, grouped by model: [0] solid, [1] foliage.
+    ///
+    /// The shadow pass used to walk every instance in the world twice - once
+    /// per pass - and draw them in whatever order they happened to sit in,
+    /// rebinding the vertex and index buffers whenever consecutive instances
+    /// came from different models, and rebinding a batch's texture once per
+    /// instance rather than once per batch. Culling once into these and
+    /// sorting them by model turns both into once per model.
+    ///
+    /// Kept as members so a frame's worth of casters costs no allocation.
+    std::vector<std::pair<uint32_t, uint32_t>> shadowCasters_[2];
 
     // Ribbon draw-call list (reused each frame)
     struct RibbonDrawCall {
@@ -808,9 +1062,29 @@ private:
         uint16_t tilesX;
         uint16_t tilesY;
         VkDescriptorSet preAllocSet = VK_NULL_HANDLE;
-        std::vector<float> vertexData;
     };
     std::unordered_map<ParticleGroupKey, ParticleGroup, ParticleGroupKeyHash> particleGroups_;
+
+    /// One run of particles written to the vertex buffer that share a group.
+    ///
+    /// The vertices used to be accumulated into a std::vector<float> per
+    /// group - nine push_backs a particle - and then memcpy'd into the mapped
+    /// buffer. They are written straight into it now, in the order they are
+    /// walked, and a run is closed whenever the group changes. Particles from
+    /// one emitter cluster together, so a run is roughly an emitter.
+    ///
+    /// That also fixes the upload: every group used to memcpy to offset zero
+    /// and draw from vertex zero, so with more than one group on screen they
+    /// all drew whichever group was copied last.
+    struct ParticleRun {
+        ParticleGroup* group = nullptr;
+        uint32_t first = 0;
+        uint32_t count = 0;
+    };
+    std::vector<ParticleRun> particleRuns_;
+    /// Vertices the particle buffer holds. Not MAX_M2_PARTICLES, which is the
+    /// cap on one instance's particles: this has to hold a whole frame's.
+    static constexpr size_t MAX_M2_PARTICLE_VERTS = 32768;
 
     // Animation update buffers (avoid per-frame allocation)
     std::vector<size_t> boneWorkIndices_;        // Reused each frame
@@ -834,12 +1108,39 @@ private:
     static constexpr size_t MAX_M2_PARTICLES = 4000;
     std::mt19937 particleRng_{123};
     bool skyMode_ = false;
+    // What the sky-model clock diagnostic last reported, so it prints on a
+    // restart or once a second rather than every frame. See M2Renderer::update.
+    uint32_t skyDiagInstanceId_ = 0;
+    float skyDiagAnimTime_ = 0.0f;
+    /// Whether the sky model was drawn last frame, so the cull
+    /// diagnostic prints on a change rather than every frame.
+    bool skyDiagWasDrawn_ = false;
+    /// Sky batches that reached a draw call this frame, and the last counts
+    /// reported, so the line prints on a change rather than every frame.
+    uint32_t skyDiagDrawsOpaque_ = 0;
+    uint32_t skyDiagDrawsTransparent_ = 0;
+    uint32_t skyDiagLastOpaque_ = 0xFFFFFFFFu;
+    uint32_t skyDiagLastTransparent_ = 0xFFFFFFFFu;
 
     // Cached camera state from update() for frustum-culling bones
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
     float cachedMaxRenderDistSq_ = 0.0f;
     float smoothedRenderDist_ = 1000.0f;  // Smoothed render distance to prevent flickering
+    /// The distance as asked for, kept so the scale can be rebuilt when the
+    /// detail setting changes without the caller having to say it again.
+    float viewDistanceRaw_ = 1200.0f;
+    float environmentDetail_ = 1.0f;
+    float groundDetailMaxDistance_ = 0.0f;   // 0 = no cap of its own
+    void recomputeViewDistanceScale() {
+        viewDistanceScale_ = (viewDistanceRaw_ / 1200.0f) * environmentDetail_;
+    }
     float viewDistanceScale_ = 1.0f;
+    float viewDistanceAbsolute_ = 1200.0f;
+    /// Drop the sky model's baked star layer, because something else is
+    /// drawing stars. See BatchGPU::starLayer.
+    bool suppressBakedStars_ = false;
+    float particleDensity_ = 1.0f;
+    float furthestDrawnSq_ = 0.0f;
     bool forceNoCull_ = false;
 
     // Thread count for parallel bone animation
@@ -863,6 +1164,12 @@ private:
     // Helper to destroy instance bone buffers.
     // When defer=true, destruction is scheduled via deferAfterFrameFence so
     // in-flight command buffers are not invalidated (use for streaming unload).
+    /// Starts a new instance's animation and seeds its bones from a
+    /// sibling of the same model, so it draws on the frame it spawns.
+    /// Both spawn paths need it and each used to have its own copy.
+    void seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
+                               M2Instance& instance);
+
     void destroyInstanceBones(M2Instance& inst, bool defer = false);
 };
 

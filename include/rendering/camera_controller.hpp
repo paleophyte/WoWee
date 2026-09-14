@@ -26,16 +26,47 @@ public:
 
     void setMovementSpeed(float speed) { movementSpeed = speed; }
     void setMouseSensitivity(float sensitivity) { mouseSensitivity = sensitivity; }
-    float getMouseSensitivity() const { return mouseSensitivity; }
+    [[nodiscard]] float getMouseSensitivity() const { return mouseSensitivity; }
     void setInvertMouse(bool invert) { invertMouse = invert; }
-    bool isInvertMouse() const { return invertMouse; }
-    void setExtendedZoom(bool extended) { extendedZoom_ = extended; }
-    bool isExtendedZoom() const { return extendedZoom_; }
+    [[nodiscard]] bool isInvertMouse() const { return invertMouse; }
+    /// How far back the camera may be pulled, as a multiple of the original
+    /// client's own limit.
+    ///
+    /// Max Camera Distance, as a multiple of the 22 yards the original client
+    /// gives. The schema's cameramaxdistance row counts the yards themselves
+    /// and kClientCVars scales cameraDistanceMaxFactor - the CVar the game's
+    /// own slider wrote, before that page was retired - onto it. Before both
+    /// there was an extended-zoom checkbox of this client's own, a switch
+    /// between two constants where this is every distance between them.
+    void setMaxDistanceFactor(float factor) {
+        maxDistanceFactor_ = std::clamp(factor, 1.0f, kMaxDistanceFactorLimit);
+    }
+    [[nodiscard]] float maxDistanceFactor() const { return maxDistanceFactor_; }
+    [[nodiscard]] bool isExtendedZoom() const { return extendedZoom_; }
     void setEnabled(bool enabled) { this->enabled = enabled; }
     void setTerrainManager(TerrainManager* tm) { terrainManager = tm; }
     void setWMORenderer(WMORenderer* wmo) { wmoRenderer = wmo; }
     void setM2Renderer(M2Renderer* m2) { m2Renderer = m2; }
     void setWaterRenderer(WaterRenderer* wr) { waterRenderer = wr; }
+
+    /// Holds the view still while something else owns the finger that is
+    /// moving the mouse. The on-screen stick is that something: SDL reports the
+    /// first finger as a held left button wherever it goes, and without this
+    /// the camera spins every time the player walks.
+    void setRotationSuppressed(bool suppressed) { rotationSuppressed_ = suppressed; }
+
+    /// Turns the view by a drag this controller never saw as a mouse.
+    ///
+    /// SDL reports only the first finger as a mouse, so with a thumb on the
+    /// movement stick a second finger dragging to look produces nothing at all.
+    /// The touch controls read that finger themselves and hand the movement
+    /// here, in the same pixels and through the same sensitivity and limits a
+    /// mouse drag goes through.
+    void applyLookDelta(float dxPixels, float dyPixels);
+
+    /// While a finger is steering, the character faces where the view does -
+    /// what holding the right mouse button means on a desktop.
+    void setSteering(bool steering) { steering_ = steering; }
 
     void processMouseWheel(float delta);
     void setFollowTarget(glm::vec3* target);
@@ -51,16 +82,16 @@ public:
     void setOnlineMode(bool online) { onlineMode = online; }
 
     // Last known safe position (grounded, not falling)
-    bool hasLastSafePosition() const { return hasLastSafe_; }
-    const glm::vec3& getLastSafePosition() const { return lastSafePos_; }
-    float getContinuousFallTime() const { return continuousFallTime_; }
+    [[nodiscard]] bool hasLastSafePosition() const { return hasLastSafe_; }
+    [[nodiscard]] const glm::vec3& getLastSafePosition() const { return lastSafePos_; }
+    [[nodiscard]] float getContinuousFallTime() const { return continuousFallTime_; }
 
     // Auto-unstuck callback (triggered when falling too long)
     using AutoUnstuckCallback = std::function<void()>;
     void setAutoUnstuckCallback(AutoUnstuckCallback cb) { autoUnstuckCallback_ = std::move(cb); }
     void startIntroPan(float durationSec = 2.8f, float orbitDegrees = 140.0f);
-    bool isIntroActive() const { return introActive; }
-    bool isIdleOrbit() const { return idleOrbit_; }
+    [[nodiscard]] bool isIntroActive() const { return introActive; }
+    [[nodiscard]] bool isIdleOrbit() const { return idleOrbit_; }
     void setIdleOrbitEnabled(bool enabled) {
         idleOrbitEnabled_ = enabled;
         if (!enabled && idleOrbit_) {
@@ -69,20 +100,23 @@ public:
             idleTimer_ = 0.0f;
         }
     }
-    bool isIdleOrbitEnabled() const { return idleOrbitEnabled_; }
+    [[nodiscard]] bool isIdleOrbitEnabled() const { return idleOrbitEnabled_; }
 
-    float getMovementSpeed() const { return movementSpeed; }
-    const glm::vec3& getDefaultPosition() const { return defaultPosition; }
-    bool isMoving() const;
-    float getYaw() const { return yaw; }
-    float getPitch() const { return pitch; }
-    float getFacingYaw() const { return facingYaw; }
-    float getTravelYaw() const { return travelYaw_; }
-    bool isThirdPerson() const { return thirdPerson; }
-    bool isFirstPersonView() const { return thirdPerson && (userTargetDistance <= MIN_DISTANCE + 0.15f); }
-    bool isGrounded() const { return grounded; }
-    bool isJumping() const { return !grounded && verticalVelocity > 0.0f; }
-    bool isFalling() const { return !grounded && verticalVelocity <= 0.0f; }
+    [[nodiscard]] float getMovementSpeed() const { return movementSpeed; }
+    [[nodiscard]] const glm::vec3& getDefaultPosition() const { return defaultPosition; }
+    [[nodiscard]] bool isMoving() const;
+    [[nodiscard]] float getYaw() const { return yaw; }
+    [[nodiscard]] float getPitch() const { return pitch; }
+    [[nodiscard]] float getFacingYaw() const { return facingYaw; }
+    [[nodiscard]] float getTravelYaw() const { return travelYaw_; }
+    [[nodiscard]] bool isThirdPerson() const { return thirdPerson; }
+    [[nodiscard]] bool isFirstPersonView() const { return thirdPerson && (userTargetDistance <= MIN_DISTANCE + 0.15f); }
+    [[nodiscard]] bool isGrounded() const { return grounded; }
+    [[nodiscard]] bool isJumping() const { return !grounded && verticalVelocity > 0.0f; }
+    // A swimming character is not grounded and is not rising, but it is not
+    // falling either - treating it as falling made leaving the water register as
+    // a hard landing.
+    [[nodiscard]] bool isFalling() const { return !grounded && !swimming && verticalVelocity <= 0.0f; }
 
     // Call every frame while riding a transport that forces Z to a locked value
     // externally (e.g. the Deeprun Tram, which has no real floor mid-tunnel).
@@ -93,24 +127,84 @@ public:
     // instant the external Z lock releases at disembark, clipping the player
     // through the floor.
     void suppressVerticalPhysics() { verticalVelocity = 0.0f; grounded = true; }
-    bool isJumpKeyPressed() const { return jumpBufferTimer > 0.0f; }
-    bool isSprinting() const;
-    bool isMovingForward() const { return moveForwardActive; }
-    bool isMovingBackward() const { return moveBackwardActive; }
-    bool isStrafingLeft() const { return strafeLeftActive; }
-    bool isStrafingRight() const { return strafeRightActive; }
-    bool isTurningLeft() const { return turningLeftActive; }
-    bool isTurningRight() const { return turningRightActive; }
-    bool isAutoRunning() const { return autoRunning; }
-    bool isRightMouseHeld() const { return rightMouseDown; }
-    bool isSitting() const { return sitting; }
-    bool isSwimming() const { return swimming; }
-    bool isInsideWMO() const { return cachedInsideWMO; }
-    bool isInsideInteriorWMO() const { return cachedInsideInteriorWMO; }
+    [[nodiscard]] bool isJumpKeyPressed() const { return jumpBufferTimer > 0.0f; }
+    [[nodiscard]] bool isSprinting() const;
+    [[nodiscard]] bool isMovingForward() const { return moveForwardActive; }
+    [[nodiscard]] bool isMovingBackward() const { return moveBackwardActive; }
+    [[nodiscard]] bool isStrafingLeft() const { return strafeLeftActive; }
+    [[nodiscard]] bool isStrafingRight() const { return strafeRightActive; }
+    [[nodiscard]] bool isTurningLeft() const { return turningLeftActive; }
+    [[nodiscard]] bool isTurningRight() const { return turningRightActive; }
+    [[nodiscard]] bool isAutoRunning() const { return autoRunning; }
+    [[nodiscard]] bool isRightMouseHeld() const { return rightMouseDown; }
+    [[nodiscard]] bool isSitting() const { return sitting; }
+    [[nodiscard]] bool isSwimming() const { return swimming; }
+    [[nodiscard]] bool isInsideWMO() const { return cachedInsideWMO; }
+    [[nodiscard]] bool isInsideInteriorWMO() const { return cachedInsideInteriorWMO; }
     void setGrounded(bool g) { grounded = g; }
     void setSitting(bool s) { sitting = s; }
-    bool isOnTaxi() const { return externalFollow_; }
-    const glm::vec3* getFollowTarget() const { return followTarget; }
+    /// What the server says the character is doing: standing, sitting, seated
+    /// in a chair, asleep, kneeling. UnitStandStateType.
+    ///
+    /// Sitting in something is a position this client does not compute - the
+    /// server put the character in the chair - so grounding stands down for it.
+    ///
+    /// Both flags, from the one number: 1-6 is sitting or asleep and 8 is
+    /// kneeling, all of which movement cancels, and 2 and 4-6 are the seats a
+    /// chair puts a character in.
+    void applyServerStandState(uint8_t standState) {
+        sitting = (standState >= 1 && standState <= 6) || standState == 8;
+        seatedInChair_ = standState == 2 || (standState >= 4 && standState <= 6);
+    }
+    [[nodiscard]] bool isSeatedInChair() const { return seatedInChair_; }
+
+    /// Look the character in the face, close in, for the barber shop.
+    ///
+    /// The barber's preview is the character themselves - the interface asks
+    /// for no camera at all, because on the real client this is the client's
+    /// job. Without it the camera stays where it was, behind the character or
+    /// pointed at a wall, and cycling styles changes something nobody can see:
+    /// reported, twice, as there being no preview.
+    ///
+    /// The player's own view is put back when the chair is left.
+    void setBarberShopView(bool on) {
+        if (on == barberView_) return;
+        barberView_ = on;
+        // Whatever the collision sweep had taken off the zoom goes with it.
+        // This view sets its own distance and restores the player's on the way
+        // out, and a debt carried across either edge is given back on top of a
+        // number it was never taken from.
+        collisionZoomDebt_ = 0.0f;
+        collisionClearSeconds_ = 0.0f;
+        if (on) {
+            savedBarberYaw_ = yaw;
+            savedBarberPitch_ = pitch;
+            savedBarberDistance_ = userTargetDistance;
+            savedBarberPivot_ = pivotHeight_;
+            // Round to the front: the camera yaw is the character's facing, so
+            // half a turn from it is looking back at them.
+            yaw = facingYaw + 180.0f;
+            // Slightly above level, so the face is in view rather than the top
+            // of the head, and close enough for hair to be worth choosing.
+            pitch = 8.0f;
+            userTargetDistance = 2.4f;
+            pivotHeight_ = 1.7f;
+        } else {
+            yaw = savedBarberYaw_;
+            pitch = savedBarberPitch_;
+            userTargetDistance = savedBarberDistance_;
+            pivotHeight_ = savedBarberPivot_;
+        }
+    }
+    [[nodiscard]] bool isBarberShopView() const { return barberView_; }
+    /// Ignore the slope limit, so any face can be walked straight up.
+    ///
+    /// For reaching a place to look at it, not for playing. Off by default and
+    /// never saved: it is a thing you turn on for a minute.
+    void setIgnoreSlopeLimit(bool ignore) { ignoreSlopeLimit_ = ignore; }
+    [[nodiscard]] bool ignoresSlopeLimit() const { return ignoreSlopeLimit_; }
+    [[nodiscard]] bool isOnTaxi() const { return externalFollow_; }
+    [[nodiscard]] const glm::vec3* getFollowTarget() const { return followTarget; }
     glm::vec3* getFollowTargetMutable() { return followTarget; }
 
     // Movement callback for sending opcodes to server
@@ -141,14 +235,14 @@ public:
     // Server turn rate in rad/s (SMSG_FORCE_TURN_RATE_CHANGE); 0 = use WOW_TURN_SPEED default
     void setTurnRateOverride(float rateRadS) { turnRateOverride_ = rateRadS; }
     void setMovementRooted(bool rooted) { movementRooted_ = rooted; }
-    bool isMovementRooted() const { return movementRooted_; }
+    [[nodiscard]] bool isMovementRooted() const { return movementRooted_; }
     void setGravityDisabled(bool disabled) { gravityDisabled_ = disabled; }
     void setFeatherFallActive(bool active) { featherFallActive_ = active; }
     void setWaterWalkActive(bool active) { waterWalkActive_ = active; }
     void setFlyingActive(bool active) { flyingActive_ = active; }
-    bool isFlyingActive() const { return flyingActive_; }
-    bool isAscending() const { return wasAscending_; }
-    bool isDescending() const { return wasDescending_; }
+    [[nodiscard]] bool isFlyingActive() const { return flyingActive_; }
+    [[nodiscard]] bool isAscending() const { return wasAscending_; }
+    [[nodiscard]] bool isDescending() const { return wasDescending_; }
     void setHoverActive(bool active) { hoverActive_ = active; }
     void setMounted(bool m) { mounted_ = m; }
     void setIntoxication(float amount) { intoxication_ = std::clamp(amount, 0.0f, 1.0f); }
@@ -160,12 +254,25 @@ public:
     void suppressMovementFor(float seconds) { movementSuppressTimer_ = seconds; }
     void suspendGravityFor(float seconds) { gravitySuspendTimer_ = seconds; }
 
+    /// Where the server says the player is, on entering a world.
+    ///
+    /// Nothing under them has streamed in yet, so for a moment the heightfield
+    /// is the only floor there is - and over a WMO that runs underground it
+    /// lies well above where they actually stand. Logging out in the Undercity
+    /// entrance tunnel and back in put the player on its roof. Until the
+    /// buildings arrive, no floor far above the position the server gave is
+    /// their floor.
+    void setEntryFloorAnchor(float renderZ, float seconds) {
+        entryFloorAnchorZ_ = renderZ;
+        entryFloorAnchorTimer_ = seconds;
+    }
+
     // Auto-follow: walk toward a target position each frame (WoW /follow).
     // The caller updates *targetPos every frame with the followed entity's render position.
     // Stops within FOLLOW_STOP_DIST; cancels on manual WASD input.
     void setAutoFollow(const glm::vec3* targetPos) { autoFollowTarget_ = targetPos; }
     void cancelAutoFollow() { autoFollowTarget_ = nullptr; }
-    bool isAutoFollowing() const { return autoFollowTarget_ != nullptr; }
+    [[nodiscard]] bool isAutoFollowing() const { return autoFollowTarget_ != nullptr; }
 
     // Trigger mount jump (applies vertical velocity for physics hop)
     void triggerMountJump();
@@ -182,6 +289,22 @@ public:
     // duration: shake duration in seconds
     void triggerShake(float magnitude, float frequency, float duration);
 
+    /// How much of a shake to actually apply, 0 to 1.
+    ///
+    /// The client moves the view on its own for spell effects, for
+    /// thunderstorms and for drunkenness, and had no control over any of it.
+    /// Nothing in 2004 offered one; every game does now, because for some
+    /// people it is the difference between playing and feeling ill. Zero stops
+    /// it outright - triggerShake drops a magnitude of zero on the floor.
+    ///
+    /// It does not touch the weave a drunk character walks with. That is what
+    /// being drunk does to the character rather than to the picture, and taking
+    /// it away would be an advantage rather than a comfort.
+    void setShakeScale(float scale) {
+        shakeScale_ = scale < 0.0f ? 0.0f : (scale > 1.0f ? 1.0f : scale);
+    }
+    [[nodiscard]] float shakeScale() const { return shakeScale_; }
+
     // For first-person player hiding
     void setCharacterRenderer(class CharacterRenderer* cr, uint32_t playerId) {
         characterRenderer = cr;
@@ -191,6 +314,81 @@ public:
 private:
     Camera* camera;
     TerrainManager* terrainManager = nullptr;
+    /// One frame's input and physics setup, handed to whichever camera mode is
+    /// running.
+    ///
+    /// update() reads the keyboard, works out the speed and the axes, and then
+    /// splits into two branches - the third-person camera that moves a character
+    /// and the free-fly camera that moves itself. The branches were fifteen
+    /// hundred lines and two hundred lines of one function, and this is what
+    /// they both need from the part before the split.
+    struct FrameInput {
+        float physicsDeltaTime = 0.0f;
+        float gravity = 0.0f;
+        float jumpVel = 0.0f;
+        float speed = 0.0f;
+        glm::vec3 forward{0.0f};      ///< movement axes, flattened onto XY
+        glm::vec3 right{0.0f};
+        glm::vec3 forward3D{0.0f};    ///< the camera's own forward, with pitch
+        glm::vec3 movement{0.0f};     ///< the horizontal move this frame; the modes adjust it
+        bool nowForward = false;
+        bool nowBackward = false;
+        bool nowStrafeLeft = false;
+        bool nowStrafeRight = false;
+        bool nowTurnLeft = false;
+        bool nowTurnRight = false;
+        bool nowJump = false;
+        bool swimUpHeld = false;
+        bool xDown = false;
+        bool uiWantsKeyboard = false;
+    };
+
+    /// The camera that orbits a character and moves it: collision, grounding,
+    /// swimming, zoom, and the pullback that keeps the camera out of walls.
+    void updateThirdPersonCamera(float deltaTime, FrameInput& f);
+
+    /// The camera that flies itself, used when nothing is being followed.
+    void updateFreeFlyCamera(float deltaTime, FrameInput& f);
+
+    /// Where the followed character wants to be this frame: the movement
+    /// intent and the swept wall collision. The floor is not consulted yet.
+    glm::vec3 moveFollowedCharacter(float deltaTime, FrameInput& f, glm::vec3& prevTargetPos);
+
+    /// What the floor queries answer directly under the character: the floor
+    /// that was chosen, and the three surfaces that were offered. The recovery
+    /// probes need to know which existed at all, not just which one won.
+    struct FloorSample {
+        std::optional<float> floor;
+        std::optional<float> terrain;
+        std::optional<float> wmo;
+        std::optional<float> m2;
+    };
+
+    /// Ask terrain, WMO and doodads where the floor is - two of them on other
+    /// threads - or answer from the cache when the character has barely moved.
+    FloorSample sampleFloorUnderFeet(const glm::vec3& targetPos, float stepUpBudget);
+
+    /// Put the character on the floor and publish where it ended up - the
+    /// expensive half, with the floor queries and the cache that skips them.
+    void groundFollowedCharacter(float deltaTime, FrameInput& f, glm::vec3& targetPos,
+                                 const glm::vec3& prevTargetPos);
+
+    /// Where the camera sits relative to the character it follows: pivot, zoom,
+    /// the pullback that keeps it out of walls, and the first-person threshold.
+    void updateOrbitCamera(float deltaTime, FrameInput& f, const glm::vec3& targetPos);
+
+    /// Move from `from` to `to` in small steps, letting the walls push back.
+    ///
+    /// A single long move tunnels through thin geometry, so it is broken into
+    /// steps of 20cm inside a building and 35cm outside, capped at eight. An
+    /// upward Z correction is kept - that is a ramp - and a downward one is
+    /// dropped, because a wall must never pull the character into the floor.
+    ///
+    /// Written out three times, for walking, for swimming, and for the free-fly
+    /// camera, with the step sizes and the cap repeated in each.
+    /// `includeDoodads` adds M2 collision, which the free-fly camera does not use.
+    glm::vec3 sweepAgainstWalls(const glm::vec3& from, const glm::vec3& to, bool includeDoodads);
+
     WMORenderer* wmoRenderer = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WaterRenderer* waterRenderer = nullptr;
@@ -216,10 +414,17 @@ private:
     bool rightMouseDown = false;
     // Camera rotation only begins once the mouse moves past a small dead-zone while a
     // button is held. This keeps a click (to select an NPC) from nudging the view on
-    // tiny hand jitter — which made NPCs appear to shift out from under the cursor.
+    // tiny hand jitter - which made NPCs appear to shift out from under the cursor.
     bool rotateArmed_ = false;
-    float dragPixelsSincePress_ = 0.0f;
-    static constexpr float kRotateDeadzonePixels = 5.0f;
+    /// Where the cursor has got to since the press, as a net offset.
+    ///
+    /// Summed signed rather than as |dx|+|dy| per event: the old measure was
+    /// the length of the path the cursor took, so a trackpad click that
+    /// jittered a few pixels and came back to where it started still read as
+    /// a drag and swung the view. What decides a click elsewhere is the
+    /// straight line from press to release, and this is now the same line.
+    float dragOffsetX_ = 0.0f;
+    float dragOffsetY_ = 0.0f;
 
     // Third-person orbit camera (WoW-style)
     bool thirdPerson = false;
@@ -230,25 +435,70 @@ private:
     static constexpr float MIN_DISTANCE = 0.5f;     // Minimum zoom (first-person threshold)
     static constexpr float MAX_DISTANCE_NORMAL = 22.0f;   // Default max zoom out
     static constexpr float MAX_DISTANCE_EXTENDED = 50.0f;  // Extended max zoom out
-    static constexpr float MAX_DISTANCE_INTERIOR = 12.0f;  // Max zoom inside WMOs
+public:
+    /// The largest multiple worth offering: the camera as far back as this
+    /// client has ever allowed. Declared here because it is built from the two
+    /// constants above. See setMaxDistanceFactor.
+    static constexpr float kMaxDistanceFactorLimit =
+        MAX_DISTANCE_EXTENDED / MAX_DISTANCE_NORMAL;
+private:
+    /// Max zoom indoors.
+    ///
+    /// Twelve still reached the walls of an ordinary room, so the collision
+    /// sweep pulled the camera in and let it back out with every step and every
+    /// turn - and that in-and-out is the motion that makes people ill. Eight
+    /// sat inside most rooms but still met the walls of a corridor, which is
+    /// most of what an interior is: Undercity is corridors, and so are the inns
+    /// and barracks a player spends time in.
+    ///
+    /// A camera that never reaches a wall is never pushed off one, so the only
+    /// way to stop the sweep firing is to keep the camera inside the room. Six
+    /// clears the corridors. It is closer than the game's own default and that
+    /// is the trade: the alternative is a view that swims.
+    ///
+    /// Chosen rather than computed, because the room's own clearance is what
+    /// the sweep already measures and feeding that back would let a doorway set
+    /// the cap for the hall beyond it.
+    static constexpr float MAX_DISTANCE_INTERIOR = 6.0f;
     bool extendedZoom_ = false;
     static constexpr float ZOOM_SMOOTH_SPEED = 15.0f;  // How fast zoom eases
     static constexpr float CAM_SMOOTH_SPEED_DEFAULT = 30.0f;
     float camSmoothSpeed_ = CAM_SMOOTH_SPEED_DEFAULT;  // User-configurable camera smoothing (higher = tighter)
     // When true the camera keeps its exponential lerp even while actively
-    // dragging or keyboard-turning — the pre-snap "floaty follow" feel.
+    // dragging or keyboard-turning - the pre-snap "floaty follow" feel.
     // When false (default), rotation input moves the camera 1:1.
     bool smoothCameraFollow_ = false;
 public:
     void setCameraSmoothSpeed(float speed) { camSmoothSpeed_ = std::clamp(speed, 5.0f, 100.0f); }
-    float getCameraSmoothSpeed() const { return camSmoothSpeed_; }
+    [[nodiscard]] float getCameraSmoothSpeed() const { return camSmoothSpeed_; }
     void setSmoothCameraFollow(bool smooth) { smoothCameraFollow_ = smooth; }
-    bool isSmoothCameraFollow() const { return smoothCameraFollow_; }
+    [[nodiscard]] bool isSmoothCameraFollow() const { return smoothCameraFollow_; }
     void setPivotHeight(float h) { pivotHeight_ = std::clamp(h, 0.0f, 3.0f); }
-    float getPivotHeight() const { return pivotHeight_; }
+    [[nodiscard]] float getPivotHeight() const { return pivotHeight_; }
+
+    /// Where the camera looks, on the character it is following.
+    ///
+    /// pivotHeight_ is a distance in metres, and a metre is a different part
+    /// of a gnome than it is of a tauren: at a fixed 1.6 the camera orbited a
+    /// point above a short character's head and zoomed into thin air. The
+    /// setting is read as a proportion of the height it was chosen against -
+    /// a night elf, who stands about that - and applied to whoever is actually
+    /// being followed.
+    [[nodiscard]] float pivotHeightFor(float characterHeight) const {
+        if (characterHeight <= 0.01f) return pivotHeight_;
+        const float share = pivotHeight_ / kPivotReferenceHeight;
+        return std::clamp(characterHeight * share, 0.2f, 3.0f);
+    }
 private:
     static constexpr float PIVOT_HEIGHT_DEFAULT = 1.6f;
+    /// The height PIVOT_HEIGHT_DEFAULT was chosen against, so that the default
+    /// still puts the pivot exactly where it always did for a character of
+    /// that size and only moves it for the ones it was wrong for.
+    static constexpr float kPivotReferenceHeight = 2.0f;
     float pivotHeight_ = PIVOT_HEIGHT_DEFAULT;  // User-configurable pivot height
+    /// The followed character's height, refreshed as it is followed. Zero
+    /// until something has been measured, which reads as the old behaviour.
+    float followedHeight_ = 0.0f;
     static constexpr float CAM_SPHERE_RADIUS = 0.32f;  // Keep camera farther from geometry to avoid clipping-through surfaces
     static constexpr float CAM_EPSILON = 0.22f;        // Extra wall offset to avoid near-plane clipping artifacts
     static constexpr float COLLISION_FOCUS_RADIUS_THIRD_PERSON = 20.0f;  // Reduced for performance
@@ -258,6 +508,18 @@ private:
     glm::vec3* followTarget = nullptr;
     glm::vec3 smoothedCamPos = glm::vec3(0.0f);     // For smooth camera movement
     float smoothedCollisionDist_ = -1.0f;           // Asymmetrically-smoothed WMO collision limit (-1 = uninitialised)
+    /// The ground's own limit, smoothed before it is combined with the built
+    /// geometry's. A hillside's marched height moves a little with every step
+    /// the player takes, and passing that straight through is a shudder.
+    float smoothedTerrainDist_ = -1.0f;
+    /// How far the camera is currently being lifted clear of, or dropped
+    /// below, the water surface. Eased both ways so crossing the water's
+    /// edge does not jump the view.
+    float waterNudgeZ_ = 0.0f;
+    // Degrees of yaw the camera is currently stepping around an obstruction by,
+    // so it clears a pillar or a doorframe instead of riding up the player's
+    // neck. Smoothed; zero whenever nothing is in the way.
+    float cameraDeflectDeg_ = 0.0f;
 
     // Gravity / grounding
     float verticalVelocity = 0.0f;
@@ -278,6 +540,15 @@ private:
     // Cached isInsideWMO result (throttled to avoid per-frame cost)
     bool cachedInsideWMO = false;
     bool cachedInsideInteriorWMO = false;
+    /// The zoom the player chose outdoors, kept while the indoor limit holds
+    /// them closer and given back on the way out - a limit that quietly keeps
+    /// their zoom is a setting changed behind their back.
+    float outdoorTargetDistance_ = 0.0f;
+    bool indoorZoomHeld_ = false;
+    /// How much of the zoom the collision sweep has taken, and how long
+    /// nothing has been in the way. See the pull in updateOrbitCamera.
+    float collisionZoomDebt_ = 0.0f;
+    float collisionClearSeconds_ = 0.0f;
     int insideStateCheckCounter_ = 0;
     glm::vec3 lastInsideStateCheckPos_ = glm::vec3(0.0f);
     int insideWMOCheckCounter = 0;
@@ -304,13 +575,11 @@ private:
     static constexpr float FLOOR_QUERY_DISTANCE_THRESHOLD = 2.0f;  // Increased from 1.0
     static constexpr int FLOOR_QUERY_FRAME_INTERVAL = 5;  // Increased from 3
 
-    // Helper to get cached floor height (reduces expensive queries)
-    std::optional<float> getCachedFloorHeight(float x, float y, float z);
 
     // Ray-march the terrain heightfield along pivot→camDir and return the
     // farthest camera distance that keeps clearance above the terrain surface.
     // Returns maxDist when the ray stays clear (or terrain is unavailable).
-    float raymarchTerrainCameraLimit(const glm::vec3& pivot, const glm::vec3& camDir,
+    [[nodiscard]] float raymarchTerrainCameraLimit(const glm::vec3& pivot, const glm::vec3& camDir,
                                      float maxDist) const;
 
     // Swimming
@@ -320,16 +589,42 @@ private:
     static constexpr float SWIM_GRAVITY = -5.0f;
     static constexpr float SWIM_BUOYANCY = 8.0f;
     static constexpr float SWIM_SINK_SPEED = -3.0f;
-    static constexpr float WATER_SURFACE_OFFSET = 0.9f;
+    // How fast vertical motion bleeds off when no swim-up or swim-down key is
+    // held. Retail holds depth rather than drifting, so this only arrests the
+    // momentum carried in from a jump or a dive.
+    static constexpr float SWIM_VERTICAL_DAMPING = 6.0f;
+    // Within this distance of the surface a body floats up to it; deeper than
+    // this it holds depth. Retail lets a character idle underwater - and drown
+    // doing it - so buoyancy cannot reach all the way down.
+    static constexpr float SWIM_FLOAT_BAND = 1.3f;
+    // How far the feet float below the surface while treading, which is what
+    // decides where the waterline crosses the body. The neck pivot is 1.6 above
+    // the feet, so 0.9 put the line around the knee and left the character
+    // riding on top of the water; retail treads with the shoulders out and the
+    // water at the chest.
+    static constexpr float WATER_SURFACE_OFFSET = 1.45f;
 
     // Movement input suppression (after teleport/portal, ignore held keys)
     float movementSuppressTimer_ = 0.0f;
     // Gravity suspension (after world entry, hold Z until ground detected)
     float gravitySuspendTimer_ = 0.0f;
+    float entryFloorAnchorZ_ = 0.0f;
+    float entryFloorAnchorTimer_ = 0.0f;
 
     // State
     bool enabled = true;
     bool sitting = false;
+    /// Seated in something rather than on the ground: a chair, a bench, the
+    /// barber's chair. Held apart from `sitting` because only this one means
+    /// the character's height is the server's to decide.
+    bool seatedInChair_ = false;
+    bool barberView_ = false;
+    float savedBarberYaw_ = 0.0f;
+    float savedBarberPitch_ = 0.0f;
+    float savedBarberDistance_ = 10.0f;
+    float savedBarberPivot_ = 0.0f;
+    bool ignoreSlopeLimit_ = false;
+    float maxDistanceFactor_ = 1.0f;
     bool xKeyWasDown = false;
     bool rKeyWasDown = false;
     bool runPace = false;
@@ -350,8 +645,22 @@ private:
     bool wasTurningRight = false;
     bool wasJumping = false;
     bool wasFalling = false;
+    /// How long the player has been off the ground and moving downward.
+    ///
+    /// A landing is only worth telling the server about if there was a fall.
+    /// Riding over uneven ground breaks contact for a frame at a time, and each
+    /// of those used to send MSG_MOVE_FALL_LAND - which every other client in
+    /// range plays as a landing, so a mounted player crossing a field looked to
+    /// everyone else like one landing over and over.
+    float airborneSeconds_ = 0.0f;
     bool wasAscending_ = false;   // Space held while flyingActive_
     bool wasDescending_ = false;  // X held while flyingActive_
+    /// True while the tile under a position has not finished streaming, which
+    /// is when there is no floor to find and gravity must wait for one.
+    [[nodiscard]] bool groundNotStreamedYet(float x, float y) const;
+
+    bool rotationSuppressed_ = false;
+    bool steering_ = false;
     bool moveForwardActive = false;
     bool moveBackwardActive = false;
     bool strafeLeftActive = false;
@@ -368,7 +677,6 @@ private:
     // Movement speeds
     bool useWoWSpeed = false;
     static constexpr float WOW_RUN_SPEED = 7.0f;     // Normal run (WotLK)
-    static constexpr float WOW_SPRINT_SPEED = 10.5f; // Optional fast mode (not default WoW behavior)
     static constexpr float WOW_WALK_SPEED = 2.5f;    // Walk
     static constexpr float WOW_BACK_SPEED = 4.5f;    // Backpedal
     static constexpr float WOW_TURN_SPEED = 180.0f;  // Keyboard turn deg/sec
@@ -442,6 +750,12 @@ private:
 
     // No-ground timer: after grace period, let the player fall instead of hovering
     float noGroundTimer_ = 0.0f;
+    // Edge trigger for the terrain-penetration rescue's log line. It fires every
+    // frame of a steep climb, and the interesting event is that it started -
+    // above all if it ever starts somewhere it should not, like a crypt.
+    bool terrainRescueActive_ = false;
+    /// Throttle for the WOWEE_FLOOR_DEBUG trace.
+    float floorDebugTimer_ = 0.0f;
     static constexpr float NO_GROUND_GRACE = 0.5f; // 500ms grace for terrain streaming
 
     // Continuous fall time (for auto-unstuck detection)
@@ -469,6 +783,7 @@ private:
     float shakeDuration_  = 0.0f;
     float shakeMagnitude_ = 0.0f;
     float shakeFrequency_ = 0.0f;
+    float shakeScale_     = 1.0f;  ///< the player's Camera shake setting
 
     // Server-authored drunkenness (0 sober, 1 smashed).
     float intoxication_ = 0.0f;

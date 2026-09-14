@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Token Reward catalog (.wtbr) — novel
+// Wowee Open Token Reward catalog (.wtbr) - novel
 // replacement for the per-vendor token redemption tables
 // (currency_token_reward / npc_vendor token rows). Each
 // entry says "spend N copies of token X to receive
@@ -93,14 +93,14 @@ struct WoweeTokenReward {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t tokenRewardId) const;
+    [[nodiscard]] const Entry* findById(uint32_t tokenRewardId) const;
 
     // Returns all rewards offered for spending the given
     // token item id. Used by vendor frames to populate
     // the "what can I buy with these?" list.
-    std::vector<const Entry*> findByToken(uint32_t tokenItemId) const;
+    [[nodiscard]] std::vector<const Entry*> findByToken(uint32_t tokenItemId) const;
 
     static const char* rewardKindName(uint8_t k);
     static const char* factionStandingName(uint8_t s);
@@ -115,14 +115,14 @@ public:
 
     // Preset emitters used by --gen-tbr* variants.
     //
-    //   makeRaidTokens — 5 raid tier-token redemptions
+    //   makeRaidTokens - 5 raid tier-token redemptions
     //                     (T9 Conqueror's helm, Vanquisher's
     //                     chest, etc) consuming Trophy of
     //                     the Crusade.
-    //   makePvP        — 5 PvP redemptions (Honor → BG
+    //   makePvP        - 5 PvP redemptions (Honor → BG
     //                     mount, Arena → arena weapon,
     //                     Conquest → PvP tier helm).
-    //   makeFaction    — 5 faction-gated rewards (Argent
+    //   makeFaction    - 5 faction-gated rewards (Argent
     //                     Tournament tabard at Honored,
     //                     Hodir mammoth mount at Exalted,
     //                     Cenarion ring at Revered, etc.)

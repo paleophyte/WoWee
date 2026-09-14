@@ -34,7 +34,7 @@ bool LevelUpEffect::loadModel(M2Renderer* m2Renderer,
     }
 
     modelLoaded_ = true;
-    LOG_INFO("LevelUpEffect: loaded LevelUp.m2 — vertices=", model.vertices.size(),
+    LOG_INFO("LevelUpEffect: loaded LevelUp.m2 - vertices=", model.vertices.size(),
              " indices=", model.indices.size(),
              " emitters=", model.particleEmitters.size(),
              " batches=", model.batches.size());
@@ -51,7 +51,7 @@ void LevelUpEffect::trigger(const glm::vec3& position) {
         return;
     }
 
-    activeEffects_.push_back({instanceId, 0.0f});
+    activeEffects_.push_back({.instanceId = instanceId, .elapsed = 0.0f});
 }
 
 void LevelUpEffect::update(float deltaTime) {

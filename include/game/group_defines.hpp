@@ -35,12 +35,77 @@ struct GroupMember {
 /**
  * Full group/party data from SMSG_GROUP_LIST
  */
+/// What a loot method is called, as it is written to chat.
+///
+/// Five, not the three the field's comment used to name. The party window and
+/// the /loot command each wrote the five out; a parallel table of lowercase
+/// tokens lives in lua_api_helpers.hpp for parsing the command's argument, and
+/// the two are in the same order on purpose - the token's index is the wire
+/// value this names.
+inline const char* lootMethodName(uint8_t method) {
+    static constexpr const char* kByMethod[] = {
+        "Free for All", "Round Robin", "Master Looter",
+        "Group Loot", "Need Before Greed",
+    };
+    return method < 5 ? kByMethod[method] : "Unknown";
+}
+
+/// What an instance difficulty is called, or null for a value that is not one.
+///
+/// Three places wrote the four words out, and they disagreed about the answer
+/// for a value outside the four: two said "Normal" and one said "Unknown".
+/// Null here so each keeps its own - the Lua bindings hand this to FrameXML,
+/// which compares it against names, while the minimap is only labelling a
+/// corner and can say it does not know.
+inline const char* instanceDifficultyName(uint32_t difficulty) {
+    static constexpr const char* kByDifficulty[] = {
+        "Normal", "Heroic", "25 Normal", "25 Heroic",
+    };
+    return difficulty < 4 ? kByDifficulty[difficulty] : nullptr;
+}
+
+/// How many raid target markers there are.
+///
+/// GameHandler and SocialHandler each declared their own kRaidMarkCount and
+/// the icon loader a third, kRaidTargetIconCount. All three are the count of
+/// the marks the server indexes, so it is written here and the others name it.
+inline constexpr uint32_t kRaidMarkCount = 8;
+
+/// What a raid target marker is called, or null for a value that is not one.
+///
+/// Written out capitalised for the minimap's tooltip and lowercase for what
+/// /mark matches, plus a third time inside that command's help line - one set
+/// of eight words under two spellings. The display spelling lives here and
+/// the command lowercases what it compares against it.
+inline const char* raidMarkName(uint8_t mark) {
+    static constexpr const char* kByMark[] = {
+        "Star", "Circle", "Diamond", "Triangle",
+        "Moon", "Square", "Cross", "Skull",
+    };
+    return mark < kRaidMarkCount ? kByMark[mark] : nullptr;
+}
+
+/// Whether a group's type says raid.
+///
+/// The field changed meaning between expansions and the client tested it as a
+/// number. 1.12 writes 0 for a party and 1 for a raid; 3.3.5 writes a set of
+/// flags - 0x01 battleground, 0x02 raid, 0x04 and 0x08 for the dungeon finder -
+/// so `== 1` read a WotLK raid as no raid at all, and every test for a party
+/// written as `== 0` read a finder group (0x0C) as no party either. A dungeon
+/// group had neither kind of frame.
+///
+/// The low two bits cover both conventions: 1.12's raid is 1, WotLK's is 2, and
+/// a battleground group is a raid as well. The finder's bits mean neither.
+inline bool groupIsRaid(uint8_t groupType) {
+    return (groupType & 0x03) != 0;
+}
+
 struct GroupListData {
     uint8_t groupType = 0;       // 0 = party, 1 = raid
     uint8_t subGroup = 0;
     uint8_t flags = 0;
     uint8_t roles = 0;
-    uint8_t lootMethod = 0;      // 0=free for all, 1=round robin, 2=master loot
+    uint8_t lootMethod = 0;      ///< 0..4; see lootMethodName
     uint64_t looterGuid = 0;
     uint8_t lootThreshold = 0;
     uint8_t difficultyId = 0;
@@ -49,8 +114,8 @@ struct GroupListData {
     std::vector<GroupMember> members;
     uint64_t leaderGuid = 0;
 
-    bool isValid() const { return true; }
-    bool isEmpty() const { return memberCount == 0; }
+    [[nodiscard]] bool isValid() const { return true; }
+    [[nodiscard]] bool isEmpty() const { return memberCount == 0; }
 };
 
 /**
@@ -60,7 +125,10 @@ enum class PartyCommand : uint32_t {
     INVITE = 0,
     UNINVITE = 1,
     LEAVE = 2,
-    SWAP = 3
+    // 3 is not an operation. The server's PARTY_OP_SWAP is 4, and SWAP was
+    // declared 3, so the operation field of SMSG_PARTY_COMMAND_RESULT could
+    // never be recognised as a swap.
+    SWAP = 4
 };
 
 /**

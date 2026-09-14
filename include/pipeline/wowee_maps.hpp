@@ -7,16 +7,16 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Map / Area catalog (.wms) — novel replacement
+// Wowee Open Map / Area catalog (.wms) - novel replacement
 // for Blizzard's Map.dbc + AreaTable.dbc + the AzerothCore-
 // style world_zone SQL tables. The 26th open format added
 // to the editor.
 //
 // Defines two related kinds of locator:
-//   • Maps  — top-level worlds (continents, instances, BGs).
+//   • Maps  - top-level worlds (continents, instances, BGs).
 //             Each map has a friendly name, type, expansion
 //             tag, and player-count cap.
-//   • Areas — sub-zones within maps with friendly names,
+//   • Areas - sub-zones within maps with friendly names,
 //             parent-area chain, recommended level range,
 //             faction-territory marker, exploration XP, and
 //             an ambient-sound cross-reference into WSND.
@@ -101,10 +101,10 @@ struct WoweeMaps {
     std::vector<Map> maps;
     std::vector<Area> areas;
 
-    bool isValid() const { return !maps.empty(); }
+    [[nodiscard]] bool isValid() const { return !maps.empty(); }
 
-    const Map* findMap(uint32_t mapId) const;
-    const Area* findArea(uint32_t areaId) const;
+    [[nodiscard]] const Map* findMap(uint32_t mapId) const;
+    [[nodiscard]] const Area* findArea(uint32_t areaId) const;
 
     static const char* mapTypeName(uint8_t t);
     static const char* expansionName(uint8_t e);
@@ -120,13 +120,13 @@ public:
 
     // Preset emitters used by --gen-maps* variants.
     //
-    //   makeStarter — 1 map (continent) + 3 areas (capital,
+    //   makeStarter - 1 map (continent) + 3 areas (capital,
     //                  starter zone, neighboring zone with
     //                  parent chain).
-    //   makeClassic — 2 continents + a small dungeon instance
+    //   makeClassic - 2 continents + a small dungeon instance
     //                  + 6 areas wiring sub-zones to parents
     //                  (Stormwind > City Trade District etc).
-    //   makeBgArena — 2 maps showcasing Battleground (40 players)
+    //   makeBgArena - 2 maps showcasing Battleground (40 players)
     //                  and Arena (5v5) types.
     static WoweeMaps makeStarter(const std::string& catalogName);
     static WoweeMaps makeClassic(const std::string& catalogName);

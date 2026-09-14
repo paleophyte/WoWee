@@ -1,4 +1,4 @@
-// GameStateAdapter — concrete IGameState wrapping GameHandler + Renderer.
+// GameStateAdapter - concrete IGameState wrapping GameHandler + Renderer.
 // Phase 4.2 of chat_panel_ref.md.
 #include "ui/chat/game_state_adapter.hpp"
 #include "game/game_handler.hpp"
@@ -39,7 +39,8 @@ bool GameStateAdapter::hasPet() const   { return gameHandler_.hasPet(); }
 bool GameStateAdapter::isInGroup() const { return gameHandler_.isInGroup(); }
 
 bool GameStateAdapter::isInRaid() const {
-    return gameHandler_.isInGroup() && gameHandler_.getPartyData().groupType == 1;
+    return gameHandler_.isInGroup() &&
+           game::groupIsRaid(gameHandler_.getPartyData().groupType);
 }
 
 bool GameStateAdapter::isIndoors() const {

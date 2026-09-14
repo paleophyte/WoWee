@@ -2,6 +2,7 @@
 
 #include <imgui.h>
 #include "game/inventory.hpp"
+#include "game/item_text.hpp"
 
 namespace wowee::ui {
 
@@ -12,6 +13,11 @@ namespace colors {
     constexpr ImVec4 kBrightGreen = {0.3f, 1.0f, 0.3f, 1.0f};
     constexpr ImVec4 kYellow      = {1.0f, 1.0f, 0.3f, 1.0f};
     constexpr ImVec4 kGray        = {0.6f, 0.6f, 0.6f, 1.0f};
+    // The three steps of the level-difficulty scale that had no name, written
+    // out identically at each of the places that drew one.
+    constexpr ImVec4 kSkullRed       = {1.0f, 0.1f, 0.1f, 1.0f};
+    constexpr ImVec4 kDifficultOrange= {1.0f, 0.5f, 0.1f, 1.0f};
+    constexpr ImVec4 kEvenYellow     = {1.0f, 1.0f, 0.1f, 1.0f};
     constexpr ImVec4 kDarkGray    = {0.5f, 0.5f, 0.5f, 1.0f};
     constexpr ImVec4 kLightGray   = {0.7f, 0.7f, 0.7f, 1.0f};
     constexpr ImVec4 kWhite       = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -48,9 +54,7 @@ namespace colors {
 
     // Button styling colors (accept/decline patterns)
     constexpr ImVec4 kBtnGreen       = {0.15f, 0.5f, 0.15f, 1.0f};
-    constexpr ImVec4 kBtnGreenHover  = {0.2f, 0.7f, 0.2f, 1.0f};  // == kFriendlyGreen
     constexpr ImVec4 kBtnRed         = {0.5f, 0.15f, 0.15f, 1.0f};
-    constexpr ImVec4 kBtnRedHover    = {0.7f, 0.3f, 0.3f, 1.0f};
     constexpr ImVec4 kBtnDkGreen     = {0.2f, 0.5f, 0.2f, 1.0f};
     constexpr ImVec4 kBtnDkGreenHover= {0.3f, 0.7f, 0.3f, 1.0f};
     constexpr ImVec4 kBtnDkRed       = {0.5f, 0.2f, 0.2f, 1.0f};
@@ -67,6 +71,27 @@ namespace colors {
     constexpr ImVec4 kGold   = {1.00f, 0.82f, 0.00f, 1.0f};
     constexpr ImVec4 kSilver = {0.80f, 0.80f, 0.80f, 1.0f};
     constexpr ImVec4 kCopper = {0.72f, 0.45f, 0.20f, 1.0f};
+/// An item's durability, coloured the same way in the bag and in the tooltip.
+///
+/// Two copies with the same thresholds and different greens, so the strip under
+/// an icon and the line in its own tooltip disagreed about the same item. The
+/// strip is drawn semi-transparent, which is why the alpha is the caller's.
+inline ImVec4 durabilityColor(float pct) {
+    if (pct > 0.5f) return {0.1f, 1.0f, 0.1f, 1.0f};
+    if (pct > 0.25f) return {1.0f, 1.0f, 0.0f, 1.0f};
+    return kBrightRed;
+}
+
+// ---- Power bar colour ----
+//
+// Five places mapped a power type to its bar colour and none of them covered
+// the same set. The pet frame stopped at Energy, so a hunter pet - the one unit
+// whose power is Happiness - drew a mana-blue bar for it. The focus frame had
+// no Focus and no Happiness either.
+//
+// `fallback` is what an unrecognised type gets. Mana blue everywhere except the
+// raid list, which greys a power it does not know rather than claiming it is
+// mana.
 } // namespace colors
 
 // ---- Item quality colors ----
@@ -82,6 +107,22 @@ inline ImVec4 getQualityColor(game::ItemQuality quality) {
         case game::ItemQuality::HEIRLOOM:  return {0.90f, 0.80f, 0.50f, 1.0f};
         default:                           return {1.0f, 1.0f, 1.0f, 1.0f};
     }
+}
+
+// ---- Battleground team colours ----
+
+/// The two team colours a battleground draws its players in.
+///
+/// The heads-up display and the minimap both plot the same players, and a flag
+/// carrier being blue on one and red on the other is worse than either colour
+/// alone. Both files carried the pair, under a comment in one of them saying
+/// it was the same pair as the other.
+inline ImU32 bgGroupColor(uint32_t group) {
+    static const ImU32 kByGroup[2] = {
+        IM_COL32( 80, 180, 255, 240),   // group 0
+        IM_COL32(220,  50,  50, 240),   // group 1
+    };
+    return kByGroup[group & 1];
 }
 
 // ---- Coin display (gold/silver/copper) ----
@@ -102,9 +143,8 @@ inline void renderCoinsText(uint32_t g, uint32_t s, uint32_t c) {
 
 // Convenience overload: decompose copper amount and render as gold/silver/copper
 inline void renderCoinsFromCopper(uint64_t copper) {
-    renderCoinsText(static_cast<uint32_t>(copper / 10000),
-                    static_cast<uint32_t>((copper / 100) % 100),
-                    static_cast<uint32_t>(copper % 100));
+    const auto coins = game::splitCopper(copper);
+    renderCoinsText(coins.gold, coins.silver, coins.copper);
 }
 
 // ---- Inventory slot name from WoW inventory type ----
@@ -142,13 +182,8 @@ inline const char* getInventorySlotName(uint32_t inventoryType) {
 
 // ---- Binding type display ----
 inline void renderBindingType(uint32_t bindType) {
-    const auto& kBindColor = colors::kTooltipGold;
-    switch (bindType) {
-        case 1: ImGui::TextColored(kBindColor, "Binds when picked up"); break;
-        case 2: ImGui::TextColored(kBindColor, "Binds when equipped"); break;
-        case 3: ImGui::TextColored(kBindColor, "Binds when used"); break;
-        case 4: ImGui::TextColored(kBindColor, "Quest Item"); break;
-        default: break;
+    if (const char* text = game::itemBindText(bindType)) {
+        ImGui::TextColored(colors::kTooltipGold, "%s", text);
     }
 }
 
@@ -169,25 +204,25 @@ inline constexpr const char* kItemSetThresholdKeys[10] = {
 // ---- Socket type display (gem sockets) ----
 struct SocketTypeDef { uint32_t mask; const char* label; ImVec4 col; };
 inline constexpr SocketTypeDef kSocketTypes[] = {
-    { 1, "Meta Socket",   { 0.7f, 0.7f, 0.9f, 1.0f } },
-    { 2, "Red Socket",    { 1.0f, 0.3f, 0.3f, 1.0f } },
-    { 4, "Yellow Socket", { 1.0f, 0.9f, 0.3f, 1.0f } },
-    { 8, "Blue Socket",   { 0.3f, 0.6f, 1.0f, 1.0f } },
+    { .mask = 1, .label = "Meta Socket",   .col = { 0.7f, 0.7f, 0.9f, 1.0f } },
+    { .mask = 2, .label = "Red Socket",    .col = { 1.0f, 0.3f, 0.3f, 1.0f } },
+    { .mask = 4, .label = "Yellow Socket", .col = { 1.0f, 0.9f, 0.3f, 1.0f } },
+    { .mask = 8, .label = "Blue Socket",   .col = { 0.3f, 0.6f, 1.0f, 1.0f } },
 };
 
 // ---- Class/race bitmask lookup (for allowableClass/allowableRace display) ----
 struct ClassMaskEntry { uint32_t mask; const char* name; };
 inline constexpr ClassMaskEntry kClassMasks[] = {
-    {1,"Warrior"}, {2,"Paladin"}, {4,"Hunter"}, {8,"Rogue"},
-    {16,"Priest"}, {32,"Death Knight"}, {64,"Shaman"},
-    {128,"Mage"}, {256,"Warlock"}, {1024,"Druid"},
+    {.mask = 1,.name = "Warrior"}, {.mask = 2,.name = "Paladin"}, {.mask = 4,.name = "Hunter"}, {.mask = 8,.name = "Rogue"},
+    {.mask = 16,.name = "Priest"}, {.mask = 32,.name = "Death Knight"}, {.mask = 64,.name = "Shaman"},
+    {.mask = 128,.name = "Mage"}, {.mask = 256,.name = "Warlock"}, {.mask = 1024,.name = "Druid"},
 };
 
 struct RaceMaskEntry { uint32_t mask; const char* name; };
 inline constexpr RaceMaskEntry kRaceMasks[] = {
-    {1,"Human"}, {2,"Orc"}, {4,"Dwarf"}, {8,"Night Elf"},
-    {16,"Undead"}, {32,"Tauren"}, {64,"Gnome"}, {128,"Troll"},
-    {512,"Blood Elf"}, {1024,"Draenei"},
+    {.mask = 1,.name = "Human"}, {.mask = 2,.name = "Orc"}, {.mask = 4,.name = "Dwarf"}, {.mask = 8,.name = "Night Elf"},
+    {.mask = 16,.name = "Undead"}, {.mask = 32,.name = "Tauren"}, {.mask = 64,.name = "Gnome"}, {.mask = 128,.name = "Troll"},
+    {.mask = 512,.name = "Blood Elf"}, {.mask = 1024,.name = "Draenei"},
 };
 
 // ---- WoW class colors (Blizzard canonical) ----
@@ -208,9 +243,14 @@ inline ImVec4 getClassColor(uint8_t classId) {
 }
 
 inline ImU32 getClassColorU32(uint8_t classId, int alpha = 255) {
-    ImVec4 c = getClassColor(classId);
-    return IM_COL32(static_cast<int>(c.x * 255), static_cast<int>(c.y * 255),
-                    static_cast<int>(c.z * 255), alpha);
+    // ColorConvertFloat4ToU32 rounds to the nearest byte where a cast to int
+    // truncates, and the panels that draw a name as an ImVec4 get the rounded
+    // one. Truncating here made the same class one step darker on the minimap
+    // and the nameplates than in the party list beside them - the druid orange
+    // came out 7c where the rest of the client draws 7d.
+    const ImVec4 c = getClassColor(classId);
+    return ImGui::ColorConvertFloat4ToU32(
+        ImVec4(c.x, c.y, c.z, static_cast<float>(alpha) / 255.0f));
 }
 
 } // namespace wowee::ui

@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Server Channel Broadcast catalog (.wscb) —
+// Wowee Open Server Channel Broadcast catalog (.wscb) -
 // novel replacement for the hardcoded login-MOTD,
 // server-restart-warning, and rotating-help-tip messages
 // that vanilla servers nail into source. Each entry is
@@ -23,7 +23,7 @@ namespace pipeline {
 //         WCHN-defined system / help channels.
 //   WCHC: factionFilter uses the WCHC faction-mask bits
 //         (1=Alliance, 2=Horde, 3=Both, 0=neither which
-//         means "no broadcast" — validator warns).
+//         means "no broadcast" - validator warns).
 //
 // Binary layout (little-endian):
 //   magic[4]            = "WSCB"
@@ -35,15 +35,15 @@ namespace pipeline {
 //     nameLen + name
 //     descLen + description
 //     msgLen + messageText
-//     intervalSeconds (uint32)  — 0 = login-only / once
-//     channelKind (uint8)        — Login / SystemChannel /
+//     intervalSeconds (uint32)  - 0 = login-only / once
+//     channelKind (uint8)        - Login / SystemChannel /
 //                                  RaidWarning / MOTD /
 //                                  HelpTip
-//     factionFilter (uint8)      — WCHC faction-mask bits
-//     minLevel (uint8)           — earliest level player
+//     factionFilter (uint8)      - WCHC faction-mask bits
+//     minLevel (uint8)           - earliest level player
 //                                  must be to receive (0
 //                                  = any)
-//     maxLevel (uint8)           — latest level (0 = any)
+//     maxLevel (uint8)           - latest level (0 = any)
 //     iconColorRGBA (uint32)
 struct WoweeServerBroadcasts {
     enum ChannelKind : uint8_t {
@@ -81,21 +81,21 @@ struct WoweeServerBroadcasts {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t broadcastId) const;
+    [[nodiscard]] const Entry* findById(uint32_t broadcastId) const;
 
     // Returns all broadcasts that should fire for a player
     // of the given faction and level. Used by the
     // BroadcastTicker to build the per-player message
     // queue on login.
-    std::vector<const Entry*> findFor(uint8_t playerFaction,
+    [[nodiscard]] std::vector<const Entry*> findFor(uint8_t playerFaction,
                                        uint8_t playerLevel) const;
 
     // Returns all broadcasts of one channel kind (used by
     // the periodic ticker to schedule SystemChannel /
     // HelpTip rotations independently from login MOTDs).
-    std::vector<const Entry*> findByChannel(uint8_t channelKind) const;
+    [[nodiscard]] std::vector<const Entry*> findByChannel(uint8_t channelKind) const;
 };
 
 class WoweeServerBroadcastsLoader {
@@ -107,15 +107,15 @@ public:
 
     // Preset emitters used by --gen-scb* variants.
     //
-    //   makeMotd        — 4 login MOTD entries (welcome /
+    //   makeMotd        - 4 login MOTD entries (welcome /
     //                      patch notes summary / Discord
     //                      link / forum link).
-    //   makeMaintenance — 3 raid-wide maintenance warnings
+    //   makeMaintenance - 3 raid-wide maintenance warnings
     //                      at decreasing intervals (15min
     //                      / 5min / 1min before restart),
     //                      each with intervalSeconds=0
     //                      (one-shot).
-    //   makeHelpTips    — 6 rotating help-channel tips on
+    //   makeHelpTips    - 6 rotating help-channel tips on
     //                      a 600s (10min) cycle covering
     //                      core gameplay (talents, mounts,
     //                      auction, professions, dungeon

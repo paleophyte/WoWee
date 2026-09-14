@@ -16,7 +16,7 @@ class VkContext;
  * Sun rises at dawn, sets at dusk. Moon is visible at night.
  *
  * Pipeline layout:
- *   set 0  = perFrameLayout  (camera UBO — view, projection, etc.)
+ *   set 0  = perFrameLayout  (camera UBO - view, projection, etc.)
  *   push   = CelestialPush   (mat4 model + vec4 celestialColor + float intensity
  *                              + float moonPhase + float animTime = 96 bytes)
  */
@@ -33,6 +33,17 @@ public:
     bool initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout);
     void shutdown();
     void recreatePipelines();
+
+private:
+    /// The one pipeline description, so the first build and every rebuild
+    /// after it cannot disagree. They did: initialize() asked for no depth
+    /// test and recreatePipelines() asked for one, so the sun and moon changed
+    /// behaviour the first time the swapchain was rebuilt.
+    VkPipeline buildPipeline(VkDevice device,
+                             const VkPipelineShaderStageCreateInfo& vertStage,
+                             const VkPipelineShaderStageCreateInfo& fragStage);
+
+public:
 
     /**
      * Render celestial bodies (sun and moons).
@@ -57,32 +68,30 @@ public:
 
     // --- Enable / disable ---
     void setEnabled(bool enabled) { renderingEnabled_ = enabled; }
-    bool isEnabled() const { return renderingEnabled_; }
+    [[nodiscard]] bool isEnabled() const { return renderingEnabled_; }
 
     // --- Moon phases ---
-    /** Set White Lady phase (primary moon, 0 = new, 0.5 = full, 1 = new). */
-    void setMoonPhase(float phase);
-    float getMoonPhase() const { return whiteLadyPhase_; }
+    [[nodiscard]] float getMoonPhase() const { return whiteLadyPhase_; }
 
     /** Set Blue Child phase (secondary moon, 0 = new, 0.5 = full, 1 = new). */
     void setBlueChildPhase(float phase);
-    float getBlueChildPhase() const { return blueChildPhase_; }
+    [[nodiscard]] float getBlueChildPhase() const { return blueChildPhase_; }
 
     void setMoonPhaseCycling(bool enabled) { moonPhaseCycling_ = enabled; }
-    bool isMoonPhaseCycling() const { return moonPhaseCycling_; }
+    [[nodiscard]] bool isMoonPhaseCycling() const { return moonPhaseCycling_; }
 
     /** Enable / disable two-moon rendering (White Lady + Blue Child). */
     void setDualMoonMode(bool enabled) { dualMoonMode_ = enabled; }
-    bool isDualMoonMode() const { return dualMoonMode_; }
+    [[nodiscard]] bool isDualMoonMode() const { return dualMoonMode_; }
 
     // --- Positional / colour queries (unchanged from GL version) ---
-    glm::vec3 getSunPosition(float timeOfDay) const;
-    glm::vec3 getMoonPosition(float timeOfDay) const;
-    glm::vec3 getSunColor(float timeOfDay) const;
-    float     getSunIntensity(float timeOfDay) const;
+    [[nodiscard]] glm::vec3 getSunPosition(float timeOfDay) const;
+    [[nodiscard]] glm::vec3 getMoonPosition(float timeOfDay) const;
+    [[nodiscard]] glm::vec3 getSunColor(float timeOfDay) const;
+    [[nodiscard]] float     getSunIntensity(float timeOfDay) const;
 
 private:
-    // Push constant block — MUST match celestial.vert.glsl / celestial.frag.glsl
+    // Push constant block - MUST match celestial.vert.glsl / celestial.frag.glsl
     struct CelestialPush {
         glm::mat4 model;         // 64 bytes
         glm::vec4 celestialColor; // 16 bytes (xyz = colour, w unused)
@@ -104,8 +113,8 @@ private:
     void renderBlueChild(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, float timeOfDay,
                          float nightFactor);
 
-    float calculateCelestialAngle(float timeOfDay, float riseTime, float setTime) const;
-    float computePhaseFromGameTime(float gameTime, float cycleDays) const;
+    [[nodiscard]] float calculateCelestialAngle(float timeOfDay, float riseTime, float setTime) const;
+    [[nodiscard]] float computePhaseFromGameTime(float gameTime, float cycleDays) const;
     void  updatePhasesFromGameTime(float gameTime);
 
     // Vulkan objects

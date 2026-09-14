@@ -1,6 +1,7 @@
-// WorldLoader — terrain streaming, map transitions, world preloading
+// WorldLoader - terrain streaming, map transitions, world preloading
 // Extracted from Application as part of god-class decomposition (Section 3.3)
 
+#include "rendering/animation/melee_anim_chains.hpp"
 #include "core/world_loader.hpp"
 #include "core/application.hpp"
 #include "core/world_entry_callback_handler.hpp"
@@ -27,6 +28,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/wmo_group_path.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"
@@ -77,10 +79,7 @@ void spawnInstancePortalVisuals(uint32_t mapId,
         pipeline::M2Model model = pipeline::M2Loader::load(m2Data);
         model.name = kPortalModelName;
 
-        std::string skinPath = std::string(kPortalPath);
-        size_t dotPos = skinPath.rfind('.');
-        if (dotPos != std::string::npos) skinPath = skinPath.substr(0, dotPos);
-        skinPath += "00.skin";
+        const std::string skinPath = pipeline::skinPathForM2(std::string(kPortalPath));
         auto skinData = assetManager->readFile(skinPath);
         if (!skinData.empty() && model.version >= 264) {
             pipeline::M2Loader::loadSkin(skinData, model);
@@ -95,9 +94,11 @@ void spawnInstancePortalVisuals(uint32_t mapId,
 
     static const InstancePortalVisual kPortals[] = {
         // Ironforge station -> Deeprun Tram
-        {0,   glm::vec3(-1330.46f, -4840.26f, 503.85f), 3.10f, 4.25f},
+        {.mapId = 0,   .canonicalPos = glm::vec3(-1330.46f, -4840.26f, 503.85f),
+         .canonicalYaw = 3.10f, .scale = 4.25f},
         // Deeprun Tram -> Ironforge station
-        {369, glm::vec3(10.50f, 76.03f, -2.30f),       3.12f, 4.25f},
+        {.mapId = 369, .canonicalPos = glm::vec3(10.50f, 76.03f, -2.30f),
+         .canonicalYaw = 3.12f, .scale = 4.25f},
         // Stormwind station -> Deeprun Tram. Coordinates from a live playthrough's
         // actual AreaTrigger 2173 fire: entrance trigger position on map 0, and the
         // canonical position the player actually landed at on map 369 after transfer
@@ -105,14 +106,17 @@ void spawnInstancePortalVisuals(uint32_t mapId,
         // to its own arrival point, since both tunnel ends have similar floor height).
         // Yaw reuses the Ironforge value as a starting point - Stormwind's entrance
         // faces a different direction, so this likely needs live tuning.
-        {0,   glm::vec3(514.03f, -8346.46f, 97.60f),   3.12f, 4.25f},
+        {.mapId = 0,   .canonicalPos = glm::vec3(514.03f, -8346.46f, 97.60f),
+         .canonicalYaw = 3.12f, .scale = 4.25f},
         // Deeprun Tram -> Stormwind station
-        {369, glm::vec3(2490.91f, 68.30f, -2.30f),     3.12f, 4.25f},
+        {.mapId = 369, .canonicalPos = glm::vec3(2490.91f, 68.30f, -2.30f),
+         .canonicalYaw = 3.12f, .scale = 4.25f},
         // The Stockade exit. The WMO contains this InstancePortal doodad, but
         // WMO-child matrix instances bypass the standalone portal presentation.
         // Position and scale come from StormwindJail.wmo's authored doodad after
         // applying the instance's 180-degree placement rotation.
-        {34,  glm::vec3(0.6882f, 45.7492f, -16.1133f), 0.0f, 1.36f},
+        {.mapId = 34,  .canonicalPos = glm::vec3(0.6882f, 45.7492f, -16.1133f),
+         .canonicalYaw = 0.0f, .scale = 1.36f},
     };
 
     for (const auto& portal : kPortals) {
@@ -176,7 +180,7 @@ const char* WorldLoader::mapDisplayName(uint32_t mapId) {
 
 const char* WorldLoader::mapIdToName(uint32_t mapId) {
     // Fallback when Map.dbc is unavailable. Names must match WDT directory names
-    // (case-insensitive — AssetManager lowercases all paths).
+    // (case-insensitive - AssetManager lowercases all paths).
     switch (mapId) {
         // Continents
         case 0: return "Azeroth";
@@ -266,16 +270,6 @@ const char* WorldLoader::mapIdToName(uint32_t mapId) {
         default: return "";
     }
 }
-
-int WorldLoader::mapNameToId(const std::string& name) {
-    // Reverse lookup: iterate known continent IDs and match against mapIdToName.
-    static constexpr uint32_t kContinentIds[] = {0, 1, 530, 571};
-    for (uint32_t id : kContinentIds) {
-        if (name == mapIdToName(id)) return static_cast<int>(id);
-    }
-    return -1;
-}
-
 void WorldLoader::processPendingEntry() {
     if (!pendingWorldEntry_ || loadingWorld_) return;
     auto entry = *pendingWorldEntry_;
@@ -293,6 +287,426 @@ void WorldLoader::processPendingEntry() {
         renderer_->getCameraController()->suspendGravityFor(10.0f);
     }
     loadOnlineWorldTerrain(entry.mapId, entry.x, entry.y, entry.z);
+}
+
+// Read the map's WDT, then load either its root WMO or its terrain tiles, and
+// precompute what the player will stand on.
+//
+// The longest step of a world load by far, which is why it carries the loading
+// screen with it: several of the stages inside take long enough that the window
+// would stop answering between them.
+void WorldLoader::LoadingUi::pump() const {
+    if (!ok || !screen || !window) return;
+    screen->render();
+    window->swapBuffers();
+}
+
+void WorldLoader::loadMapGeometry(uint32_t mapId, const std::string& mapName,
+                                  const glm::vec3& spawnCanonical,
+                                  const glm::vec3& spawnRender,
+                                  const LoadingUi& ui) {
+    const auto& showProgress = ui.showProgress;
+    // The tile loader below drives the screen itself rather than through pump(),
+    // because it also writes the per-tile status line.
+    auto* loadingScreen = ui.screen;
+    const bool loadingScreenOk = ui.ok;
+    // Check WDT to detect WMO-only maps (dungeons, raids, BGs)
+    bool isWMOOnlyMap = false;
+    pipeline::WDTInfo wdtInfo;
+    {
+        std::string wdtPath = "World\\Maps\\" + mapName + "\\" + mapName + ".wdt";
+        LOG_DEBUG("Reading WDT: ", wdtPath);
+        std::vector<uint8_t> wdtData = assetManager_->readFile(wdtPath);
+        if (!wdtData.empty()) {
+            wdtInfo = pipeline::parseWDT(wdtData);
+            isWMOOnlyMap = wdtInfo.isWMOOnly() && !wdtInfo.rootWMOPath.empty();
+            LOG_DEBUG("WDT result: isWMOOnly=", isWMOOnlyMap, " rootWMO='", wdtInfo.rootWMOPath, "'");
+        } else {
+            LOG_WARNING("No WDT file found at ", wdtPath);
+        }
+    }
+
+    bool terrainOk = false;
+
+    if (isWMOOnlyMap) {
+        // ---- WMO-only map (dungeon/raid/BG): load root WMO directly ----
+        LOG_DEBUG("WMO-only map detected - loading root WMO: ", wdtInfo.rootWMOPath);
+        showProgress("Loading instance geometry...", 0.25f);
+
+        // Initialize renderers if they don't exist yet (first login to a WMO-only map).
+        // On map change, renderers already exist from the previous map.
+        if (!renderer_->getWMORenderer() || !renderer_->getTerrainManager()) {
+            renderer_->initializeRenderers(assetManager_, mapName);
+        }
+
+        // Every sub-renderer, not the two this used to name: the minimap looks
+        // its tiles up by map, and left on the last one it found none - a
+        // dungeon with no dungeon on its minimap.
+        renderer_->setActiveMapName(mapName);
+        if (renderer_->getWMORenderer()) {
+            renderer_->getWMORenderer()->setWMOOnlyMap(true);
+        }
+        if (renderer_->getTerrainManager()) {
+            renderer_->getTerrainManager()->setStreamingEnabled(false);
+        }
+
+        // Spawn player character now that renderers are initialized
+        if (!app_.playerCharacterSpawned) {
+            app_.spawnPlayerCharacter();
+            if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
+        }
+
+        // Load the root WMO
+        auto* wmoRenderer = renderer_->getWMORenderer();
+        LOG_DEBUG("WMO-only: wmoRenderer=", (wmoRenderer ? "valid" : "NULL"));
+        if (wmoRenderer) {
+            LOG_DEBUG("WMO-only: reading root WMO file: ", wdtInfo.rootWMOPath);
+            std::vector<uint8_t> wmoData = assetManager_->readFile(wdtInfo.rootWMOPath);
+            LOG_DEBUG("WMO-only: root WMO data size=", wmoData.size());
+            if (!wmoData.empty()) {
+                pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
+                LOG_DEBUG("WMO-only: parsed WMO model, nGroups=", wmoModel.nGroups);
+
+                if (wmoModel.nGroups > 0) {
+                    showProgress("Loading instance groups...", 0.35f);
+                    uint32_t loadedGroups = 0;
+                    for (uint32_t gi = 0; gi < wmoModel.nGroups; gi++) {
+                        for (const std::string& groupPath :
+                             pipeline::wmoGroupCandidates(wdtInfo.rootWMOPath, gi)) {
+                            std::vector<uint8_t> groupData =
+                                assetManager_->readFile(groupPath);
+                            if (groupData.empty()) continue;
+                            pipeline::WMOLoader::loadGroup(groupData, wmoModel, gi);
+                            loadedGroups++;
+                            break;
+                        }
+
+                        // Update loading progress
+                        if (wmoModel.nGroups > 1) {
+                            float groupProgress = 0.35f + 0.30f * static_cast<float>(gi + 1) / wmoModel.nGroups;
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "Loading instance groups... %u / %u", gi + 1, wmoModel.nGroups);
+                            showProgress(buf, groupProgress);
+                        }
+                    }
+
+                    LOG_INFO("Loaded ", loadedGroups, " / ", wmoModel.nGroups, " WMO groups for instance");
+                }
+
+                // WMO-only maps: MODF uses same format as ADT MODF.
+                // Apply the same rotation conversion that outdoor WMOs get
+                // (including the implicit +180° Z yaw), but skip the ZEROPOINT
+                // position offset for zero-position instances (server sends
+                // coordinates relative to the WMO, not relative to map corner).
+                glm::vec3 wmoPos(0.0f);
+                glm::vec3 wmoRot(
+                    -wdtInfo.rotation[2] * core::coords::PI / 180.0f,
+                    -wdtInfo.rotation[0] * core::coords::PI / 180.0f,
+                    (wdtInfo.rotation[1] + 180.0f) * core::coords::PI / 180.0f
+                );
+                if (wdtInfo.position[0] != 0.0f || wdtInfo.position[1] != 0.0f || wdtInfo.position[2] != 0.0f) {
+                    wmoPos = core::coords::adtToWorld(
+                        wdtInfo.position[0], wdtInfo.position[1], wdtInfo.position[2]);
+                }
+
+                showProgress("Uploading instance geometry...", 0.70f);
+                uint32_t wmoModelId = 900000 + mapId;  // Unique ID range for instance WMOs
+                if (wmoRenderer->loadModel(wmoModel, wmoModelId)) {
+                    uint32_t instanceId = wmoRenderer->createInstance(wmoModelId, wmoPos, wmoRot, 1.0f);
+                    if (instanceId > 0) {
+                        LOG_DEBUG("Instance WMO loaded: modelId=", wmoModelId,
+                                " instanceId=", instanceId);
+                        LOG_DEBUG("  MOHD bbox local: (",
+                                   wmoModel.boundingBoxMin.x, ", ", wmoModel.boundingBoxMin.y, ", ", wmoModel.boundingBoxMin.z,
+                                   ") to (", wmoModel.boundingBoxMax.x, ", ", wmoModel.boundingBoxMax.y, ", ", wmoModel.boundingBoxMax.z, ")");
+                        LOG_DEBUG("  WMO pos: (", wmoPos.x, ", ", wmoPos.y, ", ", wmoPos.z,
+                                   ") rot: (", wmoRot.x, ", ", wmoRot.y, ", ", wmoRot.z, ")");
+                        LOG_DEBUG("  Player render pos: (", spawnRender.x, ", ", spawnRender.y, ", ", spawnRender.z, ")");
+                        LOG_DEBUG("  Player canonical: (", spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
+                        // Show player position in WMO local space
+                        {
+                            glm::mat4 instMat(1.0f);
+                            instMat = glm::translate(instMat, wmoPos);
+                            instMat = glm::rotate(instMat, wmoRot.z, glm::vec3(0,0,1));
+                            instMat = glm::rotate(instMat, wmoRot.y, glm::vec3(0,1,0));
+                            instMat = glm::rotate(instMat, wmoRot.x, glm::vec3(1,0,0));
+                            glm::mat4 invMat = glm::inverse(instMat);
+                            glm::vec3 localPlayer = glm::vec3(invMat * glm::vec4(spawnRender, 1.0f));
+                            LOG_DEBUG("  Player in WMO local: (", localPlayer.x, ", ", localPlayer.y, ", ", localPlayer.z, ")");
+                            bool inside = localPlayer.x >= wmoModel.boundingBoxMin.x && localPlayer.x <= wmoModel.boundingBoxMax.x &&
+                                          localPlayer.y >= wmoModel.boundingBoxMin.y && localPlayer.y <= wmoModel.boundingBoxMax.y &&
+                                          localPlayer.z >= wmoModel.boundingBoxMin.z && localPlayer.z <= wmoModel.boundingBoxMax.z;
+                            LOG_DEBUG("  Player inside MOHD bbox: ", inside ? "YES" : "NO");
+                        }
+
+                        // Load doodads from the specified doodad set
+                        auto* m2Renderer = renderer_->getM2Renderer();
+                        if (m2Renderer && !wmoModel.doodadSets.empty() && !wmoModel.doodads.empty()) {
+                            uint32_t setIdx = std::min(static_cast<uint32_t>(wdtInfo.doodadSet),
+                                                       static_cast<uint32_t>(wmoModel.doodadSets.size() - 1));
+                            const auto& doodadSet = wmoModel.doodadSets[setIdx];
+
+                            showProgress("Loading instance doodads...", 0.75f);
+                            glm::mat4 wmoMatrix(1.0f);
+                            wmoMatrix = glm::translate(wmoMatrix, wmoPos);
+                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.z, glm::vec3(0, 0, 1));
+                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.y, glm::vec3(0, 1, 0));
+                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.x, glm::vec3(1, 0, 0));
+
+                            uint32_t loadedDoodads = 0;
+                            for (uint32_t di = 0; di < doodadSet.count; di++) {
+                                uint32_t doodadIdx = doodadSet.startIndex + di;
+                                if (doodadIdx >= wmoModel.doodads.size()) break;
+
+                                const auto& doodad = wmoModel.doodads[doodadIdx];
+                                auto nameIt = wmoModel.doodadNames.find(doodad.nameIndex);
+                                if (nameIt == wmoModel.doodadNames.end()) continue;
+
+                                std::string m2Path = nameIt->second;
+                                if (m2Path.empty()) continue;
+
+                                m2Path = pipeline::modelPathToM2(m2Path);
+
+                                std::vector<uint8_t> m2Data = assetManager_->readFile(m2Path);
+                                if (m2Data.empty()) continue;
+
+                                pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
+                                m2Model.name = m2Path;
+
+                                std::string skinPath = pipeline::skinPathForM2(m2Path);
+                                std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
+                                if (!skinData.empty() && m2Model.version >= 264) {
+                                    pipeline::M2Loader::loadSkin(skinData, m2Model);
+                                }
+                                if (!m2Model.isValid()) continue;
+
+                                glm::quat fixedRotation(doodad.rotation.w, doodad.rotation.x,
+                                                        doodad.rotation.y, doodad.rotation.z);
+                                glm::mat4 doodadLocal(1.0f);
+                                doodadLocal = glm::translate(doodadLocal, doodad.position);
+                                doodadLocal *= glm::mat4_cast(fixedRotation);
+                                doodadLocal = glm::scale(doodadLocal, glm::vec3(doodad.scale));
+
+                                glm::mat4 worldMatrix = wmoMatrix * doodadLocal;
+                                glm::vec3 worldPos = glm::vec3(worldMatrix[3]);
+
+                                uint32_t doodadModelId = static_cast<uint32_t>(std::hash<std::string>{}(m2Path));
+                                if (!m2Renderer->loadModel(m2Model, doodadModelId)) continue;
+                                uint32_t doodadInstId = m2Renderer->createInstanceWithMatrix(doodadModelId, worldMatrix, worldPos);
+                                if (doodadInstId) m2Renderer->setSkipWallCollision(doodadInstId, true);
+                                loadedDoodads++;
+                            }
+                            LOG_INFO("Loaded ", loadedDoodads, " instance WMO doodads");
+                        }
+                    } else {
+                        LOG_WARNING("Failed to create instance WMO instance");
+                    }
+                } else {
+                    LOG_WARNING("Failed to load instance WMO model");
+                }
+            } else {
+                LOG_WARNING("Failed to read root WMO file: ", wdtInfo.rootWMOPath);
+            }
+
+            // Build collision cache for the instance WMO
+            showProgress("Building collision cache...", 0.88f);
+            ui.pump();
+            wmoRenderer->loadFloorCache();
+            if (wmoRenderer->getFloorCacheSize() == 0) {
+                showProgress("Computing walkable surfaces...", 0.90f);
+                ui.pump();
+                wmoRenderer->precomputeFloorCache();
+            }
+        }
+
+        // Snap player to WMO floor so they don't fall through on first frame
+        if (wmoRenderer && renderer_) {
+            glm::vec3 playerPos = renderer_->getCharacterPosition();
+            // getFloorHeight deliberately rejects probes far above a WMO's bounds.
+            // Keep this within its step-up window; a +50 probe made low-ceiling
+            // instances such as The Stockade fail their otherwise valid floor hit.
+            auto floor = wmoRenderer->getFloorHeight(playerPos.x, playerPos.y, playerPos.z + 5.0f);
+            if (floor) {
+                playerPos.z = *floor + 0.1f;  // Small offset above floor
+                renderer_->getCharacterPosition() = playerPos;
+                if (gameHandler_) {
+                    glm::vec3 canonical = core::coords::renderToCanonical(playerPos);
+                    gameHandler_->setPosition(canonical.x, canonical.y, canonical.z);
+                }
+                LOG_INFO("Snapped player to instance WMO floor: z=", *floor);
+            } else {
+                // Fires routinely for this map's floor-query path (correlates with the
+                // warmup ground-check below also failing to find a floor here) without
+                // visible player impact so far - the server-provided spawn position
+                // already lands correctly. Demoted from WARNING; if this map ever does
+                // let a player fall through, this and the warmup hard-cap message are
+                // the first places to look.
+                LOG_DEBUG("Could not find WMO floor at player spawn (",
+                           playerPos.x, ", ", playerPos.y, ", ", playerPos.z, ")");
+            }
+        }
+
+        // Diagnostic: verify WMO renderer state after instance loading
+        LOG_DEBUG("=== INSTANCE WMO LOAD COMPLETE ===");
+        LOG_DEBUG("  wmoRenderer models loaded: ", wmoRenderer->getLoadedModelCount());
+        LOG_DEBUG("  wmoRenderer instances: ", wmoRenderer->getInstanceCount());
+        LOG_DEBUG("  wmoRenderer floor cache: ", wmoRenderer->getFloorCacheSize());
+
+        terrainOk = true;  // Mark as OK so post-load setup runs
+    } else {
+        // ---- Normal ADT-based map ----
+        // Compute ADT tile from canonical coordinates
+        auto [tileX, tileY] = core::coords::canonicalToTile(spawnCanonical.x, spawnCanonical.y);
+        std::string adtPath = "World\\Maps\\" + mapName + "\\" + mapName + "_" +
+                              std::to_string(tileX) + "_" + std::to_string(tileY) + ".adt";
+        LOG_INFO("Loading ADT tile [", tileX, ",", tileY, "] from canonical (",
+                 spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
+
+        // Load the initial terrain tile
+        terrainOk = renderer_->loadTestTerrain(assetManager_, adtPath);
+        if (!terrainOk) {
+            LOG_WARNING("Could not load terrain for online world - atmospheric rendering only");
+        } else {
+            LOG_INFO("Online world terrain loading initiated");
+        }
+
+        // Every sub-renderer. initializeRenderers does this too, and it runs
+        // once - so on a map change what it set stayed on the first map.
+        renderer_->setActiveMapName(mapName);
+
+        // Character renderer is created inside loadTestTerrain(), so spawn the
+        // player model now that the renderer actually exists.
+        if (!app_.playerCharacterSpawned) {
+            app_.spawnPlayerCharacter();
+            if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
+        }
+
+        showProgress("Streaming terrain tiles...", 0.35f);
+
+        // Wait for surrounding terrain tiles to stream in
+        if (terrainOk && renderer_->getTerrainManager() && renderer_->getCamera()) {
+            auto* terrainMgr = renderer_->getTerrainManager();
+            auto* camera = renderer_->getCamera();
+
+            // Use a small radius for the initial load (just immediate tiles),
+            // then restore the full radius after entering the game.
+            // This matches WoW's behavior: load quickly, stream the rest in-game.
+            const int savedLoadRadius = 6;
+            terrainMgr->setLoadRadius(4);   // 9x9=81 tiles - prevents hitches on spawn
+            terrainMgr->setUnloadRadius(9);
+
+            // Trigger tile streaming for surrounding area
+            terrainMgr->update(*camera, 1.0f);
+
+            auto startTime = std::chrono::high_resolution_clock::now();
+            auto lastProgressTime = startTime;
+            const float maxWaitSeconds = 60.0f;
+            const float stallSeconds = 10.0f;
+            int initialRemaining = terrainMgr->getRemainingTileCount();
+            if (initialRemaining < 1) initialRemaining = 1;
+            int lastRemaining = initialRemaining;
+
+            // Wait until all pending + ready-queue tiles are finalized
+            while (terrainMgr->getRemainingTileCount() > 0) {
+                // This loop presents its own frames but never reaches showProgress,
+                // so it must beat the watchdog itself or the whole tile stream reads
+                // as a hung main loop.
+                app_.beatWatchdog();
+                SDL_Event event;
+                while (SDL_PollEvent(&event)) {
+                    if (event.type == SDL_QUIT) {
+                        window_->setShouldClose(true);
+                        loadingScreen->shutdown();
+                        return;
+                    }
+                    if (event.type == SDL_WINDOWEVENT &&
+                        event.window.event == SDL_WINDOWEVENT_RESIZED) {
+                        int w = event.window.data1;
+                        int h = event.window.data2;
+                        window_->setSize(w, h);
+                        // Vulkan viewport set in command buffer
+                        if (renderer_->getCamera()) {
+                            renderer_->getCamera()->setAspectRatio(static_cast<float>(w) / h);
+                        }
+                    }
+                }
+
+                // Trigger new streaming - enqueue tiles for background workers
+                terrainMgr->update(*camera, 0.016f);
+
+                // Process ONE tile per iteration so the progress bar updates
+                // smoothly between tiles instead of stalling on large batches.
+                terrainMgr->processOneReadyTile();
+
+                int remaining = terrainMgr->getRemainingTileCount();
+                int loaded = terrainMgr->getLoadedTileCount();
+                int total = loaded + remaining;
+                if (total < 1) total = 1;
+                float tileProgress = static_cast<float>(loaded) / static_cast<float>(total);
+                float progress = 0.35f + tileProgress * 0.50f;
+
+                auto now = std::chrono::high_resolution_clock::now();
+                float elapsedSec = std::chrono::duration<float>(now - startTime).count();
+
+                char buf[192];
+                if (loaded > 0 && remaining > 0) {
+                    float tilesPerSec = static_cast<float>(loaded) / std::max(elapsedSec, 0.1f);
+                    float etaSec = static_cast<float>(remaining) / std::max(tilesPerSec, 0.1f);
+                    snprintf(buf, sizeof(buf), "Loading terrain... %d / %d tiles (%.0f tiles/s, ~%.0fs remaining)",
+                             loaded, total, tilesPerSec, etaSec);
+                } else {
+                    snprintf(buf, sizeof(buf), "Loading terrain... %d / %d tiles",
+                             loaded, total);
+                }
+
+                if (loadingScreenOk) {
+                    loadingScreen->setStatus(buf);
+                    loadingScreen->setProgress(progress);
+                    loadingScreen->render();
+                    window_->swapBuffers();
+                }
+
+                if (remaining != lastRemaining) {
+                    lastRemaining = remaining;
+                    lastProgressTime = now;
+                }
+
+                auto elapsed = std::chrono::high_resolution_clock::now() - startTime;
+                if (std::chrono::duration<float>(elapsed).count() > maxWaitSeconds) {
+                    LOG_WARNING("Online terrain streaming timeout after ", maxWaitSeconds, "s");
+                    break;
+                }
+                auto stalledFor = std::chrono::high_resolution_clock::now() - lastProgressTime;
+                if (std::chrono::duration<float>(stalledFor).count() > stallSeconds) {
+                    LOG_WARNING("Online terrain streaming stalled for ", stallSeconds,
+                                "s (remaining=", lastRemaining, "), continuing without full preload");
+                    break;
+                }
+
+                // Don't sleep if there are more tiles to finalize - keep processing
+                if (remaining > 0 && terrainMgr->getReadyQueueCount() == 0) {
+                    SDL_Delay(16);
+                }
+            }
+
+            LOG_INFO("Online terrain streaming complete: ", terrainMgr->getLoadedTileCount(), " tiles loaded");
+
+            // Restore full load radius - remaining tiles stream in-game
+            terrainMgr->setLoadRadius(savedLoadRadius);
+
+            // Load/precompute collision cache
+            if (renderer_->getWMORenderer()) {
+                showProgress("Building collision cache...", 0.88f);
+                ui.pump();
+                renderer_->getWMORenderer()->loadFloorCache();
+                if (renderer_->getWMORenderer()->getFloorCacheSize() == 0) {
+                    showProgress("Computing walkable surfaces...", 0.90f);
+                    ui.pump();
+                    renderer_->getWMORenderer()->precomputeFloorCache();
+                }
+            }
+        }
+    }
 }
 
 void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float z) {
@@ -342,7 +756,14 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         window_->swapBuffers();
     };
 
-    // Set zone name on loading screen — prefer friendly display name, then DBC
+    // Everything a slow step needs to keep the screen alive.
+    LoadingUi loadingUi;
+    loadingUi.screen = &loadingScreen;
+    loadingUi.window = window_;
+    loadingUi.ok = loadingScreenOk;
+    loadingUi.showProgress = showProgress;
+
+    // Set zone name on loading screen - prefer friendly display name, then DBC
     {
         const char* friendly = mapDisplayName(mapId);
         if (friendly) {
@@ -427,7 +848,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
     // Resolve map folder name from Map.dbc (authoritative for world/instance maps).
     // This is required for instances like DeeprunTram (map 369) that are not Azeroth/Kalimdor.
-    if (!mapNameCacheLoaded_ && assetManager_) {
+    if (!mapNameCacheLoaded_ && assetManager_ && assetManager_->isInitialized()) {
         mapNameCacheLoaded_ = true;
         if (auto mapDbc = assetManager_->loadDBC("Map.dbc"); mapDbc && mapDbc->isLoaded()) {
             mapNameById_.reserve(mapDbc->getRecordCount());
@@ -458,7 +879,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     LOG_INFO("Loading online world terrain for map '", mapName, "' (ID ", mapId, ")");
 
     // Cancel any stale preload (if it was for a different map, the file cache
-    // still retains whatever was loaded — it doesn't hurt).
+    // still retains whatever was loaded - it doesn't hurt).
     if (worldPreload_) {
         if (worldPreload_->mapId == mapId) {
             LOG_INFO("World preload: cache-warm hit for map '", mapName, "'");
@@ -481,7 +902,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     float spawnYawDeg = 0.0f;
     if (gameHandler_) {
         float canonicalYaw = gameHandler_->getMovementInfo().orientation;
-        spawnYawDeg = 180.0f - glm::degrees(canonicalYaw);
+        spawnYawDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
     }
     if (renderer_->getCameraController()) {
         renderer_->getCameraController()->setOnlineMode(true);
@@ -490,15 +911,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     }
     renderer_->setCharacterYaw(spawnYawDeg);
 
-    // Set map name for WMO renderer and reset instance mode
+    // Every sub-renderer, and out of instance mode.
+    renderer_->setActiveMapName(mapName);
     if (renderer_->getWMORenderer()) {
-        renderer_->getWMORenderer()->setMapName(mapName);
         renderer_->getWMORenderer()->setWMOOnlyMap(false);
-    }
-
-    // Set map name for terrain manager
-    if (renderer_->getTerrainManager()) {
-        renderer_->getTerrainManager()->setMapName(mapName);
     }
 
     // NOTE: TransportManager renderer connection moved to after initializeRenderers (later in this function)
@@ -568,426 +984,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
     showProgress("Loading terrain...", 0.20f);
 
-    // Check WDT to detect WMO-only maps (dungeons, raids, BGs)
-    bool isWMOOnlyMap = false;
-    pipeline::WDTInfo wdtInfo;
-    {
-        std::string wdtPath = "World\\Maps\\" + mapName + "\\" + mapName + ".wdt";
-        LOG_DEBUG("Reading WDT: ", wdtPath);
-        std::vector<uint8_t> wdtData = assetManager_->readFile(wdtPath);
-        if (!wdtData.empty()) {
-            wdtInfo = pipeline::parseWDT(wdtData);
-            isWMOOnlyMap = wdtInfo.isWMOOnly() && !wdtInfo.rootWMOPath.empty();
-            LOG_DEBUG("WDT result: isWMOOnly=", isWMOOnlyMap, " rootWMO='", wdtInfo.rootWMOPath, "'");
-        } else {
-            LOG_WARNING("No WDT file found at ", wdtPath);
-        }
-    }
-
-    bool terrainOk = false;
-
-    if (isWMOOnlyMap) {
-        // ---- WMO-only map (dungeon/raid/BG): load root WMO directly ----
-        LOG_DEBUG("WMO-only map detected — loading root WMO: ", wdtInfo.rootWMOPath);
-        showProgress("Loading instance geometry...", 0.25f);
-
-        // Initialize renderers if they don't exist yet (first login to a WMO-only map).
-        // On map change, renderers already exist from the previous map.
-        if (!renderer_->getWMORenderer() || !renderer_->getTerrainManager()) {
-            renderer_->initializeRenderers(assetManager_, mapName);
-        }
-
-        // Set map name on WMO renderer and disable terrain streaming (no ADT tiles for instances)
-        if (renderer_->getWMORenderer()) {
-            renderer_->getWMORenderer()->setMapName(mapName);
-            renderer_->getWMORenderer()->setWMOOnlyMap(true);
-        }
-        if (renderer_->getTerrainManager()) {
-            renderer_->getTerrainManager()->setStreamingEnabled(false);
-        }
-
-        // Spawn player character now that renderers are initialized
-        if (!app_.playerCharacterSpawned) {
-            app_.spawnPlayerCharacter();
-            if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
-        }
-
-        // Load the root WMO
-        auto* wmoRenderer = renderer_->getWMORenderer();
-        LOG_DEBUG("WMO-only: wmoRenderer=", (wmoRenderer ? "valid" : "NULL"));
-        if (wmoRenderer) {
-            LOG_DEBUG("WMO-only: reading root WMO file: ", wdtInfo.rootWMOPath);
-            std::vector<uint8_t> wmoData = assetManager_->readFile(wdtInfo.rootWMOPath);
-            LOG_DEBUG("WMO-only: root WMO data size=", wmoData.size());
-            if (!wmoData.empty()) {
-                pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
-                LOG_DEBUG("WMO-only: parsed WMO model, nGroups=", wmoModel.nGroups);
-
-                if (wmoModel.nGroups > 0) {
-                    showProgress("Loading instance groups...", 0.35f);
-                    std::string basePath = wdtInfo.rootWMOPath;
-                    std::string extension;
-                    if (basePath.size() > 4) {
-                        extension = basePath.substr(basePath.size() - 4);
-                        std::string extLower = extension;
-                        for (char& c : extLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        if (extLower == ".wmo") {
-                            basePath = basePath.substr(0, basePath.size() - 4);
-                        }
-                    }
-
-                    uint32_t loadedGroups = 0;
-                    for (uint32_t gi = 0; gi < wmoModel.nGroups; gi++) {
-                        char groupSuffix[16];
-                        snprintf(groupSuffix, sizeof(groupSuffix), "_%03u%s", gi, extension.c_str());
-                        std::string groupPath = basePath + groupSuffix;
-                        std::vector<uint8_t> groupData = assetManager_->readFile(groupPath);
-                        if (groupData.empty()) {
-                            snprintf(groupSuffix, sizeof(groupSuffix), "_%03u.wmo", gi);
-                            groupData = assetManager_->readFile(basePath + groupSuffix);
-                        }
-                        if (groupData.empty()) {
-                            snprintf(groupSuffix, sizeof(groupSuffix), "_%03u.WMO", gi);
-                            groupData = assetManager_->readFile(basePath + groupSuffix);
-                        }
-                        if (!groupData.empty()) {
-                            pipeline::WMOLoader::loadGroup(groupData, wmoModel, gi);
-                            loadedGroups++;
-                        }
-
-                        // Update loading progress
-                        if (wmoModel.nGroups > 1) {
-                            float groupProgress = 0.35f + 0.30f * static_cast<float>(gi + 1) / wmoModel.nGroups;
-                            char buf[128];
-                            snprintf(buf, sizeof(buf), "Loading instance groups... %u / %u", gi + 1, wmoModel.nGroups);
-                            showProgress(buf, groupProgress);
-                        }
-                    }
-
-                    LOG_INFO("Loaded ", loadedGroups, " / ", wmoModel.nGroups, " WMO groups for instance");
-                }
-
-                // WMO-only maps: MODF uses same format as ADT MODF.
-                // Apply the same rotation conversion that outdoor WMOs get
-                // (including the implicit +180° Z yaw), but skip the ZEROPOINT
-                // position offset for zero-position instances (server sends
-                // coordinates relative to the WMO, not relative to map corner).
-                glm::vec3 wmoPos(0.0f);
-                glm::vec3 wmoRot(
-                    -wdtInfo.rotation[2] * 3.14159f / 180.0f,
-                    -wdtInfo.rotation[0] * 3.14159f / 180.0f,
-                    (wdtInfo.rotation[1] + 180.0f) * 3.14159f / 180.0f
-                );
-                if (wdtInfo.position[0] != 0.0f || wdtInfo.position[1] != 0.0f || wdtInfo.position[2] != 0.0f) {
-                    wmoPos = core::coords::adtToWorld(
-                        wdtInfo.position[0], wdtInfo.position[1], wdtInfo.position[2]);
-                }
-
-                showProgress("Uploading instance geometry...", 0.70f);
-                uint32_t wmoModelId = 900000 + mapId;  // Unique ID range for instance WMOs
-                if (wmoRenderer->loadModel(wmoModel, wmoModelId)) {
-                    uint32_t instanceId = wmoRenderer->createInstance(wmoModelId, wmoPos, wmoRot, 1.0f);
-                    if (instanceId > 0) {
-                        LOG_DEBUG("Instance WMO loaded: modelId=", wmoModelId,
-                                " instanceId=", instanceId);
-                        LOG_DEBUG("  MOHD bbox local: (",
-                                   wmoModel.boundingBoxMin.x, ", ", wmoModel.boundingBoxMin.y, ", ", wmoModel.boundingBoxMin.z,
-                                   ") to (", wmoModel.boundingBoxMax.x, ", ", wmoModel.boundingBoxMax.y, ", ", wmoModel.boundingBoxMax.z, ")");
-                        LOG_DEBUG("  WMO pos: (", wmoPos.x, ", ", wmoPos.y, ", ", wmoPos.z,
-                                   ") rot: (", wmoRot.x, ", ", wmoRot.y, ", ", wmoRot.z, ")");
-                        LOG_DEBUG("  Player render pos: (", spawnRender.x, ", ", spawnRender.y, ", ", spawnRender.z, ")");
-                        LOG_DEBUG("  Player canonical: (", spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
-                        // Show player position in WMO local space
-                        {
-                            glm::mat4 instMat(1.0f);
-                            instMat = glm::translate(instMat, wmoPos);
-                            instMat = glm::rotate(instMat, wmoRot.z, glm::vec3(0,0,1));
-                            instMat = glm::rotate(instMat, wmoRot.y, glm::vec3(0,1,0));
-                            instMat = glm::rotate(instMat, wmoRot.x, glm::vec3(1,0,0));
-                            glm::mat4 invMat = glm::inverse(instMat);
-                            glm::vec3 localPlayer = glm::vec3(invMat * glm::vec4(spawnRender, 1.0f));
-                            LOG_DEBUG("  Player in WMO local: (", localPlayer.x, ", ", localPlayer.y, ", ", localPlayer.z, ")");
-                            bool inside = localPlayer.x >= wmoModel.boundingBoxMin.x && localPlayer.x <= wmoModel.boundingBoxMax.x &&
-                                          localPlayer.y >= wmoModel.boundingBoxMin.y && localPlayer.y <= wmoModel.boundingBoxMax.y &&
-                                          localPlayer.z >= wmoModel.boundingBoxMin.z && localPlayer.z <= wmoModel.boundingBoxMax.z;
-                            LOG_DEBUG("  Player inside MOHD bbox: ", inside ? "YES" : "NO");
-                        }
-
-                        // Load doodads from the specified doodad set
-                        auto* m2Renderer = renderer_->getM2Renderer();
-                        if (m2Renderer && !wmoModel.doodadSets.empty() && !wmoModel.doodads.empty()) {
-                            uint32_t setIdx = std::min(static_cast<uint32_t>(wdtInfo.doodadSet),
-                                                       static_cast<uint32_t>(wmoModel.doodadSets.size() - 1));
-                            const auto& doodadSet = wmoModel.doodadSets[setIdx];
-
-                            showProgress("Loading instance doodads...", 0.75f);
-                            glm::mat4 wmoMatrix(1.0f);
-                            wmoMatrix = glm::translate(wmoMatrix, wmoPos);
-                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.z, glm::vec3(0, 0, 1));
-                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.y, glm::vec3(0, 1, 0));
-                            wmoMatrix = glm::rotate(wmoMatrix, wmoRot.x, glm::vec3(1, 0, 0));
-
-                            uint32_t loadedDoodads = 0;
-                            for (uint32_t di = 0; di < doodadSet.count; di++) {
-                                uint32_t doodadIdx = doodadSet.startIndex + di;
-                                if (doodadIdx >= wmoModel.doodads.size()) break;
-
-                                const auto& doodad = wmoModel.doodads[doodadIdx];
-                                auto nameIt = wmoModel.doodadNames.find(doodad.nameIndex);
-                                if (nameIt == wmoModel.doodadNames.end()) continue;
-
-                                std::string m2Path = nameIt->second;
-                                if (m2Path.empty()) continue;
-
-                                if (m2Path.size() > 4) {
-                                    std::string ext = m2Path.substr(m2Path.size() - 4);
-                                    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                                    if (ext == ".mdx" || ext == ".mdl") {
-                                        m2Path = m2Path.substr(0, m2Path.size() - 4) + ".m2";
-                                    }
-                                }
-
-                                std::vector<uint8_t> m2Data = assetManager_->readFile(m2Path);
-                                if (m2Data.empty()) continue;
-
-                                pipeline::M2Model m2Model = pipeline::M2Loader::load(m2Data);
-                                m2Model.name = m2Path;
-
-                                std::string skinPath = m2Path.substr(0, m2Path.size() - 3) + "00.skin";
-                                std::vector<uint8_t> skinData = assetManager_->readFile(skinPath);
-                                if (!skinData.empty() && m2Model.version >= 264) {
-                                    pipeline::M2Loader::loadSkin(skinData, m2Model);
-                                }
-                                if (!m2Model.isValid()) continue;
-
-                                glm::quat fixedRotation(doodad.rotation.w, doodad.rotation.x,
-                                                        doodad.rotation.y, doodad.rotation.z);
-                                glm::mat4 doodadLocal(1.0f);
-                                doodadLocal = glm::translate(doodadLocal, doodad.position);
-                                doodadLocal *= glm::mat4_cast(fixedRotation);
-                                doodadLocal = glm::scale(doodadLocal, glm::vec3(doodad.scale));
-
-                                glm::mat4 worldMatrix = wmoMatrix * doodadLocal;
-                                glm::vec3 worldPos = glm::vec3(worldMatrix[3]);
-
-                                uint32_t doodadModelId = static_cast<uint32_t>(std::hash<std::string>{}(m2Path));
-                                if (!m2Renderer->loadModel(m2Model, doodadModelId)) continue;
-                                uint32_t doodadInstId = m2Renderer->createInstanceWithMatrix(doodadModelId, worldMatrix, worldPos);
-                                if (doodadInstId) m2Renderer->setSkipWallCollision(doodadInstId, true);
-                                loadedDoodads++;
-                            }
-                            LOG_INFO("Loaded ", loadedDoodads, " instance WMO doodads");
-                        }
-                    } else {
-                        LOG_WARNING("Failed to create instance WMO instance");
-                    }
-                } else {
-                    LOG_WARNING("Failed to load instance WMO model");
-                }
-            } else {
-                LOG_WARNING("Failed to read root WMO file: ", wdtInfo.rootWMOPath);
-            }
-
-            // Build collision cache for the instance WMO
-            showProgress("Building collision cache...", 0.88f);
-            if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
-            wmoRenderer->loadFloorCache();
-            if (wmoRenderer->getFloorCacheSize() == 0) {
-                showProgress("Computing walkable surfaces...", 0.90f);
-                if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
-                wmoRenderer->precomputeFloorCache();
-            }
-        }
-
-        // Snap player to WMO floor so they don't fall through on first frame
-        if (wmoRenderer && renderer_) {
-            glm::vec3 playerPos = renderer_->getCharacterPosition();
-            // getFloorHeight deliberately rejects probes far above a WMO's bounds.
-            // Keep this within its step-up window; a +50 probe made low-ceiling
-            // instances such as The Stockade fail their otherwise valid floor hit.
-            auto floor = wmoRenderer->getFloorHeight(playerPos.x, playerPos.y, playerPos.z + 5.0f);
-            if (floor) {
-                playerPos.z = *floor + 0.1f;  // Small offset above floor
-                renderer_->getCharacterPosition() = playerPos;
-                if (gameHandler_) {
-                    glm::vec3 canonical = core::coords::renderToCanonical(playerPos);
-                    gameHandler_->setPosition(canonical.x, canonical.y, canonical.z);
-                }
-                LOG_INFO("Snapped player to instance WMO floor: z=", *floor);
-            } else {
-                // Fires routinely for this map's floor-query path (correlates with the
-                // warmup ground-check below also failing to find a floor here) without
-                // visible player impact so far - the server-provided spawn position
-                // already lands correctly. Demoted from WARNING; if this map ever does
-                // let a player fall through, this and the warmup hard-cap message are
-                // the first places to look.
-                LOG_DEBUG("Could not find WMO floor at player spawn (",
-                           playerPos.x, ", ", playerPos.y, ", ", playerPos.z, ")");
-            }
-        }
-
-        // Diagnostic: verify WMO renderer state after instance loading
-        LOG_DEBUG("=== INSTANCE WMO LOAD COMPLETE ===");
-        LOG_DEBUG("  wmoRenderer models loaded: ", wmoRenderer->getLoadedModelCount());
-        LOG_DEBUG("  wmoRenderer instances: ", wmoRenderer->getInstanceCount());
-        LOG_DEBUG("  wmoRenderer floor cache: ", wmoRenderer->getFloorCacheSize());
-
-        terrainOk = true;  // Mark as OK so post-load setup runs
-    } else {
-        // ---- Normal ADT-based map ----
-        // Compute ADT tile from canonical coordinates
-        auto [tileX, tileY] = core::coords::canonicalToTile(spawnCanonical.x, spawnCanonical.y);
-        std::string adtPath = "World\\Maps\\" + mapName + "\\" + mapName + "_" +
-                              std::to_string(tileX) + "_" + std::to_string(tileY) + ".adt";
-        LOG_INFO("Loading ADT tile [", tileX, ",", tileY, "] from canonical (",
-                 spawnCanonical.x, ", ", spawnCanonical.y, ", ", spawnCanonical.z, ")");
-
-        // Load the initial terrain tile
-        terrainOk = renderer_->loadTestTerrain(assetManager_, adtPath);
-        if (!terrainOk) {
-            LOG_WARNING("Could not load terrain for online world - atmospheric rendering only");
-        } else {
-            LOG_INFO("Online world terrain loading initiated");
-        }
-
-        // Set map name on WMO renderer (initializeRenderers handles terrain/minimap/worldMap)
-        if (renderer_->getWMORenderer()) {
-            renderer_->getWMORenderer()->setMapName(mapName);
-        }
-
-        // Character renderer is created inside loadTestTerrain(), so spawn the
-        // player model now that the renderer actually exists.
-        if (!app_.playerCharacterSpawned) {
-            app_.spawnPlayerCharacter();
-            if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();
-        }
-
-        showProgress("Streaming terrain tiles...", 0.35f);
-
-        // Wait for surrounding terrain tiles to stream in
-        if (terrainOk && renderer_->getTerrainManager() && renderer_->getCamera()) {
-            auto* terrainMgr = renderer_->getTerrainManager();
-            auto* camera = renderer_->getCamera();
-
-            // Use a small radius for the initial load (just immediate tiles),
-            // then restore the full radius after entering the game.
-            // This matches WoW's behavior: load quickly, stream the rest in-game.
-            const int savedLoadRadius = 6;
-            terrainMgr->setLoadRadius(4);   // 9x9=81 tiles — prevents hitches on spawn
-            terrainMgr->setUnloadRadius(9);
-
-            // Trigger tile streaming for surrounding area
-            terrainMgr->update(*camera, 1.0f);
-
-            auto startTime = std::chrono::high_resolution_clock::now();
-            auto lastProgressTime = startTime;
-            const float maxWaitSeconds = 60.0f;
-            const float stallSeconds = 10.0f;
-            int initialRemaining = terrainMgr->getRemainingTileCount();
-            if (initialRemaining < 1) initialRemaining = 1;
-            int lastRemaining = initialRemaining;
-
-            // Wait until all pending + ready-queue tiles are finalized
-            while (terrainMgr->getRemainingTileCount() > 0) {
-                // This loop presents its own frames but never reaches showProgress,
-                // so it must beat the watchdog itself or the whole tile stream reads
-                // as a hung main loop.
-                app_.beatWatchdog();
-                SDL_Event event;
-                while (SDL_PollEvent(&event)) {
-                    if (event.type == SDL_QUIT) {
-                        window_->setShouldClose(true);
-                        loadingScreen.shutdown();
-                        return;
-                    }
-                    if (event.type == SDL_WINDOWEVENT &&
-                        event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                        int w = event.window.data1;
-                        int h = event.window.data2;
-                        window_->setSize(w, h);
-                        // Vulkan viewport set in command buffer
-                        if (renderer_->getCamera()) {
-                            renderer_->getCamera()->setAspectRatio(static_cast<float>(w) / h);
-                        }
-                    }
-                }
-
-                // Trigger new streaming — enqueue tiles for background workers
-                terrainMgr->update(*camera, 0.016f);
-
-                // Process ONE tile per iteration so the progress bar updates
-                // smoothly between tiles instead of stalling on large batches.
-                terrainMgr->processOneReadyTile();
-
-                int remaining = terrainMgr->getRemainingTileCount();
-                int loaded = terrainMgr->getLoadedTileCount();
-                int total = loaded + remaining;
-                if (total < 1) total = 1;
-                float tileProgress = static_cast<float>(loaded) / static_cast<float>(total);
-                float progress = 0.35f + tileProgress * 0.50f;
-
-                auto now = std::chrono::high_resolution_clock::now();
-                float elapsedSec = std::chrono::duration<float>(now - startTime).count();
-
-                char buf[192];
-                if (loaded > 0 && remaining > 0) {
-                    float tilesPerSec = static_cast<float>(loaded) / std::max(elapsedSec, 0.1f);
-                    float etaSec = static_cast<float>(remaining) / std::max(tilesPerSec, 0.1f);
-                    snprintf(buf, sizeof(buf), "Loading terrain... %d / %d tiles (%.0f tiles/s, ~%.0fs remaining)",
-                             loaded, total, tilesPerSec, etaSec);
-                } else {
-                    snprintf(buf, sizeof(buf), "Loading terrain... %d / %d tiles",
-                             loaded, total);
-                }
-
-                if (loadingScreenOk) {
-                    loadingScreen.setStatus(buf);
-                    loadingScreen.setProgress(progress);
-                    loadingScreen.render();
-                    window_->swapBuffers();
-                }
-
-                if (remaining != lastRemaining) {
-                    lastRemaining = remaining;
-                    lastProgressTime = now;
-                }
-
-                auto elapsed = std::chrono::high_resolution_clock::now() - startTime;
-                if (std::chrono::duration<float>(elapsed).count() > maxWaitSeconds) {
-                    LOG_WARNING("Online terrain streaming timeout after ", maxWaitSeconds, "s");
-                    break;
-                }
-                auto stalledFor = std::chrono::high_resolution_clock::now() - lastProgressTime;
-                if (std::chrono::duration<float>(stalledFor).count() > stallSeconds) {
-                    LOG_WARNING("Online terrain streaming stalled for ", stallSeconds,
-                                "s (remaining=", lastRemaining, "), continuing without full preload");
-                    break;
-                }
-
-                // Don't sleep if there are more tiles to finalize — keep processing
-                if (remaining > 0 && terrainMgr->getReadyQueueCount() == 0) {
-                    SDL_Delay(16);
-                }
-            }
-
-            LOG_INFO("Online terrain streaming complete: ", terrainMgr->getLoadedTileCount(), " tiles loaded");
-
-            // Restore full load radius — remaining tiles stream in-game
-            terrainMgr->setLoadRadius(savedLoadRadius);
-
-            // Load/precompute collision cache
-            if (renderer_->getWMORenderer()) {
-                showProgress("Building collision cache...", 0.88f);
-                if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
-                renderer_->getWMORenderer()->loadFloorCache();
-                if (renderer_->getWMORenderer()->getFloorCacheSize() == 0) {
-                    showProgress("Computing walkable surfaces...", 0.90f);
-                    if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
-                    renderer_->getWMORenderer()->precomputeFloorCache();
-                }
-            }
-        }
-    }
+    // The map's geometry, and the loading screen it takes with it.
+    loadMapGeometry(mapId, mapName, spawnCanonical, spawnRender, loadingUi);
 
     // Snap player to loaded terrain so they don't spawn underground
     if (renderer_->getCameraController()) {
@@ -996,7 +994,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     renderer_->setCharacterYaw(spawnYawDeg);
     spawnInstancePortalVisuals(mapId, renderer_, assetManager_);
 
-    // Test transport disabled — real transports come from server via UPDATEFLAG_TRANSPORT
+    // Test transport disabled - real transports come from server via UPDATEFLAG_TRANSPORT
     showProgress("Finalizing world...", 0.94f);
     // setupTestTransport();
 
@@ -1038,12 +1036,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             uint32_t instanceId = spawner->getCreatureInstanceId(guid);
             if (instanceId == 0) instanceId = spawner->getPlayerInstanceId(guid);
             if (instanceId != 0 && cr) {
-                static const uint32_t attackAnims[] = {
-                    rendering::anim::ATTACK_1H,
-                    rendering::anim::ATTACK_2H,
-                    rendering::anim::ATTACK_2H_LOOSE,
-                    rendering::anim::ATTACK_UNARMED
-                };
+                const auto attackAnims =
+                rendering::anim::meleeAnimChain(rendering::anim::MeleeChain::Generic);
                 bool played = false;
                 for (uint32_t anim : attackAnims) {
                     if (cr->hasAnimation(instanceId, anim)) {
@@ -1096,10 +1090,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             if (gameHandler_) gameHandler_->update(1.0f / 60.0f);
 
             // If a new world entry was deferred during packet processing,
-            // stop warming up this map — we'll load the new one after cleanup.
+            // stop warming up this map - we'll load the new one after cleanup.
             if (pendingWorldEntry_) {
                 LOG_DEBUG("loadOnlineWorldTerrain(map ", mapId,
-                            ") — deferred world entry pending, stopping warmup");
+                            ") - deferred world entry pending, stopping warmup");
                 break;
             }
 
@@ -1131,7 +1125,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
             // Don't exit warmup until the ground under the player exists.
             // In cities like Stormwind, players stand on WMO floors, not terrain.
-            // Check BOTH terrain AND WMO floor — require at least one to be valid.
+            // Check BOTH terrain AND WMO floor - require at least one to be valid.
             bool groundReady = false;
             if (renderer_) {
                 // spawnRender already went server -> canonical -> render above.
@@ -1148,7 +1142,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                         groundReady = true;
                     }
                 }
-                // Check terrain — but only if it's close to spawn Z (within 15 units).
+                // Check terrain - but only if it's close to spawn Z (within 15 units).
                 // Terrain far below a WMO city doesn't count as ground.
                 if (!groundReady) {
                     if (auto* tm = renderer_->getTerrainManager()) {
@@ -1190,7 +1184,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             bool readyToExit = (elapsed >= kMinWarmupSeconds && idleIterations >= kIdleThreshold && groundReady);
             if (readyToExit || elapsed >= kMaxWarmupSeconds) {
                 if (elapsed >= kMaxWarmupSeconds && !groundReady) {
-                    LOG_WARNING("Warmup hit hard cap (", kMaxWarmupSeconds, "s), ground NOT ready — may fall through world");
+                    LOG_WARNING("Warmup hit hard cap (", kMaxWarmupSeconds, "s), ground NOT ready - may fall through world");
                 } else if (elapsed >= kMaxWarmupSeconds) {
                     LOG_WARNING("Warmup hit hard cap (", kMaxWarmupSeconds, "s), entering world with pending work");
                 }
@@ -1214,8 +1208,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     // world load are fully flushed before the first render frame. Without this,
     // vkCmdBeginRenderPass can crash on NVIDIA 590.x when resources from async
     // uploads haven't completed their queue operations.
+    // Checked: a device already lost during the load used to pass through
+    // here silently and be reported by the first frame's own submit instead,
+    // which put the blame one stage too late.
     if (renderer_ && renderer_->getVkContext()) {
-        vkDeviceWaitIdle(renderer_->getVkContext()->getDevice());
+        renderer_->getVkContext()->waitIdle("world entry flush");
     }
 
     if (loadingScreenOk) {
@@ -1238,7 +1235,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             app_.worldEntryCallbacks_->setTaxiLandingClampTimer(0.0f);
             app_.worldEntryCallbacks_->setLastTaxiFlight(false);
         }
-        // Recursive call — sets loadedMapId_ and IN_GAME state for the final map.
+        // Recursive call - sets loadedMapId_ and IN_GAME state for the final map.
         loadOnlineWorldTerrain(entry.mapId, entry.x, entry.y, entry.z);
         return;  // The recursive call handles setState(IN_GAME).
     }
@@ -1266,6 +1263,12 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         addonManager_->loadAllAddons();
         app_.addonsLoaded_ = true;
         addonManager_->fireEvent("VARIABLES_LOADED");
+        // After VARIABLES_LOADED, which is when the chat window
+        // settings are available to be read. Every chat frame
+        // answers this by applying its saved font, colour, size
+        // and docked state; without it they keep the defaults
+        // they were built with however much was saved.
+        addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
         addonManager_->fireEvent("PLAYER_LOGIN");
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
     } else if (addonManager_ && app_.addonsLoaded_) {
@@ -1324,13 +1327,14 @@ void WorldLoader::startWorldPreload(uint32_t mapId, const std::string& mapName,
                 // Read ADT file (warms file cache)
                 std::string adtPath = "World\\Maps\\" + mn + "\\" + mn + "_" +
                                       std::to_string(tx) + "_" + std::to_string(ty) + ".adt";
-                am->readFile(adtPath);
+                // Discarded on purpose: the read is for the cache it warms.
+                (void)am->readFile(adtPath);
                 if (cancelFlag->load(std::memory_order_relaxed)) break;
 
                 // Read obj0 variant
                 std::string objPath = "World\\Maps\\" + mn + "\\" + mn + "_" +
                                       std::to_string(tx) + "_" + std::to_string(ty) + "_obj0.adt";
-                am->readFile(objPath);
+                (void)am->readFile(objPath);
             }
             LOG_DEBUG("World preload worker finished");
         });

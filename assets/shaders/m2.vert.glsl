@@ -11,13 +11,18 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 fogColor;
     vec4 fogParams;
     vec4 shadowParams;
+    vec4 playerPos;   // xyz = player world position, w = horizontal speed
+    vec4 playerWake;  // xyz = trailing player position (springback reference)
 };
 
 // Per-draw push constants (batch-level data only)
 layout(push_constant) uniform Push {
     int texCoordSet;         // UV set index (0 or 1)
-    int isFoliage;           // Foliage wind animation flag
+    int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3 hanging cloth
     int instanceDataOffset;  // Base index into InstanceSSBO for this draw group
+    float swayRefHeight;     // Model height the sway normalises against (model space)
+    float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
+    float plantHeight;       // The model's own height (model space), for the player brush
 } push;
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
@@ -31,6 +36,10 @@ struct InstanceData {
     float fadeAlpha;
     int useBones;
     int boneBase;
+    int boneCount;
+    // 0 for an ordinary instance, 1 while the player is pressing on it. Sits
+    // in what was padding, so the entry is the same 96 bytes it always was.
+    float highlight;
 };
 layout(set = 3, binding = 0) readonly buffer InstanceSSBO {
     InstanceData instanceData[];
@@ -50,6 +59,7 @@ layout(location = 3) flat out vec3 InstanceOrigin;
 layout(location = 4) out float ModelHeight;
 layout(location = 5) out float vFadeAlpha;
 layout(location = 6) flat out int vSkyMode;
+layout(location = 7) flat out float vHighlight;
 
 void main() {
     // Fetch per-instance data from SSBO
@@ -64,7 +74,11 @@ void main() {
     vec4 norm = vec4(aNormal, 0.0);
 
     if (uBones != 0) {
-        ivec4 bi = ivec4(aBoneIndicesF);
+        // Clamp to the range this instance actually owns. A model whose bone
+        // count exceeds the ceiling would otherwise index into the next
+        // instance's matrices and fling its vertices across the world.
+        int bCount = max(instanceData[instIdx].boneCount, 1);
+        ivec4 bi = clamp(ivec4(aBoneIndicesF), ivec4(0), ivec4(bCount - 1));
         mat4 skinMat = bones[bBase + bi.x] * aBoneWeights.x
                      + bones[bBase + bi.y] * aBoneWeights.y
                      + bones[bBase + bi.z] * aBoneWeights.z
@@ -73,42 +87,194 @@ void main() {
         norm = skinMat * norm;
     }
 
-    // Wind animation for foliage
+    // How far up the model this vertex sits, 0 at the base and 1 at the top.
+    // Quadratic so the roots stay planted and the motion collects at the tip.
+    // swayRefHeight is 20 for anything tree-sized, which is the constant this
+    // used to hardcode; ground clutter passes its own height instead, because
+    // normalising a one-yard tuft against twenty moves it by nothing at all.
+    float heightFactor = 0.0;
     if (push.isFoliage > 0) {
+        heightFactor = clamp(pos.z / max(push.swayRefHeight, 0.01), 0.0, 1.0);
+        heightFactor *= heightFactor; // quadratic - base stays grounded
+    }
+
+    // Wind animation for foliage.
+    //
+    // Ground clutter (mode 2) is left out of this on purpose. Every detail
+    // doodad has its own one-bone sequence and plays it, so a shader wind on
+    // top would be two swings of the same plant at two different rates. The
+    // player brush below still applies to it: that is motion the authored
+    // animation has no way to know about.
+    if (push.isFoliage == 1) {
         float windTime = fogParams.z;
         vec3 worldRef = model[3].xyz;
-        float heightFactor = clamp(pos.z / 20.0, 0.0, 1.0);
-        heightFactor *= heightFactor; // quadratic — base stays grounded
+        float amp = push.swayAmp * heightFactor;
 
-        // Layer 1: Trunk sway — slow, large amplitude
+        // Layer 1: Trunk sway - slow, large amplitude
         float trunkPhase = windTime * 0.8 + dot(worldRef.xy, vec2(0.1, 0.13));
-        float trunkSwayX = sin(trunkPhase) * 0.35 * heightFactor;
-        float trunkSwayY = cos(trunkPhase * 0.7) * 0.25 * heightFactor;
+        float trunkSwayX = sin(trunkPhase) * 0.35 * amp;
+        float trunkSwayY = cos(trunkPhase * 0.7) * 0.25 * amp;
 
-        // Layer 2: Branch sway — medium frequency, per-branch phase
+        // Layer 2: Branch sway - medium frequency, per-branch phase
         float branchPhase = windTime * 1.7 + dot(worldRef.xy, vec2(0.37, 0.71));
-        float branchSwayX = sin(branchPhase + pos.y * 0.4) * 0.15 * heightFactor;
-        float branchSwayY = cos(branchPhase * 1.1 + pos.x * 0.3) * 0.12 * heightFactor;
+        float branchSwayX = sin(branchPhase + pos.y * 0.4) * 0.15 * amp;
+        float branchSwayY = cos(branchPhase * 1.1 + pos.x * 0.3) * 0.12 * amp;
 
-        // Layer 3: Leaf flutter — fast, small amplitude, per-vertex
+        // Layer 3: Leaf flutter - fast, small amplitude, per-vertex
         float leafPhase = windTime * 4.5 + dot(aPos, vec3(1.7, 2.3, 0.9));
-        float leafFlutterX = sin(leafPhase) * 0.06 * heightFactor;
-        float leafFlutterY = cos(leafPhase * 1.3) * 0.05 * heightFactor;
+        float leafFlutterX = sin(leafPhase) * 0.06 * amp;
+        float leafFlutterY = cos(leafPhase * 1.3) * 0.05 * amp;
 
         pos.x += trunkSwayX + branchSwayX + leafFlutterX;
         pos.y += trunkSwayY + branchSwayY + leafFlutterY;
     }
 
+    // Cloth: a banner, a flag, a tapestry. Mode 3 hangs, mode 4 stands.
+    //
+    // Which end is held is the whole difference. A tapestry is nailed to its
+    // bar and moves at the hem, so the weight is the drop below the top. A
+    // standard is a pole planted in the ground with the cloth near its head,
+    // so the weight is the height above the base - and getting that backwards
+    // is what swung the foot of the Undercity gate's banner pole hardest of
+    // anything on the model. Neither can be told from the other by bounds:
+    // both reach z=0. The client separates them by how wide the geometry is
+    // down at the ground, a spar against a full hem, and says which this is.
+    //
+    // Two rates: a slow sway of the whole cloth and a smaller ripple across it,
+    // so it breathes rather than swinging like a sign. The amplitude is a
+    // twentieth of the cloth's own drop, set on the client side.
+    if (push.isFoliage == 3 || push.isFoliage == 4) {
+        float windTime = fogParams.z;
+        vec3 worldRef = model[3].xyz;
+        float span = max(push.plantHeight, 0.01);
+        float clothBase = push.swayRefHeight - span;
+        float held = (push.isFoliage == 4)
+                   ? clamp((pos.z - clothBase) / span, 0.0, 1.0)
+                   : clamp((push.swayRefHeight - pos.z) / span, 0.0, 1.0);
+        held *= held;
+        float amp = push.swayAmp * held;
+
+        // Per banner rather than per vertex, so two on the same wall are not
+        // in step - the phase comes from where the instance stands.
+        float phase = windTime * 1.1 + dot(worldRef.xy, vec2(0.21, 0.17));
+        vec3 sway = vec3(
+            (sin(phase) * 0.7 + sin(phase * 2.7 + pos.y * 1.9) * 0.25) * amp,
+            (cos(phase * 0.9) * 0.6 + cos(phase * 3.1 + pos.x * 1.7) * 0.2) * amp,
+            // A little in and out as well, so the cloth is not a flat sheet
+            // sliding sideways.
+            sin(phase * 1.6 + pos.x * 1.3) * 0.12 * amp);
+
+        // Away from the wall, never into it.
+        //
+        // A banner hangs flush against stone, so any motion toward its own
+        // back face goes through the masonry - a quarter of it was still
+        // enough to show. The whole perpendicular component is taken out and a
+        // third of it given back outward only: the cloth billows away from the
+        // wall and slides in its own plane, and the half-cycle that used to
+        // push it backwards now does nothing at all.
+        //
+        // Outward is each face's own normal, so a two-sided banner puffs
+        // slightly rather than parting - which is what a cloth in a draught
+        // does anyway.
+        vec3 clothN = normalize(norm.xyz);
+        float perp = dot(sway, clothN);
+        sway -= clothN * perp;
+        sway += clothN * max(perp, 0.0) * 0.35;
+        pos.xyz += sway;
+    }
+
     vec4 worldPos = model * pos;
+
+    // Foliage parts around whoever walks through it, then springs back. Applied
+    // in world space after the model transform: the displacement is a distance
+    // in yards from the player, not something the model's own scale and rotation
+    // should be turning.
+    //
+    // Grass, ferns and bushes all give way; a tree does not, and the taper
+    // between them is on the plant's own height rather than on which of the two
+    // sway modes it happens to use. A shoulder-high bush and a waist-high one
+    // should not behave differently because a bounding box crossed a threshold.
+    if (push.isFoliage > 0 && push.isFoliage != 3 && push.isFoliage != 4 &&
+        push.plantHeight > 0.0) {
+        vec3 base = model[3].xyz;                      // instance origin, on the ground
+        float zScale = length(model[2].xyz);
+        float plantHeight = push.plantHeight * zScale;
+
+        // Full effect up to about head height, nothing from a small tree up.
+        float sizeGate = 1.0 - smoothstep(4.0, 8.0, plantHeight);
+
+        // Only foliage at the player's own level reacts. Flying over a field
+        // must not flatten it, and neither must standing on the roof above it.
+        float levelGate = 1.0 - smoothstep(1.5, 4.0, abs(base.z - playerPos.z));
+        levelGate *= sizeGate;
+
+        // Height along the plant, from its own base rather than from whatever
+        // the wind normalised against: mode 2 does not compute the wind at all.
+        float brushT = clamp(pos.z / max(push.plantHeight, 0.01), 0.0, 1.0);
+        brushT *= brushT;
+
+        if (levelGate > 0.0 && brushT > 0.0) {
+            // Reach grows a little with the plant, so a waist-high fern gives
+            // way sooner than a tuft of grass does.
+            float reach = 1.1 + plantHeight * 0.35;
+
+            // Bend away from the player, and from where the player was a
+            // moment ago. Taking the stronger of the two rather than the sum
+            // keeps a standing player - where the two points coincide - from
+            // bending the clutter twice as far as a walking one.
+            vec2 toNow  = base.xy - playerPos.xy;
+            vec2 toWake = base.xy - playerWake.xy;
+            float dNow  = length(toNow);
+            float dWake = length(toWake);
+            float infNow  = 1.0 - smoothstep(0.0, reach, dNow);
+            float infWake = 1.0 - smoothstep(0.0, reach, dWake);
+
+            vec2 dir;
+            float influence;
+            if (infNow >= infWake) {
+                influence = infNow;
+                dir = toNow / max(dNow, 0.001);
+            } else {
+                influence = infWake;
+                dir = toWake / max(dWake, 0.001);
+            }
+            influence *= levelGate;
+
+            // Bend, capped so tall clutter doesn't lie flat on the ground.
+            float bend = influence * brushT * min(plantHeight * 0.45, 0.75);
+
+            // Rustle: a fast quiver riding on the bend, present only while the
+            // player is actually moving. Phase is per-plant, so a field
+            // shivers rather than pulsing in unison.
+            float speed = clamp(playerPos.w / 7.0, 0.0, 1.0);
+            float rustlePhase = fogParams.z * 17.0 + dot(base.xy, vec2(3.1, 2.7));
+            float rustle = sin(rustlePhase) * influence * brushT
+                         * speed * min(plantHeight * 0.10, 0.15);
+
+            worldPos.xy += dir * bend + vec2(-dir.y, dir.x) * rustle;
+            // Trodden clutter also settles a little, rather than pivoting on
+            // its base and standing just as tall.
+            worldPos.z -= influence * brushT * plantHeight * 0.12;
+        }
+    }
+
     FragPos = worldPos.xyz;
     Normal = mat3(model) * norm.xyz;
 
     TexCoord = (push.texCoordSet == 1 ? aTexCoord2 : aTexCoord) + uvOff;
 
     InstanceOrigin = model[3].xyz;
-    ModelHeight = pos.z;
+    // How far up the plant this vertex is, as a fraction of the plant's own
+    // height. The fragment shader shades a canopy with it, and dividing by a
+    // constant there could only be right for one size of plant.
+    ModelHeight = push.plantHeight > 0.0 ? clamp(pos.z / push.plantHeight, 0.0, 1.0) : 1.0;
     vFadeAlpha = fade;
     vSkyMode = push.isFoliage < 0 ? 1 : 0;
+    vHighlight = instanceData[instIdx].highlight;
 
     gl_Position = projection * view * worldPos;
+    // A sky model sits on the far plane whatever its radius, so the depth
+    // test rejects it wherever terrain has already been drawn. The sky is
+    // drawn after the ground now, and this is what makes that free.
+    if (push.isFoliage < 0) gl_Position.z = gl_Position.w;
 }

@@ -1,4 +1,5 @@
 #include "rendering/footprint_renderer.hpp"
+#include "pipeline/m2_loader.hpp"
 
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -40,9 +41,8 @@ std::string normalizeModelPath(std::string path) {
         if (c == '/') return '\\';
         return static_cast<char>(std::tolower(c));
     });
-    if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".mdx") == 0)
-        path.replace(path.size() - 4, 4, ".m2");
-    return path;
+    // .mdx and .mdl both mean the .m2 that shipped; this knew only the first.
+    return pipeline::modelPathToM2(path);
 }
 
 std::string basenameOf(const std::string& path) {
@@ -86,18 +86,14 @@ void FootprintRenderer::shutdown() {
     vkDeviceWaitIdle(device);
 
     for (auto& texture : textures_) texture.destroy(device, allocator);
-    if (quadVB_) vmaDestroyBuffer(allocator, quadVB_, quadVBAlloc_);
-    if (pipeline_) vkDestroyPipeline(device, pipeline_, nullptr);
-    if (pipelineLayout_) vkDestroyPipelineLayout(device, pipelineLayout_, nullptr);
-    if (descriptorPool_) vkDestroyDescriptorPool(device, descriptorPool_, nullptr);
-    if (materialSetLayout_) vkDestroyDescriptorSetLayout(device, materialSetLayout_, nullptr);
+    // Through the helpers, which clear each handle as they destroy it, so the
+    // block of assignments that used to follow is gone.
+    destroy(allocator, quadVB_, quadVBAlloc_);
+    destroy(device, pipeline_);
+    destroy(device, pipelineLayout_);
+    destroy(device, descriptorPool_);
+    destroy(device, materialSetLayout_);
 
-    quadVB_ = VK_NULL_HANDLE;
-    quadVBAlloc_ = VK_NULL_HANDLE;
-    pipeline_ = VK_NULL_HANDLE;
-    pipelineLayout_ = VK_NULL_HANDLE;
-    descriptorPool_ = VK_NULL_HANDLE;
-    materialSetLayout_ = VK_NULL_HANDLE;
     textureSets_.fill(VK_NULL_HANDLE);
     profilesByPath_.clear();
     profilesByBasename_.clear();
@@ -120,7 +116,7 @@ bool FootprintRenderer::createDescriptorResources() {
     VkDescriptorPoolSize size{};
     size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     size.descriptorCount = kTextureCount;
-    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    VkDescriptorPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets = kTextureCount;
     pool.poolSizeCount = 1;
     pool.pPoolSizes = &size;
@@ -128,7 +124,7 @@ bool FootprintRenderer::createDescriptorResources() {
 
     std::array<VkDescriptorSetLayout, kTextureCount> layouts{};
     layouts.fill(materialSetLayout_);
-    VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    VkDescriptorSetAllocateInfo alloc{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     alloc.descriptorPool = descriptorPool_;
     alloc.descriptorSetCount = kTextureCount;
     alloc.pSetLayouts = layouts.data();
@@ -153,9 +149,9 @@ bool FootprintRenderer::createPipeline() {
         pipelineLayout_ = createPipelineLayout(device, {perFrameLayout_, materialSetLayout_}, {push});
     }
 
-    VkVertexInputBindingDescription binding{0, 5 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription pos{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
-    VkVertexInputAttributeDescription uv{1, 0, VK_FORMAT_R32G32_SFLOAT, 3 * sizeof(float)};
+    VkVertexInputBindingDescription binding{.binding = 0, .stride = 5 * sizeof(float), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription pos{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0};
+    VkVertexInputAttributeDescription uv{.location = 1, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 3 * sizeof(float)};
     pipeline_ = PipelineBuilder()
         .setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT), frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
         .setVertexInput({binding}, {pos, uv})
@@ -166,7 +162,7 @@ bool FootprintRenderer::createPipeline() {
         .setMultisample(vkCtx_->getMsaaSamples())
         .setLayout(pipelineLayout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
-        .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR})
+        .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
     vert.destroy();
     frag.destroy();
@@ -219,8 +215,16 @@ bool FootprintRenderer::loadFootprintData(pipeline::AssetManager* assets) {
         }
         textures_[i].createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        // createSampler answers nothing and the image view is created without
+        // being checked either, so "uploaded" is not the same as "sampleable".
+        // Writing an unsampleable texture into a live descriptor is undefined
+        // behaviour that costs the device rather than the footprints. See #123.
+        if (!textures_[i].isValid()) {
+            LOG_WARNING("FootprintRenderer: ", path, " is not sampleable");
+            return false;
+        }
         VkDescriptorImageInfo imageInfo = textures_[i].descriptorInfo();
-        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         write.dstSet = textureSets_[i];
         write.dstBinding = 0;
         write.descriptorCount = 1;
@@ -236,10 +240,16 @@ bool FootprintRenderer::loadFootprintData(pipeline::AssetManager* assets) {
         auto textureIt = indexById.find(modelDbc->getUInt32(row, 6));
         if (textureIt == indexById.end()) continue;
         std::string path = normalizeModelPath(modelDbc->getString(row, 2));
-        const float length = modelDbc->getFloat(row, 7) / 12.0f;
-        const float width = modelDbc->getFloat(row, 8) / 12.0f;
-        if (path.empty() || length <= 0.05f || width <= 0.05f) continue;
-        Profile profile{textureIt->second, length, width};
+        // FootprintTextureLength/Width are inches; world units are yards, so the
+        // conversion is /36.  Dividing by 12 yields feet and renders every print
+        // three times its real size - a human's came out a yard long.
+        const float length = modelDbc->getFloat(row, 7) / 36.0f;
+        const float width = modelDbc->getFloat(row, 8) / 36.0f;
+        // Reject degenerate rows on the raw inches, so the /36 correction doesn't
+        // also quietly raise the cutoff and drop small creatures that used to
+        // resolve a profile.
+        if (path.empty() || length * 36.0f <= 0.6f || width * 36.0f <= 0.6f) continue;
+        Profile profile{.textureIndex = textureIt->second, .length = length, .width = width};
         profilesByPath_[path] = profile;
     }
     std::unordered_map<std::string, unsigned> basenameCounts;
@@ -262,12 +272,13 @@ FootprintRenderer::Profile FootprintRenderer::resolveProfile(
     auto base = profilesByBasename_.find(basenameOf(normalized));
     if (base != profilesByBasename_.end()) return base->second;
 
+    // Yards, to match the converted DBC dimensions above.
     switch (fallback) {
-        case FootprintFallback::HOOF:   return {4, 1.5f, 1.0f};
-        case FootprintFallback::PAW:    return {5, 2.0f, 1.5f};
-        case FootprintFallback::CLAW:   return {2, 2.0f, 1.5f};
-        case FootprintFallback::CLOVEN: return {3, 1.8f, 1.3f};
-        case FootprintFallback::BIPED:  return {0, 1.0f, 0.83f};
+        case FootprintFallback::HOOF:   return {.textureIndex = 4, .length = 0.50f, .width = 0.33f};
+        case FootprintFallback::PAW:    return {.textureIndex = 5, .length = 0.67f, .width = 0.50f};
+        case FootprintFallback::CLAW:   return {.textureIndex = 2, .length = 0.67f, .width = 0.50f};
+        case FootprintFallback::CLOVEN: return {.textureIndex = 3, .length = 0.60f, .width = 0.43f};
+        case FootprintFallback::BIPED:  return {.textureIndex = 0, .length = 0.33f, .width = 0.28f};
     }
     return {};
 }
@@ -293,16 +304,20 @@ void FootprintRenderer::spawn(const std::string& modelName, const glm::vec3& bas
     const Profile profile = resolveProfile(modelName, fallback);
     const glm::vec2 forward(std::cos(yawRadians), std::sin(yawRadians));
     const glm::vec2 right(-forward.y, forward.x);
-    const float side = (leftFoot ? -1.0f : 1.0f) * profile.width * 0.24f;
+    // Stance is how far each foot sits off the centreline - a body dimension,
+    // roughly three quarters of a footprint's width to either side.  The
+    // coefficient carries the /12-to-/36 correction so the gait stays as wide
+    // as it was while the prints themselves shrink to life size.
+    const float side = (leftFoot ? -1.0f : 1.0f) * profile.width * 0.72f;
     const glm::vec2 xy = glm::vec2(basePosition) + right * side - forward * profile.length * 0.16f;
     glm::vec3 position(xy.x, xy.y, basePosition.z);
     position.z = resolveFloorHeight(position) + 0.035f;
 
     if (prints_.size() >= kMaxPrints) prints_.erase(prints_.begin());
     // A negative width mirrors the one-foot mask laterally for the opposite foot.
-    prints_.push_back({position, yawRadians, profile.length,
-                       leftFoot ? -profile.width : profile.width, 0.0f,
-                       profile.textureIndex});
+    prints_.push_back({.position = position, .yaw = yawRadians, .length = profile.length,
+                       .signedWidth = leftFoot ? -profile.width : profile.width, .age = 0.0f,
+                       .textureIndex = profile.textureIndex});
 }
 
 void FootprintRenderer::update(float deltaTime) {

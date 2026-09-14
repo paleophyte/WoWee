@@ -15,7 +15,6 @@ namespace ui {
 
 class InventoryScreen;
 class SpellbookScreen;
-class QuestLogScreen;
 
 /**
  * Context needed by the renderer to display links, tooltips, and icons.
@@ -24,14 +23,16 @@ struct MarkupRenderContext {
     game::GameHandler*  gameHandler   = nullptr;
     InventoryScreen*    inventory     = nullptr;
     SpellbookScreen*    spellbook     = nullptr;
-    QuestLogScreen*     questLog      = nullptr;
     pipeline::AssetManager* assetMgr  = nullptr;
-    // Spell icon callback — same as ChatPanel::getSpellIcon
+    // Spell icon callback - same as ChatPanel::getSpellIcon
     std::function<VkDescriptorSet(uint32_t, pipeline::AssetManager*)> getSpellIcon;
     // Chat input buffer for shift-click link insertion
     char*   chatInputBuffer   = nullptr;
     size_t  chatInputBufSize  = 0;
     bool*   moveCursorToEnd   = nullptr;
+    // Used when there is no raw input buffer to append to - a surface outside
+    // the chat window still wants shift-click to reach the chat input.
+    std::function<void(const std::string&)> insertLink;
 };
 
 /**

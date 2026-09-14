@@ -79,7 +79,7 @@ TEST_CASE("renderPosToMapUV: continent applies vertical offset", "[world_map][co
     glm::vec2 zone_uv = renderPosToMapUV(center, bounds, false);
     glm::vec2 cont_uv = renderPosToMapUV(center, bounds, true);
 
-    // No vertical offset — continent and zone UV should be identical
+    // No vertical offset - continent and zone UV should be identical
     REQUIRE(zone_uv.x == Catch::Approx(cont_uv.x).margin(0.01f));
     REQUIRE(cont_uv.y == Catch::Approx(zone_uv.y).margin(0.01f));
 }
@@ -148,7 +148,7 @@ TEST_CASE("findZoneForPlayer: finds smallest containing zone", "[world_map][coor
     // Small zone fully inside large
     zones.push_back(makeZone(3, 200, 1000.0f, -1000.0f, 1000.0f, -1000.0f, 0, 1, "Small"));
 
-    // Player at center — should find the smaller zone
+    // Player at center - should find the smaller zone
     glm::vec3 playerPos(0.0f, 0.0f, 0.0f);
     int found = findZoneForPlayer(zones, playerPos);
     REQUIRE(found == 2);  // Small zone
@@ -190,4 +190,134 @@ TEST_CASE("getContinentProjectionBounds: rejects non-continent zones", "[world_m
     float l, r, t, b;
     bool ok = getContinentProjectionBounds(zones, 0, l, r, t, b);
     REQUIRE(ok == false);
+}
+
+// ── findZoneForPlayer: the server's zone beats the geometry ──────
+
+// The map opened on whichever WorldMapArea box the player sat deepest inside.
+// Those boxes are axis-aligned rectangles around irregular zones, so neighbours
+// overlap heavily and the deepest-inside answer is only ever a guess - hence a
+// map that opened on a zone the player was merely near. The server tells us the
+// zone outright; these pin that it is used, and that the guess still stands in
+// when it has not said.
+//
+// findZoneForPlayer takes render-space, where renderX = wowY and renderY = wowX.
+static glm::vec3 atWow(float wowX, float wowY) { return glm::vec3(wowY, wowX, 0.0f); }
+
+TEST_CASE("findZoneForPlayer: the server's zone id wins over the geometry",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones = {
+        // A big zone the player is standing deep inside.
+        makeZone(1, 100, 1000.0f, -1000.0f, 1000.0f, -1000.0f, 0, 0, "Big"),
+        // A neighbour whose box reaches over the same spot.
+        makeZone(2, 200, 200.0f, -200.0f, 200.0f, -200.0f, 0, 0, "Neighbour"),
+    };
+    const glm::vec3 pos = atWow(0.0f, 0.0f);
+
+    // With nothing from the server the geometry picks the tighter, more central box.
+    REQUIRE(findZoneForPlayer(zones, pos, 0) == 1);
+
+    // Told which zone the player is in, it says so regardless of the boxes.
+    REQUIRE(findZoneForPlayer(zones, pos, 100) == 0);
+    REQUIRE(findZoneForPlayer(zones, pos, 200) == 1);
+}
+
+TEST_CASE("findZoneForPlayer: a zone id not on this map falls back to geometry",
+          "[world_map][coordinate_projection]") {
+    // Standing on one continent with the map showing another, the id names no
+    // zone here. Guessing is better than answering "nowhere".
+    std::vector<Zone> zones = {
+        makeZone(1, 100, 500.0f, -500.0f, 500.0f, -500.0f, 0, 0, "Here"),
+    };
+    REQUIRE(findZoneForPlayer(zones, atWow(0.0f, 0.0f), 999999) == 0);
+}
+
+TEST_CASE("findZoneForPlayer: the server's zone is honoured outside its own box",
+          "[world_map][coordinate_projection]") {
+    // The point of the fix. WorldMapArea bounds do not cover every part of a
+    // zone, so a player near an edge could fall inside a neighbour's box only.
+    // The id must still win - that is what "sort of close to" was.
+    std::vector<Zone> zones = {
+        makeZone(1, 100, 10.0f, -10.0f, 10.0f, -10.0f, 0, 0, "Real zone"),
+        makeZone(2, 200, 1000.0f, -1000.0f, 1000.0f, -1000.0f, 0, 0, "Neighbour"),
+    };
+    const glm::vec3 outsideReal = atWow(500.0f, 500.0f);
+
+    REQUIRE(findZoneForPlayer(zones, outsideReal, 0) == 1);   // geometry: neighbour
+    REQUIRE(findZoneForPlayer(zones, outsideReal, 100) == 0); // server: real zone
+}
+
+TEST_CASE("findZoneByAreaId: exact, and -1 for unknown or zero",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones = {
+        makeZone(1, 0,   100.0f, -100.0f, 100.0f, -100.0f, 0, 0, "Continent"),
+        makeZone(2, 331, 100.0f, -100.0f, 100.0f, -100.0f, 0, 0, "Ashenvale"),
+    };
+    REQUIRE(findZoneByAreaId(zones, 331) == 1);
+    REQUIRE(findZoneByAreaId(zones, 12345) == -1);
+    // 0 is "no zone", not the continent entry, whose areaID is also 0.
+    REQUIRE(findZoneByAreaId(zones, 0) == -1);
+}
+
+// ── continentZoneIndex ───────────────────────────────────────
+//
+// The world map's zone dropdown was empty on every continent, and choosing a
+// continent did nothing. Both read the continent's row out of the zone list,
+// and the lookup insisted that row be a leaf - a continent whose
+// parentWorldMapID names the map above it. 3.3.5's WorldMapArea.dbc leaves
+// that field zero on all four of them, so the lookup answered -1 for Kalimdor,
+// Azeroth, Expansion01 and Northrend alike: every continent in the game.
+
+TEST_CASE("a continent row with no parent is still the continent",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones;
+    // Exactly the shape the game ships: areaID 0, parentWorldMapID 0.
+    Zone azeroth;  azeroth.mapID = 0; azeroth.areaID = 0; azeroth.wmaID = 14;
+    azeroth.parentWorldMapID = 0;
+    Zone elwynn;   elwynn.mapID = 0; elwynn.areaID = 12; elwynn.wmaID = 30;
+    zones.push_back(azeroth);
+    zones.push_back(elwynn);
+
+    REQUIRE(isLeafContinent(zones, 0) == false);   // the reason it used to fail
+    REQUIRE(continentZoneIndex(zones, 0) == 0);
+}
+
+TEST_CASE("a leaf continent is preferred over the root above it",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones;
+    Zone root;  root.mapID = 0; root.areaID = 0; root.wmaID = 100;
+    root.parentWorldMapID = 0;
+    Zone leaf;  leaf.mapID = 0; leaf.areaID = 0; leaf.wmaID = 101;
+    leaf.parentWorldMapID = 100;         // its parent is the row above
+    zones.push_back(root);
+    zones.push_back(leaf);
+
+    // The zones hang off the leaf, so the leaf is the one worth finding.
+    REQUIRE(isRootContinent(zones, 0) == true);
+    REQUIRE(isLeafContinent(zones, 1) == true);
+    REQUIRE(continentZoneIndex(zones, 0) == 1);
+}
+
+TEST_CASE("a map with no continent row answers -1",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones;
+    Zone onlyAZone; onlyAZone.mapID = 0; onlyAZone.areaID = 12; onlyAZone.wmaID = 30;
+    zones.push_back(onlyAZone);
+
+    REQUIRE(continentZoneIndex(zones, 0) == -1);
+    REQUIRE(continentZoneIndex(zones, 571) == -1);   // a map with nothing at all
+}
+
+TEST_CASE("each continent finds its own row, not another map's",
+          "[world_map][coordinate_projection]") {
+    std::vector<Zone> zones;
+    for (uint32_t mapId : {uint32_t(1), uint32_t(0), uint32_t(530), uint32_t(571)}) {
+        Zone c; c.mapID = mapId; c.areaID = 0; c.wmaID = 10 + mapId;
+        c.parentWorldMapID = 0;
+        zones.push_back(c);
+    }
+    REQUIRE(continentZoneIndex(zones, 1) == 0);
+    REQUIRE(continentZoneIndex(zones, 0) == 1);
+    REQUIRE(continentZoneIndex(zones, 530) == 2);
+    REQUIRE(continentZoneIndex(zones, 571) == 3);
 }

@@ -7,6 +7,10 @@
 #include "game/game_handler.hpp"
 #include "addons/addon_manager.hpp"
 #include "core/application.hpp"
+#include "ui/framexml_takeover.hpp"
+#include "ui/chat/chat_utils.hpp"
+#include "rendering/camera_controller.hpp"
+#include "rendering/renderer.hpp"
 #include <algorithm>
 #include <cctype>
 
@@ -16,7 +20,7 @@ namespace wowee { namespace ui {
 class RunCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         auto* am = ctx.services.addonManager;
         if (am) {
             am->runScript(ctx.args);
@@ -25,15 +29,15 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"run", "script"}; }
-    std::string helpText() const override { return "Execute Lua code"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"run", "script"}; }
+    [[nodiscard]] std::string helpText() const override { return "Execute Lua code"; }
 };
 
 // --- /dump, /print ---
 class DumpCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         auto* am = ctx.services.addonManager;
         if (am && am->isInitialized()) {
             // Wrap expression in print(tostring(...)) to display the value
@@ -53,8 +57,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"dump", "print"}; }
-    std::string helpText() const override { return "Evaluate & print Lua expression"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"dump", "print"}; }
+    [[nodiscard]] std::string helpText() const override { return "Evaluate & print Lua expression"; }
 };
 
 // --- /reload, /reloadui, /rl ---
@@ -65,6 +69,11 @@ public:
         if (am) {
             am->reload();
             am->fireEvent("VARIABLES_LOADED");
+            // The chat windows are rebuilt by the reload and come up with the
+            // defaults their XML carries, so they have to be told to read the
+            // settings back - same as at login, and the reason a /reload used
+            // to lose the chat layout.
+            am->fireEvent("UPDATE_CHAT_WINDOWS");
             am->fireEvent("PLAYER_LOGIN");
             am->fireEvent("PLAYER_ENTERING_WORLD");
             game::MessageChatData rlMsg;
@@ -81,8 +90,49 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"reload", "reloadui", "rl"}; }
-    std::string helpText() const override { return "Reload all addons"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"reload", "reloadui", "rl"}; }
+    [[nodiscard]] std::string helpText() const override { return "Reload all addons"; }
+};
+
+// --- /fxcheck ---
+class FrameXmlCheckCommand : public IChatCommand {
+public:
+    ChatCommandResult execute(ChatCommandContext& ctx) override {
+        frameXmlRequestCheck();
+
+        // What the interface itself can see, asked through the same bindings
+        // FrameXML uses. The widget report says whether a frame is shown; it
+        // cannot say whether it *should* be, and those are the two readings
+        // that have to be told apart. A hidden target frame is correct with no
+        // target and a fault with one, and from the tree alone they are the
+        // same line. print() reaches the log, so the answer lands beside the
+        // report it belongs to.
+        if (auto* am = ctx.services.addonManager) {
+            am->runScript(
+                "local function yn(v) return v and 'yes' or 'no' end\n"
+                "local auras = 0\n"
+                "for i = 1, 40 do if not UnitAura('player', i) then break end auras = i end\n"
+                "print('[fxcheck] target=' .. yn(UnitExists('target')) ..\n"
+                "      ' name=' .. tostring(UnitExists('target') and UnitName('target')) ..\n"
+                "      ' | TargetFrame shown=' .. yn(TargetFrame and TargetFrame:IsShown()) ..\n"
+                "      ' unit=' .. tostring(TargetFrame and TargetFrame.unit) ..\n"
+                "      ' | player auras=' .. auras ..\n"
+                "      ' BuffButton1=' .. tostring(BuffButton1 ~= nil) ..\n"
+                "      ' | XP=' .. tostring(UnitXP('player')) .. '/' .. tostring(UnitXPMax('player')) ..\n"
+                "      ' | bag0 slots=' .. tostring(GetContainerNumSlots(0)))\n");
+        }
+
+        game::MessageChatData msg;
+        msg.type = game::ChatType::SYSTEM;
+        msg.language = game::ChatLanguage::UNIVERSAL;
+        msg.message = "FrameXML takeover check written to the log.";
+        ctx.gameHandler.addLocalChatMessage(msg);
+        return {};
+    }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"fxcheck"}; }
+    [[nodiscard]] std::string helpText() const override {
+        return "Report the FrameXML takeover check for the interface as it is now";
+    }
 };
 
 // --- /stopmacro [conditions] ---
@@ -103,8 +153,8 @@ public:
         if (shouldStop) ctx.panel.macroStopped() = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"stopmacro"}; }
-    std::string helpText() const override { return "Stop macro execution"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopmacro"}; }
+    [[nodiscard]] std::string helpText() const override { return "Stop macro execution"; }
 };
 
 // --- /clear ---
@@ -114,19 +164,8 @@ public:
         ctx.gameHandler.clearChatHistory();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"clear"}; }
-    std::string helpText() const override { return "Clear chat history"; }
-};
-
-// --- /logout ---
-class LogoutCommand : public IChatCommand {
-public:
-    ChatCommandResult execute(ChatCommandContext& /*ctx*/) override {
-        core::Application::getInstance().logoutToLogin();
-        return {};
-    }
-    std::vector<std::string> aliases() const override { return {"logout"}; }
-    std::string helpText() const override { return "Logout to login screen"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"clear"}; }
+    [[nodiscard]] std::string helpText() const override { return "Clear chat history"; }
 };
 
 // --- /difficulty ---
@@ -172,18 +211,51 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"difficulty"}; }
-    std::string helpText() const override { return "Set dungeon difficulty"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"difficulty"}; }
+    [[nodiscard]] std::string helpText() const override { return "Set dungeon difficulty"; }
 };
 
 // --- Registration ---
+// ---------------------------------------------------------------------------
+// /climb [on|off] - walk up anything, for reaching a place to look at it.
+// ---------------------------------------------------------------------------
+class ClimbCommand : public IChatCommand {
+public:
+    ChatCommandResult execute(ChatCommandContext& ctx) override {
+        auto* renderer = ctx.services.renderer;
+        auto* cam = renderer ? renderer->getCameraController() : nullptr;
+        if (!cam) {
+            ctx.gameHandler.addLocalChatMessage(
+                chat_utils::makeSystemMessage("Climb: no camera to set it on."));
+            return {};
+        }
+        std::string arg = ctx.args;
+        for (char& c : arg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.front()))) arg.erase(arg.begin());
+        while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.back()))) arg.pop_back();
+
+        const bool want = arg.empty() ? !cam->ignoresSlopeLimit()
+                                      : (arg == "on" || arg == "1" || arg == "yes");
+        cam->setIgnoreSlopeLimit(want);
+        ctx.gameHandler.addLocalChatMessage(chat_utils::makeSystemMessage(
+            want ? "Climb: on - any slope is walkable."
+                 : "Climb: off - the 50 degree limit is back."));
+        return {};
+    }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"climb", "slope"}; }
+    [[nodiscard]] std::string helpText() const override {
+        return "Walk up any slope, for reaching somewhere to look at it (/climb on|off)";
+    }
+};
+
 void registerSystemCommands(ChatCommandRegistry& reg) {
+    reg.registerCommand(std::make_unique<ClimbCommand>());
     reg.registerCommand(std::make_unique<RunCommand>());
     reg.registerCommand(std::make_unique<DumpCommand>());
     reg.registerCommand(std::make_unique<ReloadCommand>());
+    reg.registerCommand(std::make_unique<FrameXmlCheckCommand>());
     reg.registerCommand(std::make_unique<StopMacroCommand>());
     reg.registerCommand(std::make_unique<ClearCommand>());
-    reg.registerCommand(std::make_unique<LogoutCommand>());
     reg.registerCommand(std::make_unique<DifficultyCommand>());
 }
 

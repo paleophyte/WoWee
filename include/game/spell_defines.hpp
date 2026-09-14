@@ -21,9 +21,9 @@ struct AuraSlot {
     uint64_t casterGuid = 0;
     uint64_t receivedAtMs = 0; // Client timestamp (ms) when durationMs was set
 
-    bool isEmpty() const { return spellId == 0; }
+    [[nodiscard]] bool isEmpty() const { return spellId == 0; }
     // Remaining duration in ms, counting down from when the packet was received
-    int32_t getRemainingMs(uint64_t nowMs) const {
+    [[nodiscard]] int32_t getRemainingMs(uint64_t nowMs) const {
         if (durationMs < 0) return -1;
         uint64_t elapsed = (nowMs > receivedAtMs) ? (nowMs - receivedAtMs) : 0;
         int32_t remaining = durationMs - static_cast<int32_t>(elapsed);
@@ -41,8 +41,8 @@ struct ActionBarSlot {
     float cooldownRemaining = 0.0f;
     float cooldownTotal = 0.0f;
 
-    bool isReady() const { return cooldownRemaining <= 0.0f; }
-    bool isEmpty() const { return type == EMPTY; }
+    [[nodiscard]] bool isReady() const { return cooldownRemaining <= 0.0f; }
+    [[nodiscard]] bool isEmpty() const { return type == EMPTY; }
 };
 
 /**
@@ -62,11 +62,11 @@ struct CombatTextEntry {
     bool isPlayerSource = false; // True if player dealt this
     uint8_t powerType = 0;      // For ENERGIZE/POWER_DRAIN: 0=mana,1=rage,2=focus,3=energy,6=runicpower
     uint64_t srcGuid = 0;       // Source entity (attacker/caster)
-    uint64_t dstGuid = 0;       // Destination entity (victim/target) — used for world-space positioning
+    uint64_t dstGuid = 0;       // Destination entity (victim/target) - used for world-space positioning
     float xSeed = 0.0f;         // Random horizontal offset seed (-1..1) to stagger overlapping text
 
     static constexpr float LIFETIME = 2.5f;
-    bool isExpired() const { return age >= LIFETIME; }
+    [[nodiscard]] bool isExpired() const { return age >= LIFETIME; }
 };
 
 /**
@@ -100,7 +100,7 @@ struct SpellCooldownEntry {
 inline const char* getSpellCastResultString(uint8_t result, int powerType = -1) {
     // AzerothCore 3.3.5a SpellCastResult enum (SharedDefines.h)
     switch (result) {
-        case 0:   return nullptr; // SUCCESS — not a failure
+        case 0:   return nullptr; // SUCCESS - not a failure
         case 1:   return "Affecting combat";
         case 2:   return "Already at full health";
         case 3:   return "Already at full mana";
@@ -303,7 +303,7 @@ inline const char* getSpellCastResultString(uint8_t result, int powerType = -1) 
     }
 }
 
-// ── SpellEffect — SMSG_SPELLLOGEXECUTE effectType field (3.3.5a) ──────────
+// ── SpellEffect - SMSG_SPELLLOGEXECUTE effectType field (3.3.5a) ──────────
 // Full WoW enum has 164 entries; only values used in the codebase or commonly
 // relevant are defined here. Values match SharedDefines.h SpellEffects enum.
 namespace SpellEffect {
@@ -357,7 +357,7 @@ namespace SpellEffect {
     constexpr uint8_t TOTAL_SPELL_EFFECTS       = 164;
 } // namespace SpellEffect
 
-// ── SpellMissInfo — SMSG_SPELLLOGMISS / SMSG_SPELL_GO miss type (3.3.5a) ─
+// ── SpellMissInfo - SMSG_SPELLLOGMISS / SMSG_SPELL_GO miss type (3.3.5a) ─
 namespace SpellMissInfo {
     constexpr uint8_t NONE      = 0;   // Miss
     constexpr uint8_t MISS      = 0;

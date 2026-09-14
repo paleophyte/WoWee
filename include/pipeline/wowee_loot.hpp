@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Loot Table (.wlot) — novel replacement for the
+// Wowee Open Loot Table (.wlot) - novel replacement for the
 // creature_loot_template / gameobject_loot_template SQL
 // tables AzerothCore-style servers use to drive what drops
 // when a creature is killed (or a chest is opened). The
@@ -75,10 +75,10 @@ struct WoweeLoot {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    // Lookup by creatureId — nullptr if not present.
-    const Entry* findByCreatureId(uint32_t creatureId) const;
+    // Lookup by creatureId - nullptr if not present.
+    [[nodiscard]] const Entry* findByCreatureId(uint32_t creatureId) const;
 };
 
 class WoweeLootLoader {
@@ -90,12 +90,12 @@ public:
 
     // Preset emitters used by --gen-loot* variants.
     //
-    //   makeStarter — minimal: 1 creature with 1 drop slot,
+    //   makeStarter - minimal: 1 creature with 1 drop slot,
     //                  1 item @ 50% chance + 0..50 copper.
-    //   makeBandit  — bandit table: dropCount=2, 4 candidate
+    //   makeBandit  - bandit table: dropCount=2, 4 candidate
     //                  items (linen, cloth, knife, ale), each
     //                  at distinct chances; 5..50 copper.
-    //   makeBoss    — elite boss: dropCount=4, 6 candidates
+    //   makeBoss    - elite boss: dropCount=4, 6 candidates
     //                  including a guaranteed quest item, plus
     //                  GroupRollOnly epic at 5%; 50..200 silver.
     static WoweeLoot makeStarter(const std::string& catalogName);

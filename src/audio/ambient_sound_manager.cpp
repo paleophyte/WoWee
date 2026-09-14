@@ -1,4 +1,5 @@
 #include "audio/ambient_sound_manager.hpp"
+#include "audio/sample_load.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
@@ -80,7 +81,7 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
     blacksmithSounds_.resize(1);
     bool blacksmithLoaded = loadSound("Sound\\Ambience\\WMOAmbience\\BlackSmith.wav", blacksmithSounds_[0], assets);
 
-    // Load bird chirp sounds (daytime periodic) — up to 6 variants
+    // Load bird chirp sounds (daytime periodic) - up to 6 variants
     {
         static constexpr const char* birdPaths[] = {
             "Sound\\Ambience\\BirdAmbience\\BirdChirp01.wav",
@@ -128,8 +129,6 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
     bool snowHeavyLoaded = loadSound("Sound\\Ambience\\Weather\\SnowHeavy.wav", snowHeavySounds_[0], assets);
 
     // Load water ambience sounds
-    oceanSounds_.resize(1);
-    bool oceanLoaded = loadSound("Sound\\Ambience\\Water\\OceanDeepDay.wav", oceanSounds_[0], assets);
 
     underwaterSounds_.resize(1);
     bool underwaterLoaded = loadSound("Sound\\Ambience\\Water\\UnderwaterSwim.wav", underwaterSounds_[0], assets);
@@ -232,8 +231,8 @@ bool AmbientSoundManager::initialize(pipeline::AssetManager* assets) {
              ", Blacksmith loaded: ", blacksmithLoaded ? "YES" : "NO");
     LOG_INFO("AmbientSoundManager: Weather sounds - Rain: ", (rainLightLoaded && rainMediumLoaded && rainHeavyLoaded) ? "YES" : "NO",
              ", Snow: ", (snowLightLoaded && snowMediumLoaded && snowHeavyLoaded) ? "YES" : "NO");
-    LOG_INFO("AmbientSoundManager: Water sounds - Ocean: ", oceanLoaded ? "YES" : "NO",
-             ", Underwater: ", underwaterLoaded ? "YES" : "NO");
+    LOG_INFO("AmbientSoundManager: Water sounds - Underwater: ",
+             underwaterLoaded ? "YES" : "NO");
     LOG_INFO("AmbientSoundManager: Zone sounds - Forest: ", (forestDayLoaded && forestNightLoaded) ? "YES" : "NO",
              ", Beach: ", (beachDayLoaded && beachNightLoaded) ? "YES" : "NO",
              ", Desert: ", (desertCanyonDayLoaded && desertPlainsDayLoaded) ? "YES" : "NO");
@@ -261,20 +260,7 @@ void AmbientSoundManager::shutdown() {
 }
 
 bool AmbientSoundManager::loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets) {
-    sample.path = path;
-    sample.loaded = false;
-
-    try {
-        sample.data = assets->readFile(path);
-        if (!sample.data.empty()) {
-            sample.loaded = true;
-            return true;
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR("AmbientSoundManager: Failed to load ", path, ": ", e.what());
-    }
-
-    return false;
+    return loadSampleFile(path, sample, assets, "AmbientSoundManager");
 }
 
 void AmbientSoundManager::update(float deltaTime, const glm::vec3& cameraPos, bool isIndoor, bool isSwimming, bool isBlacksmith) {
@@ -553,19 +539,6 @@ uint64_t AmbientSoundManager::addEmitter(const glm::vec3& position, AmbientType 
     emitters_.push_back(emitter);
     return emitter.id;
 }
-
-void AmbientSoundManager::removeEmitter(uint64_t id) {
-    emitters_.erase(
-        std::remove_if(emitters_.begin(), emitters_.end(),
-            [id](const AmbientEmitter& e) { return e.id == id; }),
-        emitters_.end()
-    );
-}
-
-void AmbientSoundManager::clearEmitters() {
-    emitters_.clear();
-}
-
 void AmbientSoundManager::setGameTime(float hours) {
     gameTimeHours_ = std::fmod(hours, 24.0f);
     if (gameTimeHours_ < 0.0f) gameTimeHours_ += 24.0f;
@@ -618,6 +591,7 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 493:  // Moonglade
         case 361:  // Felwood
         case 331:  // Ashenvale
+        case 394:  // Grizzly Hills
         case 357:  // Feralas
         case 15:   // Dustwallow Marsh (lush)
         case 267:  // Hillsbrad Foothills
@@ -627,13 +601,15 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
             zone = ZoneType::FOREST_NORMAL; break;
 
         case 1:    // Dun Morogh
-        case 196:  // Winterspring
+        case 618:  // Winterspring
         case 3:    // Badlands (actually dry but close enough)
         case 2817: // Crystalsong Forest
-        case 66:   // Storm Peaks
-        case 67:   // Icecrown
-        case 394:  // Dragonblight
-        case 65:   // Howling Fjord
+        case 66:   // Zul'Drak
+        case 67:   // The Storm Peaks
+        case 210:  // Icecrown
+        case 65:   // Dragonblight
+        case 495:  // Howling Fjord
+        case 3537: // Borean Tundra
             zone = ZoneType::FOREST_SNOW; break;
 
         // ---- Grasslands / plains ----
@@ -652,14 +628,13 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
 
         case 46:   // Burning Steppes
         case 51:   // Searing Gorge
-        case 241:  // Eastern Plaguelands (barren)
+        case 4:    // Blasted Lands
         case 28:   // Western Plaguelands
             zone = ZoneType::DESERT_CANYON; break;
 
         // ---- Jungle ----
         case 33:   // Stranglethorn Vale
-        case 78:   // Un'Goro Crater
-        case 210:  // Uldaman
+        case 490:  // Un'Goro Crater
         case 1377: // Silithus (arid but closest)
             zone = ZoneType::JUNGLE; break;
 
@@ -667,13 +642,19 @@ void AmbientSoundManager::setZoneId(uint32_t zoneId) {
         case 8:    // Swamp of Sorrows
         case 11:   // Wetlands
         case 139:  // Eastern Plaguelands
-        case 763:  // Zangarmarsh
+        case 3521: // Zangarmarsh
             zone = ZoneType::MARSH; break;
 
         // ---- Beach / coast ----
-        case 4:    // Barrens coast (Merchant Coast)
-        case 3537: // Azuremyst Isle
-        case 3524: // Bloodmyst Isle
+        //
+        // Every id here is AreaTable's, checked against the file rather than
+        // remembered. Eleven of them were not: 4 was labelled a Barrens coast
+        // and is the Blasted Lands, which is how a blighted red waste came to
+        // have seabirds and surf over it; 210 was labelled Uldaman and is
+        // Icecrown; four Northrend ids each named the zone belonging to
+        // another; 78 and 763 name nothing at all.
+        case 3524: // Azuremyst Isle
+        case 3525: // Bloodmyst Isle
             zone = ZoneType::BEACH; break;
 
         default: break;
@@ -767,8 +748,15 @@ void AmbientSoundManager::updateWaterAmbience(float deltaTime, bool isSwimming) 
             }
         }
     }
-    // Play ocean sounds when near water but not swimming
-    // (This could be enhanced later with proximity detection to water surfaces)
+    // Ocean ambience for standing beside water, rather than in it, is not
+    // played and its sample is no longer loaded for it.
+    //
+    // It wants a distance to the nearest water surface, which nothing here
+    // measures: isSwimming says in or out and nothing about how far away it is
+    // when out. Being near the sea is already covered approximately by the
+    // BEACH zone ambience above, which is why this was never missed. Whoever
+    // adds the proximity query can load Sound\\Ambience\\Water\\OceanDeepDay.wav
+    // here again - keeping it in memory until then bought nothing.
 }
 
 void AmbientSoundManager::updateZoneAmbience(float deltaTime, bool isIndoor) {
@@ -904,7 +892,7 @@ void AmbientSoundManager::updateBellTolls(float deltaTime) {
     if (bellLibrary && !bellLibrary->empty() && (*bellLibrary)[0].loaded) {
         if (bellTollTime_ >= bellInterval) {
             // Bells have their own "Capital City Bells" slider (bellVolumeScale_)
-            // and must be independent of the ambient slider (volumeScale_) — the
+            // and must be independent of the ambient slider (volumeScale_) - the
             // engine still applies master volume. Coupling to volumeScale_ made the
             // bell control appear dead whenever ambient was turned down.
             float volume = 0.5f * bellVolumeScale_;

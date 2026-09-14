@@ -35,7 +35,9 @@ public:
         bool grounded = true;
         bool swimming = false;
         bool sitting = false;    // Camera controller sitting state
-        bool stunned = false;
+        // No stunned here: CombatFSM holds that state and resolves before this
+        // one, returning the stun pose itself, so this was filled in from
+        // CombatFSM::isStunned and then never looked at.
         // Animation state query for one-shot completion detection
         uint32_t currentAnimId = 0;
         float currentAnimTime = 0.0f;
@@ -48,16 +50,16 @@ public:
     /// Evaluate current state against input and capabilities.
     AnimOutput resolve(const Input& in, const AnimCapabilitySet& caps);
 
-    State getState() const { return state_; }
+    [[nodiscard]] State getState() const { return state_; }
     void setState(State s) { state_ = s; }
-    bool isActive() const { return state_ != State::NONE; }
+    [[nodiscard]] bool isActive() const { return state_ != State::NONE; }
     void reset();
 
     // ── Emote management ────────────────────────────────────────────────
     void startEmote(uint32_t animId, bool loop);
     void cancelEmote();
-    bool isEmoteActive() const { return emoteActive_; }
-    uint32_t getEmoteAnimId() const { return emoteAnimId_; }
+    [[nodiscard]] bool isEmoteActive() const { return emoteActive_; }
+    [[nodiscard]] uint32_t getEmoteAnimId() const { return emoteAnimId_; }
 
     // ── Sit/sleep/kneel management ──────────────────────────────────────
     // WoW UnitStandStateType constants
@@ -75,7 +77,7 @@ public:
     // Overrides the seated loop without skipping SIT_GROUND_DOWN. Passing zero
     // restores the normal seated idle.
     void setSeatedLoopAnimation(uint32_t animationId);
-    uint8_t getStandState() const { return standState_; }
+    [[nodiscard]] uint8_t getStandState() const { return standState_; }
 
     // ── Loot management ─────────────────────────────────────────────────
     void startLooting();
@@ -107,7 +109,7 @@ private:
     uint8_t lootEndFrames_ = 0;
 
     void updateTransitions(const Input& in);
-    bool oneShotComplete(const Input& in, uint32_t expectedAnimId) const;
+    [[nodiscard]] bool oneShotComplete(const Input& in, uint32_t expectedAnimId) const;
 };
 
 } // namespace rendering

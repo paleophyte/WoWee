@@ -10,7 +10,7 @@ namespace pipeline {
 
 struct WMOModel;
 
-// Wowee Open Building format (.wob) — novel WMO replacement
+// Wowee Open Building format (.wob) - novel WMO replacement
 // Buildings with multiple groups, portals, and doodad sets
 struct WoweeBuilding {
     struct Vertex {
@@ -55,7 +55,7 @@ struct WoweeBuilding {
     std::vector<DoodadPlacement> doodads;
     float boundRadius = 1.0f;
 
-    bool isValid() const { return !groups.empty(); }
+    [[nodiscard]] bool isValid() const { return !groups.empty(); }
 };
 
 class WoweeBuildingLoader {
@@ -72,7 +72,7 @@ public:
 
     // Convenience: try loading <path-without-ext>.wob from the standard editor
     // search paths (custom_zones/buildings/, output/buildings/). `extraPrefixes`
-    // are tried before the defaults — pass per-zone roots like
+    // are tried before the defaults - pass per-zone roots like
     // {"output/<map>/buildings/", "custom_zones/<map>/buildings/"} when the
     // caller knows the active zone. Returns valid building on hit.
     static WoweeBuilding tryLoadByGamePath(

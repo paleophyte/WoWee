@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Keybinding catalog (.wkbd) — novel replacement
+// Wowee Open Keybinding catalog (.wkbd) - novel replacement
 // for Blizzard's KeyBinding.dbc plus the AzerothCore-style
 // default-keybind SQL data. Defines the key bindings shipped
 // with the game: movement (W/A/S/D), targeting (Tab),
@@ -21,7 +21,7 @@ namespace pipeline {
 // F4, ESC) set isUserOverridable=0 so the rebind dialog
 // can't accidentally break them.
 //
-// This catalog has no cross-references to other formats —
+// This catalog has no cross-references to other formats -
 // it's a self-contained binding map between strings and
 // keys, consumed directly by the input layer.
 //
@@ -65,10 +65,10 @@ struct WoweeKeyBinding {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t bindingId) const;
-    const Entry* findByActionName(const std::string& actionName) const;
+    [[nodiscard]] const Entry* findById(uint32_t bindingId) const;
+    [[nodiscard]] const Entry* findByActionName(const std::string& actionName) const;
 
     static const char* categoryName(uint8_t c);
 };
@@ -82,12 +82,12 @@ public:
 
     // Preset emitters used by --gen-kbd* variants.
     //
-    //   makeStarter   — 3 essential bindings (MOVE_FORWARD,
+    //   makeStarter   - 3 essential bindings (MOVE_FORWARD,
     //                    TARGET_NEAREST_ENEMY, TOGGLE_CHARACTER).
-    //   makeMovement  — 8 movement bindings (4-directional,
+    //   makeMovement  - 8 movement bindings (4-directional,
     //                    JUMP, TOGGLE_AUTORUN, TOGGLE_WALK,
     //                    SIT_OR_STAND).
-    //   makeUIPanels  — 10 UI toggle bindings
+    //   makeUIPanels  - 10 UI toggle bindings
     //                    (Character/Inventory/Bags/Spellbook/
     //                    Talents/QuestLog/Friends/Guild/
     //                    MainMenu/Calendar).

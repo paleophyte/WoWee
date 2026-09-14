@@ -35,10 +35,16 @@ struct SkyParams {
     float fogDensity = 0.0f;        // 0-1
     float horizonGlow = 0.3f;       // 0-1
     float weatherIntensity = 0.0f;  // 0-1 (rain/snow intensity, attenuates lens flare)
+    // How much of the line from the eye to the sun is blocked, 0 clear to 1
+    // solid. The lens flare had no such input: it asked only whether the sun
+    // was in front of the camera and on screen, so a hillside, a building or a
+    // ceiling between the two changed nothing and the flare hung over the
+    // terrain that was covering it.
+    float sunOcclusion = 0.0f;
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours
-    float gameTime = -1.0f;     // Server game time in seconds (-1 = use fallback)
+    float gameTime = -1.0f;     // Server game time, hours since midnight (-1 = use fallback)
 
     // Skybox selection (future: from LightSkybox.dbc)
     uint32_t skyboxModelId = 0;
@@ -90,39 +96,34 @@ public:
      * Default: OFF (stars come from skybox)
      */
     void setProceduralStarsEnabled(bool enabled) { proceduralStarsEnabled_ = enabled; }
-    bool isProceduralStarsEnabled() const { return proceduralStarsEnabled_; }
+    [[nodiscard]] bool isProceduralStarsEnabled() const { return proceduralStarsEnabled_; }
 
     /**
      * Enable/disable debug sky mode (forces procedural stars even with skybox)
      */
     void setDebugSkyMode(bool enabled) { debugSkyMode_ = enabled; }
-    bool isDebugSkyMode() const { return debugSkyMode_; }
+    [[nodiscard]] bool isDebugSkyMode() const { return debugSkyMode_; }
 
     /**
      * Get sun position in world space (for lens flare, shadows, etc.)
      */
-    glm::vec3 getSunPosition(const SkyParams& params) const;
+    [[nodiscard]] glm::vec3 getSunPosition(const SkyParams& params) const;
 
     /**
      * Enable/disable moon phase cycling
      */
     void setMoonPhaseCycling(bool enabled);
 
-    /**
-     * Set moon phases manually (0.0-1.0 each)
-     */
-    void setWhiteLadyPhase(float phase);
     void setBlueChildPhase(float phase);
 
-    float getWhiteLadyPhase() const;
-    float getBlueChildPhase() const;
+    [[nodiscard]] float getBlueChildPhase() const;
 
     // Component accessors (for direct control if needed)
-    Skybox*    getSkybox()    const { return skybox_.get(); }
-    Celestial* getCelestial() const { return celestial_.get(); }
-    StarField* getStarField() const { return starField_.get(); }
-    Clouds*    getClouds()    const { return clouds_.get(); }
-    LensFlare* getLensFlare() const { return lensFlare_.get(); }
+    [[nodiscard]] Skybox*    getSkybox()    const { return skybox_.get(); }
+    [[nodiscard]] Celestial* getCelestial() const { return celestial_.get(); }
+    [[nodiscard]] StarField* getStarField() const { return starField_.get(); }
+    [[nodiscard]] Clouds*    getClouds()    const { return clouds_.get(); }
+    [[nodiscard]] LensFlare* getLensFlare() const { return lensFlare_.get(); }
 
 private:
     std::unique_ptr<Skybox>    skybox_;      // Authoritative sky

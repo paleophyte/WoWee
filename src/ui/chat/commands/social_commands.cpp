@@ -12,12 +12,12 @@ namespace wowee { namespace ui {
 class InviteCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        if (ctx.args.empty()) return {false, false};
+        if (ctx.args.empty()) return {.handled = false, .clearInput = false};
         ctx.gameHandler.inviteToGroup(ctx.args);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"invite"}; }
-    std::string helpText() const override { return "Invite player to group"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"invite"}; }
+    [[nodiscard]] std::string helpText() const override { return "Invite player to group"; }
 };
 
 // --- /inspect ---
@@ -28,8 +28,8 @@ public:
         ctx.panel.getSlashCmds().showInspect = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"inspect"}; }
-    std::string helpText() const override { return "Inspect target's equipment"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"inspect"}; }
+    [[nodiscard]] std::string helpText() const override { return "Inspect target's equipment"; }
 };
 
 // --- /friend, /addfriend ---
@@ -44,7 +44,7 @@ public:
                 if (subCmd == "add") {
                     ctx.gameHandler.addFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
-                } else if (subCmd == "remove" || subCmd == "delete" || subCmd == "rem") {
+                } if (subCmd == "remove" || subCmd == "delete" || subCmd == "rem") {
                     ctx.gameHandler.removeFriend(ctx.args.substr(subCmdSpace + 1));
                     return {};
                 }
@@ -61,8 +61,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(msg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"friend", "addfriend"}; }
-    std::string helpText() const override { return "Add/remove friend"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"friend", "addfriend"}; }
+    [[nodiscard]] std::string helpText() const override { return "Add/remove friend"; }
 };
 
 // --- /removefriend, /delfriend, /remfriend ---
@@ -80,8 +80,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(msg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"removefriend", "delfriend", "remfriend"}; }
-    std::string helpText() const override { return "Remove friend"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"removefriend", "delfriend", "remfriend"}; }
+    [[nodiscard]] std::string helpText() const override { return "Remove friend"; }
 };
 
 // --- /ignore ---
@@ -99,8 +99,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(msg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"ignore"}; }
-    std::string helpText() const override { return "Ignore player messages"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"ignore"}; }
+    [[nodiscard]] std::string helpText() const override { return "Ignore player messages"; }
 };
 
 // --- /unignore ---
@@ -118,8 +118,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(msg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"unignore"}; }
-    std::string helpText() const override { return "Unignore player"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"unignore"}; }
+    [[nodiscard]] std::string helpText() const override { return "Unignore player"; }
 };
 
 // --- /who, /whois, /online, /players ---
@@ -152,8 +152,8 @@ public:
         ctx.panel.getSlashCmds().showWho = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"who", "whois", "online", "players"}; }
-    std::string helpText() const override { return "List online players"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"who", "whois", "online", "players"}; }
+    [[nodiscard]] std::string helpText() const override { return "List online players"; }
 };
 
 // --- /duel ---
@@ -171,8 +171,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"duel"}; }
-    std::string helpText() const override { return "Challenge target to duel"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"duel"}; }
+    [[nodiscard]] std::string helpText() const override { return "Challenge target to duel"; }
 };
 
 // --- /trade ---
@@ -190,8 +190,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"trade"}; }
-    std::string helpText() const override { return "Initiate trade with target"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"trade"}; }
+    [[nodiscard]] std::string helpText() const override { return "Initiate trade with target"; }
 };
 
 // --- Registration ---

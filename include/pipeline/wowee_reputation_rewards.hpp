@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Reputation Reward Tier catalog (.wrpr) —
+// Wowee Open Reputation Reward Tier catalog (.wrpr) -
 // novel replacement for the implicit reputation-tier
 // rules vanilla WoW encoded across multiple SQL tables
 // (npc_vendor with reqstanding columns, item_template
@@ -19,7 +19,7 @@ namespace pipeline {
 // mount unlock flags.
 //
 // First catalog with TWO variable-length payload arrays
-// per entry (unlockedItemIds + unlockedRecipeIds) —
+// per entry (unlockedItemIds + unlockedRecipeIds) -
 // previous variable-length formats used a single array
 // (WCMR waypoints, WCMG members, WPTT spellIdsByRank).
 //
@@ -43,12 +43,12 @@ namespace pipeline {
 //     nameLen + name
 //     descLen + description
 //     factionId (uint32)
-//     minStanding (int32)            — Hated -42000 to
+//     minStanding (int32)            - Hated -42000 to
 //                                       Exalted +42000
-//     discountPct (uint8)            — 0..20 vendor
+//     discountPct (uint8)            - 0..20 vendor
 //                                       discount tier
-//     grantsTabard (uint8)           — 0/1 bool
-//     grantsMount (uint8)            — 0/1 bool
+//     grantsTabard (uint8)           - 0/1 bool
+//     grantsMount (uint8)            - 0/1 bool
 //     pad0 (uint8)
 //     iconColorRGBA (uint32)
 //     unlockedItemCount (uint32)
@@ -74,22 +74,22 @@ struct WoweeReputationRewards {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t tierId) const;
+    [[nodiscard]] const Entry* findById(uint32_t tierId) const;
 
     // Returns the tier for a given (faction, current
     // standing). Picks the highest tier whose
     // minStanding the player meets. Used by the vendor
     // UI to compute "at what discount can I buy from
     // this NPC?" without scanning the catalog.
-    const Entry* findActiveTierFor(uint32_t factionId,
+    [[nodiscard]] const Entry* findActiveTierFor(uint32_t factionId,
                                      int32_t currentStanding) const;
 
     // Returns all tiers for a faction in ascending
     // standing order. Used by the achievement / unlock
     // preview UI ("what do I get at Revered?").
-    std::vector<const Entry*> findByFaction(uint32_t factionId) const;
+    [[nodiscard]] std::vector<const Entry*> findByFaction(uint32_t factionId) const;
 };
 
 class WoweeReputationRewardsLoader {
@@ -101,17 +101,17 @@ public:
 
     // Preset emitters used by --gen-rpr* variants.
     //
-    //   makeArgentCrusade — 4 tiers (Friendly 3000 /
+    //   makeArgentCrusade - 4 tiers (Friendly 3000 /
     //                        Honored 9000 / Revered 21000
     //                        / Exalted 42000) with
     //                        progressive item + recipe
     //                        unlocks plus tabard at
     //                        Friendly and mount at
     //                        Exalted.
-    //   makeKaluak        — 4 fishing-themed tiers for
+    //   makeKaluak        - 4 fishing-themed tiers for
     //                        Kalu'ak faction, progressive
     //                        cooking recipe unlocks.
-    //   makeAccordTabard  — 3 tiers showcasing the
+    //   makeAccordTabard  - 3 tiers showcasing the
     //                        grantsTabard + grantsMount
     //                        flags (Wyrmrest Accord
     //                        Honored item / Revered

@@ -23,7 +23,7 @@ public:
 
     // Volume control
     void setVolumeScale(float scale);
-    float getVolumeScale() const { return volumeScale_; }
+    [[nodiscard]] float getVolumeScale() const { return volumeScale_; }
 
     // Weapon swing sounds (whoosh sounds before impact)
     enum class WeaponSize {
@@ -48,8 +48,6 @@ public:
 
     void playImpact(WeaponSize weaponSize, ImpactType impactType, bool isCrit = false);
 
-    // Emote sounds
-    void playClap();
 
     // Player character vocals
     enum class PlayerRace {
@@ -59,9 +57,6 @@ public:
         DRAENEI_FEMALE
     };
 
-    void playPlayerAttackGrunt(PlayerRace race);
-    void playPlayerWound(PlayerRace race, bool isCrit = false);
-    void playPlayerDeath(PlayerRace race);
 
 private:
     struct CombatSample {
@@ -94,27 +89,11 @@ private:
     std::vector<CombatSample> hitShieldCritSounds_;
 
     // Emote sounds
-    std::vector<CombatSample> clapSounds_;
 
     // Player character vocal libraries
-    std::vector<CombatSample> bloodElfMaleAttackSounds_;
-    std::vector<CombatSample> bloodElfMaleWoundSounds_;
-    std::vector<CombatSample> bloodElfMaleWoundCritSounds_;
-    std::vector<CombatSample> bloodElfMaleDeathSounds_;
 
-    std::vector<CombatSample> bloodElfFemaleAttackSounds_;
-    std::vector<CombatSample> bloodElfFemaleWoundSounds_;
-    std::vector<CombatSample> bloodElfFemaleDeathSounds_;
 
-    std::vector<CombatSample> draeneiMaleAttackSounds_;
-    std::vector<CombatSample> draeneiMaleWoundSounds_;
-    std::vector<CombatSample> draeneiMaleWoundCritSounds_;
-    std::vector<CombatSample> draeneiMaleDeathSounds_;
 
-    std::vector<CombatSample> draeneiFemaleAttackSounds_;
-    std::vector<CombatSample> draeneiFemaleWoundSounds_;
-    std::vector<CombatSample> draeneiFemaleWoundCritSounds_;
-    std::vector<CombatSample> draeneiFemaleDeathSounds_;
 
     // State tracking
     float volumeScale_ = 1.0f;

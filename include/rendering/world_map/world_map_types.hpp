@@ -1,4 +1,4 @@
-// world_map_types.hpp — Vulkan-free domain types for the world map system.
+// world_map_types.hpp - Vulkan-free domain types for the world map system.
 // Extracted from rendering/world_map.hpp (Phase 1 of refactoring plan).
 // Consumers of these types do NOT need Vulkan/VMA headers.
 #pragma once
@@ -68,7 +68,7 @@ struct OverlayEntry {
     uint16_t texWidth = 0, texHeight = 0;  // Overlay size in pixels
     uint16_t offsetX = 0, offsetY = 0;     // Pixel offset within zone map
     int tileCols = 0, tileRows = 0;
-    // HitRect from WorldMapOverlay.dbc fields 13-16 — fast AABB pre-filter for
+    // HitRect from WorldMapOverlay.dbc fields 13-16 - fast AABB pre-filter for
     // subzone hover detection in zone view (avoids sampling every overlay).
     uint16_t hitRectLeft = 0, hitRectRight = 0;
     uint16_t hitRectTop = 0, hitRectBottom = 0;
@@ -108,13 +108,6 @@ struct RareMark {
     int rank = 4;          ///< Creature rank: 2 = Rare Elite, 4 = Rare
 };
 
-// ── Nearby spawned chest marker (UI layer → world map overlay) ─
-
-struct ChestMark {
-    glm::vec3 renderPos;   ///< Position in render-space coordinates
-    std::string name;      ///< Chest/container name (shown as tooltip on hover)
-};
-
 // ── Taxi (flight master) node (UI layer → world map overlay) ─
 
 struct TaxiNode {
@@ -123,7 +116,7 @@ struct TaxiNode {
     float     wowX = 0, wowY = 0, wowZ = 0;  ///< Canonical WoW coordinates
     std::string name;      ///< Node name (shown as tooltip)
     bool      known = false; ///< Player has discovered this node
-    // Flight-map (taxi selection mode) data — only meaningful while a flight
+    // Flight-map (taxi selection mode) data - only meaningful while a flight
     // master window is open and the cost map is built from the current node.
     uint32_t  costCopper = 0;   ///< Total flight cost from the current node
     bool      current = false;  ///< This is the node the player is standing at
@@ -157,6 +150,9 @@ struct QuestPOI {
     float wowX = 0, wowY = 0;  ///< Canonical WoW coordinates (centroid)
     std::string name;           ///< Quest title
     Kind kind = Kind::OBJECTIVE;
+    /// The objective's outline, canonical, when the map is shading it. Empty
+    /// for a marker that is only a point, and for a quest not selected.
+    std::vector<glm::vec2> area;
 };
 
 } // namespace world_map

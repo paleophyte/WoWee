@@ -22,24 +22,6 @@ std::string evaluateMacroConditionals(const std::string& rawArg,
                                        game::GameHandler& gameHandler,
                                        uint64_t& targetOverride);
 
-namespace {
-
-inline std::string getEntityName(const std::shared_ptr<game::Entity>& entity) {
-    if (entity->getType() == game::ObjectType::PLAYER) {
-        auto player = std::static_pointer_cast<game::Player>(entity);
-        if (!player->getName().empty()) return player->getName();
-    } else if (entity->getType() == game::ObjectType::UNIT) {
-        auto unit = std::static_pointer_cast<game::Unit>(entity);
-        if (!unit->getName().empty()) return unit->getName();
-    } else if (entity->getType() == game::ObjectType::GAMEOBJECT) {
-        auto go = std::static_pointer_cast<game::GameObject>(entity);
-        if (!go->getName().empty()) return go->getName();
-    }
-    return "Unknown";
-}
-
-} // anon namespace
-
 // --- /transportinfo ---
 // Dumps active transport state (entry, path, clock mode, position) so
 // stationary/invisible transports can be diagnosed live instead of guessing.
@@ -73,19 +55,19 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"transportinfo"}; }
-    std::string helpText() const override { return "List active transports and their state"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"transportinfo"}; }
+    [[nodiscard]] std::string helpText() const override { return "List active transports and their state"; }
 };
 
 // --- /time ---
 class TimeCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.queryServerTime();
+        ctx.gameHandler.queryServerTime(true);  // typed by the player, so say it
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"time"}; }
-    std::string helpText() const override { return "Query server time"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"time"}; }
+    [[nodiscard]] std::string helpText() const override { return "Query server time"; }
 };
 
 // --- /loc, /coords, /whereami ---
@@ -99,7 +81,7 @@ public:
         char buf[256];
         snprintf(buf, sizeof(buf), "%.1f, %.1f, %.1f%s%s",
                  pmi.x, pmi.y, pmi.z,
-                 zoneName.empty() ? "" : " — ",
+                 zoneName.empty() ? "" : " - ",
                  zoneName.c_str());
         game::MessageChatData sysMsg;
         sysMsg.type = game::ChatType::SYSTEM;
@@ -108,8 +90,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(sysMsg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"loc", "coords", "whereami"}; }
-    std::string helpText() const override { return "Print player coordinates"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"loc", "coords", "whereami"}; }
+    [[nodiscard]] std::string helpText() const override { return "Print player coordinates"; }
 };
 
 // --- /zone ---
@@ -126,8 +108,8 @@ public:
         ctx.gameHandler.addLocalChatMessage(sysMsg);
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"zone"}; }
-    std::string helpText() const override { return "Show current zone"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"zone"}; }
+    [[nodiscard]] std::string helpText() const override { return "Show current zone"; }
 };
 
 // --- /played ---
@@ -137,8 +119,8 @@ public:
         ctx.gameHandler.requestPlayedTime();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"played"}; }
-    std::string helpText() const override { return "Show time played"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"played"}; }
+    [[nodiscard]] std::string helpText() const override { return "Show time played"; }
 };
 
 // --- /screenshot, /ss ---
@@ -148,8 +130,8 @@ public:
         ctx.panel.getSlashCmds().takeScreenshot = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"screenshot", "ss"}; }
-    std::string helpText() const override { return "Take a screenshot"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"screenshot", "ss"}; }
+    [[nodiscard]] std::string helpText() const override { return "Take a screenshot"; }
 };
 
 // --- /ticket, /gmticket, /gm ---
@@ -159,8 +141,8 @@ public:
         ctx.panel.getSlashCmds().showGmTicket = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"ticket", "gmticket", "gm"}; }
-    std::string helpText() const override { return "Open GM ticket"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"ticket", "gmticket", "gm"}; }
+    [[nodiscard]] std::string helpText() const override { return "Open GM ticket"; }
 };
 
 // --- /score ---
@@ -171,8 +153,8 @@ public:
         ctx.panel.getSlashCmds().showBgScore = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"score"}; }
-    std::string helpText() const override { return "Show BG scoreboard"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"score"}; }
+    [[nodiscard]] std::string helpText() const override { return "Show BG scoreboard"; }
 };
 
 // --- /threat ---
@@ -182,8 +164,8 @@ public:
         ctx.panel.getSlashCmds().toggleThreat = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"threat"}; }
-    std::string helpText() const override { return "Toggle threat display"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"threat"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle threat display"; }
 };
 
 // --- /combatlog, /cl ---
@@ -193,8 +175,8 @@ public:
         ctx.panel.getSlashCmds().toggleCombatLog = true;
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"combatlog", "cl"}; }
-    std::string helpText() const override { return "Toggle combat log"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"combatlog", "cl"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle combat log"; }
 };
 
 // --- /helm, /helmet, /showhelm ---
@@ -204,8 +186,8 @@ public:
         ctx.gameHandler.toggleHelm();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"helm", "helmet", "showhelm"}; }
-    std::string helpText() const override { return "Toggle helmet visibility"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"helm", "helmet", "showhelm"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle helmet visibility"; }
 };
 
 // --- /cloak, /showcloak ---
@@ -215,8 +197,8 @@ public:
         ctx.gameHandler.toggleCloak();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"cloak", "showcloak"}; }
-    std::string helpText() const override { return "Toggle cloak visibility"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"cloak", "showcloak"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle cloak visibility"; }
 };
 
 // --- /follow, /f ---
@@ -226,8 +208,8 @@ public:
         ctx.gameHandler.followTarget();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"follow", "f"}; }
-    std::string helpText() const override { return "Walk toward and camera-follow your current target"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"follow", "f"}; }
+    [[nodiscard]] std::string helpText() const override { return "Walk toward and camera-follow your current target"; }
 };
 
 // --- /stopfollow ---
@@ -237,8 +219,8 @@ public:
         ctx.gameHandler.cancelFollow();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"stopfollow"}; }
-    std::string helpText() const override { return "Stop following"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopfollow"}; }
+    [[nodiscard]] std::string helpText() const override { return "Stop following"; }
 };
 
 // --- /assist ---
@@ -248,18 +230,11 @@ public:
         auto assistEntityTarget = [&](uint64_t srcGuid) {
             auto srcEnt = ctx.gameHandler.getEntityManager().getEntity(srcGuid);
             if (!srcEnt) { ctx.gameHandler.assistTarget(); return; }
-            uint64_t atkGuid = 0;
-            const auto& flds = srcEnt->getFields();
-            auto iLo = flds.find(game::fieldIndex(game::UF::UNIT_FIELD_TARGET_LO));
-            if (iLo != flds.end()) {
-                atkGuid = iLo->second;
-                auto iHi = flds.find(game::fieldIndex(game::UF::UNIT_FIELD_TARGET_HI));
-                if (iHi != flds.end()) atkGuid |= (static_cast<uint64_t>(iHi->second) << 32);
-            }
+            const uint64_t atkGuid = game::unitTargetGuid(*srcEnt);
             if (atkGuid != 0) {
                 ctx.gameHandler.setTarget(atkGuid);
             } else {
-                std::string sn = getEntityName(srcEnt);
+                std::string sn = game::entityDisplayName(srcEnt);
                 game::MessageChatData msg;
                 msg.type = game::ChatType::SYSTEM;
                 msg.language = game::ChatLanguage::UNIVERSAL;
@@ -291,7 +266,7 @@ public:
                 const auto& pmi = ctx.gameHandler.getMovementInfo();
                 for (const auto& [guid, ent] : ctx.gameHandler.getEntityManager().getEntities()) {
                     if (!ent || ent->getType() == game::ObjectType::OBJECT) continue;
-                    std::string nm = getEntityName(ent);
+                    std::string nm = game::entityDisplayName(ent);
                     std::string nml = nm;
                     for (char& c : nml) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                     if (nml.find(argLow) != 0) continue;
@@ -315,8 +290,8 @@ public:
         }
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"assist"}; }
-    std::string helpText() const override { return "Assist target (target their target)"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"assist"}; }
+    [[nodiscard]] std::string helpText() const override { return "Assist target (target their target)"; }
 };
 
 // --- /pvp ---
@@ -326,8 +301,8 @@ public:
         ctx.gameHandler.togglePvp();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"pvp"}; }
-    std::string helpText() const override { return "Toggle PvP flag"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"pvp"}; }
+    [[nodiscard]] std::string helpText() const override { return "Toggle PvP flag"; }
 };
 
 // --- /unstuck ---
@@ -337,8 +312,8 @@ public:
         ctx.gameHandler.unstuck();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"unstuck"}; }
-    std::string helpText() const override { return "Reset position to floor height"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"unstuck"}; }
+    [[nodiscard]] std::string helpText() const override { return "Reset position to floor height"; }
 };
 
 // --- /unstuckgy ---
@@ -348,8 +323,8 @@ public:
         ctx.gameHandler.unstuckGy();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"unstuckgy"}; }
-    std::string helpText() const override { return "Move to nearest graveyard"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"unstuckgy"}; }
+    [[nodiscard]] std::string helpText() const override { return "Move to nearest graveyard"; }
 };
 
 // --- /unstuckhearth ---
@@ -359,8 +334,8 @@ public:
         ctx.gameHandler.unstuckHearth();
         return {};
     }
-    std::vector<std::string> aliases() const override { return {"unstuckhearth"}; }
-    std::string helpText() const override { return "Teleport to hearthstone bind point"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"unstuckhearth"}; }
+    [[nodiscard]] std::string helpText() const override { return "Teleport to hearthstone bind point"; }
 };
 
 // --- /transport board ---
@@ -391,7 +366,7 @@ public:
                 ctx.gameHandler.addLocalChatMessage(msg);
             }
             return {};
-        } else if (sub == "leave") {
+        } if (sub == "leave") {
             if (ctx.gameHandler.isOnTransport()) {
                 ctx.gameHandler.clearPlayerTransport();
                 game::MessageChatData msg;
@@ -409,10 +384,10 @@ public:
             return {};
         }
         // Unrecognized sub-command
-        return {false, false};
+        return {.handled = false, .clearInput = false};
     }
-    std::vector<std::string> aliases() const override { return {"transport"}; }
-    std::string helpText() const override { return "Transport: /transport board|leave"; }
+    [[nodiscard]] std::vector<std::string> aliases() const override { return {"transport"}; }
+    [[nodiscard]] std::string helpText() const override { return "Transport: /transport board|leave"; }
 };
 
 // --- Registration ---

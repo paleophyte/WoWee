@@ -1,3 +1,4 @@
+#include "core/local_time.hpp"
 #include "sql_exporter.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -50,9 +51,10 @@ bool SQLExporter::exportCreatures(const std::vector<CreatureSpawn>& spawns,
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
     char timeBuf[32];
-    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&time));
+    const std::tm tm = wowee::core::localTime(time);
+    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tm);
 
-    f << "-- Wowee World Editor — Creature Spawn Export\n";
+    f << "-- Wowee World Editor - Creature Spawn Export\n";
     f << "-- Generated: " << timeBuf << "\n";
     f << "-- Target: AzerothCore / TrinityCore 3.3.5a\n";
     f << "-- Map ID: " << mapId << "\n";
@@ -125,7 +127,7 @@ bool SQLExporter::exportCreatures(const std::vector<CreatureSpawn>& spawns,
 
         // Editor stores positions in render coords; AzerothCore expects WoW
         // canonical (X=north, Y=west). renderToCanonical handles the swap.
-        // Sanitize each component — ostream prints NaN as "nan" which
+        // Sanitize each component - ostream prints NaN as "nan" which
         // AzerothCore's SQL import will reject.
         glm::vec3 wow = core::coords::renderToCanonical(s.position);
         if (!std::isfinite(wow.x)) wow.x = 0.0f;
@@ -276,7 +278,7 @@ bool SQLExporter::exportQuests(const std::vector<Quest>& quests,
                 reqNpcOrGoCount[npcSlot] = obj.targetCount;
                 npcSlot++;
             } else if (obj.type == QuestObjectiveType::TalkToNPC && npcSlot < 4) {
-                // AzerothCore reuses RequiredNpcOrGo for talk objectives —
+                // AzerothCore reuses RequiredNpcOrGo for talk objectives -
                 // count=1 indicates an interaction rather than a kill.
                 reqNpcOrGo[npcSlot] = resolveCreatureEntry(id);
                 reqNpcOrGoCount[npcSlot] = 1;
@@ -292,7 +294,7 @@ bool SQLExporter::exportQuests(const std::vector<Quest>& quests,
             // representable objectives).
         }
 
-        // Reward items — itemRewards entries are item IDs as strings;
+        // Reward items - itemRewards entries are item IDs as strings;
         // try to parse as numeric. Anything unparseable becomes 0 and is
         // skipped by the count=0 check below.
         uint32_t rewardItemId[4] = {0, 0, 0, 0};

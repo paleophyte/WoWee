@@ -1,13 +1,20 @@
 #define VMA_IMPLEMENTATION
+#include <set>
+#include <thread>
+#include <mutex>
 #include "rendering/vk_context.hpp"
+
+#include <fstream>
+#include "rendering/vk_utils.hpp"
 #include "core/logger.hpp"
+#include "pipeline/blp_loader.hpp"
 #include <VkBootstrap.h>
 #include <SDL2/SDL_vulkan.h>
 #include <imgui_impl_vulkan.h>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <string>
 
 namespace wowee {
@@ -82,7 +89,7 @@ bool VkContext::initialize(SDL_Window* window) {
     if (!createAllocator()) return false;
 
     // Pipeline cache: try to load from disk, fall back to empty cache.
-    // Not fatal — if it fails we just skip caching.
+    // Not fatal - if it fails we just skip caching.
     createPipelineCache();
 
     int w, h;
@@ -91,13 +98,8 @@ bool VkContext::initialize(SDL_Window* window) {
 
     if (!createCommandPools()) return false;
     if (!createSyncObjects()) return false;
+    createGpuQueryPools();
     if (!createImGuiResources()) return false;
-
-    // Query anisotropy support from the physical device.
-    VkPhysicalDeviceFeatures supportedFeatures{};
-    vkGetPhysicalDeviceFeatures(physicalDevice, &supportedFeatures);
-    samplerAnisotropySupported_ = (supportedFeatures.samplerAnisotropy == VK_TRUE);
-    LOG_INFO("Sampler anisotropy supported: ", samplerAnisotropySupported_ ? "YES" : "NO");
 
     sInstance_ = this;
 
@@ -118,18 +120,35 @@ void VkContext::shutdown() {
     // reference) have already been destroyed, so running them would call
     // vkFreeDescriptorSets on invalid pools.  vkDestroyDevice reclaims all
     // device-child resources anyway.
-    for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) {
-        deferredCleanup_[fi].clear();
+    size_t droppedCleanups = 0;
+    for (auto& cleanups : deferredCleanup_) {
+        droppedCleanups += cleanups.size();
+        cleanups.clear();
+    }
+    // Said out loud, because these are exactly the objects vkDestroyDevice then
+    // reports as leaked, and without the count there is no way to tell that
+    // report apart from a resource nobody freed at all.
+    if (droppedCleanups > 0) {
+        LOG_INFO("shutdown: dropped ", droppedCleanups,
+                 " deferred destructions unexecuted (their pools are already gone;"
+                 " vkDestroyDevice reclaims them and validation counts them as leaked)");
     }
 
     LOG_DEBUG("VkContext::shutdown - destroyImGuiResources...");
     destroyImGuiResources();
 
     // Destroy sync objects
+    if (frameTimeline_) {
+        vkDestroySemaphore(device, frameTimeline_, nullptr);
+        frameTimeline_ = VK_NULL_HANDLE;
+    }
     for (auto& frame : frames) {
         if (frame.inFlightFence) vkDestroyFence(device, frame.inFlightFence, nullptr);
         if (frame.commandPool) vkDestroyCommandPool(device, frame.commandPool, nullptr);
         frame = {};
+    }
+    for (auto& pool : gpuQueryPools_) {
+        if (pool) { vkDestroyQueryPool(device, pool, nullptr); pool = VK_NULL_HANDLE; }
     }
     for (auto sem : imageAcquiredSemaphores_) { if (sem) vkDestroySemaphore(device, sem, nullptr); }
     imageAcquiredSemaphores_.clear();
@@ -137,13 +156,45 @@ void VkContext::shutdown() {
     renderFinishedSemaphores_.clear();
     if (nextAcquireSemaphore_) { vkDestroySemaphore(device, nextAcquireSemaphore_, nullptr); nextAcquireSemaphore_ = VK_NULL_HANDLE; }
 
-    // Clean up any in-flight async upload batches (device already idle)
-    for (auto& batch : inFlightBatches_) {
-        // Staging buffers: skip destroy — allocator is about to be torn down
-        vkDestroyFence(device, batch.fence, nullptr);
-        // Command buffer freed when pool is destroyed below
+    // Clean up any in-flight async upload batches. waitAllUploads does the full
+    // retirement -- fence, command buffer, VMA staging and the plainly
+    // allocated staging -- and the device is already idle above, so its waits
+    // return at once. Both command pools it frees from are destroyed below
+    // this point, and so is the allocator.
+    //
+    // This used to destroy only the fence, on the grounds that the allocator
+    // was about to be torn down anyway. That was never true of rawStaging,
+    // which is vkCreateBuffer/vkAllocateMemory and belongs to no allocator, and
+    // stopped being true of the rest once shutdown began destroying the VMA
+    // allocator under validation. Every batch left in flight leaked a command
+    // buffer, its staging buffers and their memory, which is most of what
+    // vkDestroyDevice reported.
+    if (!inFlightBatches_.empty() || !batchRawStaging_.empty() || !batchStagingBuffers_.empty()) {
+        size_t rawInFlight = 0, vmaInFlight = 0;
+        for (const auto& b : inFlightBatches_) {
+            rawInFlight += b.rawStaging.size();
+            vmaInFlight += b.stagingBuffers.size();
+        }
+        LOG_INFO("shutdown: retiring ", inFlightBatches_.size(), " upload batches (",
+                 rawInFlight, " raw + ", vmaInFlight, " pooled staging), plus ",
+                 batchRawStaging_.size(), " raw + ", batchStagingBuffers_.size(),
+                 " pooled in the batch still being built");
     }
-    inFlightBatches_.clear();
+    waitAllUploads();
+
+    // The batch still being accumulated has never been submitted, so
+    // waitAllUploads does not see it. Its staging belongs to this context
+    // alone -- no descriptor pool, no sub-renderer -- so unlike the deferred
+    // queues above there is nothing here that could already be invalid.
+    for (auto& raw : batchRawStaging_) {
+        vkDestroyBuffer(device, raw.buffer, nullptr);
+        vkFreeMemory(device, raw.memory, nullptr);
+    }
+    batchRawStaging_.clear();
+    for (auto& staging : batchStagingBuffers_) {
+        destroyBuffer(allocator, staging);
+    }
+    batchStagingBuffers_.clear();
 
     if (immFence) { vkDestroyFence(device, immFence, nullptr); immFence = VK_NULL_HANDLE; }
     // Destroying the pool implicitly frees immCmdBuf_; just drop the handle.
@@ -170,11 +221,50 @@ void VkContext::shutdown() {
     LOG_DEBUG("VkContext::shutdown - destroySwapchain...");
     destroySwapchain();
 
-    // Skip vmaDestroyAllocator — it walks every allocation to free it, which
-    // takes many seconds with thousands of loaded textures/models.  The driver
-    // reclaims all device memory when we destroy the device, and the OS reclaims
-    // everything on process exit.  Skipping this makes shutdown instant.
-    allocator = VK_NULL_HANDLE;
+    // Normally skip vmaDestroyAllocator: it walks every allocation to free it,
+    // which takes many seconds with thousands of loaded textures and models. The
+    // driver reclaims all device memory when the device is destroyed and the OS
+    // reclaims the rest at process exit, so skipping it makes shutdown instant.
+    //
+    // Under validation, tear it down properly. Whatever the caches still hold is
+    // otherwise reported object by object at vkDestroyDevice - ninety thousand
+    // errors in one run - and that flood buries any real problem the layers find.
+    // Paying a few seconds on the way out is worth a usable validation signal,
+    // and it also means a genuine leak still shows up rather than hiding in the
+    // noise. Players never take this path.
+    if (allocator) {
+        if (validationActive_) {
+            // What the allocator still holds, before it is torn down. Anything
+            // counted here is a vmaCreateBuffer/Image whose owner never called
+            // the matching vmaDestroy, and vmaDestroyAllocator frees the memory
+            // blocks without destroying those handles -- so they are what
+            // vkDestroyDevice then reports.
+            VmaTotalStatistics stats{};
+            vmaCalculateStatistics(allocator, &stats);
+            LOG_INFO("shutdown: VMA still holds ",
+                     stats.total.statistics.allocationCount, " allocations in ",
+                     stats.total.statistics.blockCount, " blocks (",
+                     stats.total.statistics.allocationBytes / (1024 * 1024), " MB)");
+            // The detailed JSON names every surviving allocation's size and
+            // memory type, which is what identifies the owner -- a handful of
+            // distinctive sizes is usually enough to point at one subsystem.
+            if (stats.total.statistics.allocationCount > 0) {
+                char* statsJson = nullptr;
+                vmaBuildStatsString(allocator, &statsJson, VK_TRUE);
+                if (statsJson) {
+                    const auto path = std::filesystem::temp_directory_path() / "wowee-vma-leak.json";
+                    if (std::ofstream out(path); out) {
+                        out << statsJson;
+                        LOG_INFO("shutdown: surviving VMA allocations dumped to ", path.string());
+                    }
+                    vmaFreeStatsString(allocator, statsJson);
+                }
+            }
+            LOG_INFO("Validation active - destroying VMA allocator (slow, but keeps the exit clean)");
+            vmaDestroyAllocator(allocator);
+        }
+        allocator = VK_NULL_HANDLE;
+    }
 
     LOG_DEBUG("VkContext::shutdown - vkDestroyDevice...");
     if (device) { vkDestroyDevice(device, nullptr); device = VK_NULL_HANDLE; }
@@ -199,17 +289,32 @@ void VkContext::deferAfterFrameFence(std::function<void()>&& fn) {
 void VkContext::deferAfterAllFrameFences(std::function<void()>&& fn) {
     // Shared resources (material descriptor sets, vertex/index buffers) are
     // bound by every in-flight frame's command buffer.  deferAfterFrameFence
-    // only waits for ONE slot's fence — the other slot may still be executing.
+    // only waits for ONE slot's fence - the other slot may still be executing.
     // Add to every slot; a shared counter ensures the lambda runs exactly once,
     // after the LAST slot has been fenced.
     auto counter  = std::make_shared<uint32_t>(MAX_FRAMES_IN_FLIGHT);
     auto sharedFn = std::make_shared<std::function<void()>>(std::move(fn));
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        deferredCleanup_[i].push_back([counter, sharedFn]() {
+    for (auto& cleanups : deferredCleanup_) {
+        cleanups.emplace_back([counter, sharedFn]() {
             if (--(*counter) == 0) {
                 (*sharedFn)();
             }
         });
+    }
+}
+
+void VkContext::flushDeferredCleanup() {
+    // Run every queued destruction now rather than waiting for the frame slots
+    // to come around again. Subsystems defer destruction because in-flight
+    // command buffers may still reference the resources, but during shutdown no
+    // further frames are rendered, so anything queued would otherwise sit there
+    // until VkContext::shutdown drops the queues unexecuted - which is how every
+    // resident terrain chunk and WMO group ended up outliving the device.
+    //
+    // Call this while the subsystem's descriptor pools are still alive: the
+    // queued lambdas free descriptor sets from them.
+    for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) {
+        runDeferredCleanup(fi);
     }
 }
 
@@ -228,6 +333,14 @@ VkSampler VkContext::getOrCreateSampler(const VkSamplerCreateInfo& info) {
     if (!samplerAnisotropySupported_) {
         adjusted.anisotropyEnable = VK_FALSE;
         adjusted.maxAnisotropy = 1.0f;
+    } else if (adjusted.maxAnisotropy > anisotropyLimit_) {
+        // ...and to what the player asked for, which is the same kind of
+        // ceiling: callers ask for the filtering they want and this is what
+        // the client will actually give. Hashed with the rest of the state
+        // below, so two requests that differ only above the ceiling now share
+        // one sampler rather than making two identical ones.
+        adjusted.maxAnisotropy = anisotropyLimit_;
+        adjusted.anisotropyEnable = adjusted.maxAnisotropy > 1.0f ? VK_TRUE : VK_FALSE;
     }
 
     uint64_t key = hashSamplerCreateInfo(adjusted);
@@ -253,7 +366,7 @@ VkSampler VkContext::getOrCreateSampler(const VkSamplerCreateInfo& info) {
         // Double-check: another thread may have inserted while we were creating.
         auto [it, inserted] = samplerCache_.emplace(key, sampler);
         if (!inserted) {
-            // Another thread won the race — destroy our duplicate and use theirs.
+            // Another thread won the race - destroy our duplicate and use theirs.
             vkDestroySampler(device, sampler, nullptr);
             return it->second;
         }
@@ -279,10 +392,35 @@ bool VkContext::createInstance(SDL_Window* window) {
         builder.enable_extension(ext);
     }
 
-    if (enableValidation) {
+    // Allow turning validation on in a release build via env var, so the
+    // Khronos validation layer's messages (e.g. the exact VK error behind an
+    // FSR3 pipeline-creation failure) get routed to our log via debugCallback.
+    bool enableValidationEffective = enableValidation;
+    if (const char* v = std::getenv("WOWEE_VULKAN_VALIDATION")) {
+        if (v[0] && v[0] != '0') enableValidationEffective = true;
+    }
+    if (enableValidationEffective) {
         builder.request_validation_layers(true)
                .set_debug_callback(debugCallback);
+        LOG_INFO("Vulkan validation layers requested");
+
+        // WOWEE_VULKAN_GPU_VALIDATION=1 additionally instruments the shaders.
+        //
+        // The plain layer only checks API calls, so a fault that lives inside a
+        // shader - an index past the end of a storage buffer, a descriptor read
+        // that was never written - is invisible to it: the log stays clean right
+        // up to the device being lost, which says nothing about where. This
+        // reports the shader and the instruction instead. It is very slow, which
+        // is why it is its own switch rather than part of the one above.
+        if (const char* g = std::getenv("WOWEE_VULKAN_GPU_VALIDATION");
+            g && g[0] && g[0] != '0') {
+            builder.add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
+            builder.add_validation_feature_enable(
+                VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
+            LOG_INFO("Vulkan GPU-assisted validation requested (expect a large slowdown)");
+        }
     }
+    validationActive_ = enableValidationEffective;
 
     auto instRet = builder.build();
     if (!instRet) {
@@ -313,21 +451,65 @@ bool VkContext::createSurface(SDL_Window* window) {
     return true;
 }
 
+/// Names every device the loader offers and what each one lacks.
+///
+/// Selection failure otherwise reports "no_suitable_device" and nothing else,
+/// which says neither which devices were considered nor what was wanted of
+/// them. On a phone, where the answer cannot be read off a desktop driver, that
+/// is the whole diagnosis.
+void VkContext::reportUnsuitableDevices() const {
+    uint32_t count = 0;
+    if (vkEnumeratePhysicalDevices(instance, &count, nullptr) != VK_SUCCESS || count == 0) {
+        LOG_ERROR("  the loader offers no Vulkan device at all.");
+        return;
+    }
+    std::vector<VkPhysicalDevice> devices(count);
+    vkEnumeratePhysicalDevices(instance, &count, devices.data());
+
+    LOG_ERROR("  ", count, " device(s) offered:");
+    for (VkPhysicalDevice device : devices) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(device, &props);
+
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, families.data());
+
+        bool graphics = false;
+        bool present = false;
+        for (uint32_t i = 0; i < familyCount; ++i) {
+            if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) graphics = true;
+            VkBool32 supported = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &supported);
+            if (supported) present = true;
+        }
+
+        LOG_ERROR("    ", props.deviceName,
+                  " - Vulkan ", VK_VERSION_MAJOR(props.apiVersion),
+                  ".", VK_VERSION_MINOR(props.apiVersion),
+                  ", graphics queue: ", graphics ? "yes" : "NO",
+                  ", can present to this surface: ", present ? "yes" : "NO");
+    }
+}
+
 bool VkContext::selectPhysicalDevice() {
+    // Nothing is demanded of the device here beyond a queue that can draw and
+    // present. The four features this used to require - samplerAnisotropy,
+    // fillModeNonSolid, and the two FSR2 compute features - each already had a
+    // fallback further in: the sampler clamps anisotropy off, the terrain
+    // wireframe is a debug view that warns and draws filled, and FSR2 is a
+    // setting that can be off. Requiring them at selection turned four soft
+    // degradations into one hard refusal to start, which is what a Pixel 9a got.
     vkb::PhysicalDeviceSelector selector{vkbInstance_};
-    VkPhysicalDeviceFeatures requiredFeatures{};
-    requiredFeatures.samplerAnisotropy = VK_TRUE;
-    requiredFeatures.fillModeNonSolid = VK_TRUE;  // wireframe debug pipelines
-    requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;  // FSR2 compute shaders
-    requiredFeatures.shaderInt16 = VK_TRUE;  // FSR2 compute shaders
     selector.set_surface(surface)
             .set_minimum_version(1, 1)
-            .set_required_features(requiredFeatures)
             .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete);
 
     auto physRet = selector.select();
     if (!physRet) {
         LOG_ERROR("Failed to select Vulkan physical device: ", physRet.error().message());
+        reportUnsuitableDevices();
         return false;
     }
 
@@ -336,11 +518,62 @@ bool VkContext::selectPhysicalDevice() {
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(physicalDevice, &props);
-    (void)props.apiVersion; // Available if needed for version checks
+    deviceApiVersion_ = props.apiVersion;
     gpuVendorId_ = props.vendorID;
-    std::strncpy(gpuName_, props.deviceName, sizeof(gpuName_) - 1);
-    gpuName_[sizeof(gpuName_) - 1] = '\0';
+    // snprintf rather than strncpy: deviceName is the same size as gpuName_,
+    // so strncpy copies exactly the buffer length and GCC reports it may not
+    // terminate, even with the explicit NUL that followed. snprintf always
+    // terminates and truncates on its own.
+    std::snprintf(gpuName_, sizeof(gpuName_), "%s", props.deviceName);
     LOG_INFO("GPU: ", gpuName_, " (vendor 0x", std::hex, gpuVendorId_, std::dec, ")");
+
+    // What a timestamp tick is worth. Whether the queue can actually write one
+    // is asked in createGpuQueryPools, which runs after the queue family has
+    // been chosen - it is not known here.
+    timestampPeriodNs_ = props.limits.timestampPeriod;
+
+    // Each of these has to be enabled before createLogicalDevice constructs the
+    // DeviceBuilder, for the reason spelled out at the top of that function.
+    // One call per feature: enable_features_if_present is all or nothing, so
+    // asking for four at once loses which of them the device actually has.
+    auto enableIfPresent = [this](VkBool32 VkPhysicalDeviceFeatures::*field) {
+        VkPhysicalDeviceFeatures wanted{};
+        wanted.*field = VK_TRUE;
+        return vkbPhysicalDevice_.enable_features_if_present(wanted);
+    };
+    samplerAnisotropySupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::samplerAnisotropy);
+    fillModeNonSolidSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::fillModeNonSolid);
+    fsr2ComputeFeaturesSupported_ =
+        enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
+        enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);
+    // A DXT BLP is handed to the GPU as BC1/BC2/BC3. Mobile parts carry ASTC
+    // and ETC2 instead and sample a BC image as nothing at all, which is an
+    // untextured wall and a black doodad rather than an error. Told to the
+    // loader, which then unpacks to RGBA8.
+    blockCompressionSupported_ =
+        enableIfPresent(&VkPhysicalDeviceFeatures::textureCompressionBC);
+    pipeline::setBlockCompressionSupported(blockCompressionSupported_);
+    // Bounds-checked buffer access, on unless asked otherwise. The one device
+    // loss this client has ever pinned to a cause was a vertex shader reading
+    // past the end of the M2 instance buffer; NVIDIA answers that read with a
+    // page fault and a lost device, Metal with zeros. With this on, every
+    // driver answers with zeros. Said at warning level because a log of a
+    // lost device has to show whether it was on.
+    static const bool noRobust = [] {
+        const char* v = std::getenv("WOWEE_VK_NO_ROBUST_BUFFERS");
+        return v && *v && *v != '0';
+    }();
+    robustBufferAccessSupported_ =
+        !noRobust && enableIfPresent(&VkPhysicalDeviceFeatures::robustBufferAccess);
+    LOG_WARNING("Robust buffer access: ",
+                robustBufferAccessSupported_ ? "on"
+                : (noRobust ? "off (WOWEE_VK_NO_ROBUST_BUFFERS)" : "not offered by this device"));
+    LOG_INFO("Sampler anisotropy supported: ", samplerAnisotropySupported_ ? "YES" : "NO");
+    LOG_INFO("Wireframe views supported: ", fillModeNonSolidSupported_ ? "YES" : "NO");
+    LOG_INFO("FSR2 compute features supported: ",
+             fsr2ComputeFeaturesSupported_ ? "YES" : "NO");
+    LOG_INFO("Block compressed textures (BC1/2/3) supported: ",
+             blockCompressionSupported_ ? "YES" : "NO");
 
     VkPhysicalDeviceDepthStencilResolveProperties dsResolveProps{};
     dsResolveProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES;
@@ -349,7 +582,7 @@ bool VkContext::selectPhysicalDevice() {
     props2.pNext = &dsResolveProps;
     vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
 
-    // Gate on instance API version — vkCreateRenderPass2 is core 1.2 and only
+    // Gate on instance API version - vkCreateRenderPass2 is core 1.2 and only
     // available when the instance was created with apiVersion >= 1.2.
     // The device may report 1.2+ but a 1.1 instance won't have the function pointer.
     if (instanceApiVersion_ >= VK_API_VERSION_1_2) {
@@ -372,9 +605,33 @@ bool VkContext::selectPhysicalDevice() {
         depthResolveMode_ = VK_RESOLVE_MODE_NONE;
     }
 
-    LOG_INFO("Vulkan device: ", props.deviceName);
-    LOG_INFO("Vulkan API version: ", VK_VERSION_MAJOR(props.apiVersion), ".",
-             VK_VERSION_MINOR(props.apiVersion), ".", VK_VERSION_PATCH(props.apiVersion));
+    // At warning level, so a crash report carries it.
+    //
+    // A log sent in after a device loss is filtered to warnings and errors, and
+    // the adapter was named at info: every report of a lost device arrived with
+    // no idea which GPU or driver lost it, which is the first thing anyone
+    // would ask. The driver version was not written down at all.
+    //
+    // Vendors pack that version differently. NVIDIA's is 10/8/8/6 bits rather
+    // than Vulkan's 10/10/12, and decoding theirs the standard way prints a
+    // number that matches nothing on their download page.
+    const uint32_t dv = props.driverVersion;
+    char driverStr[64];
+    if (props.vendorID == 0x10DE) {  // NVIDIA
+        std::snprintf(driverStr, sizeof(driverStr), "%u.%u.%u.%u",
+                      (dv >> 22) & 0x3FFu, (dv >> 14) & 0xFFu,
+                      (dv >> 6) & 0xFFu, dv & 0x3Fu);
+    } else {
+        std::snprintf(driverStr, sizeof(driverStr), "%u.%u.%u",
+                      VK_VERSION_MAJOR(dv), VK_VERSION_MINOR(dv), VK_VERSION_PATCH(dv));
+    }
+    LOG_WARNING("Vulkan device: ", props.deviceName,
+                " vendor=0x", std::hex, props.vendorID,
+                " device=0x", props.deviceID, std::dec,
+                " driver=", driverStr,
+                " api=", VK_VERSION_MAJOR(props.apiVersion), ".",
+                VK_VERSION_MINOR(props.apiVersion), ".",
+                VK_VERSION_PATCH(props.apiVersion));
     LOG_INFO("Depth resolve support: ", depthResolveSupported_ ? "YES" : "NO");
 
     // Probe queue families to see if the graphics family supports multiple queues
@@ -392,30 +649,167 @@ bool VkContext::selectPhysicalDevice() {
 }
 
 bool VkContext::createLogicalDevice() {
+    // Every enable_extension_if_present has to happen before this line.
+    // vkb::DeviceBuilder takes the physical device by value, so a call made
+    // after it is constructed changes vkbPhysicalDevice_ and not the copy the
+    // builder creates the device from. That is how synchronization2 came to
+    // log as enabled while vkCmdPipelineBarrier2KHR would not resolve.
+    sync2IsCore_ = (deviceApiVersion_ >= VK_API_VERSION_1_3 &&
+                    instanceApiVersion_ >= VK_API_VERSION_1_3);
+    const bool sync2Available =
+        sync2IsCore_ || vkbPhysicalDevice_.enable_extension_if_present(
+                            VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    const bool amdCoherentAvailable = vkbPhysicalDevice_.enable_extension_if_present(
+        VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+    // VK_EXT_host_image_copy. Lets pixels go straight into an image from host
+    // memory, so a texture upload needs no staging buffer, no transfer
+    // submission and no layout barriers around it. Worth most where the two
+    // copies were never separate memory to begin with.
+    //
+    // It depends on two others, and every dependency has to be in the same
+    // enabled list: without them vkCreateDevice is out of spec. MoltenVK
+    // creates the device anyway and only the validation layer says so, so the
+    // three are taken together or not at all.
+    const bool hostCopyDeps =
+        vkbPhysicalDevice_.enable_extension_if_present(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME) &&
+        vkbPhysicalDevice_.enable_extension_if_present(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
+    const bool hostImageCopyAvailable =
+        hostCopyDeps &&
+        vkbPhysicalDevice_.enable_extension_if_present(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+    // Two that only speak after the device is lost. Three logs of a lost
+    // device from one reporter end at the same line - the frame's submit
+    // answering -4 - and the line cannot say which of the dozen submissions
+    // before it actually died, because a lost device is reported at the next
+    // call, not the faulting one. The fault extension names the address and
+    // whether it was read, written or executed; the checkpoints name the last
+    // marker each queue reached. Both are NVIDIA's to offer, which is where
+    // every one of those logs came from.
+    const bool deviceFaultAvailable =
+        vkbPhysicalDevice_.enable_extension_if_present(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    checkpointsSupported_ = vkbPhysicalDevice_.enable_extension_if_present(
+        VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+
     vkb::DeviceBuilder deviceBuilder{vkbPhysicalDevice_};
 
-    // Enable optional Vulkan 1.2 features for FSR2 compute shaders (shaderFloat16)
+    // Enable optional Vulkan 1.1/1.2 features for FSR2/FSR3 compute shaders.
+    // shaderFloat16 covers fp16 *arithmetic*; the AMD FSR3 SDK shaders also pack
+    // fp16 into storage buffers, which needs the 16-bit *storage* features
+    // (storageBuffer16BitAccess / uniformAndStorageBuffer16BitAccess). Without
+    // them the FFX Vulkan backend fails to build its compute pipelines and
+    // ffxCreateContext returns rc=3 (RUNTIME_ERROR) - "Path C upscale failed".
+    VkPhysicalDeviceVulkan11Features enabled11{};
+    enabled11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     VkPhysicalDeviceVulkan12Features enabled12{};
     enabled12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     if (instanceApiVersion_ >= VK_API_VERSION_1_2) {
+        VkPhysicalDeviceVulkan11Features supported11{};
+        supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
         VkPhysicalDeviceVulkan12Features supported12{};
         supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        supported11.pNext = &supported12;
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features2.pNext = &supported12;
+        features2.pNext = &supported11;
         vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
         if (supported12.shaderFloat16) {
             enabled12.shaderFloat16 = VK_TRUE;
-            LOG_INFO("Enabling shaderFloat16 for FSR2 compute shaders");
+            LOG_INFO("Enabling shaderFloat16 for FSR2/FSR3 compute shaders");
         }
+        if (supported12.shaderInt8) {
+            enabled12.shaderInt8 = VK_TRUE;
+        }
+        // Core in 1.2 and required of any 1.2 implementation, but the query
+        // costs nothing and this block only runs when the instance reached
+        // 1.2 at all -- on a 1.1 instance the frame ring stays on fences.
+        if (supported12.timelineSemaphore) {
+            enabled12.timelineSemaphore = VK_TRUE;
+            timelineSemaphoreSupported_ = true;
+            LOG_INFO("Enabling timelineSemaphore for frame synchronisation");
+        }
+        // The AMD FSR3 SDK backend hardcodes fp16Supported=true and always
+        // selects the fp16 shader permutations, whose wave/subgroup reductions
+        // operate on 16-bit types - that needs shaderSubgroupExtendedTypes.
+        // Without it, ffxCreateContext fails building those pipelines (rc=3).
+        if (supported12.shaderSubgroupExtendedTypes) {
+            enabled12.shaderSubgroupExtendedTypes = VK_TRUE;
+            LOG_INFO("Enabling shaderSubgroupExtendedTypes for FSR3 fp16 wave ops");
+        }
+        if (supported11.storageBuffer16BitAccess) {
+            enabled11.storageBuffer16BitAccess = VK_TRUE;
+            LOG_INFO("Enabling 16-bit storage for FSR3 SDK compute shaders");
+        }
+        if (supported11.uniformAndStorageBuffer16BitAccess) {
+            enabled11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
+        }
+        // Add each struct separately - vk-bootstrap owns the pNext chaining;
+        // manually linking them would be overwritten when it appends the next.
+        deviceBuilder.add_pNext(&enabled11);
         deviceBuilder.add_pNext(&enabled12);
     }
+
+    // VK_KHR_synchronization2, taken when the device offers it and skipped
+    // when it does not. Core in Vulkan 1.3, but MoltenVK advertises 1.2 with
+    // the extension present, so requiring 1.3 would drop the platform this is
+    // developed on for a feature it actually has.
+    // Two ways in, because a 1.3 device has it in core and need not advertise
+    // the extension string at all, while a 1.2 device only has the extension.
+    // Checking one and not the other would take the legacy path on hardware
+    // that supports it natively.
+    VkPhysicalDeviceSynchronization2FeaturesKHR sync2Features{};
+    sync2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR;
+    if (sync2Available) {
+        sync2Features.synchronization2 = VK_TRUE;
+        deviceBuilder.add_pNext(&sync2Features);
+        synchronization2Supported_ = true;
+        LOG_INFO("Enabling synchronization2 (", sync2IsCore_ ? "core 1.3" : "KHR extension", ")");
+    } else {
+        LOG_INFO("synchronization2 not available - barriers use the legacy entry point");
+    }
+
+    VkPhysicalDeviceHostImageCopyFeaturesEXT hostCopyFeatures{};
+    hostCopyFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT;
+    if (hostImageCopyAvailable) {
+        // Advertising the extension is not the same as having the feature.
+        VkPhysicalDeviceHostImageCopyFeaturesEXT supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 probe{};
+        probe.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        probe.pNext = &supported;
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &probe);
+        if (supported.hostImageCopy) {
+            hostCopyFeatures.hostImageCopy = VK_TRUE;
+            deviceBuilder.add_pNext(&hostCopyFeatures);
+            hostImageCopySupported_ = true;
+            LOG_INFO("Enabling VK_EXT_host_image_copy - textures upload without a staging buffer");
+        }
+    }
+
+#if defined(VK_EXT_device_fault)
+    VkPhysicalDeviceFaultFeaturesEXT faultFeatures{};
+    faultFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    if (deviceFaultAvailable) {
+        // Advertising the extension is not the same as having the feature.
+        VkPhysicalDeviceFaultFeaturesEXT supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 probe{};
+        probe.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        probe.pNext = &supported;
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &probe);
+        if (supported.deviceFault) {
+            faultFeatures.deviceFault = VK_TRUE;
+            deviceBuilder.add_pNext(&faultFeatures);
+            deviceFaultSupported_ = true;
+        }
+    }
+#else
+    (void)deviceFaultAvailable;
+#endif
 
     // Enable AMD device coherent memory feature if the extension was enabled
     // (prevents validation errors when VMA selects memory types with DEVICE_COHERENT_BIT_AMD)
     VkPhysicalDeviceCoherentMemoryFeaturesAMD coherentFeatures{};
     coherentFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
-    if (vkbPhysicalDevice_.enable_extension_if_present(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME)) {
+    if (amdCoherentAvailable) {
         coherentFeatures.deviceCoherentMemory = VK_TRUE;
         deviceBuilder.add_pNext(&coherentFeatures);
         LOG_INFO("Enabling AMD device coherent memory");
@@ -459,6 +853,62 @@ bool VkContext::createLogicalDevice() {
     auto vkbDevice = devRet.value();
     device = vkbDevice.device;
 
+    // Resolved once here rather than per barrier. The KHR entry point is the
+    // one to ask for: on a 1.2 instance the promoted vkCmdPipelineBarrier2
+    // name is not loadable even when the extension is present.
+    if (synchronization2Supported_) {
+        cmdPipelineBarrier2_ = reinterpret_cast<PFN_vkCmdPipelineBarrier2KHR>(
+            vkGetDeviceProcAddr(device,
+                sync2IsCore_ ? "vkCmdPipelineBarrier2" : "vkCmdPipelineBarrier2KHR"));
+        if (cmdPipelineBarrier2_ == nullptr) {
+            // Advertised but not loadable. Nothing to do but take the legacy
+            // path, which every barrier already falls back to.
+            synchronization2Supported_ = false;
+            LOG_WARNING("VK_KHR_synchronization2 enabled but vkCmdPipelineBarrier2KHR "
+                        "did not resolve - using the legacy entry point");
+        }
+    }
+    setPipelineBarrier2Fn(cmdPipelineBarrier2_);
+
+    // Only present with VK_EXT_debug_utils, which comes with validation. When
+    // it is absent naming is a no-op, which is what a release build wants.
+    setObjectNameFn(reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT")));
+
+    if (hostImageCopySupported_) {
+        copyMemoryToImage_ = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
+            vkGetDeviceProcAddr(device, "vkCopyMemoryToImageEXT"));
+        transitionImageLayoutHost_ = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(
+            vkGetDeviceProcAddr(device, "vkTransitionImageLayoutEXT"));
+        if (copyMemoryToImage_ == nullptr || transitionImageLayoutHost_ == nullptr) {
+            hostImageCopySupported_ = false;
+            LOG_WARNING("VK_EXT_host_image_copy enabled but its entry points did not "
+                        "resolve - textures keep the staging buffer path");
+        }
+    }
+
+#if defined(VK_EXT_device_fault)
+    if (deviceFaultSupported_) {
+        getDeviceFaultInfo_ = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+            vkGetDeviceProcAddr(device, "vkGetDeviceFaultInfoEXT"));
+        if (getDeviceFaultInfo_ == nullptr) deviceFaultSupported_ = false;
+    }
+#endif
+    if (checkpointsSupported_) {
+        cmdSetCheckpoint_ = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(
+            vkGetDeviceProcAddr(device, "vkCmdSetCheckpointNV"));
+        getQueueCheckpointData_ = reinterpret_cast<PFN_vkGetQueueCheckpointDataNV>(
+            vkGetDeviceProcAddr(device, "vkGetQueueCheckpointDataNV"));
+        if (cmdSetCheckpoint_ == nullptr || getQueueCheckpointData_ == nullptr) {
+            checkpointsSupported_ = false;
+        }
+    }
+    // At warning level: a log of a lost device has to show whether these
+    // were armed, or their silence reads as the driver having nothing to say.
+    LOG_WARNING("Device-loss diagnostics: fault info ",
+                deviceFaultSupported_ ? "on" : "off",
+                ", queue checkpoints ", checkpointsSupported_ ? "on" : "off");
+
     if (requestTransferQueue) {
         // With custom_queue_setup, we must retrieve queues manually.
         auto families = vkbPhysicalDevice_.get_queue_families();
@@ -481,7 +931,7 @@ bool VkContext::createLogicalDevice() {
 
         LOG_INFO("Dedicated transfer queue enabled (family ", gfxFamily, ", queue index 1)");
     } else {
-        // Standard path — let vkb resolve queues.
+        // Standard path - let vkb resolve queues.
         auto gqRet = vkbDevice.get_queue(vkb::QueueType::graphics);
         if (!gqRet) {
             LOG_ERROR("Failed to get graphics queue");
@@ -509,7 +959,20 @@ bool VkContext::createAllocator() {
     allocInfo.instance = instance;
     allocInfo.physicalDevice = physicalDevice;
     allocInfo.device = device;
-    allocInfo.vulkanApiVersion = instanceApiVersion_;
+    // VMA asserts when handed a version newer than the headers it was compiled
+    // against, and the two do not have to agree: the NDK ships Vulkan 1.3
+    // headers while a Pixel's loader reports an instance at 1.4. Telling it a
+    // version it has no code for is wrong even where the assert is compiled
+    // out, so clamp rather than raise the ceiling.
+    const uint32_t vmaCeiling = VK_MAKE_API_VERSION(
+        0, VMA_VULKAN_VERSION / 1000000, (VMA_VULKAN_VERSION / 1000) % 1000, 0);
+    allocInfo.vulkanApiVersion = std::min(instanceApiVersion_, vmaCeiling);
+    if (instanceApiVersion_ > vmaCeiling) {
+        LOG_INFO("Instance is Vulkan ", VK_VERSION_MAJOR(instanceApiVersion_), ".",
+                 VK_VERSION_MINOR(instanceApiVersion_), " but VMA was built for ",
+                 VK_VERSION_MAJOR(vmaCeiling), ".", VK_VERSION_MINOR(vmaCeiling),
+                 "; the allocator is told the lower one");
+    }
 
     if (vmaCreateAllocator(&allocInfo, &allocator) != VK_SUCCESS) {
         LOG_ERROR("Failed to create VMA allocator");
@@ -543,7 +1006,7 @@ static std::string getPipelineCachePath() {
 bool VkContext::createPipelineCache() {
     // NVIDIA drivers have their own built-in pipeline/shader disk cache.
     // Using VkPipelineCache on NVIDIA 590.x causes vkCmdBeginRenderPass to
-    // SIGSEGV inside libnvidia-glcore — skip entirely on NVIDIA GPUs.
+    // SIGSEGV inside libnvidia-glcore - skip entirely on NVIDIA GPUs.
     if (gpuVendorId_ == 0x10DE) {
         LOG_INFO("Pipeline cache: skipped (NVIDIA driver provides built-in caching)");
         return true;
@@ -584,7 +1047,7 @@ bool VkContext::createPipelineCache() {
             result = vkCreatePipelineCache(device, &cacheCI, nullptr, &pipelineCache_);
         }
         if (result != VK_SUCCESS) {
-            LOG_WARNING("Pipeline cache creation failed — pipelines will not be cached");
+            LOG_WARNING("Pipeline cache creation failed - pipelines will not be cached");
             pipelineCache_ = VK_NULL_HANDLE;
             return false;
         }
@@ -628,15 +1091,48 @@ void VkContext::savePipelineCache() {
     LOG_INFO("Pipeline cache saved to disk (", dataSize, " bytes)");
 }
 
+/// Asks for an unrotated swapchain where the surface allows it.
+///
+/// Android hands a portrait-native panel to a landscape activity by reporting
+/// currentTransform as a 90 degree rotation, and vk-bootstrap adopts that when
+/// nothing else is asked for. Adopting it is a promise to rotate the rendering
+/// to match, which this renderer does not do, so the whole interface came out
+/// turned on its side. Asking for identity moves the rotation to the display
+/// controller, which costs a composition pass and is what an engine without
+/// pre-rotation should do.
+///
+/// A surface that cannot present unrotated keeps its own transform, and the
+/// caller is no worse off than before.
+/// Returns true when it asked for a transform the surface is not already using,
+/// which makes VK_SUBOPTIMAL_KHR the permanent answer from then on.
+static bool requestIdentityTransform(vkb::SwapchainBuilder& builder,
+                                     VkPhysicalDevice physicalDevice,
+                                     VkSurfaceKHR surface) {
+    VkSurfaceCapabilitiesKHR caps{};
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps) != VK_SUCCESS) {
+        return false;
+    }
+    if (caps.currentTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) return false;
+    if (!(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) {
+        LOG_WARNING("Surface reports transform 0x", std::hex, caps.currentTransform, std::dec,
+                    " and cannot present unrotated; the image will be rotated");
+        return false;
+    }
+    builder.set_pre_transform_flags(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR);
+    return true;
+}
+
 bool VkContext::createSwapchain(int width, int height) {
     vkb::SwapchainBuilder swapchainBuilder{physicalDevice, device, surface};
 
     auto& builder = swapchainBuilder
-        .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+        .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
         .set_desired_extent(static_cast<uint32_t>(width), static_cast<uint32_t>(height))
         .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
         .set_desired_min_image_count(2)
         .set_old_swapchain(swapchain);
+
+    presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
     if (vsync_) {
         builder.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR);
@@ -744,6 +1240,183 @@ bool VkContext::createCommandPools() {
     return true;
 }
 
+void VkContext::createGpuQueryPools() {
+    // A period of zero means the device does not timestamp; a queue family can
+    // report zero valid bits even on a device that does, which MoltenVK and
+    // some mobile drivers do. Both have to hold.
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, families.data());
+    const uint32_t validBits = (graphicsQueueFamily < familyCount)
+        ? families[graphicsQueueFamily].timestampValidBits : 0;
+    gpuTimingSupported_ = (timestampPeriodNs_ > 0.0f) && (validBits > 0);
+    if (!gpuTimingSupported_) {
+        LOG_WARNING("GPU timing unavailable: timestampPeriod=", timestampPeriodNs_,
+                    ", the graphics queue reports ", validBits,
+                    " valid timestamp bits - the per-pass GPU breakdown will be empty");
+        return;
+    }
+
+    VkQueryPoolCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = kMaxGpuMarks;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (vkCreateQueryPool(device, &info, nullptr, &gpuQueryPools_[i]) != VK_SUCCESS) {
+            LOG_WARNING("Could not create the GPU timestamp pool; per-pass GPU "
+                        "timings will be empty");
+            gpuTimingSupported_ = false;
+            return;
+        }
+    }
+    LOG_INFO("GPU timing enabled: ", timestampPeriodNs_, "ns per tick, ",
+             kMaxGpuMarks, " marks per frame");
+}
+
+void VkContext::checkpoint(VkCommandBuffer cmd, const char* label) {
+    if (!checkpointsSupported_ || cmdSetCheckpoint_ == nullptr || cmd == VK_NULL_HANDLE) return;
+    cmdSetCheckpoint_(cmd, label);
+}
+
+void VkContext::noteDeviceLost(const char* where, VkResult result) {
+    if (result != VK_ERROR_DEVICE_LOST) return;
+    // The first report is the one that matters: every call after it fails
+    // the same way, and a log full of them buries the one that was first.
+    if (deviceLost_) return;
+    deviceLost_ = true;
+    LOG_ERROR("Device lost - first seen by ", where);
+    reportDeviceFault();
+}
+
+VkResult VkContext::waitIdle(const char* where) {
+    if (device == VK_NULL_HANDLE) return VK_SUCCESS;
+    const VkResult r = vkDeviceWaitIdle(device);
+    if (r != VK_SUCCESS) LOG_ERROR("vkDeviceWaitIdle failed in ", where, ": ", static_cast<int>(r));
+    noteDeviceLost(where, r);
+    return r;
+}
+
+void VkContext::reportDeviceFault() {
+    // What each queue had reached. A checkpoint is the marker most recently
+    // executed at a stage, so the pass named here is the one that was running
+    // - or the last one that finished, if the fault was in what came after.
+    if (checkpointsSupported_ && getQueueCheckpointData_ != nullptr) {
+        auto report = [&](VkQueue queue, const char* name) {
+            if (queue == VK_NULL_HANDLE) return;
+            uint32_t count = 0;
+            getQueueCheckpointData_(queue, &count, nullptr);
+            if (count == 0) {
+                LOG_ERROR("  ", name, " queue: no checkpoint reached");
+                return;
+            }
+            std::vector<VkCheckpointDataNV> data(count);
+            for (auto& d : data) d.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+            getQueueCheckpointData_(queue, &count, data.data());
+            for (uint32_t i = 0; i < count; ++i) {
+                const char* label = static_cast<const char*>(data[i].pCheckpointMarker);
+                LOG_ERROR("  ", name, " queue last reached '", label ? label : "?",
+                          "' at stage 0x", std::hex,
+                          static_cast<uint32_t>(data[i].stage), std::dec);
+            }
+        };
+        report(graphicsQueue, "graphics");
+        if (hasDedicatedTransfer_ && transferQueue_ != graphicsQueue) report(transferQueue_, "upload");
+    }
+
+#if defined(VK_EXT_device_fault)
+    if (!deviceFaultSupported_ || getDeviceFaultInfo_ == nullptr) return;
+    VkDeviceFaultCountsEXT counts{};
+    counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+    VkResult r = getDeviceFaultInfo_(device, &counts, nullptr);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        LOG_ERROR("  vkGetDeviceFaultInfoEXT (counts): ", static_cast<int>(r));
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;  // the binary blob is for the vendor's tools, not a log
+    VkDeviceFaultInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+    info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+    info.pVendorInfos = vendor.empty() ? nullptr : vendor.data();
+    r = getDeviceFaultInfo_(device, &counts, &info);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        LOG_ERROR("  vkGetDeviceFaultInfoEXT: ", static_cast<int>(r));
+        return;
+    }
+    info.description[VK_MAX_DESCRIPTION_SIZE - 1] = '\0';
+    LOG_ERROR("  driver says: '", info.description, "'");
+    auto kind = [](VkDeviceFaultAddressTypeEXT t) {
+        switch (t) {
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "none";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "invalid read";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "invalid write";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "invalid execute";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT: return "instruction pointer unknown";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT: return "instruction pointer invalid";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT: return "instruction pointer fault";
+            default: return "?";
+        }
+    };
+    if (counts.addressInfoCount == 0) {
+        LOG_ERROR("  no faulting address reported - a hang or timeout rather than a bad access");
+    }
+    for (uint32_t i = 0; i < counts.addressInfoCount; ++i) {
+        LOG_ERROR("  fault ", i, ": ", kind(addresses[i].addressType),
+                  " at 0x", std::hex, addresses[i].reportedAddress,
+                  " (within 0x", addresses[i].addressPrecision, ")", std::dec);
+    }
+    for (uint32_t i = 0; i < counts.vendorInfoCount; ++i) {
+        vendor[i].description[VK_MAX_DESCRIPTION_SIZE - 1] = '\0';
+        LOG_ERROR("  vendor ", i, ": '", vendor[i].description,
+                  "' code 0x", std::hex, vendor[i].vendorFaultCode,
+                  " data 0x", vendor[i].vendorFaultData, std::dec);
+    }
+#endif
+}
+
+void VkContext::gpuMark(VkCommandBuffer cmd, const char* label) {
+    // A mark is also a checkpoint, so the two name the same places and a
+    // fault report reads against the same labels as the timing overlay.
+    checkpoint(cmd, label);
+    if (!gpuTimingSupported_ || cmd == VK_NULL_HANDLE) return;
+    uint32_t& n = gpuMarkCount_[currentFrame];
+    if (n >= kMaxGpuMarks) return;   // the tail of a frame is lost, not the frame
+    gpuMarkLabels_[currentFrame][n] = label;
+    // Bottom of pipe: the mark is "everything before this has finished", which
+    // is what makes the gap to the next mark the cost of the pass between them.
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        gpuQueryPools_[currentFrame], n);
+    ++n;
+}
+
+void VkContext::readGpuTimings(uint32_t slot) {
+    const uint32_t n = gpuMarkCount_[slot];
+    if (!gpuTimingSupported_ || !gpuMarksPending_[slot] || n < 2) return;
+
+    uint64_t stamps[kMaxGpuMarks]{};
+    // No WAIT bit: this slot's fence has already been waited on by the caller,
+    // so the results are there. Asking the driver to wait here would put a
+    // second block in the frame for something already finished.
+    const VkResult r = vkGetQueryPoolResults(
+        device, gpuQueryPools_[slot], 0, n, sizeof(stamps), stamps,
+        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return;   // VK_NOT_READY on a frame that never ran
+
+    gpuTimings_.clear();
+    for (uint32_t i = 1; i < n; ++i) {
+        // Unsigned subtraction, so a wrapped or out-of-order pair reads as an
+        // enormous positive number rather than a negative one. Drop those
+        // rather than reporting a pass that took four seconds.
+        if (stamps[i] < stamps[i - 1]) continue;
+        const double ms = static_cast<double>(stamps[i] - stamps[i - 1]) *
+                          static_cast<double>(timestampPeriodNs_) / 1.0e6;
+        if (ms > 1000.0) continue;
+        gpuTimings_.emplace_back(gpuMarkLabels_[slot][i], ms);
+    }
+}
+
 bool VkContext::createSyncObjects() {
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -752,11 +1425,36 @@ bool VkContext::createSyncObjects() {
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Start signaled so first frame doesn't block
 
+    // The timeline starts at 0 and every slot's timelineValue starts at 0, so
+    // the first wait on each slot is already satisfied -- the same starting
+    // state VK_FENCE_CREATE_SIGNALED_BIT gives the fences below.
+    if (timelineSemaphoreSupported_) {
+        VkSemaphoreTypeCreateInfo typeInfo{};
+        typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        typeInfo.initialValue = 0;
+        VkSemaphoreCreateInfo timelineInfo{};
+        timelineInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        timelineInfo.pNext = &typeInfo;
+        if (vkCreateSemaphore(device, &timelineInfo, nullptr, &frameTimeline_) != VK_SUCCESS) {
+            LOG_WARNING("Could not create the frame timeline semaphore; using fences");
+            frameTimeline_ = VK_NULL_HANDLE;
+        } else {
+            frameTimelineValue_ = 0;
+            for (auto& f : frames) f.timelineValue = 0;
+        }
+    }
+
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateFence(device, &fenceInfo, nullptr, &frames[i].inFlightFence) != VK_SUCCESS) {
             LOG_ERROR("Failed to create sync objects for frame ", i);
             return false;
         }
+        // The handle, because validation reports a fence by handle and there is
+        // no way to tell a frame fence from the upload fence in that message.
+        // Two rounds of this went on a fence nobody could identify.
+        LOG_WARNING("frame fence ", i, " = 0x", std::hex,
+                    reinterpret_cast<uint64_t>(frames[i].inFlightFence), std::dec);
     }
 
     // Per-swapchain-image semaphores: avoids reuse while the presentation engine
@@ -772,7 +1470,7 @@ bool VkContext::createSyncObjects() {
             return false;
         }
     }
-    // One extra acquire semaphore — we need it for the next vkAcquireNextImageKHR
+    // One extra acquire semaphore - we need it for the next vkAcquireNextImageKHR
     // before we know which image we'll get.
     if (vkCreateSemaphore(device, &semInfo, nullptr, &nextAcquireSemaphore_) != VK_SUCCESS) {
         LOG_ERROR("Failed to create next-acquire semaphore");
@@ -782,7 +1480,14 @@ bool VkContext::createSyncObjects() {
     // Immediate submit fence (not signaled initially)
     VkFenceCreateInfo immFenceInfo{};
     immFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    if (vkCreateFence(device, &immFenceInfo, nullptr, &immFence) != VK_SUCCESS) {
+    // Logged for the same reason as the frame fences: validation reports a
+    // fence by handle, and immFence is shared by endSingleTimeCommands and the
+    // upload batches - which submit on different queues.
+    if (vkCreateFence(device, &immFenceInfo, nullptr, &immFence) == VK_SUCCESS) {
+        LOG_WARNING("immediate fence = 0x", std::hex,
+                    reinterpret_cast<uint64_t>(immFence), std::dec);
+    }
+    if (immFence == VK_NULL_HANDLE) {
         LOG_ERROR("Failed to create immediate submit fence");
         return false;
     }
@@ -795,7 +1500,7 @@ bool VkContext::createDepthBuffer() {
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType = VK_IMAGE_TYPE_2D;
     imgInfo.format = depthFormat;
-    imgInfo.extent = {swapchainExtent.width, swapchainExtent.height, 1};
+    imgInfo.extent = {.width = swapchainExtent.width, .height = swapchainExtent.height, .depth = 1};
     imgInfo.mipLevels = 1;
     imgInfo.arrayLayers = 1;
     imgInfo.samples = msaaSamples_;
@@ -836,7 +1541,7 @@ void VkContext::destroyDepthBuffer() {
 bool VkContext::createMsaaColorImage() {
     if (msaaSamples_ == VK_SAMPLE_COUNT_1_BIT) return true; // No MSAA image needed
 
-    // Check if lazily allocated memory is available — only use TRANSIENT when it is.
+    // Check if lazily allocated memory is available - only use TRANSIENT when it is.
     // AMD GPUs (especially RDNA4) don't expose lazily allocated memory; using TRANSIENT
     // without it can cause the driver to optimize for tile-only storage, leading to
     // crashes during MSAA resolve when the backing memory was never populated.
@@ -854,7 +1559,7 @@ bool VkContext::createMsaaColorImage() {
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType = VK_IMAGE_TYPE_2D;
     imgInfo.format = swapchainFormat;
-    imgInfo.extent = {swapchainExtent.width, swapchainExtent.height, 1};
+    imgInfo.extent = {.width = swapchainExtent.width, .height = swapchainExtent.height, .depth = 1};
     imgInfo.mipLevels = 1;
     imgInfo.arrayLayers = 1;
     imgInfo.samples = msaaSamples_;
@@ -909,7 +1614,7 @@ bool VkContext::createDepthResolveImage() {
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType = VK_IMAGE_TYPE_2D;
     imgInfo.format = depthFormat;
-    imgInfo.extent = {swapchainExtent.width, swapchainExtent.height, 1};
+    imgInfo.extent = {.width = swapchainExtent.width, .height = swapchainExtent.height, .depth = 1};
     imgInfo.mipLevels = 1;
     imgInfo.arrayLayers = 1;
     imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -972,8 +1677,7 @@ void VkContext::setMsaaSamples(VkSampleCountFlagBits samples) {
     swapchainDirty = true;
 }
 
-bool VkContext::createImGuiResources() {
-    // Create depth buffer first
+bool VkContext::createSwapchainRenderTargets(const char* verb) {
     if (!createDepthBuffer()) return false;
 
     // Create MSAA color image if needed
@@ -1093,7 +1797,7 @@ bool VkContext::createImGuiResources() {
             rpInfo2.pDependencies = &dep2;
 
             if (vkCreateRenderPass2(device, &rpInfo2, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-                LOG_ERROR("Failed to create MSAA render pass (depth resolve)");
+                LOG_ERROR("Failed to ", verb, " MSAA render pass (depth resolve)");
                 return false;
             }
         } else {
@@ -1134,7 +1838,7 @@ bool VkContext::createImGuiResources() {
             rpInfo.pDependencies = &dependency;
 
             if (vkCreateRenderPass(device, &rpInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-                LOG_ERROR("Failed to create MSAA render pass");
+                LOG_ERROR("Failed to ", verb, " MSAA render pass");
                 return false;
             }
         }
@@ -1154,12 +1858,12 @@ bool VkContext::createImGuiResources() {
             fbInfo.layers = 1;
 
             if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
-                LOG_ERROR("Failed to create MSAA swapchain framebuffer ", i);
+                LOG_ERROR("Failed to ", verb, " MSAA swapchain framebuffer ", i);
                 return false;
             }
         }
     } else {
-        // Non-MSAA render pass: 2 attachments (color + depth) — original path
+        // Non-MSAA render pass: 2 attachments (color + depth) - original path
         VkAttachmentDescription attachments[2] = {};
 
         // Color attachment (swapchain image)
@@ -1214,7 +1918,7 @@ bool VkContext::createImGuiResources() {
         rpInfo.pDependencies = &dependency;
 
         if (vkCreateRenderPass(device, &rpInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-            LOG_ERROR("Failed to create render pass");
+            LOG_ERROR("Failed to ", verb, " render pass");
             return false;
         }
 
@@ -1233,18 +1937,24 @@ bool VkContext::createImGuiResources() {
             fbInfo.layers = 1;
 
             if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
-                LOG_ERROR("Failed to create swapchain framebuffer ", i);
+                LOG_ERROR("Failed to ", verb, " swapchain framebuffer ", i);
                 return false;
             }
         }
     }
+
+    return true;
+}
+
+bool VkContext::createImGuiResources() {
+    if (!createSwapchainRenderTargets("create")) return false;
 
     // Create descriptor pool for ImGui.
     // Budget: ~10 internal ImGui sets + up to 2000 UI icon textures (spells,
     // items, talents, buffs, etc.) that are uploaded and cached for the session.
     static constexpr uint32_t IMGUI_POOL_SIZE = 2048;
     VkDescriptorPoolSize poolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, IMGUI_POOL_SIZE},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = IMGUI_POOL_SIZE},
     };
 
     VkDescriptorPoolCreateInfo dpInfo{};
@@ -1259,7 +1969,187 @@ bool VkContext::createImGuiResources() {
         return false;
     }
 
+    // One creation site for the overlay pass, shared by both MSAA and non-MSAA
+    // configurations. Recreated from recreateSwapchain the same way.
+    if (!createOverlayRenderPass()) return false;
+    if (!createSceneContinueRenderPass()) return false;
+
     return true;
+}
+
+
+// The UI draws in its own pass, after the scene has resolved and after water
+// refraction has copied the scene. Keeping it separate means the UI is never
+// part of the refraction capture, and deliberately single-sampled: ImGui draws
+// axis-aligned rectangles and pre-antialiased glyphs, which MSAA does almost
+// nothing for, so multisampling it only costs fill rate. Colour only, loading
+// what is already on the swapchain - no depth, no resolve.
+bool VkContext::createOverlayRenderPass() {
+    destroyOverlayRenderPass();
+
+    VkAttachmentDescription color{};
+    color.format = swapchainFormat;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorRef{};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+
+    // Wait for the scene resolve and for the refraction copy that reads it.
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = 1;
+    rpInfo.pAttachments = &color;
+    rpInfo.subpassCount = 1;
+    rpInfo.pSubpasses = &subpass;
+    rpInfo.dependencyCount = 1;
+    rpInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &overlayRenderPass) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create overlay (UI) render pass");
+        overlayRenderPass = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Same attachments, so ImGui's pipelines work in either, but clearing rather
+    // than loading. The loading screen draws ImGui with nothing underneath it,
+    // and it used to do that inside the scene pass - which stopped being valid
+    // once ImGui's pipelines were built single-sampled for the overlay pass.
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &overlayClearRenderPass) != VK_SUCCESS) {
+        LOG_ERROR("Failed to create clearing overlay render pass");
+        overlayClearRenderPass = VK_NULL_HANDLE;
+    }
+
+    overlayFramebuffers.resize(swapchainImageViews.size());
+    for (size_t i = 0; i < swapchainImageViews.size(); i++) {
+        VkFramebufferCreateInfo fbInfo{};
+        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass = overlayRenderPass;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments = &swapchainImageViews[i];
+        fbInfo.width = swapchainExtent.width;
+        fbInfo.height = swapchainExtent.height;
+        fbInfo.layers = 1;
+        if (vkCreateFramebuffer(device, &fbInfo, nullptr, &overlayFramebuffers[i]) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create overlay framebuffer ", i);
+            destroyOverlayRenderPass();
+            return false;
+        }
+    }
+    return true;
+}
+
+// Continuation of the scene pass: same attachments as the scene pass (so the
+// pipelines built for it work unchanged) but loading what is already drawn
+// instead of clearing. Water renders here, after the scene has been copied for
+// refraction, which is what keeps the water out of its own refraction source.
+// Only built without MSAA - a multisampled continuation would have to resolve a
+// second time and could not preserve the first resolve.
+bool VkContext::createSceneContinueRenderPass() {
+    if (msaaSamples_ > VK_SAMPLE_COUNT_1_BIT) {
+        sceneContinueRenderPass = VK_NULL_HANDLE;
+        return true;
+    }
+
+    VkAttachmentDescription attachments[2]{};
+    attachments[0].format = swapchainFormat;
+    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    attachments[1].format = depthFormat;
+    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colorRef{};
+    colorRef.attachment = 0;
+    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = 1;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    // Must match the scene pass's dependency exactly. This pass is begun against
+    // the scene's own framebuffer, and render pass compatibility is checked
+    // against how that framebuffer was created - a dependency that differs makes
+    // the begin invalid, which is undefined behaviour and rendered the frame into
+    // a corner of the screen on the FXAA path.
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = 2;
+    rpInfo.pAttachments = attachments;
+    rpInfo.subpassCount = 1;
+    rpInfo.pSubpasses = &subpass;
+    rpInfo.dependencyCount = 1;
+    rpInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(device, &rpInfo, nullptr, &sceneContinueRenderPass) != VK_SUCCESS) {
+        LOG_WARNING("Failed to create scene continuation pass - water stays in the scene pass");
+        sceneContinueRenderPass = VK_NULL_HANDLE;
+    }
+    return true;
+}
+
+void VkContext::destroyOverlayRenderPass() {
+    for (VkFramebuffer fb : overlayFramebuffers) {
+        if (fb) vkDestroyFramebuffer(device, fb, nullptr);
+    }
+    overlayFramebuffers.clear();
+    if (overlayRenderPass) {
+        vkDestroyRenderPass(device, overlayRenderPass, nullptr);
+        overlayRenderPass = VK_NULL_HANDLE;
+    }
+    if (overlayClearRenderPass) {
+        vkDestroyRenderPass(device, overlayClearRenderPass, nullptr);
+        overlayClearRenderPass = VK_NULL_HANDLE;
+    }
+    if (sceneContinueRenderPass) {
+        vkDestroyRenderPass(device, sceneContinueRenderPass, nullptr);
+        sceneContinueRenderPass = VK_NULL_HANDLE;
+    }
 }
 
 void VkContext::destroyImGuiResources() {
@@ -1272,14 +2162,22 @@ void VkContext::destroyImGuiResources() {
     uiTextures_.clear();
     uiTextureSampler_ = VK_NULL_HANDLE; // Owned by sampler cache
 
-    if (imguiDescriptorPool) {
-        vkDestroyDescriptorPool(device, imguiDescriptorPool, nullptr);
-        imguiDescriptorPool = VK_NULL_HANDLE;
-    }
+    // Said here rather than by whoever decided to destroy them, so that the
+    // generation cannot disagree with what actually happened to the sets.
+    ++uiTextureGeneration_;
+
+    // This context's own UI texture pool, which the sets above were allocated
+    // from. Freed with them rather than with ImGui's, which is the whole point
+    // of it existing.
+    destroy(device, uiTexturePool_);
+    destroy(device, uiTextureLayout_);
+
+    destroy(device, imguiDescriptorPool);
     destroyMsaaColorImage();
     destroyDepthResolveImage();
     destroyDepthBuffer();
     // Framebuffers are destroyed in destroySwapchain()
+    destroyOverlayRenderPass();
     if (imguiRenderPass) {
         vkDestroyRenderPass(device, imguiRenderPass, nullptr);
         imguiRenderPass = VK_NULL_HANDLE;
@@ -1295,6 +2193,46 @@ static uint32_t findMemType(VkPhysicalDevice physDev, uint32_t typeFilter, VkMem
     }
     LOG_ERROR("VkContext: no suitable memory type found");
     return UINT32_MAX;
+}
+
+bool VkContext::ensureUiTextureDescriptorPool() {
+    if (uiTexturePool_ != VK_NULL_HANDLE) return true;
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
+                                    &uiTextureLayout_) != VK_SUCCESS) {
+        LOG_ERROR("Could not create the UI texture descriptor layout");
+        return false;
+    }
+
+    // Sized for the interface with FrameXML loaded, which asks for several
+    // hundred distinct files; the old path shared ImGui's pool and inherited
+    // whatever that was sized for.
+    VkDescriptorPoolSize size{};
+    size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    size.descriptorCount = 4096;
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 4096;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &size;
+    LOG_WARNING("UI textures allocate from this context's own descriptor pool, "
+                "so they outlive an ImGui backend restart");
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &uiTexturePool_) != VK_SUCCESS) {
+        LOG_ERROR("Could not create the UI texture descriptor pool");
+        vkDestroyDescriptorSetLayout(device, uiTextureLayout_, nullptr);
+        uiTextureLayout_ = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
 }
 
 VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, int height) {
@@ -1359,7 +2297,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imgInfo.imageType = VK_IMAGE_TYPE_2D;
         imgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        imgInfo.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+        imgInfo.extent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
         imgInfo.mipLevels = 1;
         imgInfo.arrayLayers = 1;
         imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1392,36 +2330,52 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
 
     // Upload via immediate submit
     immediateSubmit([&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo barrierDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        barrierDep.dependencyFlags = 0;
+        barrierDep.imageMemoryBarrierCount = 1;
+        barrierDep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, barrierDep);
 
         VkBufferImageCopy region{};
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+        region.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1};
+        region.imageExtent = {.width = static_cast<uint32_t>(width), .height = static_cast<uint32_t>(height), .depth = 1};
         vkCmdCopyBufferToImage(cmd, stagingBuffer, image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
+        barrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkDependencyInfo toReadDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        toReadDep.imageMemoryBarrierCount = 1;
+        toReadDep.pImageMemoryBarriers = &barrier;
+        cmdPipelineBarrier2(cmd, toReadDep);
     });
 
-    // Cleanup staging
-    vkDestroyBuffer(device, stagingBuffer, nullptr);
-    vkFreeMemory(device, stagingMemory, nullptr);
+    // Freed now only if the copy has already run. Inside a batch immediateSubmit
+    // records and returns without submitting, so destroying the staging here
+    // pulls the source out from under a copy that has not happened - the image
+    // then contains whatever was left behind, which draws as nothing at all.
+    if (inUploadBatch_) {
+        deferRawStagingCleanup(stagingBuffer, stagingMemory);
+    } else {
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingMemory, nullptr);
+    }
 
     // Create image view
     VkImageView imageView;
@@ -1431,7 +2385,7 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         viewInfo.image = image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        viewInfo.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
         if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
             vkDestroyImage(device, image, nullptr);
             vkFreeMemory(device, imageMemory, nullptr);
@@ -1439,12 +2393,36 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
         }
     }
 
-    // Register with ImGui (allocates from imguiDescriptorPool)
-    VkDescriptorSet ds = ImGui_ImplVulkan_AddTexture(uiTextureSampler_, imageView,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // From this context's own pool rather than ImGui's, so the set survives a
+    // backend restart. ImGui only ever binds what ImTextureID points at, and a
+    // set built to the same layout binds identically.
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (ensureUiTextureDescriptorPool()) {
+        VkDescriptorSetAllocateInfo alloc{};
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = uiTexturePool_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &uiTextureLayout_;
+        if (vkAllocateDescriptorSets(device, &alloc, &ds) != VK_SUCCESS) {
+            ds = VK_NULL_HANDLE;
+        } else {
+            VkDescriptorImageInfo info{};
+            info.sampler = uiTextureSampler_;
+            info.imageView = imageView;
+            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = ds;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &info;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+    }
 
     if (!ds) {
-        LOG_ERROR("ImGui descriptor pool exhausted — cannot upload UI texture");
+        LOG_ERROR("UI descriptor pool exhausted - cannot upload UI texture");
         vkDestroyImageView(device, imageView, nullptr);
         vkDestroyImage(device, image, nullptr);
         vkFreeMemory(device, imageMemory, nullptr);
@@ -1452,9 +2430,55 @@ VkDescriptorSet VkContext::uploadImGuiTexture(const uint8_t* rgba, int width, in
     }
 
     // Track for cleanup
-    uiTextures_.push_back({image, imageMemory, imageView});
+    uiTextures_.push_back({.image = image, .memory = imageMemory, .view = imageView});
 
     return ds;
+}
+
+void VkContext::releaseSurface() {
+    if (device) vkDeviceWaitIdle(device);
+
+    for (auto fb : swapchainFramebuffers) {
+        if (fb) vkDestroyFramebuffer(device, fb, nullptr);
+    }
+    swapchainFramebuffers.clear();
+    for (auto iv : swapchainImageViews) {
+        if (iv) vkDestroyImageView(device, iv, nullptr);
+    }
+    swapchainImageViews.clear();
+    swapchainImages.clear();
+    if (swapchain) {
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+        swapchain = VK_NULL_HANDLE;
+    }
+    if (surface) {
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        surface = VK_NULL_HANDLE;
+    }
+    surfaceLost_ = true;
+    LOG_INFO("Vulkan surface and swapchain released for the background");
+}
+
+bool VkContext::restoreSurface(SDL_Window* window, int width, int height) {
+    if (!surfaceLost_) {
+        LOG_INFO("Resume with a surface that was never released; nothing to rebuild");
+        return true;
+    }
+    if (!createSurface(window)) {
+        LOG_ERROR("Could not recreate the Vulkan surface on resume");
+        return false;
+    }
+    surfaceLost_ = false;
+
+    // Only the surface is rebuilt here. The swapchain is left to the renderer's
+    // own dirty path, which rebuilds the water passes, the post-process chain
+    // and the HiZ pyramid along with it - all of them holding views into the
+    // swapchain. Building it here instead left those pointing at images that no
+    // longer existed, and beginFrame read through one of them.
+    swapchainDirty = true;
+    LOG_INFO("Vulkan surface rebuilt after resume; swapchain to follow (",
+             width, "x", height, ")");
+    return true;
 }
 
 bool VkContext::recreateSwapchain(int width, int height) {
@@ -1476,11 +2500,13 @@ bool VkContext::recreateSwapchain(int width, int height) {
 
     vkb::SwapchainBuilder swapchainBuilder{physicalDevice, device, surface};
     auto& builder = swapchainBuilder
-        .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+        .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
         .set_desired_extent(static_cast<uint32_t>(width), static_cast<uint32_t>(height))
         .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
         .set_desired_min_image_count(2)
         .set_old_swapchain(oldSwapchain);
+
+    presentsOffNativeTransform_ = requestIdentityTransform(builder, physicalDevice, surface);
 
     if (vsync_) {
         builder.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR);
@@ -1504,7 +2530,7 @@ bool VkContext::recreateSwapchain(int width, int height) {
         return false;
     }
 
-    // Success — safe to retire the old swapchain
+    // Success - safe to retire the old swapchain
     if (oldSwapchain) {
         vkDestroySwapchainKHR(device, oldSwapchain, nullptr);
     }
@@ -1542,250 +2568,123 @@ bool VkContext::recreateSwapchain(int width, int height) {
     destroyDepthBuffer();
 
     // Destroy old render pass (needs recreation if MSAA changed)
+    destroyOverlayRenderPass();
     if (imguiRenderPass) {
         vkDestroyRenderPass(device, imguiRenderPass, nullptr);
         imguiRenderPass = VK_NULL_HANDLE;
     }
 
-    if (!createDepthBuffer()) return false;
-    if (!createMsaaColorImage()) return false;
-    if (!createDepthResolveImage()) return false;
+    if (!createSwapchainRenderTargets("recreate")) return false;
 
-    bool useMsaa = (msaaSamples_ > VK_SAMPLE_COUNT_1_BIT);
-
-    if (useMsaa) {
-        const bool useDepthResolve = (depthResolveImageView != VK_NULL_HANDLE);
-        // MSAA render pass: 3 or 4 attachments
-        VkAttachmentDescription attachments[4] = {};
-        attachments[0].format = swapchainFormat;
-        attachments[0].samples = msaaSamples_;
-        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        attachments[1].format = depthFormat;
-        attachments[1].samples = msaaSamples_;
-        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        attachments[2].format = swapchainFormat;
-        attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
-        attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[2].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        if (useDepthResolve) {
-            attachments[3].format = depthFormat;
-            attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
-            attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            attachments[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attachments[3].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        }
-
-        if (useDepthResolve) {
-            VkAttachmentDescription2 attachments2[4]{};
-            for (int i = 0; i < 4; ++i) {
-                attachments2[i].sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-                attachments2[i].format = attachments[i].format;
-                attachments2[i].samples = attachments[i].samples;
-                attachments2[i].loadOp = attachments[i].loadOp;
-                attachments2[i].storeOp = attachments[i].storeOp;
-                attachments2[i].stencilLoadOp = attachments[i].stencilLoadOp;
-                attachments2[i].stencilStoreOp = attachments[i].stencilStoreOp;
-                attachments2[i].initialLayout = attachments[i].initialLayout;
-                attachments2[i].finalLayout = attachments[i].finalLayout;
-            }
-
-            VkAttachmentReference2 colorRef2{};
-            colorRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-            colorRef2.attachment = 0;
-            colorRef2.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            VkAttachmentReference2 depthRef2{};
-            depthRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-            depthRef2.attachment = 1;
-            depthRef2.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            VkAttachmentReference2 resolveRef2{};
-            resolveRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-            resolveRef2.attachment = 2;
-            resolveRef2.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            VkAttachmentReference2 depthResolveRef2{};
-            depthResolveRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-            depthResolveRef2.attachment = 3;
-            depthResolveRef2.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-            VkSubpassDescriptionDepthStencilResolve dsResolve{};
-            dsResolve.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
-            dsResolve.depthResolveMode = depthResolveMode_;
-            dsResolve.stencilResolveMode = VK_RESOLVE_MODE_NONE;
-            dsResolve.pDepthStencilResolveAttachment = &depthResolveRef2;
-
-            VkSubpassDescription2 subpass2{};
-            subpass2.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
-            subpass2.pNext = &dsResolve;
-            subpass2.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-            subpass2.colorAttachmentCount = 1;
-            subpass2.pColorAttachments = &colorRef2;
-            subpass2.pDepthStencilAttachment = &depthRef2;
-            subpass2.pResolveAttachments = &resolveRef2;
-
-            VkSubpassDependency2 dep2{};
-            dep2.sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
-            dep2.srcSubpass = VK_SUBPASS_EXTERNAL;
-            dep2.dstSubpass = 0;
-            dep2.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dep2.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dep2.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-            VkRenderPassCreateInfo2 rpInfo2{};
-            rpInfo2.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
-            rpInfo2.attachmentCount = 4;
-            rpInfo2.pAttachments = attachments2;
-            rpInfo2.subpassCount = 1;
-            rpInfo2.pSubpasses = &subpass2;
-            rpInfo2.dependencyCount = 1;
-            rpInfo2.pDependencies = &dep2;
-
-            if (vkCreateRenderPass2(device, &rpInfo2, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-                LOG_ERROR("Failed to recreate MSAA render pass (depth resolve)");
-                return false;
-            }
-        } else {
-            VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-            VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-            VkAttachmentReference resolveRef{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-
-            VkSubpassDescription subpass{};
-            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-            subpass.colorAttachmentCount = 1;
-            subpass.pColorAttachments = &colorRef;
-            subpass.pDepthStencilAttachment = &depthRef;
-            subpass.pResolveAttachments = &resolveRef;
-
-            VkSubpassDependency dependency{};
-            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-            dependency.dstSubpass = 0;
-            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dependency.srcAccessMask = 0;
-            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-            VkRenderPassCreateInfo rpInfo{};
-            rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-            rpInfo.attachmentCount = 3;
-            rpInfo.pAttachments = attachments;
-            rpInfo.subpassCount = 1;
-            rpInfo.pSubpasses = &subpass;
-            rpInfo.dependencyCount = 1;
-            rpInfo.pDependencies = &dependency;
-
-            if (vkCreateRenderPass(device, &rpInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-                LOG_ERROR("Failed to recreate MSAA render pass");
-                return false;
-            }
-        }
-
-        swapchainFramebuffers.resize(swapchainImageViews.size());
-        for (size_t i = 0; i < swapchainImageViews.size(); i++) {
-            VkImageView fbAttachments[4] = {msaaColorView_, depthImageView, swapchainImageViews[i], depthResolveImageView};
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = imguiRenderPass;
-            fbInfo.attachmentCount = useDepthResolve ? 4 : 3;
-            fbInfo.pAttachments = fbAttachments;
-            fbInfo.width = swapchainExtent.width;
-            fbInfo.height = swapchainExtent.height;
-            fbInfo.layers = 1;
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
-                LOG_ERROR("Failed to recreate MSAA swapchain framebuffer ", i);
-                return false;
-            }
-        }
-    } else {
-        // Non-MSAA render pass: 2 attachments
-        VkAttachmentDescription attachments[2] = {};
-        attachments[0].format = swapchainFormat;
-        attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        attachments[1].format = depthFormat;
-        attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorRef;
-        subpass.pDepthStencilAttachment = &depthRef;
-
-        VkSubpassDependency dependency{};
-        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo rpInfo{};
-        rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rpInfo.attachmentCount = 2;
-        rpInfo.pAttachments = attachments;
-        rpInfo.subpassCount = 1;
-        rpInfo.pSubpasses = &subpass;
-        rpInfo.dependencyCount = 1;
-        rpInfo.pDependencies = &dependency;
-
-        if (vkCreateRenderPass(device, &rpInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
-            LOG_ERROR("Failed to recreate render pass");
-            return false;
-        }
-
-        swapchainFramebuffers.resize(swapchainImageViews.size());
-        for (size_t i = 0; i < swapchainImageViews.size(); i++) {
-            VkImageView fbAttachments[2] = {swapchainImageViews[i], depthImageView};
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = imguiRenderPass;
-            fbInfo.attachmentCount = 2;
-            fbInfo.pAttachments = fbAttachments;
-            fbInfo.width = swapchainExtent.width;
-            fbInfo.height = swapchainExtent.height;
-            fbInfo.layers = 1;
-            if (vkCreateFramebuffer(device, &fbInfo, nullptr, &swapchainFramebuffers[i]) != VK_SUCCESS) {
-                LOG_ERROR("Failed to recreate swapchain framebuffer ", i);
-                return false;
-            }
-        }
-    }
+    if (!createOverlayRenderPass()) return false;
+    if (!createSceneContinueRenderPass()) return false;
 
     swapchainDirty = false;
     LOG_INFO("Swapchain recreated: ", swapchainExtent.width, "x", swapchainExtent.height);
     return true;
+}
+
+void VkContext::resetFrameSyncState() {
+    if (device == VK_NULL_HANDLE) return;
+    // How many asynchronous upload batches are still outstanding when a
+    // rebuild happens. These are submitted without being waited on, one fence
+    // each, and FrameXML makes hundreds where this client alone makes almost
+    // none - which is the one difference that scales the way the fault does.
+    if (!inFlightBatches_.empty()) {
+        LOG_WARNING("rebuild with ", inFlightBatches_.size(),
+                    " upload batches still in flight (", batchesSubmitted_,
+                    " submitted, ", batchesRetired_, " retired)");
+    }
+    // Checked: if the device is already gone, everything below is theatre and
+    // the fence wait in the next frame takes the blame for it.
+    if (const VkResult idle = vkDeviceWaitIdle(device); idle != VK_SUCCESS) {
+        LOG_ERROR("wait-idle before a rebuild failed: ", static_cast<int>(idle),
+                  " - the device was already lost before this rebuild, not by it");
+    }
+
+    // Retire the upload batches now. The wait above means every one of them has
+    // finished, so this frees each fence, command buffer and staging buffer
+    // while the pools they came from are still alive - the same condition
+    // flushDeferredCleanup needs, and for the same reason. Left alone they
+    // survived the rebuild holding all three, and the only thing that would
+    // ever collect them is a later frame happening to poll.
+    pollUploadBatches();
+
+    // Everything queued to be freed later can be freed now, because the wait
+    // above says the GPU holds nothing. Left queued, these frees sit against
+    // frame slots whose fences are about to be remade signalled - so the next
+    // visit to each slot releases them on a fence that reports completion by
+    // construction rather than because work finished. The pools they free from
+    // are still alive at this point, which is the condition flushDeferredCleanup
+    // is documented as needing.
+    flushDeferredCleanup();
+
+    // The timeline needs none of the surgery below. vkDeviceWaitIdle above
+    // means every submit has completed, so the counter has reached
+    // frameTimelineValue_; pointing every slot at that value leaves each one
+    // already satisfied, which is the state the first frame expects. Nothing
+    // is destroyed and the counter keeps running, so no value is ever reused.
+    if (frameTimeline_ != VK_NULL_HANDLE) {
+        for (auto& f : frames) {
+            f.timelineValue = frameTimelineValue_;
+        }
+    }
+
+    // Recreated rather than reset: a fence has to end up signalled, and
+    // vkResetFences only ever unsignals. Destroying and remaking with
+    // VK_FENCE_CREATE_SIGNALED_BIT is the state the first frame expects.
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (frames[i].inFlightFence) {
+            vkDestroyFence(device, frames[i].inFlightFence, nullptr);
+            frames[i].inFlightFence = VK_NULL_HANDLE;
+        }
+        if (vkCreateFence(device, &fenceInfo, nullptr, &frames[i].inFlightFence) != VK_SUCCESS) {
+            LOG_ERROR("Could not remake frame fence ", i, " after a rebuild");
+        }
+        if (frames[i].commandBuffer) {
+            vkResetCommandBuffer(frames[i].commandBuffer, 0);
+        }
+    }
+    // The semaphores go the same way, and for the same reason the fences do.
+    //
+    // A binary semaphore cannot be reset, only waited on. An acquire signals
+    // one; if the swapchain is rebuilt before the submit that would have
+    // waited on it, it stays signalled with nothing left to consume it. The
+    // rebuild only ever created or destroyed these when the image *count*
+    // changed, so on a rebuild that keeps the same count - which an MSAA or
+    // FSR change does - every one of them carried its state across.
+    //
+    // Handing an already-signalled semaphore to vkAcquireNextImageKHR is
+    // undefined, and the driver answers by losing the device. That is the
+    // shape of it: a settings change, a rebuild, then the very next frame
+    // failing its fence wait with VK_ERROR_DEVICE_LOST.
+    //
+    // vkDeviceWaitIdle above guarantees nothing is still using them, so
+    // destroying and remaking here is safe and leaves every one unsignalled.
+    {
+        VkSemaphoreCreateInfo semInfo{};
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        auto remake = [&](VkSemaphore& sem) {
+            if (sem) vkDestroySemaphore(device, sem, nullptr);
+            sem = VK_NULL_HANDLE;
+            if (vkCreateSemaphore(device, &semInfo, nullptr, &sem) != VK_SUCCESS) {
+                LOG_ERROR("Could not remake a swapchain semaphore after a rebuild");
+            }
+        };
+        for (auto& sem : imageAcquiredSemaphores_)  remake(sem);
+        for (auto& sem : renderFinishedSemaphores_) remake(sem);
+        remake(nextAcquireSemaphore_);
+        // Not remade: it is one of the per-image ones above, already replaced.
+        // Left dangling it would name a semaphore that no longer exists.
+        currentAcquireSemaphore_ = VK_NULL_HANDLE;
+    }
+
+    currentFrame = 0;
+    LOG_WARNING("Frame synchronisation reset after a rebuild: fences signalled, "
+                "command buffers reset, back to slot 0");
 }
 
 VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
@@ -1797,21 +2696,34 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     // Wait for this frame's fence (with timeout to detect GPU hangs)
     static int beginFrameCounter = 0;
     beginFrameCounter++;
-    VkResult fenceResult = vkWaitForFences(device, 1, &frame.inFlightFence, VK_TRUE, 5000000000ULL); // 5 second timeout
+    VkResult fenceResult;
+    if (frameTimeline_ != VK_NULL_HANDLE) {
+        VkSemaphoreWaitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &frameTimeline_;
+        waitInfo.pValues = &frame.timelineValue;
+        fenceResult = vkWaitSemaphores(device, &waitInfo, 5000000000ULL); // 5 second timeout
+    } else {
+        fenceResult = vkWaitForFences(device, 1, &frame.inFlightFence, VK_TRUE, 5000000000ULL); // 5 second timeout
+    }
     if (fenceResult == VK_TIMEOUT) {
-        LOG_ERROR("beginFrame[", beginFrameCounter, "] FENCE TIMEOUT (5s) on frame slot ", currentFrame, " — GPU hang detected!");
+        LOG_ERROR("beginFrame[", beginFrameCounter, "] FENCE TIMEOUT (5s) on frame slot ", currentFrame,
+                  " (waiting for timeline ", frame.timelineValue, ") - GPU hang detected!");
         return VK_NULL_HANDLE;
     }
     if (fenceResult != VK_SUCCESS) {
         LOG_ERROR("beginFrame[", beginFrameCounter, "] fence wait failed: ", static_cast<int>(fenceResult));
-        if (fenceResult == VK_ERROR_DEVICE_LOST) {
-            deviceLost_ = true;
-        }
+        noteDeviceLost("beginFrame frame-slot wait", fenceResult);
         return VK_NULL_HANDLE;
     }
 
     // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
     runDeferredCleanup(currentFrame);
+
+    // The wait above is what makes this slot's timestamps readable: the submit
+    // that wrote them has completed. Read before the pool is reset below.
+    readGpuTimings(currentFrame);
 
     // Acquire next swapchain image using the free semaphore.
     // After acquiring we swap it into the per-image slot so the old per-image
@@ -1824,7 +2736,8 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
         return VK_NULL_HANDLE;
     }
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-        LOG_ERROR("Failed to acquire swapchain image");
+        LOG_ERROR("Failed to acquire swapchain image: ", static_cast<int>(result));
+        noteDeviceLost("vkAcquireNextImageKHR", result);
         return VK_NULL_HANDLE;
     }
 
@@ -1835,7 +2748,10 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
     nextAcquireSemaphore_ = imageAcquiredSemaphores_[imageIndex];
     imageAcquiredSemaphores_[imageIndex] = currentAcquireSemaphore_;
 
-    vkResetFences(device, 1, &frame.inFlightFence);
+    // A timeline only ever moves forward, so there is nothing to unsignal.
+    if (frameTimeline_ == VK_NULL_HANDLE) {
+        vkResetFences(device, 1, &frame.inFlightFence);
+    }
     vkResetCommandBuffer(frame.commandBuffer, 0);
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -1844,20 +2760,33 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
 
     vkBeginCommandBuffer(frame.commandBuffer, &beginInfo);
 
+    // Reset outside any render pass, which is where this sits, and before the
+    // first mark. A pool that is written without being reset returns stale
+    // results for the queries that were not rewritten.
+    if (gpuTimingSupported_) {
+        vkCmdResetQueryPool(frame.commandBuffer, gpuQueryPools_[currentFrame],
+                            0, kMaxGpuMarks);
+        gpuMarkCount_[currentFrame] = 0;
+        gpuMarksPending_[currentFrame] = true;
+        gpuMark(frame.commandBuffer, "frame start");
+    }
+
     // If async upload batches are still in flight (submitted to the transfer queue),
     // wait for their fences and insert a memory barrier so the graphics queue sees
     // the completed layout transitions and transfer writes.
     if (!inFlightBatches_.empty()) {
         waitAllUploads();
 
-        VkMemoryBarrier memBarrier{};
-        memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        VkMemoryBarrier2 memBarrier{};
+        memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        memBarrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        memBarrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(frame.commandBuffer,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+        VkDependencyInfo memDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        memDep.memoryBarrierCount = 1;
+        memDep.pMemoryBarriers = &memBarrier;
+        cmdPipelineBarrier2(frame.commandBuffer, memDep);
     }
 
     return frame.commandBuffer;
@@ -1888,15 +2817,76 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     submitInfo.pWaitDstStageMask = &waitStage;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &renderSem;
 
-    VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, frame.inFlightFence);
+    // Present still needs the binary renderFinished semaphore -- WSI does not
+    // take a timeline. So the submit signals both: the binary one for
+    // vkQueuePresentKHR, and the timeline for the CPU wait in beginFrame that
+    // used to be a fence. The value paired with a binary semaphore is ignored,
+    // but the arrays still have to be the same length.
+    VkSemaphore signalSemaphores[2] = { renderSem, frameTimeline_ };
+    uint64_t signalValues[2] = { 0, 0 };
+    const uint64_t waitValue = 0;
+    VkTimelineSemaphoreSubmitInfo timelineSubmit{};
+
+    if (frameTimeline_ != VK_NULL_HANDLE) {
+        signalValues[1] = ++frameTimelineValue_;
+        timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmit.waitSemaphoreValueCount = 1;
+        timelineSubmit.pWaitSemaphoreValues = &waitValue;
+        timelineSubmit.signalSemaphoreValueCount = 2;
+        timelineSubmit.pSignalSemaphoreValues = signalValues;
+        submitInfo.pNext = &timelineSubmit;
+        submitInfo.signalSemaphoreCount = 2;
+        submitInfo.pSignalSemaphores = signalSemaphores;
+    } else {
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = &renderSem;
+    }
+
+    VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo,
+                                          frameTimeline_ != VK_NULL_HANDLE ? VK_NULL_HANDLE
+                                                                           : frame.inFlightFence);
+    if (submitResult == VK_SUCCESS && frameTimeline_ != VK_NULL_HANDLE) {
+        // Only once the submit is in: on failure the timeline is never
+        // signalled, and a slot left waiting on an unreachable value would
+        // hang the next beginFrame for its whole timeout instead of failing.
+        frame.timelineValue = signalValues[1];
+    }
     if (submitResult != VK_SUCCESS) {
         LOG_ERROR("endFrame[", endFrameCounter, "] vkQueueSubmit FAILED: ", static_cast<int>(submitResult));
-        if (submitResult == VK_ERROR_DEVICE_LOST) {
-            deviceLost_ = true;
-        }
+        noteDeviceLost("endFrame vkQueueSubmit", submitResult);
+        // And no present. renderSem is signalled by the submission that just
+        // failed, so presenting on it queues a wait that nothing will ever
+        // satisfy - the same trap the timeline value above is withheld to
+        // avoid, one semaphore further along. A driver answers that with a
+        // hang or a second error, either of which buries the real one.
+        //
+        // The sync state is remade here rather than left to the rebuild.
+        // recreateSwapchain() does wait the device idle, but it only creates or
+        // destroys semaphores when the swapchain image *count* changes, so a
+        // rebuild that keeps the count carries every one of them across with
+        // its state intact - and marking the swapchain dirty is not enough on
+        // its own.
+        //
+        // acquireSem is the one that matters. A failed submit never waits on
+        // it, so it stays signalled, and handing an already-signalled semaphore
+        // to vkAcquireNextImageKHR is undefined: the driver answers by losing
+        // the device, which is the failure this return exists to avoid
+        // compounding rather than to cause one frame later.
+        //
+        // resetFrameSyncState() is what remakes them unsignalled. It also
+        // remakes the fences signalled and points every timeline slot at the
+        // value the counter has reached, so the next frame begins on a slot
+        // that is satisfied by construction. On a device that is already gone
+        // it logs its failed wait-idle and carries on, which is the treatment
+        // the MSAA rebuild path gives it.
+        //
+        // It leaves currentFrame at 0 itself, so this path does not advance the
+        // slot: after the reset every slot is safe to begin on, which is all
+        // advancing past this one was for.
+        resetFrameSyncState();
+        swapchainDirty = true;
+        return;
     }
 
     VkPresentInfoKHR presentInfo{};
@@ -1908,7 +2898,13 @@ void VkContext::endFrame(VkCommandBuffer cmd, uint32_t imageIndex) {
     presentInfo.pImageIndices = &imageIndex;
 
     VkResult result = vkQueuePresentKHR(presentQueue, &presentInfo);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    // Presenting unrotated onto a rotated surface is suboptimal by definition,
+    // and says so on every frame for as long as the swapchain lives. Rebuilding
+    // on that answer rebuilds every frame, which is what stopped the client
+    // dead on the login screen rather than merely making it slow.
+    const bool suboptimalIsExpected = presentsOffNativeTransform_;
+    if (result == VK_ERROR_OUT_OF_DATE_KHR ||
+        (result == VK_SUBOPTIMAL_KHR && !suboptimalIsExpected)) {
         swapchainDirty = true;
     }
 
@@ -1934,8 +2930,22 @@ VkCommandBuffer VkContext::beginSingleTimeCommands() {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(immCmdBuf_, &beginInfo);
+    checkpoint(immCmdBuf_, "immediate commands");
 
     return immCmdBuf_;
+}
+
+void VkContext::noteImmediateSubmitThread(const char* who) {
+    static std::mutex seenMutex;
+    static std::set<std::thread::id> seen;
+    const std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(seenMutex);
+    if (seen.insert(self).second && seen.size() > 1) {
+        LOG_WARNING("immFence is now being used from ", seen.size(),
+                    " threads (latest via ", who, ") - it is shared and "
+                    "unguarded, so two of them can reset a fence the other "
+                    "is waiting on");
+    }
 }
 
 void VkContext::endSingleTimeCommands(VkCommandBuffer cmd) {
@@ -1946,16 +2956,49 @@ void VkContext::endSingleTimeCommands(VkCommandBuffer cmd) {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, immFence);
-    vkWaitForFences(device, 1, &immFence, VK_TRUE, UINT64_MAX);
+    // immFence and the immediate command pool are shared and unguarded. If two
+    // threads reach here at once, one resets a fence the other is waiting on -
+    // which is what validation reports as VUID-vkResetFences-pFences-01123,
+    // and the driver answers by losing the device. Said once per thread so a
+    // log shows whether that is happening.
+    noteImmediateSubmitThread("endSingleTimeCommands");
+
+    // Checked, because this is where the first sign of trouble goes missing.
+    //
+    // A log of a lost device begins with validation complaining that immFence
+    // is being reset while still in use - which is what happens *after* a wait
+    // that returned an error rather than waiting. The submit and the wait were
+    // both unchecked, so whatever actually went wrong left no line at all and
+    // the reset took the blame for it.
+    //
+    // Said once. If the device is gone, every subsequent call fails the same
+    // way and a log full of it buries the first one.
+    static bool reported = false;
+    const VkResult submitted = vkQueueSubmit(graphicsQueue, 1, &submitInfo, immFence);
+    if (submitted != VK_SUCCESS && !reported) {
+        reported = true;
+        LOG_ERROR("immediate submit failed: ", static_cast<int>(submitted),
+                  " - this is the first failure, whatever follows is its wake");
+    }
+    const VkResult waited = vkWaitForFences(device, 1, &immFence, VK_TRUE, UINT64_MAX);
+    if (waited != VK_SUCCESS && !reported) {
+        reported = true;
+        LOG_ERROR("immediate wait failed: ", static_cast<int>(waited),
+                  " (VK_ERROR_DEVICE_LOST is -4) - the fence is not signalled,"
+                  " so the reset below is the symptom rather than the cause");
+    }
+    noteDeviceLost("immediate submit", submitted);
+    noteDeviceLost("immediate wait", waited);
     vkResetFences(device, 1, &immFence);
     // Buffer stays allocated; it will be reset on the next beginSingleTimeCommands.
 }
 
 void VkContext::immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& function) {
     if (inUploadBatch_) {
-        // Record into the batch command buffer — no submit, no fence wait
-        function(batchCmd_);
+        // Record into the batch command buffer - no submit, no fence wait.
+        // Opened on demand, so a batch nothing writes to costs nothing.
+        ensureBatchCmd();
+        if (batchCmd_ != VK_NULL_HANDLE) function(batchCmd_);
         return;
     }
     VkCommandBuffer cmd = beginSingleTimeCommands();
@@ -1964,11 +3007,41 @@ void VkContext::immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& funct
 }
 
 void VkContext::beginUploadBatch() {
+    // WOWEE_VK_NO_UPLOAD_BATCH=1 turns batching off entirely: every
+    // immediateSubmit then submits and waits on its own, as it did before the
+    // batch path existed.
+    //
+    // A diagnostic rather than a setting, and here because three device losses
+    // in a row have landed within a second of the first batch of the session -
+    // at frames 803, 1194 and 8916, so it is the batch and not the frame count
+    // - and moving the submit to the graphics queue did not change it. This
+    // separates "the batch path is implicated" from "something else at world
+    // entry is", which is a question no amount of reading has settled.
+    //
+    // Slow, because it is the path the batching replaced. Expect a long load.
+    static const bool noBatch = [] {
+        const char* v = std::getenv("WOWEE_VK_NO_UPLOAD_BATCH");
+        return v && *v && *v != '0';
+    }();
+    if (noBatch) return;
+
     uploadBatchDepth_++;
     if (inUploadBatch_) return; // already in a batch (nested call)
     inUploadBatch_ = true;
+    // The command buffer is not allocated here.
+    //
+    // A batch now wraps the whole interface render, which happens every frame
+    // and usually uploads nothing at all. Allocating and freeing a command
+    // buffer to record nothing into, sixty times a second, is churn the pool
+    // does not need. ensureBatchCmd() opens one the first time something
+    // actually records, and the end calls treat a null buffer as an empty
+    // batch.
+}
 
-    // Allocate from transfer pool if available, otherwise from immCommandPool.
+/// Opens the batch's command buffer if nothing has recorded into one yet.
+void VkContext::ensureBatchCmd() {
+    if (batchCmd_ != VK_NULL_HANDLE) return;
+    // From the transfer pool where there is one, otherwise the immediate pool.
     VkCommandPool pool = hasDedicatedTransfer_ ? transferCommandPool_ : immCommandPool;
 
     VkCommandBufferAllocateInfo allocInfo{};
@@ -1976,12 +3049,16 @@ void VkContext::beginUploadBatch() {
     allocInfo.commandPool = pool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = 1;
-    vkAllocateCommandBuffers(device, &allocInfo, &batchCmd_);
+    if (vkAllocateCommandBuffers(device, &allocInfo, &batchCmd_) != VK_SUCCESS) {
+        batchCmd_ = VK_NULL_HANDLE;
+        return;
+    }
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(batchCmd_, &beginInfo);
+    checkpoint(batchCmd_, "upload batch");
 }
 
 void VkContext::endUploadBatch() {
@@ -1991,17 +3068,28 @@ void VkContext::endUploadBatch() {
 
     inUploadBatch_ = false;
 
+    // Nothing ever recorded, so there is nothing to end, submit or free.
+    if (batchCmd_ == VK_NULL_HANDLE) {
+        batchStagingBuffers_.clear();
+        batchRawStaging_.clear();
+        return;
+    }
+
     VkCommandPool pool = hasDedicatedTransfer_ ? transferCommandPool_ : immCommandPool;
 
-    if (batchStagingBuffers_.empty()) {
-        // No GPU copies were recorded — skip the submit entirely.
+    // Raw staging counts too. Checking only the allocator's list meant a batch
+    // holding nothing but ImGui texture uploads looked empty, so the command
+    // buffer holding every one of those copies was thrown away unsubmitted and
+    // the images stayed blank.
+    if (batchStagingBuffers_.empty() && batchRawStaging_.empty()) {
+        // No GPU copies were recorded - skip the submit entirely.
         vkEndCommandBuffer(batchCmd_);
         vkFreeCommandBuffers(device, pool, 1, &batchCmd_);
         batchCmd_ = VK_NULL_HANDLE;
         return;
     }
 
-    // Submit commands with a NEW fence — don't wait, let GPU work in parallel.
+    // Submit commands with a NEW fence - don't wait, let GPU work in parallel.
     vkEndCommandBuffer(batchCmd_);
 
     VkFenceCreateInfo fenceInfo{};
@@ -2014,19 +3102,55 @@ void VkContext::endUploadBatch() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &batchCmd_;
 
-    // Submit to the dedicated transfer queue if available, otherwise graphics.
-    VkQueue targetQueue = hasDedicatedTransfer_ ? transferQueue_ : graphicsQueue;
-    vkQueueSubmit(targetQueue, 1, &submitInfo, fence);
+    // On the graphics queue, not the transfer one, unless asked otherwise.
+    //
+    // Both queues are in the same family, so no ownership transfer is needed -
+    // that much of the setup comment is right. But same family is not same
+    // queue: two queues run independently, and nothing here ordered them. The
+    // upload was submitted with a fence and no semaphore, the fence only ever
+    // used to free staging afterwards, so the graphics queue could sample a
+    // texture while the transfer queue was still writing it. Undefined, and on
+    // this driver it hangs.
+    //
+    // Submitting to the same queue the rendering uses makes submission order
+    // the execution order, and the layout transitions already recorded in this
+    // command buffer do the rest. It costs the parallelism the split was for.
+    //
+    // Why it surfaced now: this client alone makes almost no async batches, and
+    // FrameXML makes hundreds. Both device losses under investigation landed
+    // within a second of the *first* batch of the session.
+    //
+    // WOWEE_VK_ASYNC_UPLOAD_QUEUE=1 restores the old behaviour, for confirming
+    // that is what this was rather than taking it on argument.
+    static const bool asyncUploadQueue = [] {
+        const char* v = std::getenv("WOWEE_VK_ASYNC_UPLOAD_QUEUE");
+        return v && *v && *v != '0';
+    }();
+    VkQueue targetQueue = (hasDedicatedTransfer_ && asyncUploadQueue) ? transferQueue_ : graphicsQueue;
+    noteDeviceLost("async upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, fence));
+
+    // Said once, with the handle, because these are the only fences created
+    // after startup - so a validation message naming a high handle is one of
+    // these rather than a frame fence or the immediate one. FrameXML makes
+    // hundreds of them; without it there are almost none, which is the shape
+    // of the difference between the two branches.
+    if (batchesSubmitted_ == 0) {
+        LOG_WARNING("first async upload batch fence = 0x", std::hex,
+                    reinterpret_cast<uint64_t>(fence), std::dec);
+    }
+    ++batchesSubmitted_;
 
     // Stash everything for later cleanup when fence signals
     InFlightBatch batch;
     batch.fence = fence;
     batch.cmd = batchCmd_;
     batch.stagingBuffers = std::move(batchStagingBuffers_);
+    batch.rawStaging = std::move(batchRawStaging_);
     inFlightBatches_.push_back(std::move(batch));
 
     batchCmd_ = VK_NULL_HANDLE;
     batchStagingBuffers_.clear();
+    batchRawStaging_.clear();
 }
 
 void VkContext::endUploadBatchSync() {
@@ -2036,17 +3160,45 @@ void VkContext::endUploadBatchSync() {
 
     inUploadBatch_ = false;
 
+    // Nothing ever recorded, so there is nothing to end, submit or free.
+    if (batchCmd_ == VK_NULL_HANDLE) {
+        batchStagingBuffers_.clear();
+        batchRawStaging_.clear();
+        return;
+    }
+
     VkCommandPool pool = hasDedicatedTransfer_ ? transferCommandPool_ : immCommandPool;
 
-    if (batchStagingBuffers_.empty()) {
+    if (batchStagingBuffers_.empty() && batchRawStaging_.empty()) {
         vkEndCommandBuffer(batchCmd_);
         vkFreeCommandBuffers(device, pool, 1, &batchCmd_);
         batchCmd_ = VK_NULL_HANDLE;
         return;
     }
 
-    // Synchronous path for load screens — submit and wait on the target queue.
-    VkQueue targetQueue = hasDedicatedTransfer_ ? transferQueue_ : graphicsQueue;
+    // Synchronous path - submit and wait on the target queue.
+    //
+    // The second queue of the graphics family where there is one, which is
+    // every desktop driver and never MoltenVK: Metal exposes one queue per
+    // family, so on the platform this is developed on these batches have
+    // always gone to the graphics queue, and the second-queue path has only
+    // ever run on the machines that report lost devices. Nothing here shares
+    // a resource with the frame in flight on the other queue, and the wait
+    // below finishes the batch before anything samples what it wrote - but
+    // that is an argument, and WOWEE_VK_SYNC_UPLOAD_ON_GRAPHICS=1 is the
+    // test of it: the same batches, the same waits, one queue.
+    static const bool syncOnGraphics = [] {
+        const char* v = std::getenv("WOWEE_VK_SYNC_UPLOAD_ON_GRAPHICS");
+        return v && *v && *v != '0';
+    }();
+    VkQueue targetQueue = (hasDedicatedTransfer_ && !syncOnGraphics) ? transferQueue_ : graphicsQueue;
+    static bool saidWhichQueue = false;
+    if (!saidWhichQueue) {
+        saidWhichQueue = true;
+        LOG_WARNING("Synchronous upload batches run on the ",
+                    targetQueue == graphicsQueue ? "graphics queue"
+                                                 : "second queue of the graphics family");
+    }
 
     vkEndCommandBuffer(batchCmd_);
 
@@ -2055,9 +3207,36 @@ void VkContext::endUploadBatchSync() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &batchCmd_;
 
-    vkQueueSubmit(targetQueue, 1, &submitInfo, immFence);
-    vkWaitForFences(device, 1, &immFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &immFence);
+    // Its own fence, not the shared immediate one.
+    //
+    // immFence is also used by endSingleTimeCommands, which submits on the
+    // graphics queue while this submits on the transfer queue when there is
+    // one. Validation reports that fence - 0x170000000017, named at creation
+    // - being reset while still in use, repeatedly, just before the device is
+    // lost. Two queues signalling one fence is the fragility whatever the
+    // exact interleaving; a fence per submit has no such question about it.
+    //
+    // FrameXML is what makes this reachable: it uploads hundreds of textures
+    // through here, where this client alone uploads a handful.
+    VkFenceCreateInfo batchFenceInfo{};
+    batchFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence batchFence = VK_NULL_HANDLE;
+    if (vkCreateFence(device, &batchFenceInfo, nullptr, &batchFence) != VK_SUCCESS) {
+        LOG_ERROR("Could not create an upload fence; falling back to the shared one");
+        batchFence = immFence;
+    }
+
+    // Both checked. These were the only unchecked waits between a world load
+    // and the first frame's submit, so a device lost in one of them was first
+    // reported by that submit, one stage later and with no name attached.
+    noteDeviceLost("sync upload batch submit", vkQueueSubmit(targetQueue, 1, &submitInfo, batchFence));
+    noteDeviceLost("sync upload batch wait",
+                   vkWaitForFences(device, 1, &batchFence, VK_TRUE, UINT64_MAX));
+    if (batchFence != immFence) {
+        vkDestroyFence(device, batchFence, nullptr);
+    } else {
+        vkResetFences(device, 1, &immFence);
+    }
 
     vkFreeCommandBuffers(device, pool, 1, &batchCmd_);
     batchCmd_ = VK_NULL_HANDLE;
@@ -2066,6 +3245,8 @@ void VkContext::endUploadBatchSync() {
         destroyBuffer(allocator, staging);
     }
     batchStagingBuffers_.clear();
+    // The copies have completed by here, so the sources can go.
+    freeRawStaging();
 }
 
 void VkContext::pollUploadBatches() {
@@ -2076,14 +3257,22 @@ void VkContext::pollUploadBatches() {
     for (auto it = inFlightBatches_.begin(); it != inFlightBatches_.end(); ) {
         VkResult result = vkGetFenceStatus(device, it->fence);
         if (result == VK_SUCCESS) {
-            // GPU finished — free resources
+            // GPU finished - free resources
+            for (auto& raw : it->rawStaging) {
+                vkDestroyBuffer(device, raw.buffer, nullptr);
+                vkFreeMemory(device, raw.memory, nullptr);
+            }
             for (auto& staging : it->stagingBuffers) {
                 destroyBuffer(allocator, staging);
             }
             vkFreeCommandBuffers(device, pool, 1, &it->cmd);
             vkDestroyFence(device, it->fence, nullptr);
             it = inFlightBatches_.erase(it);
+            ++batchesRetired_;
         } else {
+            // VK_NOT_READY is the ordinary answer. Anything else is the device
+            // saying so through a fence nobody was going to wait on.
+            if (result != VK_NOT_READY) noteDeviceLost("upload batch fence status", result);
             ++it;
         }
     }
@@ -2093,18 +3282,40 @@ void VkContext::waitAllUploads() {
     VkCommandPool pool = hasDedicatedTransfer_ ? transferCommandPool_ : immCommandPool;
 
     for (auto& batch : inFlightBatches_) {
-        vkWaitForFences(device, 1, &batch.fence, VK_TRUE, UINT64_MAX);
+        noteDeviceLost("waitAllUploads",
+                       vkWaitForFences(device, 1, &batch.fence, VK_TRUE, UINT64_MAX));
+        for (auto& raw : batch.rawStaging) {
+            vkDestroyBuffer(device, raw.buffer, nullptr);
+            vkFreeMemory(device, raw.memory, nullptr);
+        }
         for (auto& staging : batch.stagingBuffers) {
             destroyBuffer(allocator, staging);
         }
         vkFreeCommandBuffers(device, pool, 1, &batch.cmd);
         vkDestroyFence(device, batch.fence, nullptr);
+        // Counted, because the rebuild warning reports submitted against
+        // retired and this path used to clear the list without saying so. It
+        // read as a hundred and thirty-seven batches outstanding while one was,
+        // which is a number that invites exactly the wrong conclusion.
+        ++batchesRetired_;
     }
     inFlightBatches_.clear();
 }
 
 void VkContext::deferStagingCleanup(AllocatedBuffer staging) {
     batchStagingBuffers_.push_back(staging);
+}
+
+void VkContext::deferRawStagingCleanup(VkBuffer buffer, VkDeviceMemory memory) {
+    batchRawStaging_.push_back({.buffer = buffer, .memory = memory});
+}
+
+void VkContext::freeRawStaging() {
+    for (const RawStaging& s : batchRawStaging_) {
+        vkDestroyBuffer(device, s.buffer, nullptr);
+        vkFreeMemory(device, s.memory, nullptr);
+    }
+    batchRawStaging_.clear();
 }
 
 } // namespace rendering

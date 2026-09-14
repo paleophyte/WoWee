@@ -3,6 +3,7 @@
 #include <cstring>
 #include <chrono>
 #include <iterator>
+#include <ranges>
 
 #ifdef HAVE_UNICORN
 // Unicorn Engine headers
@@ -14,29 +15,7 @@ namespace game {
 
 #ifdef HAVE_UNICORN
 
-// Memory layout for emulated environment
-// Note: heap must not overlap the module region (typically loaded at 0x400000)
-// or the stack. Keep heap above 0x02000000 (32MB) to leave space for module + padding.
-constexpr uint32_t STACK_BASE = 0x00100000;  // 1MB
-constexpr uint32_t STACK_SIZE = 0x00100000;  // 1MB stack
-constexpr uint32_t HEAP_BASE  = 0x02000000;  // 32MB — well above typical module base (0x400000)
-constexpr uint32_t HEAP_SIZE  = 0x01000000;  // 16MB heap
-constexpr uint32_t API_STUB_BASE = 0x70000000; // API stub area (high memory)
-
-WardenEmulator::WardenEmulator()
-    : uc_(nullptr)
-    , moduleBase_(0)
-    , moduleSize_(0)
-    , stackBase_(STACK_BASE)
-    , stackSize_(STACK_SIZE)
-    , heapBase_(HEAP_BASE)
-    , heapSize_(HEAP_SIZE)
-    , apiStubBase_(API_STUB_BASE)
-    , nextApiStubAddr_(API_STUB_BASE)
-    , apiCodeHookRegistered_(false)
-    , nextHeapAddr_(HEAP_BASE)
-{
-}
+WardenEmulator::WardenEmulator() = default;
 
 WardenEmulator::~WardenEmulator() {
     if (uc_) {
@@ -57,7 +36,6 @@ bool WardenEmulator::initialize(const void* moduleCode, size_t moduleSize, uint3
     hooks_.clear();
     nextHeapAddr_ = heapBase_;
     nextApiStubAddr_ = apiStubBase_;
-    apiCodeHookRegistered_ = false;
 
     {
         char addrBuf[32];
@@ -81,7 +59,7 @@ bool WardenEmulator::initialize(const void* moduleCode, size_t moduleSize, uint3
     if (modEnd > heapBase_ && moduleBase_ < heapBase_ + heapSize_) {
         {
             char buf[256];
-            std::snprintf(buf, sizeof(buf), "WardenEmulator: Module [0x%X, 0x%X) overlaps heap [0x%X, 0x%X) - adjust HEAP_BASE",
+            std::snprintf(buf, sizeof(buf), "WardenEmulator: Module [0x%X, 0x%X) overlaps heap [0x%X, 0x%X) - adjust kHeapBase",
                           moduleBase_, modEnd, heapBase_, heapBase_ + heapSize_);
             LOG_ERROR(buf);
         }
@@ -145,7 +123,7 @@ bool WardenEmulator::initialize(const void* moduleCode, size_t moduleSize, uint3
     // This allows execution to continue past NULL reads, making diagnostics easier.
     err = uc_mem_map(uc_, 0x0, 0x1000, UC_PROT_READ);
     if (err != UC_ERR_OK) {
-        // Non-fatal — just log it; the emulator will still function
+        // Non-fatal - just log it; the emulator will still function
         LOG_WARNING("WardenEmulator: could not map null guard page: ", uc_strerror(err));
     }
 
@@ -157,9 +135,8 @@ bool WardenEmulator::initialize(const void* moduleCode, size_t moduleSize, uint3
     // Add code hook over the API stub area so Windows API calls are intercepted
     uc_hook apiHook;
     uc_hook_add(uc_, &apiHook, UC_HOOK_CODE, (void*)hookCode, this,
-                API_STUB_BASE, API_STUB_BASE + 0x10000 - 1);
+                kApiStubBase, kApiStubBase + 0x10000 - 1);
     hooks_.push_back(apiHook);
-    apiCodeHookRegistered_ = true;
 
     {
         char sBuf[128];
@@ -198,7 +175,7 @@ uint32_t WardenEmulator::hookAPI(const std::string& dllName,
     }
 
     // Store the handler so hookCode() can dispatch to it
-    apiHandlers_[stubAddr] = { argCount, std::move(handler) };
+    apiHandlers_[stubAddr] = { .argCount = argCount, .handler = std::move(handler) };
 
     // Write a RET (0xC3) at the stub address as a safe fallback in case
     // the code hook fires after EIP has already advanced past our intercept.
@@ -248,15 +225,6 @@ uint32_t WardenEmulator::writeData(const void* data, size_t size) {
     }
     return addr;
 }
-
-std::vector<uint8_t> WardenEmulator::readData(uint32_t address, size_t size) {
-    std::vector<uint8_t> result(size);
-    if (!readMemory(address, result.data(), size)) {
-        return {};
-    }
-    return result;
-}
-
 uint32_t WardenEmulator::callFunction(uint32_t address, const std::vector<uint32_t>& args) {
     if (!uc_) {
         LOG_ERROR("WardenEmulator: Not initialized");
@@ -274,9 +242,8 @@ uint32_t WardenEmulator::callFunction(uint32_t address, const std::vector<uint32
     uc_reg_read(uc_, UC_X86_REG_ESP, &esp);
 
     // Push arguments (stdcall: right-to-left)
-    for (auto it = args.rbegin(); it != args.rend(); ++it) {
+    for (uint32_t arg : std::views::reverse(args)) {
         esp -= 4;
-        uint32_t arg = *it;
         uc_mem_write(uc_, esp, &arg, 4);
     }
 
@@ -291,7 +258,12 @@ uint32_t WardenEmulator::callFunction(uint32_t address, const std::vector<uint32
     // Execute until return address
     uc_err err = uc_emu_start(uc_, address, retAddr, 0, 0);
     if (err != UC_ERR_OK) {
-        LOG_ERROR("WardenEmulator: Execution failed: ", uc_strerror(err));
+        if (failuresExpected_) {
+            LOG_WARNING("WardenEmulator: module did not run (", uc_strerror(err),
+                        ") - expected, it did not verify as Blizzard's");
+        } else {
+            LOG_ERROR("WardenEmulator: Execution failed: ", uc_strerror(err));
+        }
         return 0;
     }
 
@@ -425,21 +397,6 @@ bool WardenEmulator::freeMemory(uint32_t address) {
 
     return true;
 }
-
-uint32_t WardenEmulator::getRegister(int regId) {
-    uint32_t value = 0;
-    if (uc_) {
-        uc_reg_read(uc_, regId, &value);
-    }
-    return value;
-}
-
-void WardenEmulator::setRegister(int regId, uint32_t value) {
-    if (uc_) {
-        uc_reg_write(uc_, regId, &value);
-    }
-}
-
 // ============================================================================
 // Windows API Implementations
 // ============================================================================
@@ -489,7 +446,7 @@ uint32_t WardenEmulator::apiGetTickCount([[maybe_unused]] WardenEmulator& emu, [
 }
 
 uint32_t WardenEmulator::apiSleep([[maybe_unused]] WardenEmulator& emu, const std::vector<uint32_t>& args) {
-    if (args.size() < 1) return 0;
+    if (args.empty()) return 0;
     uint32_t dwMilliseconds = args[0];
 
     LOG_DEBUG("WinAPI: Sleep(", dwMilliseconds, ")");
@@ -549,7 +506,7 @@ void WardenEmulator::hookCode(uc_engine* uc, uint64_t address, [[maybe_unused]] 
     if (!self) return;
 
     auto it = self->apiHandlers_.find(static_cast<uint32_t>(address));
-    if (it == self->apiHandlers_.end()) return; // not an API stub — trace disabled to avoid spam
+    if (it == self->apiHandlers_.end()) return; // not an API stub - trace disabled to avoid spam
 
     const ApiHookEntry& entry = it->second;
 
@@ -580,7 +537,7 @@ void WardenEmulator::hookCode(uc_engine* uc, uint64_t address, [[maybe_unused]] 
     uc_reg_write(uc, UC_X86_REG_EIP, &retAddr);
 }
 
-void WardenEmulator::hookMemInvalid([[maybe_unused]] uc_engine* uc, int type, uint64_t address, int size, [[maybe_unused]] int64_t value, [[maybe_unused]] void* userData) {
+void WardenEmulator::hookMemInvalid([[maybe_unused]] uc_engine* uc, int type, uint64_t address, int size, [[maybe_unused]] int64_t value, void* userData) {
 
     const char* typeStr = "UNKNOWN";
     switch (type) {
@@ -593,21 +550,23 @@ void WardenEmulator::hookMemInvalid([[maybe_unused]] uc_engine* uc, int type, ui
     }
 
     {
-        char mBuf[128];
+        char mBuf[160];
         std::snprintf(mBuf, sizeof(mBuf), "WardenEmulator: Invalid memory access: %s at 0x%llX (size=%d)",
                       typeStr, static_cast<unsigned long long>(address), size);
-        LOG_ERROR(mBuf);
+        // A module that never verified faulting is the attempt failing, not
+        // the client. Said at error level it makes a working login look broken.
+        const auto* self = static_cast<const WardenEmulator*>(userData);
+        if (self != nullptr && self->failuresExpected()) {
+            LOG_WARNING(mBuf);
+        } else {
+            LOG_ERROR(mBuf);
+        }
     }
 }
 
 #else // !HAVE_UNICORN
-// Stub implementations — Unicorn Engine not available on this platform.
-WardenEmulator::WardenEmulator()
-    : uc_(nullptr), moduleBase_(0), moduleSize_(0)
-    , stackBase_(0), stackSize_(0)
-    , heapBase_(0), heapSize_(0)
-    , apiStubBase_(0), nextApiStubAddr_(0), apiCodeHookRegistered_(false)
-    , nextHeapAddr_(0) {}
+// Stub implementations - Unicorn Engine not available on this platform.
+WardenEmulator::WardenEmulator() = default;
 WardenEmulator::~WardenEmulator() {}
 bool WardenEmulator::initialize(const void*, size_t, uint32_t) { return false; }
 uint32_t WardenEmulator::hookAPI(const std::string&, const std::string&,
@@ -618,12 +577,9 @@ bool WardenEmulator::writeMemory(uint32_t, const void*, size_t) { return false; 
 std::string WardenEmulator::readString(uint32_t, size_t) { return {}; }
 uint32_t WardenEmulator::allocateMemory(size_t, uint32_t) { return 0; }
 bool WardenEmulator::freeMemory(uint32_t) { return false; }
-uint32_t WardenEmulator::getRegister(int) { return 0; }
-void WardenEmulator::setRegister(int, uint32_t) {}
 void WardenEmulator::setupCommonAPIHooks() {}
 uint32_t WardenEmulator::getAPIAddress(const std::string&, const std::string&) const { return 0; }
 uint32_t WardenEmulator::writeData(const void*, size_t) { return 0; }
-std::vector<uint8_t> WardenEmulator::readData(uint32_t, size_t) { return {}; }
 void WardenEmulator::hookCode(uc_engine*, uint64_t, uint32_t, void*) {}
 void WardenEmulator::hookMemInvalid(uc_engine*, int, uint64_t, int, int64_t, void*) {}
 #endif // HAVE_UNICORN

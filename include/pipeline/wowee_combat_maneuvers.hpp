@@ -7,7 +7,7 @@
 namespace wowee {
 namespace pipeline {
 
-// Wowee Open Combat Maneuver Group catalog (.wcmg) —
+// Wowee Open Combat Maneuver Group catalog (.wcmg) -
 // novel replacement for the hardcoded class-mutex tables
 // that the WoW client uses to grey out incompatible
 // action-bar buttons (only one Warrior stance active at
@@ -39,10 +39,10 @@ namespace pipeline {
 //     nameLen + name
 //     descLen + description
 //     classMask (uint32)
-//     categoryKind (uint8)       — Stance / Form / Aspect /
+//     categoryKind (uint8)       - Stance / Form / Aspect /
 //                                   Presence / Posture /
 //                                   Sigil
-//     exclusive (uint8)          — 0/1 bool, only one
+//     exclusive (uint8)          - 0/1 bool, only one
 //                                   active at a time
 //     pad0 (uint8) / pad1 (uint8)
 //     iconColorRGBA (uint32)
@@ -76,20 +76,20 @@ struct WoweeCombatManeuvers {
     std::string name;
     std::vector<Entry> entries;
 
-    bool isValid() const { return !entries.empty(); }
+    [[nodiscard]] bool isValid() const { return !entries.empty(); }
 
-    const Entry* findById(uint32_t groupId) const;
+    [[nodiscard]] const Entry* findById(uint32_t groupId) const;
 
     // Returns all maneuver groups available to a class
     // (used by the action-bar UI to compute which spells
     // share a mutex bucket and grey accordingly).
-    std::vector<const Entry*> findByClass(uint32_t classBit) const;
+    [[nodiscard]] std::vector<const Entry*> findByClass(uint32_t classBit) const;
 
     // Returns the group containing the given spell ID, if
     // any. Used by the action-bar update path to know
     // whether casting a spell should clear a "currently
     // active" outline elsewhere on the bar.
-    const Entry* findGroupForSpell(uint32_t spellId) const;
+    [[nodiscard]] const Entry* findGroupForSpell(uint32_t spellId) const;
 };
 
 class WoweeCombatManeuversLoader {
@@ -101,16 +101,16 @@ public:
 
     // Preset emitters used by --gen-cmg* variants.
     //
-    //   makeWarrior   — 1 entry: WarriorStances (3 spells:
+    //   makeWarrior   - 1 entry: WarriorStances (3 spells:
     //                    Battle / Defensive / Berserker)
     //                    classMask=1, exclusive.
-    //   makeDruid     — 2 entries: DruidShapeshiftForms
+    //   makeDruid     - 2 entries: DruidShapeshiftForms
     //                    (5 spells: Bear / Cat / Travel /
     //                    Tree of Life / Moonkin) and
     //                    DruidFlightForms (2 spells:
     //                    Flight Form / Swift Flight Form)
     //                    classMask=1024, both exclusive.
-    //   makeAllMutex  — 4 entries spanning all classes
+    //   makeAllMutex  - 4 entries spanning all classes
     //                    that have mutex groups: Warrior
     //                    stances / Hunter aspects / DK
     //                    presences / Druid forms (one

@@ -1,6 +1,12 @@
 #pragma once
 
+#include "rendering/collision_geometry.hpp"
+#include "rendering/vk_shader.hpp"
+#include "rendering/spatial_grid.hpp"
+#include "rendering/shadow_params.hpp"
+
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/grass_clearing.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -11,6 +17,7 @@
 #include <vector>
 #include <string>
 #include <optional>
+#include <limits>
 #include <future>
 #include <algorithm>
 
@@ -71,11 +78,24 @@ public:
      */
     bool loadModel(const pipeline::WMOModel& model, uint32_t id);
 
+    enum class ModelLoadResult { Complete, InProgress, Failed };
+
+    /// Upload a model a few groups at a time. InProgress means call again with
+    /// the same arguments; a single large model can otherwise take over a
+    /// hundred milliseconds, which lands as a visible hitch when terrain
+    /// streaming finalises a tile.
+    ModelLoadResult loadModelIncremental(const pipeline::WMOModel& model, uint32_t id, float budgetMs);
+
     /**
      * Check if a WMO model is currently resident in the renderer
      * @param id WMO model identifier
      */
     bool isModelLoaded(uint32_t id) const;
+    /// Whether this instance's model has finished uploading its groups, and so
+    /// whether a failed floor query means "nothing under you" rather than "not
+    /// loaded yet". The two need telling apart: a rider held in place waiting
+    /// for collision that is already there waits forever.
+    bool instanceHasCollisionGeometry(uint32_t instanceId) const;
 
     /**
      * Check if a WMO instance is still live in the renderer. Owners that cache
@@ -117,6 +137,23 @@ public:
      */
     void setInstanceTransform(uint32_t instanceId, const glm::mat4& transform);
 
+    /// Mark an instance as a moving transport. Its collision still answers the
+    /// static-world floor query (you walk onto a hull, you stand on a lift), but
+    /// only when the deck is genuinely underfoot - see getFloorHeight. Idempotent;
+    /// safe on every register.
+    void setInstanceIsTransport(uint32_t instanceId, bool isTransport);
+
+    /// Take an instance out of the world without unloading it.
+    ///
+    /// A cross-continent transport is one object on a route that spans two
+    /// maps: for half its cycle the Undercity zeppelin is over Howling Fjord
+    /// and is not here at all. Its hull holds still on this map's slice while
+    /// it is away, so without this it would sit invisible-but-solid over the
+    /// tower, and a player could stand on a zeppelin that is on another
+    /// continent. Hidden instances are skipped by drawing and by every spatial
+    /// query, which is where collision comes from.
+    void setInstanceHidden(uint32_t instanceId, bool hidden);
+
     /**
      * Add doodad (child M2) to WMO instance
      * @param instanceId WMO instance to add doodad to
@@ -136,6 +173,11 @@ public:
      * @param modelId WMO model ID
      * @return Vector of doodad templates (empty if no doodads or model not found)
      */
+    /// Set an animation on every child doodad of an instance. Returns how many
+    /// doodads were addressed, so a caller streaming them in over several frames
+    /// can tell when the set has grown and re-apply. A doodad lacking the
+    /// sequence is left as it is.
+    size_t setInstanceDoodadAnimation(uint32_t instanceId, uint32_t animationId, bool loop);
     const std::vector<DoodadTemplate>* getDoodadTemplates(uint32_t modelId) const;
 
     /**
@@ -166,6 +208,9 @@ public:
      */
     /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     void prepareRender();
+    /// viewerPos is the character; portal culling seeds from it as well as from
+    /// the camera, because at a doorway the two stand in different groups and
+    /// neither alone is reliably the right place to start.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                 const glm::vec3* viewerPos = nullptr);
 
@@ -184,6 +229,11 @@ public:
      * Get number of loaded models
      */
     void recreatePipelines();
+    /// The four main-pass pipelines, which initialize() and
+    /// recreatePipelines() both need and each used to describe.
+    bool buildMainPassPipelines(VkDevice device,
+                                wowee::rendering::VkShaderModule& vertShader,
+                                wowee::rendering::VkShaderModule& fragShader);
     bool isInitialized() const { return initialized_; }
     uint32_t getModelCount() const { return loadedModels.size(); }
 
@@ -283,7 +333,16 @@ public:
      * @param outNormalZ If not null, receives the Z component of the floor surface normal
      *                   (1.0 = flat, 0.0 = vertical). Useful for slope walkability checks.
      */
-    std::optional<float> getFloorHeight(float glX, float glY, float glZ, float* outNormalZ = nullptr) const;
+    /// The floor under (glX, glY), searching at or below glZ. By default it
+    /// returns the highest such floor, which is the step-up behaviour. Pass
+    /// `referenceZ` (the querier's actual feet height) to instead get the floor
+    /// closest to the feet - which is what keeps a player standing on the lower
+    /// of two stacked floors under an overhang, rather than being snapped up to
+    /// the level above them.
+    std::optional<float> getFloorHeight(float glX, float glY, float glZ,
+                                        float* outNormalZ = nullptr,
+                                        float referenceZ =
+                                            std::numeric_limits<float>::quiet_NaN()) const;
 
     /** Query floor collision from one moving WMO instance. */
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
@@ -294,6 +353,16 @@ public:
     void debugDumpGroupsAtPosition(float glX, float glY, float glZ) const;
 
     /**
+     * Append the 2D footprints of instances touching the given window, for
+     * the grass generator's clearings - grass grows short and sparse beside
+     * a building the way it does beside a road. Per-group boxes rather than
+     * the instance's outer bounds: a keep's outer box swallows its own
+     * courtyards, and a courtyard is exactly where grass belongs.
+     */
+    void collectGrassClearings(float minX, float minY, float maxX, float maxY,
+                               std::vector<pipeline::GrassClearingSource>& out) const;
+
+    /**
      * Check wall collision and adjust position
      * @param from Starting position
      * @param to Desired position
@@ -302,6 +371,11 @@ public:
      * @return true if collision occurred
      */
     bool checkWallCollision(const glm::vec3& from, const glm::vec3& to, glm::vec3& adjustedPos, bool insideWMO = false) const;
+
+    /// Whether solid WMO geometry stands between two points - a sight line
+    /// rather than a step, so no player radius and no step height. See the
+    /// definition for why checkWallCollision cannot answer this.
+    bool segmentBlocked(const glm::vec3& from, const glm::vec3& to) const;
 
     /**
      * Check if a position is inside any WMO
@@ -335,7 +409,6 @@ public:
      * Limit expensive collision/raycast queries to objects near a focus point.
      */
     void setCollisionFocus(const glm::vec3& worldPos, float radius);
-    void clearCollisionFocus();
 
     void resetQueryStats();
     double getQueryTimeMs() const { return queryTimeMs; }
@@ -376,7 +449,7 @@ public:
     void setDeferNormalMaps(bool defer) { deferNormalMaps_ = defer; }
 
 private:
-    // WMO material UBO — matches WMOMaterial in wmo.frag.glsl
+    // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
     struct WMOMaterialUBO {
         int32_t hasTexture;        // 0
         int32_t alphaTest;         // 4
@@ -439,6 +512,17 @@ private:
             bool isTransparent = false;     // blendMode >= 2
             bool isWindow = false;          // F_SIDN or F_WINDOW material
             bool isLava = false;            // lava/magma texture (UV scroll)
+            /// Cloth hung in the building's own mesh: where the bar is, how
+            /// far the cloth drops below it, and where it hangs.
+            ///
+            /// Stormwind's gate banners are geometry in the city WMO rather
+            /// than doodads - the material is STORMWINDBANNER01 - so the sway
+            /// a banner model gets has to be applied to the batch that draws
+            /// one. Zero drop means the batch is not cloth.
+            float clothTop = 0.0f;
+            float clothDrop = 0.0f;
+            float clothCentreX = 0.0f;
+            float clothCentreY = 0.0f;
             // 0 = not luminous, 1 = authored lamp glass (bright), 2 = firelit
             // from behind with a flicker (clock faces). See wmo.frag's emissive
             // branch for how each level is shaded.
@@ -477,6 +561,12 @@ private:
 
         // Per-collision-triangle MOPY flags (indexed by collision tri index, i.e. triStart/3)
         std::vector<uint8_t> triMopyFlags;
+        /// True when no triangle in this group blocks: no collision hull, and
+        /// nothing rendered that is not detail. Detail never blocks, so such a
+        /// group is walk-through in its entirety - which is a thing to be
+        /// walked through only if it was meant to be, and Darkshore's bridges
+        /// are 428 triangles of it.
+        bool noBlockingTriangles = false;
 
         // Scratch bitset for deduplicating triangle queries (sized to numTriangles)
         mutable std::vector<uint8_t> triVisited;
@@ -484,10 +574,15 @@ private:
         // Build the spatial grid from collision geometry
         void buildCollisionGrid();
 
-        // Get triangle indices for a local-space XY point
-        const std::vector<uint32_t>* getTrianglesAtLocal(float localX, float localY) const;
 
         // Get triangle indices for a local-space XY range (for wall collision)
+        /// The triangles of one of the three cell arrays that a query box
+        /// reaches, deduplicated. The three queries below differ only in
+        /// which array they pass.
+        void gatherCellTriangles(const std::vector<std::vector<uint32_t>>& cells,
+                                 float minX, float minY, float maxX, float maxY,
+                                 std::vector<uint32_t>& out) const;
+
         void getTrianglesInRange(float minX, float minY, float maxX, float maxY,
                                  std::vector<uint32_t>& out) const;
 
@@ -549,7 +644,19 @@ private:
         // For each group: which portal refs belong to it (start index, count)
         std::vector<std::pair<uint16_t, uint16_t>> groupPortalRefs;
 
-        uint32_t getTotalTriangles() const {
+        // Set once the textures and materials below have been populated, so a
+        // resumed load skips straight to the groups it has left.
+        bool setupDone = false;
+        // Next group to upload. A large model's groups are spread across several
+        // calls under a time budget rather than uploaded in one stall.
+        // Next texture to upload. Uploading them all at once cost 40ms on a
+        // transport - the images are large, and the expense is the GPU upload
+        // rather than the decode, which the worker already did.
+        size_t nextTextureIndex = 0;
+        size_t nextGroupIndex = 0;
+        uint32_t loadedGroups = 0;
+
+        [[nodiscard]] uint32_t getTotalTriangles() const {
             uint32_t total = 0;
             for (const auto& group : groups) {
                 total += group.indexCount / 3;
@@ -580,8 +687,38 @@ private:
         };
         std::vector<DoodadInfo> doodads;
 
+        // A moving transport (ship hull, elevator). It keeps ordinary collision -
+        // a rider gets exact deck height from getInstanceFloorHeight, but everyone
+        // else needs the hull solid to walk aboard in the first place. The flag
+        // only restricts how far from the feet the static floor query will accept
+        // this deck, so a lift cycling past a bystander cannot become their ground
+        // (the Undercity elevator yo-yo).
+        bool isTransport = false;
+
+        /// Loaded, positioned, and not in the world right now. See
+        /// setInstanceHidden.
+        bool hidden = false;
+
         void updateModelMatrix();
     };
+
+    /// Recomputes one instance's world and per-group bounds after its
+    /// model matrix has changed.
+    void refreshInstanceBounds(WMOInstance& inst);
+
+    /// Whether a collision focus is set and this instance is outside it.
+    bool outsideCollisionFocus(const WMOInstance& instance) const;
+
+    /// Whether a point is inside any of a WMO's groups, or only its
+    /// interior ones. The two public queries above differ by that flag.
+    bool isInsideWMOGroups(float glX, float glY, float glZ,
+                           bool interiorOnly, uint32_t* outModelId) const;
+
+    /// Whether a point is inside an instance's world bounds, with the Z
+    /// window widened by the caller's margins.
+    bool withinWorldBounds(const WMOInstance& instance,
+                           float glX, float glY, float glZ,
+                           float zMarginDown = 0.0f, float zMarginUp = 0.0f) const;
 
     /**
      * Create GPU resources for a WMO group
@@ -603,8 +740,12 @@ private:
     /**
      * Get visible groups via portal traversal
      */
+    /// Seeds from both the camera's group and the character's: at a doorway the
+    /// two are in different rooms, and walking from only one while judging every
+    /// door against the camera's frustum empties the interior.
     void getVisibleGroupsViaPortals(const ModelData& model,
                                      const glm::vec3& cameraLocalPos,
+                                     const glm::vec3& viewerLocalPos,
                                      const Frustum& frustum,
                                      const glm::mat4& modelMatrix,
                                      std::unordered_set<uint32_t>& outVisibleGroups) const;
@@ -647,24 +788,7 @@ private:
      */
     void destroyGroupGPU(GroupResources& group, bool defer = false);
 
-    struct GridCell {
-        int x;
-        int y;
-        int z;
-        bool operator==(const GridCell& other) const {
-            return x == other.x && y == other.y && z == other.z;
-        }
-    };
-    struct GridCellHash {
-        size_t operator()(const GridCell& c) const {
-            size_t h1 = std::hash<int>()(c.x);
-            size_t h2 = std::hash<int>()(c.y);
-            size_t h3 = std::hash<int>()(c.z);
-            return h1 ^ (h2 * 0x9e3779b9u) ^ (h3 * 0x85ebca6bu);
-        }
-    };
 
-    GridCell toCell(const glm::vec3& p) const;
     void rebuildSpatialIndex();
     void gatherCandidates(const glm::vec3& queryMin, const glm::vec3& queryMax, std::vector<size_t>& outIndices) const;
 
@@ -690,11 +814,9 @@ private:
     // Shadow rendering (Phase 7)
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout shadowParamsLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool shadowParamsPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet shadowParamsSet_ = VK_NULL_HANDLE;
-    ::VkBuffer shadowParamsUBO_ = VK_NULL_HANDLE;
-    VmaAllocation shadowParamsAlloc_ = VK_NULL_HANDLE;
+    /// The set the shadow pass binds. Five separate members before,
+    /// built and torn down here and in three other renderers.
+    ShadowParamsSet shadowParams_;
 
     // Descriptor set layouts
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
@@ -729,6 +851,9 @@ private:
 
     // Loaded models (modelId -> ModelData)
     std::unordered_map<uint32_t, ModelData> loadedModels;
+    // Models part-way through an incremental load; moved into loadedModels once
+    // every group is uploaded, so a half-built model is never rendered.
+    std::unordered_map<uint32_t, ModelData> loadingModels_;
     size_t modelCacheLimit_ = 4000;
     uint32_t modelLimitRejectWarnings_ = 0;
 
@@ -749,9 +874,26 @@ private:
 
     // Rendering state
     bool wireframeMode = false;
-    bool frustumCulling = true;
+    bool frustumCulling = true;  // dead: every instance is included, the group cull does the work
     bool portalCulling = true;   // AABB transform bug fixed; conservative frustum test (no plane-side check) is visually safe
     bool distanceCulling = false;  // Disabled - causes ground to disappear
+
+    /// Master switch, and it is off: no WMO group is dropped for any reason.
+    ///
+    /// Buildings kept disappearing from angles that had no business hiding
+    /// them. Distance culling was turned off years ago for the same complaint
+    /// ("causes ground to disappear") and it did not settle the matter, because
+    /// the distance test below runs whether that flag is set or not - the flag
+    /// only chooses which of two distances to use, so everything past
+    /// viewDistance_ vanished regardless.
+    ///
+    /// The set of instances is already bounded by which tiles are loaded, so
+    /// what this costs is the groups of loaded buildings that are behind the
+    /// camera or too far to matter, not an unbounded scene.
+    ///
+    /// WOWEE_WMO_CULL=1 puts portal and distance culling back, for measuring
+    /// what it costs or for chasing this again.
+    bool cullingEnabled_ = false;
     float maxGroupDistance = 500.0f;
     float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
@@ -760,14 +902,10 @@ private:
     mutable uint32_t lastDistanceCulledGroups = 0;
 
     // Optional query-space culling for collision/raycast hot paths.
-    bool collisionFocusEnabled = false;
-    glm::vec3 collisionFocusPos = glm::vec3(0.0f);
-    float collisionFocusRadius = 0.0f;
-    float collisionFocusRadiusSq = 0.0f;
+    CollisionFocus collisionFocus;
 
     // Uniform grid for fast local collision queries.
-    static constexpr float SPATIAL_CELL_SIZE = 64.0f;
-    std::unordered_map<GridCell, std::vector<uint32_t>, GridCellHash> spatialGrid;
+    SpatialGrid spatialGrid;
     std::unordered_map<uint32_t, size_t> instanceIndexById;
     // Collision scratch buffers are thread_local (see wmo_renderer.cpp) for thread-safety.
 
@@ -781,12 +919,11 @@ private:
         uint32_t portalCulled = 0;
         uint32_t distanceCulled = 0;
     };
-    std::vector<std::future<void>> cullFutures_;
     std::vector<size_t> visibleInstances_;      // reused per frame
     std::vector<InstanceDrawList> drawLists_;    // reused per frame
     std::unordered_set<uint32_t> portalVisibleGroupSet_; // reused per frame (portal culling scratch)
 
-    // Collision query profiling — atomic because getFloorHeight is dispatched
+    // Collision query profiling - atomic because getFloorHeight is dispatched
     // on async threads from camera_controller while the main thread reads these.
     mutable std::atomic<double> queryTimeMs{0.0};
     mutable std::atomic<uint32_t> queryCallCount{0};
@@ -794,7 +931,6 @@ private:
     // Floor height cache - persistent precomputed grid
     static constexpr float FLOOR_GRID_CELL_SIZE = 2.0f;  // 2 unit grid cells
     mutable std::unordered_map<uint64_t, float> precomputedFloorGrid;  // key -> floor height
-    mutable bool floorGridDirty = true;  // Rebuild when instances change
     mutable uint32_t currentFrameId = 0;
 
     uint64_t floorGridKey(float x, float y) const {
@@ -804,16 +940,14 @@ private:
                static_cast<uint64_t>(static_cast<uint32_t>(iy));
     }
 
-    // Compute floor height for a single cell (expensive, done at load time)
-    std::optional<float> computeFloorHeightSlow(float x, float y, float refZ) const;
 
-    // Active WMO group tracking — reduces per-query group iteration
+    // Active WMO group tracking - reduces per-query group iteration
     struct ActiveGroupInfo {
         uint32_t instanceIdx = UINT32_MAX;
         uint32_t modelId = 0;
         int32_t groupIdx = -1;
         std::vector<uint32_t> neighborGroups;  // portal-connected groups
-        bool isValid() const { return instanceIdx != UINT32_MAX && groupIdx >= 0; }
+        [[nodiscard]] bool isValid() const { return instanceIdx != UINT32_MAX && groupIdx >= 0; }
         void invalidate() { instanceIdx = UINT32_MAX; groupIdx = -1; neighborGroups.clear(); }
     };
     mutable ActiveGroupInfo activeGroup_;
@@ -824,7 +958,7 @@ private:
         struct Entry { uint64_t key; float resultZ; float normalZ; uint32_t frameId; };
         Entry entries[CAPACITY] = {};
 
-        uint64_t makeKey(float x, float y) const {
+        [[nodiscard]] uint64_t makeKey(float x, float y) const {
             // 0.5-unit quantized grid
             int32_t ix = static_cast<int32_t>(std::floor(x * 2.0f));
             int32_t iy = static_cast<int32_t>(std::floor(y * 2.0f));
@@ -846,10 +980,9 @@ private:
         void put(float x, float y, float result, float normalZ, uint32_t frame) {
             uint64_t k = makeKey(x, y);
             size_t slot = k % CAPACITY;
-            entries[slot] = { k, result, normalZ, frame };
+            entries[slot] = { .key = k, .resultZ = result, .normalZ = normalZ, .frameId = frame };
         }
     };
-    mutable FrameFloorCache frameFloorCache_;
 };
 
 } // namespace rendering

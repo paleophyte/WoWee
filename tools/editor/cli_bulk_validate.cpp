@@ -1,6 +1,7 @@
 #include "cli_bulk_validate.hpp"
 #include "cli_arg_parse.hpp"
 #include "cli_format_table.hpp"
+#include "cli_paths.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -32,43 +33,6 @@ struct PerFile {
     bool skipped = false;    // file is a known asset format with no validator
 };
 
-bool peekMagic(const fs::path& path, char magic[4]) {
-    std::ifstream is(path, std::ios::binary);
-    if (!is) return false;
-    if (!is.read(magic, 4) || is.gcount() != 4) return false;
-    return true;
-}
-
-// Wrap a single argument in single quotes for /bin/sh,
-// escaping any embedded single quotes via the standard
-// '"'"' incantation. Used so paths with spaces /
-// apostrophes still work when handed to std::system().
-std::string shellQuote(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') out += "'\"'\"'";
-        else out.push_back(c);
-    }
-    out.push_back('\'');
-    return out;
-}
-
-// Derive the per-format --validate-X flag from the
-// --info-X flag in the format table. Both share the same
-// magic suffix (e.g. --info-wsrg -> --validate-wsrg).
-std::string deriveValidateFlag(const char* infoFlag) {
-    if (!infoFlag) return {};
-    std::string s = infoFlag;
-    const std::string prefix = "--info-";
-    if (s.size() < prefix.size() ||
-        s.compare(0, prefix.size(), prefix) != 0) {
-        return {};
-    }
-    return "--validate-" + s.substr(prefix.size());
-}
-
 int handleBulk(int& i, int argc, char** argv) {
     std::string dir = argv[++i];
     bool jsonOut = consumeJsonFlag(i, argc, argv);
@@ -77,7 +41,7 @@ int handleBulk(int& i, int argc, char** argv) {
             "bulk-validate: not a directory: %s\n", dir.c_str());
         return 1;
     }
-    // argv[0] is this binary's invocation path — needed
+    // argv[0] is this binary's invocation path - needed
     // so each file can be validated via a fresh subprocess
     // call, isolating one file's failures from another's.
     std::string self = argv[0];
@@ -91,10 +55,12 @@ int handleBulk(int& i, int argc, char** argv) {
         PerFile pf;
         pf.path = entry.path();
         pf.fmt = fmt;
-        std::string validateFlag = deriveValidateFlag(fmt->infoFlag);
+        const std::string suffix = formatFlagSuffix(fmt->infoFlag);
+        const std::string validateFlag =
+            suffix.empty() ? std::string() : "--validate-" + suffix;
         if (validateFlag.empty()) {
             // Asset-style format with no validator hooked
-            // up — count it but don't try to invoke.
+            // up - count it but don't try to invoke.
             pf.skipped = true;
             rows.push_back(std::move(pf));
             continue;
@@ -152,7 +118,7 @@ int handleBulk(int& i, int argc, char** argv) {
     std::printf("  failed           : %zu\n", failCount);
     std::printf("  skipped (no val) : %zu\n", skipCount);
     if (ok) {
-        std::printf("  OK — every catalog with a validator passed\n");
+        std::printf("  OK - every catalog with a validator passed\n");
         return 0;
     }
     std::printf("\n  failures:\n");
@@ -168,7 +134,9 @@ int handleBulk(int& i, int argc, char** argv) {
     // command. Pick the first failure.
     for (const auto& r : rows) {
         if (r.skipped || r.exitCode == 0) continue;
-        std::string flag = deriveValidateFlag(r.fmt->infoFlag);
+        const std::string suffix = formatFlagSuffix(r.fmt->infoFlag);
+        const std::string flag =
+            suffix.empty() ? std::string() : "--validate-" + suffix;
         std::printf("    %s %s %s\n",
                     self.c_str(), flag.c_str(),
                     r.path.string().c_str());

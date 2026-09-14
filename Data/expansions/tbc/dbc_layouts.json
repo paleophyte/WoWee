@@ -28,14 +28,15 @@
     "TitleBit": 20
   },
   "CharacterFacialHairStyles": {
-    "Geoset100": 3,
-    "Geoset200": 5,
-    "Geoset300": 4,
+    "Geoset100": 6,
+    "Geoset200": 8,
+    "Geoset300": 7,
     "RaceID": 0,
     "SexID": 1,
     "Variation": 2
   },
   "CreatureDisplayInfo": {
+    "CreatureModelScale": 4,
     "ExtraDisplayId": 3,
     "ID": 0,
     "ModelID": 1,
@@ -67,12 +68,13 @@
   },
   "CreatureModelData": {
     "ID": 0,
-    "ModelPath": 2
+    "ModelPath": 2,
+    "ModelScale": 4
   },
   "Emotes": {
     "AnimID": 2,
-    "ID": 0,
-    "EmoteSpecProc": 4
+    "EmoteSpecProc": 4,
+    "ID": 0
   },
   "EmotesText": {
     "Command": 1,
@@ -89,6 +91,7 @@
   },
   "Faction": {
     "ID": 0,
+    "Name": 23,
     "ReputationBase0": 10,
     "ReputationBase1": 11,
     "ReputationBase2": 12,
@@ -96,8 +99,7 @@
     "ReputationRaceMask0": 2,
     "ReputationRaceMask1": 3,
     "ReputationRaceMask2": 4,
-    "ReputationRaceMask3": 5,
-    "Name": 23
+    "ReputationRaceMask3": 5
   },
   "FactionTemplate": {
     "Enemy0": 6,
@@ -120,17 +122,17 @@
     "ID": 0,
     "InventoryIcon": 5,
     "LeftModel": 1,
-    "RightModel": 2,
     "LeftModelTexture": 3,
+    "RightModel": 2,
     "RightModelTexture": 4,
-    "TextureArmLower": 15,
-    "TextureArmUpper": 14,
-    "TextureFoot": 21,
-    "TextureHand": 16,
-    "TextureLegLower": 20,
-    "TextureLegUpper": 19,
-    "TextureTorsoLower": 18,
-    "TextureTorsoUpper": 17
+    "TextureArmLower": 16,
+    "TextureArmUpper": 15,
+    "TextureFoot": 22,
+    "TextureHand": 17,
+    "TextureLegLower": 21,
+    "TextureLegUpper": 20,
+    "TextureTorsoLower": 19,
+    "TextureTorsoUpper": 18
   },
   "ItemSet": {
     "ID": 0,
@@ -179,16 +181,16 @@
     "Z": 3
   },
   "LightFloatBand": {
-    "BlockIndex": 1,
-    "NumKeyframes": 2,
-    "TimeKey0": 3,
-    "Value0": 19
+    "BlockIndex": 0,
+    "NumKeyframes": 1,
+    "TimeKey0": 2,
+    "Value0": 18
   },
   "LightIntBand": {
-    "BlockIndex": 1,
-    "NumKeyframes": 2,
-    "TimeKey0": 3,
-    "Value0": 19
+    "BlockIndex": 0,
+    "NumKeyframes": 1,
+    "TimeKey0": 2,
+    "Value0": 18
   },
   "LightParams": {
     "LightParamsID": 0
@@ -199,8 +201,10 @@
   },
   "SkillLine": {
     "Category": 1,
+    "Description": 20,
     "ID": 0,
-    "Name": 3
+    "Name": 3,
+    "SpellIcon": 37
   },
   "SkillLineAbility": {
     "SkillLineID": 1,
@@ -209,28 +213,56 @@
   "Spell": {
     "Attributes": 5,
     "AttributesEx": 6,
-    "Targets": 14,
-    "RecoveryTime": 23,
-    "CategoryRecoveryTime": 24,
     "CastingTimeIndex": 22,
+    "CategoryRecoveryTime": 24,
+    "Description": 161,
     "DispelType": 3,
     "DurationIndex": 34,
+    "Effect0": 65,
+    "Effect1": 66,
+    "Effect2": 67,
+    "EffectApplyAuraName0": 95,
+    "EffectApplyAuraName1": 96,
+    "EffectApplyAuraName2": 97,
     "EffectBasePoints0": 80,
-    "Effect0": 71,
-    "Effect1": 72,
-    "Effect2": 73,
     "EffectBasePoints1": 81,
     "EffectBasePoints2": 82,
+    "EffectImplicitTargetA": 86,
+    "EffectItemType0": 107,
+    "EffectItemType1": 108,
+    "EffectItemType2": 109,
+    "EffectMiscValue0": 110,
+    "EffectMiscValue1": 111,
+    "EffectMiscValue2": 112,
     "ID": 0,
     "IconID": 124,
     "ManaCost": 36,
     "Name": 127,
     "PowerType": 35,
     "RangeIndex": 40,
-    "Rank": 136,
+    "Rank": 144,
+    "Reagent0": 46,
+    "Reagent1": 47,
+    "Reagent2": 48,
+    "Reagent3": 49,
+    "Reagent4": 50,
+    "Reagent5": 51,
+    "Reagent6": 52,
+    "Reagent7": 53,
+    "ReagentCount0": 54,
+    "ReagentCount1": 55,
+    "ReagentCount2": 56,
+    "ReagentCount3": 57,
+    "ReagentCount4": 58,
+    "ReagentCount5": 59,
+    "ReagentCount6": 60,
+    "ReagentCount7": 61,
+    "RecoveryTime": 23,
     "SchoolMask": 215,
     "SpellVisualID": 122,
-    "Tooltip": 154
+    "TargetAuraState": 19,
+    "Targets": 14,
+    "Tooltip": 178
   },
   "SpellIcon": {
     "ID": 0,
@@ -241,14 +273,14 @@
     "Name": 13
   },
   "SpellRange": {
-    "MinRange": 2,
-    "MaxRange": 4
+    "MaxRange": 4,
+    "MinRange": 2
   },
   "SpellVisual": {
     "CastKit": 2,
     "ID": 0,
     "ImpactKit": 3,
-    "MissileModel": 8,
+    "MissileModel": 7,
     "PrecastKit": 1
   },
   "SpellVisualEffectName": {
@@ -286,10 +318,8 @@
   "TaxiNodes": {
     "ID": 0,
     "MapID": 1,
-    "MountDisplayIdAlliance": 14,
-    "MountDisplayIdAllianceFallback": 12,
-    "MountDisplayIdHorde": 15,
-    "MountDisplayIdHordeFallback": 13,
+    "MountDisplayIdAlliance": 22,
+    "MountDisplayIdHorde": 23,
     "Name": 5,
     "X": 2,
     "Y": 3,

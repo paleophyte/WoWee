@@ -20,8 +20,14 @@ struct GPUPerFrameData {
     glm::vec4 ambientColor;   // xyz = color, w = unused
     glm::vec4 viewPos;        // xyz = camera pos, w = unused
     glm::vec4 fogColor;       // xyz = color, w = unused
-    glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = unused
-    glm::vec4 shadowParams;   // x = enabled(0/1), y = strength, z = unused, w = unused
+    glm::vec4 fogParams;      // x = fogStart, y = fogEnd, z = time, w = water ripple strength
+    glm::vec4 shadowParams;   // x = enabled(0/1), y = strength, z = one shadow-map texel, w = unused
+    // The player, for effects that react to where they are standing: water
+    // ripples and the foliage the player brushes past. playerWake trails the
+    // player by a fixed time constant, so clutter the player has already walked
+    // through springs back over that interval instead of snapping upright.
+    glm::vec4 playerPos;      // xyz = player world position, w = horizontal speed (yd/s)
+    glm::vec4 playerWake;     // xyz = trailing player position, w = unused
     glm::vec4 localLightPosRadius[MAX_LOCAL_LIGHTS];       // xyz = position, w = radius
     glm::vec4 localLightColorIntensity[MAX_LOCAL_LIGHTS];  // rgb = color, w = intensity
     glm::ivec4 localLightMeta;                             // x = active light count
@@ -32,10 +38,40 @@ struct GPUPushConstants {
     glm::mat4 model;
 };
 
-// Push constants for shadow rendering passes
-struct ShadowPush {
-    glm::mat4 lightSpaceMatrix;
+/// The WMO's own, which carries where a batch of cloth hangs beside the model
+/// matrix: (top z, drop, centre x, centre y) in the model's local space.
+struct WMOPushConstants {
     glm::mat4 model;
+    glm::vec4 cloth{0.0f};
+};
+
+// Push constants for shadow rendering passes.
+//
+// Two matrices filled 128 bytes exactly, which is all Vulkan guarantees for
+// push constants - and left no room for the sway a foliage caster needs to
+// match the tree it belongs to. The light-space and model matrices are
+// multiplied on the CPU instead, since nothing in the shadow shaders wanted
+// them apart: the fragment shader's world position was never read.
+struct ShadowPush {
+    glm::mat4 lightSpaceModel;
+    /// xy: the instance's world origin, which gives the wind its per-tree
+    /// phase. z: the height the bend is normalised against. w: its amplitude.
+    /// All zero for anything that does not sway.
+    glm::vec4 sway{0.0f};
+    /// x: sample the texture. y: alpha-test it. z: bend in the wind.
+    ///
+    /// These were in the uniform buffer, and the M2 pass writes that buffer
+    /// twice a frame - once for its solid casters, once for its foliage. A
+    /// uniform buffer is read when the draw executes rather than when it is
+    /// recorded, so the second write decided what the first pass's draws saw,
+    /// and one persistently-mapped copy shared between frames in flight let a
+    /// CPU write land in the middle of the previous frame's reads. Losing the
+    /// alpha test that way turns a leaf cutout into the solid outline of the
+    /// canopy. Push constants are recorded into the command buffer with the
+    /// draw, so there is nothing left to race.
+    glm::ivec4 flags{0};
+    /// x: the wind clock the sway is sampled at.
+    glm::vec4 wind{0.0f};
 };
 
 // Uniform buffer for shadow rendering parameters (matches shader std140 layout)
@@ -64,7 +100,7 @@ struct QueryTimer {
         if (totalMs) {
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
-            // Relaxed is fine for diagnostics — exact ordering doesn't matter.
+            // Relaxed is fine for diagnostics - exact ordering doesn't matter.
             double old = totalMs->load(std::memory_order_relaxed);
             while (!totalMs->compare_exchange_weak(old, old + ms, std::memory_order_relaxed)) {}
         }

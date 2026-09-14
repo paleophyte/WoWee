@@ -69,6 +69,31 @@ inline float canonicalToServerYaw(float canonicalYaw) {
     return normalizeAngleRad(canonicalYaw + (PI * 0.5f));
 }
 
+// Character yaw is the renderer's facing in degrees; canonical yaw is the game
+// side's in radians. The frame loop pushes render → game every frame, so the
+// renderer is the source of truth and anything wanting to change facing has to
+// change it there - see GameHandler::faceCanonicalYaw. Both directions live
+// here so the pair cannot drift: they were hand-written at four call sites, two
+// of them inverting the other two from memory.
+//
+// Render yaw is canonical + 90 degrees, which falls out of the two conventions
+// rather than being a choice: canonicalToRender swaps x and y, and canonical yaw
+// is atan2(-dy, dx), so a direction at canonical yaw c has render components
+// (-sin c, cos c) and therefore a render yaw of c + 90.
+//
+// It was written as 180 - c, which is a mirror rather than a rotation: the two
+// agree at exactly one heading and diverge everywhere else. Every user of the
+// pair was consistently wrong together, so nothing looked amiss until a value
+// crossed to the server - orientation, where it made the arc checks fail and
+// the server report a target as not in front while the character faced it.
+inline float characterYawDegToCanonical(float yawDeg) {
+    return normalizeAngleRad(yawDeg * (PI / 180.0f) - (PI * 0.5f));
+}
+
+inline float canonicalToCharacterYawDeg(float canonicalYaw) {
+    return canonicalYaw * (180.0f / PI) + 90.0f;
+}
+
 // Convert between canonical WoW and engine rendering coordinates (just swap X/Y).
 inline glm::vec3 canonicalToRender(const glm::vec3& wow) {
     return glm::vec3(wow.y, wow.x, wow.z);

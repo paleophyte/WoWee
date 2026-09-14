@@ -73,13 +73,21 @@ is expected for gameplay-affecting changes.
 - `opcodes.json` supports `_extends` / `_remove` (see
   `src/game/opcode_table.cpp` `loadOpcodeJsonRecursive`). The turtle
   profile uses this to inherit from classic.
-- `update_fields.json` does **not** currently support `_extends` — the
+- `update_fields.json` does **not** currently support `_extends` - the
   classic and turtle files must be kept byte-identical by hand. Update
   both together when changing vanilla field indices.
 - Authoritative source for vanilla 1.12 field indices: vmangos
   `UpdateFields_1_12_1.h`. For 2.4.3 and 3.3.5a, use vmangos
   `UpdateFields_2_4_3.h` and AzerothCore / TrinityCore `UpdateFields.h`
   respectively.
+- `expansion.json` may name the realm's Warden signing key as
+  `wardenRsaModulus`, 512 hex characters for the 256-byte RSA-2048 modulus.
+  Omit it and the module's signature is checked against Blizzard's own key,
+  which is right for a server running a genuine module. A server that builds
+  its own module signs it with a key of its own, and its key can be pulled
+  out of that server's client with `extract_warden_rsa.py`. The value is
+  refused unless it is exactly 512 hex characters: a key wrong in one nibble
+  fails verification the same way no key at all does.
 
 ## Key Files for New Contributors
 

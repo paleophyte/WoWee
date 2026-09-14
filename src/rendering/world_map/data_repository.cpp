@@ -1,4 +1,4 @@
-// data_repository.cpp — DBC data loading, ZMP pixel map, and zone/POI/overlay storage.
+// data_repository.cpp - DBC data loading, ZMP pixel map, and zone/POI/overlay storage.
 // Extracted from WorldMap::loadZonesFromDBC, loadPOIData, buildCosmicView
 // (Phase 5 of refactoring plan).
 #include "rendering/world_map/data_repository.hpp"
@@ -61,6 +61,12 @@ void DataRepository::loadZones(const std::string& mapName,
     }
 
     if (mapID < 0) {
+        // "World" and "Cosmic" are views the interface assembles out of the
+        // other maps, not maps the game has. There is nothing to load for one
+        // and nothing wrong when nothing is - said as an unknown map, it reads
+        // as data missing every time somebody zooms the map out.
+        if (isUiOnlyMapFolder(mapName)) return;
+
         mapID = folderToMapId(mapName);
         if (mapID < 0) {
             LOG_WARNING("DataRepository: unknown map '", mapName, "'");
@@ -190,8 +196,7 @@ void DataRepository::loadZones(const std::string& mapName,
     }
 
     // Derive continent bounds from child zones if missing
-    for (int ci = 0; ci < static_cast<int>(zones_.size()); ci++) {
-        auto& cont = zones_[ci];
+    for (auto& cont : zones_) {
         if (cont.areaID != 0) continue;
         if (std::abs(cont.bounds.locLeft) > 0.001f || std::abs(cont.bounds.locRight) > 0.001f ||
             std::abs(cont.bounds.locTop) > 0.001f || std::abs(cont.bounds.locBottom) > 0.001f)
@@ -329,12 +334,6 @@ glm::vec3 DataRepository::transformRenderPosition(
     return renderPos;
 }
 
-int DataRepository::getExpansionLevel() {
-    if (game::isClassicLikeExpansion()) return 0;
-    if (game::isActiveExpansion("tbc")) return 1;
-    return 2;  // WotLK and above
-}
-
 // --------------------------------------------------------
 // ZMP pixel map loading
 // --------------------------------------------------------
@@ -379,7 +378,7 @@ void DataRepository::loadZmpPixelMap(const std::string& continentName,
             }
         }
     }
-    LOG_INFO("DataRepository: loaded ZMP '", zmpPath, "' — ",
+    LOG_INFO("DataRepository: loaded ZMP '", zmpPath, "' - ",
              nonZero, "/", ZMP_SIZE * ZMP_SIZE, " non-zero cells, "
              "maxCol=", maxCol, " maxRow=", maxRow,
              " (if ~125/~111 → maps to 1024x768 FBO, if ~127/~127 → maps to 1002x668 visible)");
@@ -456,8 +455,8 @@ int DataRepository::zoneIndexForAreaId(uint32_t areaId) const {
     // For now, iterate zones looking for one whose overlays reference this areaId.
     for (int i = 0; i < static_cast<int>(zones_.size()); i++) {
         for (const auto& ov : zones_[i].overlays) {
-            for (int j = 0; j < 4; j++) {
-                if (ov.areaIDs[j] == areaId) return i;
+            for (uint32_t ovAreaId : ov.areaIDs) {
+                if (ovAreaId == areaId) return i;
             }
         }
     }
@@ -514,20 +513,29 @@ void DataRepository::buildCosmicView(int /*expLevel*/) {
     cosmicMaps_.clear();
 
     if (game::isClassicLikeExpansion()) {
-        // Vanilla/Classic: No cosmic view — skip from WORLD straight to CONTINENT.
+        // Vanilla/Classic: No cosmic view - skip from WORLD straight to CONTINENT.
         cosmicEnabled_ = false;
-        LOG_INFO("DataRepository: Classic mode — cosmic view disabled");
+        LOG_INFO("DataRepository: Classic mode - cosmic view disabled");
         return;
     }
 
     cosmicEnabled_ = true;
 
-    // Azeroth (EK + Kalimdor) — always present; bottom-right region of cosmic map
-    cosmicMaps_.push_back({0, "Azeroth", 0.58f, 0.05f, 0.95f, 0.95f});
+    // Where each world actually sits on the cosmic art, measured off it rather
+    // than rounded to a tenth. These were 0.05 to 0.95 tall, which is the whole
+    // sheet: hovering blank parchment at the top of the map highlighted
+    // Azeroth, and the box drawn around it enclosed most of the page.
+    //
+    // The bottom edges take in the name banner under each globe, which is part
+    // of the thing being pointed at.
+    cosmicMaps_.push_back({.mapId = 0, .label = "Azeroth",
+                           .uvLeft = 0.585f, .uvTop = 0.370f,
+                           .uvRight = 0.945f, .uvBottom = 0.875f});
 
     if (game::isActiveExpansion("tbc") || game::isActiveExpansion("wotlk")) {
-        // TBC+: Add Outland — top-left region of cosmic map
-        cosmicMaps_.push_back({530, "Outland", 0.05f, 0.10f, 0.55f, 0.90f});
+        cosmicMaps_.push_back({.mapId = 530, .label = "Outland",
+                               .uvLeft = 0.115f, .uvTop = 0.070f,
+                               .uvRight = 0.555f, .uvBottom = 0.610f});
     }
 
     LOG_INFO("DataRepository: cosmic view built with ", cosmicMaps_.size(), " landmasses");
@@ -539,15 +547,28 @@ void DataRepository::buildAzerothView(int /*expLevel*/) {
     // Clickable continent regions on the Azeroth world map (azeroth1-12.blp).
     // UV coordinates are approximate positions of each landmass on the combined map.
 
-    // Eastern Kingdoms — right side of the Azeroth map
-    azerothRegions_.push_back({0, mapDisplayName(0), 0.55f, 0.05f, 0.95f, 0.95f});
+    // Eastern Kingdoms - right side of the Azeroth map
+    // Measured off the world map art rather than rounded to a twentieth. Eastern
+    // Kingdoms began at 0.55 - the middle of the ocean, overlapping Northrend's
+    // box - so pointing at Northrend's eastern half highlighted the wrong
+    // continent, and whichever was listed first won.
+    azerothRegions_.push_back({.mapId = 0, .label = mapDisplayName(0),
+                               .uvLeft = 0.700f, .uvTop = 0.155f,
+                               .uvRight = 0.960f, .uvBottom = 0.915f});
 
-    // Kalimdor — left side of the Azeroth map
-    azerothRegions_.push_back({1, mapDisplayName(1), 0.05f, 0.10f, 0.45f, 0.95f});
+    // Kalimdor - left side of the Azeroth map
+    azerothRegions_.push_back({.mapId = 1, .label = mapDisplayName(1),
+                               .uvLeft = 0.085f, .uvTop = 0.185f,
+                               .uvRight = 0.355f, .uvBottom = 0.935f});
 
     if (game::isActiveExpansion("wotlk")) {
-        // WotLK: Northrend — top-center of the Azeroth map
-        azerothRegions_.push_back({571, mapDisplayName(571), 0.30f, 0.0f, 0.72f, 0.28f});
+        // WotLK: Northrend - top-center of the Azeroth map
+        // Its western tip and Kalimdor's eastern islands are a whisker apart,
+        // so the two boxes are parted over open sea where neither is being
+        // pointed at.
+        azerothRegions_.push_back({.mapId = 571, .label = mapDisplayName(571),
+                                   .uvLeft = 0.365f, .uvTop = 0.020f,
+                                   .uvRight = 0.690f, .uvBottom = 0.310f});
     }
 
     LOG_INFO("DataRepository: Azeroth view built with ", azerothRegions_.size(), " continent regions");
