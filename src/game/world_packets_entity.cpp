@@ -822,6 +822,7 @@ bool AttackStopParser::parse(network::Packet& packet, AttackStopData& data) {
 }
 
 bool AttackerStateUpdateParser::parse(network::Packet& packet, AttackerStateUpdateData& data) {
+    data = AttackerStateUpdateData{};
     // Upfront validation: hitInfo(4) + packed GUIDs(1-8 each) + totalDamage(4) + overkill(4) + subDamageCount(1) = 17 bytes minimum
     if (!packet.hasRemaining(17)) return false;
 
@@ -849,55 +850,55 @@ bool AttackerStateUpdateParser::parse(network::Packet& packet, AttackerStateUpda
     data.overkill = static_cast<int32_t>(packet.readUInt32());
     data.subDamageCount = packet.readUInt8();
 
-    // Cap subDamageCount: each entry is 20 bytes. If the claimed count
-    // exceeds what the remaining bytes can hold, a GUID was mis-parsed
-    // (off by one byte), causing the school-mask byte to be read as count.
-    // In that case clamp to the number of full entries that fit.
-    {
-        size_t remaining = packet.getRemainingSize();
-        size_t maxFit    = remaining / 20;
-        if (data.subDamageCount > maxFit) {
-            data.subDamageCount = static_cast<uint8_t>(std::min<size_t>(maxFit, 64));
-        } else if (data.subDamageCount > 64) {
-            data.subDamageCount = 64;
-        }
+    // Unit::SendAttackStateUpdate in AzerothCore and TrinityCore: each
+    // sub-damage is its school and its damage as a float and as an integer;
+    // the absorbs and then the resists follow as runs of their own, each only
+    // when the hit flags say there are any; then the victim state, one byte.
+    // Classic and TBC put the absorb and resist inside each sub-damage and send
+    // the state as four bytes, and this read WotLK that way too - so the state
+    // came out as an absorb, every hit showed one, and a dodge or parry read
+    // as a hit for nothing.
+    constexpr uint32_t HITINFO_FULL_ABSORB = 0x20, HITINFO_PARTIAL_ABSORB = 0x40;
+    constexpr uint32_t HITINFO_FULL_RESIST = 0x80, HITINFO_PARTIAL_RESIST = 0x100;
+    constexpr uint32_t HITINFO_BLOCK = 0x2000, HITINFO_RAGE_GAIN = 0x800000;
+    // A count no packet could hold means a guid was misread.
+    if (data.subDamageCount == 0 ||
+        !packet.hasRemaining(static_cast<size_t>(data.subDamageCount) * 12)) {
+        packet.setReadPos(startPos);
+        return false;
     }
-    if (data.subDamageCount == 0) return false;
-
-    data.subDamages.reserve(data.subDamageCount);
-    for (uint8_t i = 0; i < data.subDamageCount; ++i) {
-        // Each sub-damage entry needs 20 bytes: schoolMask(4) + damage(4) + intDamage(4) + absorbed(4) + resisted(4)
-        if (!packet.hasRemaining(20)) {
-            data.subDamageCount = i;
-            break;
-        }
-        SubDamage sub;
+    data.subDamages.resize(data.subDamageCount);
+    for (SubDamage& sub : data.subDamages) {
         sub.schoolMask = packet.readUInt32();
         sub.damage = packet.readFloat();
         sub.intDamage = packet.readUInt32();
-        sub.absorbed = packet.readUInt32();
-        sub.resisted = packet.readUInt32();
-        data.subDamages.push_back(sub);
+    }
+    const auto readRun = [&](uint32_t SubDamage::*field) {
+        if (!packet.hasRemaining(static_cast<size_t>(data.subDamageCount) * 4)) return false;
+        for (SubDamage& sub : data.subDamages) sub.*field = packet.readUInt32();
+        return true;
+    };
+    if ((data.hitInfo & (HITINFO_FULL_ABSORB | HITINFO_PARTIAL_ABSORB)) &&
+        !readRun(&SubDamage::absorbed)) {
+        packet.setReadPos(startPos);
+        return false;
+    }
+    if ((data.hitInfo & (HITINFO_FULL_RESIST | HITINFO_PARTIAL_RESIST)) &&
+        !readRun(&SubDamage::resisted)) {
+        packet.setReadPos(startPos);
+        return false;
     }
 
-    // Validate victimState + overkill fields (8 bytes)
-    if (!packet.hasRemaining(8)) {
-        data.victimState = 0;
-        return !data.subDamages.empty();
+    // The victim state, then an unknown and the melee spell id, both zero.
+    if (!packet.hasRemaining(9)) {
+        packet.setReadPos(startPos);
+        return false;
     }
-
-    data.victimState = packet.readUInt32();
-    // WotLK: attackerState(4) + meleeSpellId(4) follow victimState
-    auto rem = [&]() { return packet.getRemainingSize(); };
-    if (rem() >= 4) packet.readUInt32(); // attackerState (always 0)
-    if (rem() >= 4) packet.readUInt32(); // meleeSpellId (0 for auto-attack)
-
-    // hitInfo-conditional fields: HITINFO_BLOCK(0x2000), RAGE_GAIN(0x20000), FAKE_DAMAGE(0x40)
-    if ((data.hitInfo & 0x2000) && rem() >= 4)  data.blocked  = packet.readUInt32();
-    else data.blocked = 0;
-    // RAGE_GAIN and FAKE_DAMAGE both add a uint32 we can skip
-    if ((data.hitInfo & 0x20000) && rem() >= 4) packet.readUInt32(); // rage gain
-    if ((data.hitInfo & 0x40)    && rem() >= 4) packet.readUInt32(); // fake damage total
+    data.victimState = packet.readUInt8();
+    packet.readUInt32();
+    packet.readUInt32();
+    data.blocked = ((data.hitInfo & HITINFO_BLOCK) && packet.hasRemaining(4)) ? packet.readUInt32() : 0;
+    if ((data.hitInfo & HITINFO_RAGE_GAIN) && packet.hasRemaining(4)) packet.readUInt32();
 
     LOG_DEBUG("Melee hit: ", data.totalDamage, " damage",
               data.isCrit() ? " (CRIT)" : "",

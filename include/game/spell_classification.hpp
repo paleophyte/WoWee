@@ -21,6 +21,13 @@ inline constexpr float kCombatRangeYards = 5.0f;
 /// Returned when SpellRange.dbc was unavailable - nothing may be inferred from it.
 inline constexpr float kUnknownRange = -1.0f;
 
+/// A cost given as a percent of a pool, as Spell.dbc writes every hunter shot:
+/// a share of base mana for mana spells, of the maximum for focus, rage and
+/// energy. Rounded down, as the server rounds it.
+inline uint32_t percentPowerCost(uint32_t pool, uint32_t percent) {
+    return static_cast<uint32_t>(static_cast<uint64_t>(pool) * percent / 100);
+}
+
 /// "Self Only" range: the spell cannot reach another unit, so it lands on the caster
 /// no matter what is targeted (shouts, self-buffs, hearthstone).
 inline bool isSelfCastRange(float maxRange) {
@@ -33,6 +40,29 @@ inline bool isSelfCastRange(float maxRange) {
 /// legitimate cast.
 inline bool isMeleeRange(float maxRange) {
     return maxRange > 0.0f && maxRange <= kCombatRangeYards;
+}
+
+/// Whether a target at `centreDistance` is within a spell's reach, measured the
+/// way the server measures it: edge to edge, not centre to centre.
+///
+/// Both units' combat reach come off the distance, so a ranged spell reaches
+/// its SpellRange yards plus the two reaches. A melee ability reaches the two
+/// reaches plus 4/3 of a yard and never less than Combat Range - which is how a
+/// warrior hits a dragon from well outside five yards of its centre. Short of
+/// the minimum range, a hunter's dead zone, is out of range too.
+///
+/// Centre to centre, every melee button read out of range on anything larger
+/// than a boar and a ranged one went red a couple of yards early.
+inline bool withinSpellRange(float centreDistance, float minRange, float maxRange,
+                             float casterReach, float targetReach) {
+    const float reaches = casterReach + targetReach;
+    if (isMeleeRange(maxRange)) {
+        const float reach = reaches + 4.0f / 3.0f;
+        return centreDistance <= (reach > kCombatRangeYards ? reach : kCombatRangeYards);
+    }
+    const float edge = centreDistance - reaches;
+    if (minRange > 0.0f && edge < minRange) return false;
+    return edge <= maxRange;
 }
 
 /// Spell.dbc EffectImplicitTargetA values the client reasons about.

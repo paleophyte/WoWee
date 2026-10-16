@@ -132,3 +132,28 @@ TEST_CASE("Packing masks each field to its own width", "[packedtime]") {
     d.minute = 64;                      // one past the field
     CHECK(((packWowPackedTime(d) >> 6) & 0x1Fu) == 0u);  // the hour is untouched
 }
+
+TEST_CASE("The game clock keeps realm time at the speed servers send", "[packedtime]") {
+    using wowee::game::gameClockHour;
+    constexpr float kServerSpeed = 1.0f / 60.0f;
+    // A real minute moves the clock a game minute.
+    CHECK(gameClockHour(12.0f, 60.0, kServerSpeed) == Catch::Approx(12.0f + 1.0f / 60.0f));
+    // An hour later it is an hour later.
+    CHECK(gameClockHour(6.5f, 3600.0, kServerSpeed) == Catch::Approx(7.5f));
+    // And it wraps at midnight rather than running past 24.
+    CHECK(gameClockHour(23.5f, 3600.0, kServerSpeed) == Catch::Approx(0.5f));
+}
+
+TEST_CASE("The game clock does not lose time to small steps", "[packedtime]") {
+    using wowee::game::gameClockHour;
+    // Ten minutes at 500 frames a second, asked every frame. Adding each
+    // frame's sliver to a float near 18 rounded it away and stopped the clock;
+    // measuring from the packet cannot.
+    double elapsed = 0.0;
+    float hour = 18.0f;
+    for (int frame = 0; frame < 600 * 500; ++frame) {
+        elapsed += 1.0 / 500.0;
+        hour = gameClockHour(18.0f, elapsed, 1.0f / 60.0f);
+    }
+    CHECK(hour == Catch::Approx(18.0f + 10.0f / 60.0f).margin(1e-4));
+}

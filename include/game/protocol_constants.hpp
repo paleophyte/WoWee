@@ -18,7 +18,7 @@ constexpr uint32_t COPPER_PER_SILVER = 100;
 // Unit flags (UNIT_FIELD_FLAGS - index 59 in UnitFields for 3.3.5a;
 // 46 in Classic/TBC/Turtle. Bitmask values below are stable across expansions.)
 // ---------------------------------------------------------------------------
-constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00000100;
+constexpr uint32_t UNIT_FLAG_TAXI_FLIGHT = 0x00100000;
 constexpr uint32_t UNIT_FLAG_IN_COMBAT   = 0x00080000;
 /// The server's own mark for a unit the player is not meant to interact with:
 /// the triggers and bunnies that scripts hang their effects on. They are
@@ -29,6 +29,8 @@ constexpr uint32_t UNIT_FLAG_IN_COMBAT   = 0x00080000;
 /// summoner, and only the one the player steers answers to this.
 constexpr uint32_t UNIT_FLAG_PLAYER_CONTROLLED = 0x00000008;
 constexpr uint32_t UNIT_FLAG_NOT_SELECTABLE = 0x02000000;
+constexpr uint32_t UNIT_FLAG_NON_ATTACKABLE = 0x00000002;
+constexpr uint32_t UNIT_FLAG_IMMUNE_TO_PC   = 0x00000100;
 
 // Unit visibility flags (byte 2 of UNIT_FIELD_BYTES_1).
 // CREEP marks a unit using the client-side stealth presentation. The server

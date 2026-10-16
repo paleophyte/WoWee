@@ -4,6 +4,8 @@
 #include "addons/lua_api_helpers.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_engine.hpp"
+#include "core/logger.hpp"
+#include <set>
 
 namespace wowee::addons {
 
@@ -138,25 +140,9 @@ static int lua_IsSpellInRange(lua_State* L) {
     }
     if (spellId == 0) { return luaReturnNil(L); }
 
-    // Get spell max range from DBC
-    auto data = gh->getSpellData(spellId);
-    if (data.maxRange <= 0.0f) { return luaReturnNil(L); }
-
-    // Resolve target position
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
-    uint64_t guid = resolveUnitGuid(gh, uidStr);
-    if (guid == 0) { return luaReturnNil(L); }
-    auto targetEnt = gh->getEntityManager().getEntity(guid);
-    auto playerEnt = gh->getEntityManager().getEntity(gh->getPlayerGuid());
-    if (!targetEnt || !playerEnt) { return luaReturnNil(L); }
-
-    float dx = playerEnt->getX() - targetEnt->getX();
-    float dy = playerEnt->getY() - targetEnt->getY();
-    float dz = playerEnt->getZ() - targetEnt->getZ();
-    float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-    lua_pushnumber(L, dist <= data.maxRange ? 1 : 0);
-    return 1;
+    return pushSpellRangeAnswer(L, gh, spellId, resolveUnitGuid(gh, uidStr));
 }
 
 // UnitIsVisible(unit) → boolean (entity exists in the client's entity manager)
@@ -242,6 +228,20 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
         if (found == index) {
             // Return: name, rank, icon, count, debuffType, duration, expirationTime, ...spellId
             std::string name = gh->getSpellName(aura.spellId);
+            if (name.empty()) {
+                // An aura this client's Spell.dbc has no row for draws as
+                // "Unknown" with no icon, and nothing said which one it was.
+                // A realm's own spells are the usual cause - a server can put
+                // any id on a unit, and only a patched client knows its name.
+                static std::set<uint32_t> saidNoName;
+                if (saidNoName.insert(aura.spellId).second) {
+                    LOG_WARNING("Aura spell ", aura.spellId, " on ", uidStr,
+                                " has no Spell.dbc row, so it shows as 'Unknown' with no "
+                                "icon (", (aura.flags & 0x80) ? "debuff" : "buff",
+                                ", flags 0x", std::hex, static_cast<int>(aura.flags), std::dec,
+                                ", caster 0x", std::hex, aura.casterGuid, std::dec, ")");
+                }
+            }
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str()); // name
             lua_pushstring(L, "");           // rank
             std::string iconPath = gh->getSpellIconPath(aura.spellId);
@@ -881,11 +881,14 @@ static int lua_TargetUnit(lua_State* L) {
     return 0;
 }
 
-// ClearTarget() - clear current target
+// ClearTarget() - clear current target. Answers whether there was one, which
+// ToggleGameMenu reads to stop there instead of also opening the game menu.
 static int lua_ClearTarget(lua_State* L) {
     auto* gh = getGameHandler(L);
+    const bool hadTarget = gh && gh->hasTarget();
     if (gh) gh->clearTarget();
-    return 0;
+    lua_pushboolean(L, hadTarget);
+    return 1;
 }
 
 // FocusUnit(unitId) - set focus target
@@ -1184,7 +1187,7 @@ static int lua_IsUsableSpell(lua_State* L) {
             auto playerEntity = gh->getEntityManager().getEntity(gh->getPlayerGuid());
             if (playerEntity) {
                 auto* unit = dynamic_cast<game::Unit*>(playerEntity.get());
-                if (unit && unit->getPower() < spellData.manaCost) {
+                if (unit && unit->getPowerByType(spellData.powerType) < spellData.manaCost) {
                     noMana = true;
                 }
             }
@@ -1211,15 +1214,19 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"GetTotemTimeLeft", lua_GetTotemTimeLeft},
                 {"SpellStopCasting", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
+            const bool wasCasting = gh && gh->isCasting();
             if (gh) gh->cancelCast();
-            return 0;
+            lua_pushboolean(L, wasCasting);
+            return 1;
         }},
                 {"SpellStopTargeting", [](lua_State* L) -> int {
             // No AoE reticle, but the item cursor a stone or an oil arms is a
             // kind of targeting and escape has to put it down.
             auto* gh = getGameHandler(L);
-            if (gh && gh->isAwaitingItemTarget()) gh->cancelItemTargeting();
-            return 0;
+            const bool wasTargeting = gh && gh->isAwaitingItemTarget();
+            if (wasTargeting) gh->cancelItemTargeting();
+            lua_pushboolean(L, wasTargeting);
+            return 1;
         }},
                 {"SpellIsTargeting", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
@@ -1299,7 +1306,11 @@ void registerSpellLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"IsAutoRepeatSpell", [](lua_State* L) -> int {
-            (void)L; lua_pushboolean(L, 0); return 1; // Stub
+            auto* gh = getGameHandler(L);
+            const char* name = luaL_optstring(L, 1, "");
+            const uint32_t active = gh ? gh->getAutoRepeatSpellId() : 0;
+            lua_pushboolean(L, active != 0 && gh->getSpellName(active) == name);
+            return 1;
         }},
                 {"CastShapeshiftForm", [](lua_State* L) -> int {
             // CastShapeshiftForm(index) - cast the spell for the given form slot

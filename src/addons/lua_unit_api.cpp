@@ -334,12 +334,13 @@ static int pushPlayerFlagPredicate(lua_State* L, uint32_t bit) {
     return 1;
 }
 
+// PLAYER_FLAGS: 0x1 is the group leader, 0x2 AFK, 0x4 DND.
 static int lua_UnitIsAFK(lua_State* L) {
-    return pushPlayerFlagPredicate(L, 0x01);
+    return pushPlayerFlagPredicate(L, 0x02);
 }
 
 static int lua_UnitIsDND(lua_State* L) {
-    return pushPlayerFlagPredicate(L, 0x02);
+    return pushPlayerFlagPredicate(L, 0x04);
 }
 
 // UnitPlayerControlled(unit) - true for players and player-controlled pets
@@ -353,12 +354,12 @@ static int lua_UnitPlayerControlled(lua_State* L) {
     if (guid == 0) { return luaReturnFalse(L); }
     auto entity = gh->getEntityManager().getEntity(guid);
     if (!entity) { return luaReturnFalse(L); }
-    // Players are always player-controlled; pets check UNIT_FLAG_PLAYER_CONTROLLED (0x01000000)
+    // Players are always player-controlled; pets check UNIT_FLAG_PLAYER_CONTROLLED
     if (entity->getType() == game::ObjectType::PLAYER) {
         lua_pushboolean(L, 1);
     } else {
         uint32_t flags = entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_FLAGS));
-        lua_pushboolean(L, (flags & 0x01000000) != 0);
+        lua_pushboolean(L, (flags & game::UNIT_FLAG_PLAYER_CONTROLLED) != 0);
     }
     return 1;
 }
@@ -684,6 +685,21 @@ static int lua_UnitGroupRolesAssigned(lua_State* L) {
     return pushRoles(false, false, false);
 }
 
+/// Friendly is an answer of its own rather than "not hostile": neutral
+/// wildlife is neither, and can be attacked but not helped. A faction with a
+/// standing is friendly only from Friendly up, as the reaction says.
+static bool isFriendlyUnit(game::GameHandler* gh, const game::Unit& unit) {
+    return !unit.isHostile() && gh->unitReactionToPlayer(unit) >= 5;
+}
+
+/// Attackable unless its faction is friendly: neutral wildlife can be fought,
+/// a faction with a standing only while at war with it.
+static bool canAttackUnit(game::GameHandler* gh, const game::Unit& unit) {
+    return unit.isHostile() || !gh->isFriendlyFaction(unit.getFactionTemplate());
+}
+
+static game::Unit* unitAskedAbout(lua_State* L);
+
 // UnitCanAttack(unit, otherUnit) → boolean
 static int lua_UnitCanAttack(lua_State* L) {
     auto* gh = getGameHandler(L);
@@ -696,13 +712,8 @@ static int lua_UnitCanAttack(lua_State* L) {
     uint64_t g1 = resolveUnitGuid(gh, u1);
     uint64_t g2 = resolveUnitGuid(gh, u2);
     if (g1 == 0 || g2 == 0 || g1 == g2) { return luaReturnFalse(L); }
-    // Check if unit2 is hostile to unit1
-    auto* unit2 = resolveUnit(L, uid2);
-    if (unit2 && unit2->isHostile()) {
-        lua_pushboolean(L, 1);
-    } else {
-        lua_pushboolean(L, 0);
-    }
+    auto* unit = unitAskedAbout(L);
+    lua_pushboolean(L, unit && canAttackUnit(gh, *unit));
     return 1;
 }
 
@@ -714,7 +725,7 @@ static int lua_UnitCanCooperate(lua_State* L) {
     const char* uid2 = luaL_checkstring(L, 2);
     auto* unit2 = resolveUnit(L, uid2);
     if (!unit2) { return luaReturnFalse(L); }
-    lua_pushboolean(L, !unit2->isHostile());
+    lua_pushboolean(L, isFriendlyUnit(gh, *unit2));
     return 1;
 }
 
@@ -1080,12 +1091,8 @@ static int lua_UnitIsPossessed(lua_State* L) {
 /// Whether something else is driving this unit - the other end of the same
 /// relationship, in UNIT_FIELD_CHARMEDBY.
 ///
-/// Bound rather than left out because ToggleGameMenu reads it, and it used to
-/// survive there only by a short circuit: `ClearTarget() and (not
-/// UnitIsCharmed(...))` never reaches the second half because ClearTarget
-/// returns nothing. That is a fact about a neighbouring binding's return
-/// count, not about this one, and pressing Escape is not where anyone wants to
-/// find that out.
+/// ToggleGameMenu reads it on every Escape that clears a target:
+/// `ClearTarget() and (not UnitIsCharmed("player"))`.
 static int lua_UnitIsCharmed(lua_State* L) {
     auto* gh = getGameHandler(L);
     const char* uid = luaL_optstring(L, 1, "player");
@@ -1169,8 +1176,18 @@ static int lua_PetCanBeDismissed(lua_State* L) {
     lua_pushboolean(L, gh && gh->hasPet());
     return 1;
 }
-// Abandoning is a hunter's pet, and nothing here knows which kind it has yet.
-static int lua_PetCanBeAbandoned(lua_State* L) { return luaReturnFalse(L); }
+// Abandoning is for a hunter's pet, and the server says which pets those are:
+// UNIT_FIELD_BYTES_2 byte 2 carries UNIT_CAN_BE_ABANDONED (0x02) on them and on
+// no other. The pet menu offers Rename, Abandon and the pet paperdoll on it.
+static int lua_PetCanBeAbandoned(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint64_t pet = gh ? gh->getPetGuid() : 0;
+    auto entity = pet ? gh->getEntityManager().getEntity(pet) : nullptr;
+    constexpr uint32_t kCanBeAbandoned = 0x02;
+    const uint32_t bytes2 = entity ? entity->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2)) : 0;
+    lua_pushboolean(L, ((bytes2 >> 16) & kCanBeAbandoned) != 0);
+    return 1;
+}
 
 static int lua_InCombatLockdown(lua_State* L) {
     auto* gh = getGameHandler(L);
@@ -1836,14 +1853,14 @@ static int lua_GetMaxCombatRatingBonus(lua_State* L) {
 ///
 /// Rested means there is rested experience left to spend, not that the player
 /// is standing in an inn. Those are different questions and this asked the
-/// second: IsResting reads the rest-state byte out of PLAYER_BYTES_2, which the
-/// server clears the moment you walk outside, while the pool you earned in
-/// there is spent over the next several levels. So the bar went back to the
-/// normal purple with the exhaustion tick still several bubbles ahead of the
-/// fill - the two disagreeing on screen about the same thing.
+/// second: it read IsResting, which ends the moment you walk outside, while
+/// the pool you earned in there is spent over the next several levels. So the
+/// bar went back to the normal purple with the exhaustion tick still several
+/// bubbles ahead of the fill - the two disagreeing on screen about the same
+/// thing.
 ///
-/// IsResting keeps that byte, which is the right source for the "Resting"
-/// indicator it feeds.
+/// IsResting reads PLAYER_FLAGS 0x20, which is the right source for the
+/// "Resting" indicator it feeds.
 static int lua_GetRestState(lua_State* L) {
     auto* gh = getGameHandler(L);
     const bool rested = gh && gh->getPlayerRestedXp() > 0;
@@ -1991,6 +2008,17 @@ static int lua_GetNumPartyMembers(lua_State* L) {
     return 1;
 }
 
+// GetPartyMember(index) → 1 when that party slot is filled. The party frames
+// show and hide on it.
+static int lua_GetPartyMember(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int index = static_cast<int>(luaL_checkinteger(L, 1));
+    if (!gh || index < 1 || index > 4) { return luaReturnNil(L); }
+    if (resolveUnitGuid(gh, "party" + std::to_string(index)) == 0) { return luaReturnNil(L); }
+    lua_pushnumber(L, 1);
+    return 1;
+}
+
 static int lua_UnitInParty(lua_State* L) {
     const char* uid = luaL_optstring(L, 1, "player");
     auto* gh = getGameHandler(L);
@@ -2132,8 +2160,9 @@ static game::Unit* unitAskedAbout(lua_State* L) {
 }
 
 static int lua_UnitIsFriend(lua_State* L) {
+    auto* gh = getGameHandler(L);
     auto* unit = unitAskedAbout(L);
-    lua_pushboolean(L, unit && !unit->isHostile());
+    lua_pushboolean(L, gh && unit && isFriendlyUnit(gh, *unit));
     return 1;
 }
 
@@ -2253,27 +2282,27 @@ static int lua_GetComboPoints(lua_State* L) {
 }
 
 // UnitReaction(unit, otherUnit) → 1-8 (hostile to exalted)
-// Simplified: hostile=2, neutral=4, friendly=5
 static int lua_UnitReaction(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
-    const char* uid1 = luaL_checkstring(L, 1);
-    const char* uid2 = luaL_checkstring(L, 2);
-    auto* unit2 = resolveUnit(L, uid2);
-    if (!unit2) { return luaReturnNil(L); }
-    // If unit2 is the player, always friendly to self
-    std::string u1(uid1);
+    std::string u1(luaL_checkstring(L, 1));
     toLowerInPlace(u1);
-    std::string u2(uid2);
+    std::string u2(luaL_checkstring(L, 2));
     toLowerInPlace(u2);
-    uint64_t g1 = resolveUnitGuid(gh, u1);
-    uint64_t g2 = resolveUnitGuid(gh, u2);
-    if (g1 == g2) { lua_pushnumber(L, 5); return 1; } // same unit = friendly
-    if (unit2->isHostile()) {
-        lua_pushnumber(L, 2); // hostile
-    } else {
-        lua_pushnumber(L, 5); // friendly
+    if (!resolveUnit(L, u2.c_str())) { return luaReturnNil(L); }
+    if (resolveUnitGuid(gh, u1) == resolveUnitGuid(gh, u2)) {
+        lua_pushnumber(L, 5); // same unit = friendly
+        return 1;
     }
+    // How the unit regards the player, which is the question the tooltip and
+    // the name colours ask - UnitReaction(unit, "player"), in either order and
+    // for players as well as creatures. For a faction with a standing that is
+    // the standing: answered hostile-or-friendly, the Kurenai read as friendly
+    // to an Alliance player at Unfriendly, who could not then find out why
+    // Telaar would not speak to them.
+    auto* unit = unitAskedAbout(L);
+    if (!unit) { return luaReturnNil(L); }
+    lua_pushnumber(L, gh->unitReactionToPlayer(*unit));
     return 1;
 }
 
@@ -2563,14 +2592,21 @@ void registerUnitLuaAPI(lua_State* L) {
                                 t == game::InvType::TWO_HAND) ? 1 : 0);
             return 1;
         }},
-                // The colour a unit's name is drawn in: red for hostile, green
-                // for friendly, yellow for neutral. Unit frames read all four
-                // components straight into SetTextColor.
+                // The colour a unit's name is drawn in: red for hostile, orange
+                // for unfriendly, yellow for neutral, green for friendly. Unit
+                // frames read all four components straight into SetTextColor.
                 {"UnitSelectionColor", [](lua_State* L) -> int {
             const char* uid = luaL_optstring(L, 1, "player");
             auto* unit = resolveUnit(L, uid);
             float r = 0.0f, g = 1.0f, b = 0.0f;
-            if (unit && unit->isHostile()) { r = 1.0f; g = 0.0f; b = 0.0f; }
+            auto* gh = getGameHandler(L);
+            if (unit && gh && unit->getType() == game::ObjectType::UNIT) {
+                // A creature by how it regards the player, standing and all.
+                const int reaction = gh->unitReactionToPlayer(*unit);
+                if (reaction <= 2)      { r = 1.0f; g = 0.0f; }
+                else if (reaction == 3) { r = 1.0f; g = 0.5f; }
+                else if (reaction == 4) { r = 1.0f; g = 1.0f; }
+            } else if (unit && unit->isHostile()) { r = 1.0f; g = 0.0f; b = 0.0f; }
             lua_pushnumber(L, r);
             lua_pushnumber(L, g);
             lua_pushnumber(L, b);
@@ -2593,11 +2629,12 @@ void registerUnitLuaAPI(lua_State* L) {
             lua_pushboolean(L, (unit && unit->getHealth() == 0) ? 1 : 0);
             return 1;
         }},
-                // Whether the first unit may help the second - true between
-                // anything not hostile to each other.
+                // Whether the first unit may help the second - only a friendly
+                // one, never neutral wildlife.
                 {"UnitCanAssist", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
             auto* other = resolveUnit(L, luaL_optstring(L, 2, "target"));
-            lua_pushboolean(L, (other && !other->isHostile()) ? 1 : 0);
+            lua_pushboolean(L, (gh && other && isFriendlyUnit(gh, *other)) ? 1 : 0);
             return 1;
         }},
                 {"GetPVPRankInfo", [](lua_State* L) -> int {
@@ -2902,11 +2939,19 @@ void registerUnitLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"AcceptBattlefieldPort", [](lua_State* L) -> int {
+            // AcceptBattlefieldPort(queue, accept): the queue counts from one,
+            // and a refusal is also how a queue still waiting is left. The
+            // queue used to be dropped, which sent every answer to whichever
+            // slot held an invitation - so Leave Queue on a queue that had not
+            // popped found none and did nothing.
             auto* gh = getGameHandler(L);
+            const int idx = static_cast<int>(luaL_optnumber(L, 1, 0));
+            const uint32_t slot = (idx >= 1 && idx <= 3) ? static_cast<uint32_t>(idx - 1)
+                                                         : 0xFFFFFFFFu;
             int accept = lua_toboolean(L, 2);
             if (gh) {
-                if (accept) gh->acceptBattlefield();
-                else gh->declineBattlefield();
+                if (accept) gh->acceptBattlefield(slot);
+                else gh->declineBattlefield(slot);
             }
             return 0;
         }},
@@ -2943,6 +2988,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"UnitAffectingCombat", lua_UnitAffectingCombat},
                 {"GetNumRaidMembers",   lua_GetNumRaidMembers},
                 {"GetNumPartyMembers",  lua_GetNumPartyMembers},
+                {"GetPartyMember",      lua_GetPartyMember},
                 // The counts before the dungeon finder inflates them. There is
                 // no dungeon finder here, so they are the same number - and
                 // UIParent does arithmetic on them, where absent is an error

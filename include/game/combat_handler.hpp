@@ -166,6 +166,9 @@ private:
     /// Whether a guid is in the player's group.
     [[nodiscard]] bool isGroupMemberGuid(uint64_t guid) const;
 
+    /// Whether Tab and TargetNearestEnemy may pick a living unit.
+    [[nodiscard]] bool isEnemyTarget(uint64_t guid, const Unit& unit) const;
+
     // --- Packet handlers ---
     void handleAttackStart(network::Packet& packet);
     void handleAttackStop(network::Packet& packet);

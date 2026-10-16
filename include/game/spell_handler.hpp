@@ -82,7 +82,15 @@ public:
     [[nodiscard]] bool isCasting() const { return casting_ || restorationActive_; }
     [[nodiscard]] bool isChanneling() const { return casting_ ? castIsChannel_ : restorationActive_; }
     [[nodiscard]] bool isRestoring() const { return restorationActive_; }
+    /// Auto Shot or Shoot while it repeats, otherwise 0.
+    [[nodiscard]] uint32_t getAutoRepeatSpellId() const { return autoRepeatSpellId_; }
+    void clearAutoRepeat() { autoRepeatSpellId_ = 0; }
     [[nodiscard]] bool isGameObjectInteractionCasting() const;
+    // The cast or channel in progress, else the ability queued for the next swing.
+    [[nodiscard]] uint32_t getActiveActionSpellId() const {
+        if (casting_) return currentCastSpellId_;
+        return restorationActive_ ? restorationSpellId_ : nextSwingSpellId_;
+    }
     [[nodiscard]] uint32_t getCurrentCastSpellId() const {
         return casting_ ? currentCastSpellId_ : restorationSpellId_;
     }
@@ -361,6 +369,7 @@ private:
     // --- Packet handlers ---
     void handleInitialSpells(network::Packet& packet);
     void handleCastFailed(network::Packet& packet);
+    [[nodiscard]] bool answersPress(const CastFailedData& data, uint8_t castCount) const;
     void handleSpellStart(network::Packet& packet);
     void handleSpellGo(network::Packet& packet);
     void handleSpellCooldown(network::Packet& packet);
@@ -406,6 +415,11 @@ private:
 
     // Resolve SpellVisualID from Spell.dbc cache for a given spellId.
     uint32_t resolveSpellVisualId(uint32_t spellId);
+    float resolveSpellMissileSpeed(uint32_t spellId);
+    /// Fly the spell's missile from the caster to one target. True when one
+    /// launched, which then plays the impact kit itself when it lands.
+    bool launchSpellMissile(uint32_t spellId, uint32_t visualId, uint64_t casterGuid,
+                            uint64_t targetGuid, bool impactAtEnd);
     // Resolve render-space position for a unit GUID (player or entity).
     bool resolveUnitPosition(uint64_t guid, glm::vec3& outPos);
     // Play the cast/precast visual effect at the caster's position.
@@ -418,16 +432,13 @@ private:
 
     // --- handleSpellLogExecute per-effect parsers (extracted to reduce nesting) ---
     void parseEffectPowerDrain(network::Packet& packet, uint32_t effectLogCount,
-                               uint64_t caster, uint32_t spellId, bool isPlayerCaster,
-                               bool usesFullGuid);
+                               uint64_t caster, uint32_t spellId, bool isPlayerCaster);
     void parseEffectHealthLeech(network::Packet& packet, uint32_t effectLogCount,
-                                uint64_t caster, uint32_t spellId, bool isPlayerCaster,
-                                bool usesFullGuid);
+                                uint64_t caster, uint32_t spellId, bool isPlayerCaster);
     void parseEffectCreateItem(network::Packet& packet, uint32_t effectLogCount,
                                uint64_t caster, uint32_t spellId, bool isPlayerCaster);
     void parseEffectInterruptCast(network::Packet& packet, uint32_t effectLogCount,
-                                  uint64_t caster, uint32_t spellId, bool isPlayerCaster,
-                                  bool usesFullGuid);
+                                  uint64_t caster, uint32_t spellId, bool isPlayerCaster);
     void parseEffectFeedPet(network::Packet& packet, uint32_t effectLogCount,
                             uint64_t caster, uint32_t spellId, bool isPlayerCaster);
 
@@ -456,6 +467,15 @@ private:
     bool casting_ = false;
     bool castIsChannel_ = false;
     uint32_t currentCastSpellId_ = 0;
+    uint32_t autoRepeatSpellId_ = 0;
+    uint8_t autoRepeatCastCount_ = 0;
+    // An on-next-swing ability between its SMSG_SPELL_START and the swing.
+    uint32_t nextSwingSpellId_ = 0;
+    uint8_t nextSwingCastCount_ = 0;
+    // What the action buttons were last told, so a cast or swing changing is
+    // announced once whichever of the many cast paths changed it.
+    uint32_t announcedCastSpellId_ = 0;
+    bool announcedAutoAttack_ = false;
     float castTimeRemaining_ = 0.0f;
     float castTimeTotal_ = 0.0f;
     bool restorationActive_ = false;
@@ -511,6 +531,9 @@ private:
     // Global Cooldown
     float gcdTotal_ = 0.0f;
     std::chrono::steady_clock::time_point gcdStartedAt_{};
+    // The cast that started the optimistic GCD, which a refused cast takes back.
+    uint32_t optimisticGcdSpellId_ = 0;
+    uint8_t optimisticGcdCastCount_ = 0;
 
     // Spell book tabs
     std::vector<SpellBookTab> spellBookTabs_;

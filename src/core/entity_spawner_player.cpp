@@ -545,8 +545,9 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     if (geosetPants != 0) geosets.insert(geosetPants);
     if (geosetBelt != 0) geosets.insert(geosetBelt);
     // Back/Cloak (invType 16)
+    uint32_t capeGG = getGeosetGroup(findDisplayIdByInvType({16}), geosetGroup1Field);
     uint16_t geosetCape = pickGeoset(
-        hasInvType({16}) ? kGeosetWithCape : kGeosetNoCape,
+        hasInvType({16}) ? cloakGeoset(capeGG) : kGeosetNoCape,
         kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape);
     // Tabard (invType 19)
@@ -1287,16 +1288,7 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         // Transports are driven by the transport system rather than a looping idle.
         bool isTransportGO = gameHandler_ && gameHandler_->isTransportGuid(guid);
         if (!isTransportGO) {
-            // Totems play an explicit idle rather than the model's default sequence.
-            bool isTotem = false;
-            for (uint32_t totemAnim : {245u, 246u, 247u}) {  // TOTEM_SMALL/MEDIUM/LARGE
-                if (m2Renderer->hasAnimation(instanceId, totemAnim)) {
-                    m2Renderer->setInstanceAnimation(instanceId, totemAnim, true);
-                    isTotem = true;
-                    break;
-                }
-            }
-            if (!isTotem) applyGameObjectAnimationPolicy(guid, entry, instanceId);
+            applyGameObjectAnimationPolicy(guid, entry, instanceId);
         }
 
         gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};

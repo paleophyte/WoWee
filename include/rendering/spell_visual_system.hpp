@@ -39,6 +39,15 @@ public:
     void playSpellVisualPrecast(uint32_t visualId, const glm::vec3& worldPosition,
                                 uint32_t castTimeMs = 0, uint32_t attachInstanceId = 0);
 
+    // Whether this visual has a missile model (SpellVisual.dbc MissileModel).
+    bool hasSpellMissile(uint32_t visualId);
+
+    // Fly the visual's missile model from start to end at speed yards a second
+    // (Spell.dbc Speed). With impactAtEnd the impact kit plays where it lands,
+    // instead of when the server reports the hit. False when nothing launched.
+    bool playSpellMissile(uint32_t visualId, const glm::vec3& start, const glm::vec3& end,
+                          float speed, bool impactAtEnd);
+
     // Launch a physical weapon projectile (arrow, bullet, or thrown item)
     // without invoking the spell visual pipeline.
     void playPhysicalProjectile(const std::string& modelPath,
@@ -79,7 +88,21 @@ private:
         bool spin = false;
     };
 
+    struct SpellMissile {
+        uint32_t instanceId = 0;
+        uint32_t visualId = 0;
+        glm::vec3 start{0.0f};
+        glm::vec3 end{0.0f};
+        float elapsed = 0.0f;
+        float duration = 0.0f;
+        bool impactAtEnd = false;
+    };
+
     void loadSpellVisualDbc();
+    // Model ID for a cast, impact or missile model, loading it on first use.
+    // 0 when it cannot be loaded.
+    uint32_t loadSpellModel(const std::string& modelPath);
+    void placeSpellMissile(const SpellMissile& missile, float t);
 
     M2Renderer* m2Renderer_ = nullptr;
     Renderer* renderer_ = nullptr;
@@ -87,6 +110,8 @@ private:
 
     std::vector<SpellVisualInstance> activeSpellVisuals_;
     std::vector<PhysicalProjectile> physicalProjectiles_;
+    std::vector<SpellMissile> spellMissiles_;
+    std::unordered_map<uint32_t, std::string> spellVisualMissilePath_; // visualId → missile M2 path
     std::unordered_map<uint32_t, std::string> spellVisualPrecastPath_; // visualId → precast M2 path
     std::unordered_map<uint32_t, std::string> spellVisualCastPath_;   // visualId → cast M2 path
     std::unordered_map<uint32_t, std::string> spellVisualImpactPath_; // visualId → impact M2 path
@@ -98,6 +123,7 @@ private:
     bool spellVisualDbcLoaded_ = false;
     static constexpr float SPELL_VISUAL_MAX_DURATION = 5.0f;
     static constexpr float SPELL_VISUAL_DEFAULT_DURATION = 2.0f;
+    static constexpr float SPELL_MISSILE_MAX_DURATION = 4.0f;
 
     // Determine character attachment point from model path keywords
     static uint32_t classifyAttachmentId(const std::string& modelPath);

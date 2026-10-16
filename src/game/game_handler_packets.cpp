@@ -731,6 +731,7 @@ void GameHandler::registerCoreOpcodes() {
         dispatchTable_[op] = [this](network::Packet& packet) {
             if (packet.hasRemaining(4)) {
                 const WowDate t = unpackWowPackedTime(packet.readUInt32());
+                gameTimeSetAt_ = std::chrono::steady_clock::now();
                 gameTime_ = static_cast<float>(t.hour) +
                             static_cast<float>(t.minute) / 60.0f;
                 // Said out loud, because this is where realm time actually
@@ -748,6 +749,7 @@ void GameHandler::registerCoreOpcodes() {
         if (packet.hasRemaining(8)) {
             const WowDate t = unpackWowPackedTime(packet.readUInt32());
             float timeSpeed = packet.readFloat();
+            gameTimeSetAt_ = std::chrono::steady_clock::now();
             gameTime_ = static_cast<float>(t.hour) +
                         static_cast<float>(t.minute) / 60.0f;
             timeSpeed_ = timeSpeed;
@@ -1037,10 +1039,9 @@ void GameHandler::registerCoreOpcodes() {
 
     // Minimap ping
     dispatchTable_[Opcode::MSG_MINIMAP_PING] = [this](network::Packet& packet) {
-        const bool mmTbcLike = isPreWotlk();
-        if (!packet.hasRemaining(mmTbcLike ? 8u : 1u) ) return;
-        uint64_t senderGuid = mmTbcLike
-            ? packet.readUInt64() : packet.readPackedGuid();
+        // A full guid in every expansion; WotLK does not pack this one.
+        if (!packet.hasRemaining(8)) return;
+        uint64_t senderGuid = packet.readUInt64();
         if (!packet.hasRemaining(8)) return;
         float pingX = packet.readFloat();
         float pingY = packet.readFloat();
@@ -1325,11 +1326,17 @@ void GameHandler::registerCoreOpcodes() {
     };
 
     // ---- Auto-repeat / auras / dispel / totem ----
-    dispatchTable_[Opcode::SMSG_CANCEL_AUTO_REPEAT] = [this](network::Packet& /*packet*/) {
+    dispatchTable_[Opcode::SMSG_CANCEL_AUTO_REPEAT] = [this](network::Packet& packet) {
         // The server saying a repeating spell has stopped. Nothing in this
         // client's own interface reads it, which is why it did nothing - but
         // the action button flashes for as long as one is running and stops on
-        // exactly this.
+        // exactly this. WotLK servers name the shooter and tell everyone
+        // nearby; older ones send it empty, to the shooter alone.
+        if (packet.hasRemaining(1) &&
+            (!packet.hasFullPackedGuid() || packet.readPackedGuid() != playerGuid)) {
+            return;
+        }
+        if (spellHandler_) spellHandler_->clearAutoRepeat();
         fireAddonEvent("STOP_AUTOREPEAT_SPELL", {});
     };
 
@@ -1672,33 +1679,7 @@ void GameHandler::registerRemainingOpcodes() {
             float wIntensity = packet.readFloat();
             if (packet.hasRemaining(1))
                 /*uint8_t isAbrupt =*/ packet.readUInt8();
-            uint32_t prevWeatherType = weatherType_;
-            weatherType_ = wType;
-            weatherIntensity_ = wIntensity;
-            const char* typeName = (wType == 1) ? "Rain" : (wType == 2) ? "Snow" : (wType == 3) ? "Storm" : "Clear";
-            LOG_INFO("Weather changed: type=", wType, " (", typeName, "), intensity=", wIntensity);
-            // Announce weather changes (including initial zone weather)
-            if (wType != prevWeatherType) {
-                const char* weatherMsg = nullptr;
-                if (wIntensity < 0.05f || wType == 0) {
-                    if (prevWeatherType != 0)
-                        weatherMsg = "The weather clears.";
-                } else if (wType == 1) {
-                    weatherMsg = "It begins to rain.";
-                } else if (wType == 2) {
-                    weatherMsg = "It begins to snow.";
-                } else if (wType == 3) {
-                    weatherMsg = "A storm rolls in.";
-                }
-                if (weatherMsg) addSystemChatMessage(weatherMsg);
-            }
-            // Notify addons of weather change
-                            fireAddonEvent("WEATHER_CHANGED", {std::to_string(wType), std::to_string(wIntensity)});
-            // Storm transition: trigger a low-frequency thunder rumble shake
-            if (wType == 3 && wIntensity > 0.3f && cameraShakeCallback_) {
-                float mag = 0.03f + wIntensity * 0.04f; // 0.03–0.07 units
-                cameraShakeCallback_(mag, 6.0f, 0.6f);
-            }
+            applyWeather(wType, wIntensity);
         }
     };
     // Server-script text message - display in system chat
@@ -1782,8 +1763,13 @@ void GameHandler::registerRemainingOpcodes() {
     dispatchTable_[Opcode::SMSG_PLAYER_VEHICLE_DATA] = [this](network::Packet& packet) {
         // PackedGuid (player guid) + uint32 vehicleId
         // vehicleId == 0 means the player left the vehicle
-        if (packet.hasRemaining(1)) {
-            (void)packet.readPackedGuid(); // player guid (unused)
+        //
+        // Sent to everyone in range, about whoever mounted a multi-seat mount,
+        // so it is ours only when the guid is - otherwise anyone nearby
+        // mounting a mammoth hid this player's own model.
+        if (!packet.hasRemaining(1) || packet.readPackedGuid() != playerGuid) {
+            packet.skipAll();
+            return;
         }
         uint32_t newVehicleId = 0;
         if (packet.hasRemaining(4)) {
@@ -3544,20 +3530,13 @@ void GameHandler::handlePacket(network::Packet& packet) {
             float wIntensity = packet.readFloat();
             uint8_t abrupt = packet.readUInt8();
             bool plausibleWeather =
-                (wType <= 3) &&
+                (wType == 0 || weatherKind(wType) != WeatherKind::NONE) &&
                 std::isfinite(wIntensity) &&
                 (wIntensity >= 0.0f && wIntensity <= 1.5f) &&
                 (abrupt <= 1);
             if (plausibleWeather) {
-                weatherType_ = wType;
-                weatherIntensity_ = wIntensity;
-                const char* typeName =
-                    (wType == 1) ? "Rain" :
-                    (wType == 2) ? "Snow" :
-                    (wType == 3) ? "Storm" : "Clear";
-                LOG_INFO("Weather changed (0x006B alias): type=", wType,
-                         " (", typeName, "), intensity=", wIntensity,
-                         ", abrupt=", static_cast<int>(abrupt));
+                LOG_INFO("Opcode 0x006B interpreted as SMSG_WEATHER");
+                applyWeather(wType, wIntensity);
                 return;
             }
             // Not weather-shaped: rewind and fall through to normal opcode table handling.
@@ -3617,6 +3596,33 @@ void GameHandler::handlePacket(network::Packet& packet) {
             }
             return;
         }
+    }
+
+    // An NPC's window opening is the answer to a hello. See pendingNpcHello_.
+    switch (*logicalOp) {
+        case Opcode::SMSG_GOSSIP_MESSAGE:
+        case Opcode::SMSG_GOSSIP_COMPLETE:
+        case Opcode::SMSG_NPC_WONT_TALK:
+        case Opcode::SMSG_QUESTGIVER_QUEST_LIST:
+        case Opcode::SMSG_QUESTGIVER_QUEST_DETAILS:
+        case Opcode::SMSG_QUESTGIVER_REQUEST_ITEMS:
+        case Opcode::SMSG_QUESTGIVER_OFFER_REWARD:
+        case Opcode::SMSG_QUESTGIVER_QUEST_INVALID:
+        case Opcode::SMSG_LIST_INVENTORY:
+        case Opcode::SMSG_TRAINER_LIST:
+        case Opcode::SMSG_SHOWTAXINODES:
+        case Opcode::SMSG_BINDER_CONFIRM:
+        case Opcode::SMSG_SHOW_BANK:
+        case Opcode::SMSG_PETITION_SHOWLIST:
+        case Opcode::SMSG_SPIRIT_HEALER_CONFIRM:
+        case Opcode::SMSG_AREA_SPIRIT_HEALER_TIME:
+        case Opcode::MSG_AUCTION_HELLO:
+        case Opcode::MSG_TABARDVENDOR_ACTIVATE:
+        case Opcode::MSG_LIST_STABLED_PETS:
+            noteNpcAnswered();
+            break;
+        default:
+            break;
     }
 
     // Dispatch via the opcode handler table

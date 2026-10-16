@@ -18,6 +18,7 @@
 #include <vector>
 #include <deque>
 #include <string>
+#include <functional>
 #include <optional>
 #include <random>
 #include <chrono>
@@ -36,6 +37,7 @@ class Camera;
 class VkContext;
 class VkTexture;
 class HiZSystem;
+class RtScene;
 
 // Ceiling on the bone matrices computed and uploaded for one M2 instance.
 // WoW models run well past a hundred bones - the largest shipped model has
@@ -171,6 +173,7 @@ struct M2ModelGPU {
     std::vector<pipeline::M2Sequence> sequences;
     std::vector<uint32_t> globalSequenceDurations;  // Loop durations for global sequence tracks
     bool hasAnimation = false;  // True if any bone has keyframes
+    uint32_t rtMesh = ~0u;      // RtScene mesh, or ~0u when it does not cast
     bool isSmoke = false;       // True for smoke models (UV scroll animation)
     bool isSpellEffect = false;  // True for spell effect models (skip particle dampeners)
     bool isInstancePortal = false; // Instance portal model (spin + glow)
@@ -202,6 +205,7 @@ struct M2ModelGPU {
     /// skinned to run backward; everything else keeps looping forward.
     std::vector<uint8_t> pingPongBones;
     bool isTransportDoodad = false; // Animated ship sail/paddle child
+    bool isBoat = false;            // Small boat; bobs if it turns out to be afloat
     bool hasTextureAnimation = false; // True if any batch has UV animation
     bool hasTransparentBatches = false; // True if any batch uses alpha-blend or additive (blendMode >= 2)
     uint8_t availableLODs = 0;  // Bitmask: bit N set if any batch has submeshLevel==N
@@ -247,6 +251,9 @@ struct M2Instance {
     float scale;
     glm::mat4 modelMatrix;
     glm::mat4 invModelMatrix;
+    // Its RtScene instance and the matrix last given to it; see syncRtScene.
+    uint32_t rtInstance = ~0u;
+    glm::mat4 rtMatrix{0.0f};
     glm::vec3 worldBoundsMin;
     glm::vec3 worldBoundsMax;
 
@@ -277,6 +284,10 @@ struct M2Instance {
     /// - so the press is the only thing that can say the click landed on this
     /// one and not the scenery beside it.
     float highlight = 0.0f;
+    /// An alpha its owner sets on the whole model - the sky's crossfade
+    /// between zones. Below one the instance is drawn in the blended pass
+    /// alone, every layer of it, since an opaque layer cannot fade otherwise.
+    float fade = 1.0f;
 
     // Particle emitter state
     std::vector<float> emitterAccumulators;  // fractional particle counter per emitter
@@ -306,6 +317,11 @@ struct M2Instance {
     bool cachedIsSkyBird = false;
     bool cachedIsLightBeam = false;
     bool cachedIsTransportDoodad = false;
+    bool cachedIsBoat = false;
+    // Whether the boat sits on water: -1 not known yet, 0 no, 1 afloat.
+    int8_t afloat = -1;
+    uint8_t afloatTries = 0;
+    float afloatRecheck = 0.0f;
     bool cachedIsValid = false;
     bool skipCollision = false;    // Fully non-collidable visual/effect instance
     bool skipWallCollision = false; // Keep authored floors, suppress only wall blocking
@@ -467,6 +483,16 @@ public:
 
     /** Set the HiZ system for occlusion culling (Phase 6.3). nullptr disables HiZ. */
     void setHiZSystem(HiZSystem* hiz) { hizSystem_ = hiz; }
+
+    /// Where loaded models register their geometry for the ray traced
+    /// lighting. Static doodads only - animated models would cast their
+    /// bind pose. Not given to the sky's renderer.
+    void setRtScene(RtScene* scene) { rtScene_ = scene; }
+    /// Water surface height near a point, for telling a moored boat from a beached one.
+    void setWaterHeightQuery(std::function<std::optional<float>(float, float, float)> q) { waterHeightAt_ = std::move(q); }
+    /// Bring the scene's instances in line with this renderer's, once a frame
+    /// while the lighting is on.
+    void syncRtScene();
     void setForceNoCull(bool v) { forceNoCull_ = v; }
 
     /** Ensure GPU→CPU cull output is visible to the host after a fence wait.
@@ -506,6 +532,12 @@ public:
 
     void setInstanceTransform(uint32_t instanceId, const glm::mat4& transform);
     void setInstanceAnimationFrozen(uint32_t instanceId, bool frozen);
+    /// Play from the first frame, with bones to match.
+    ///
+    /// New instances start at a random point so placed doodads don't animate
+    /// in lockstep, and take their first bones from a sibling that is already
+    /// mid-animation. A spell cast has to start at its beginning instead.
+    void restartInstanceAnimation(uint32_t instanceId);
     /// Play an animation once and stay on its last frame.
     ///
     /// skipToEnd puts the model there immediately, which is what a door that
@@ -516,6 +548,8 @@ public:
 
     /// Light an instance while it is being pressed on. 0 clears it.
     void setInstanceHighlight(uint32_t instanceId, float amount);
+    /// See M2Instance::fade.
+    void setInstanceFade(uint32_t instanceId, float alpha);
     /// Take the light off whatever has it, whichever instance that was.
     void clearInstanceHighlights();
     /// Set the animation sequence by animation ID (e.g. anim::OPEN, anim::CLOSE).
@@ -804,7 +838,7 @@ private:
         int32_t boneBase;          //  4 bytes @ offset 80
         int32_t boneCount;         //  4 bytes @ offset 84 - clamps skinning reads
         float highlight = 0.0f;    //  4 bytes @ offset 88 - pressed-on lift
-        int32_t _pad = {};         //  4 bytes @ offset 92 - align to 96 (std430)
+        int32_t flags = {};        //  4 bytes @ offset 92 - bit 0: afloat (bobs on the water)
     };
     // How many instances one frame may hand the GPU, not how many exist. Ground
     // clutter is what fills it: it is drawn by the thousand and every tuft
@@ -861,6 +895,16 @@ private:
 
     // HiZ occlusion culling (Phase 6.3) - optional, driven by Renderer
     HiZSystem* hizSystem_ = nullptr;
+
+    RtScene* rtScene_ = nullptr;
+    // RtScene instances this renderer owns, and per RtScene instance id the
+    // sync generation that last saw it and the mesh it places.
+    std::vector<uint32_t> rtOwned_;
+    std::vector<uint64_t> rtSeen_;
+    std::vector<uint32_t> rtMeshOf_;
+    uint64_t rtSyncGeneration_ = 0;
+    void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
+    void releaseRtModel(M2ModelGPU& gpuModel);
 
     // Previous frame's view-projection for temporal reprojection in HiZ culling.
     // Stored each frame so the cull shader can project into the same screen space
@@ -1108,6 +1152,7 @@ private:
     static constexpr size_t MAX_M2_PARTICLES = 4000;
     std::mt19937 particleRng_{123};
     bool skyMode_ = false;
+    std::function<std::optional<float>(float, float, float)> waterHeightAt_;
     // What the sky-model clock diagnostic last reported, so it prints on a
     // restart or once a second rather than every frame. See M2Renderer::update.
     uint32_t skyDiagInstanceId_ = 0;
@@ -1169,6 +1214,7 @@ private:
     /// Both spawn paths need it and each used to have its own copy.
     void seedInstanceAnimation(const M2ModelGPU& model, uint32_t modelId,
                                M2Instance& instance);
+    void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
 
     void destroyInstanceBones(M2Instance& inst, bool defer = false);
 };

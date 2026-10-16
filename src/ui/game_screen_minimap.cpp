@@ -15,6 +15,7 @@
 #include "core/coordinates.hpp"
 #include "core/input.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/weather.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/wmo_renderer.hpp"
@@ -1419,15 +1420,15 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 
             const char* weatherIcon = nullptr;
             ImU32 weatherColor = IM_COL32(255, 255, 255, 200);
-            const uint32_t weatherType = gameHandler.getWeatherType();
+            const game::WeatherKind weatherKind = gameHandler.getWeatherKind();
             const float weatherIntensity = gameHandler.getWeatherIntensity();
-            if (weatherType == 1 && weatherIntensity > 0.05f) {
+            if (weatherKind == game::WeatherKind::RAIN && weatherIntensity > 0.05f) {
                 weatherIcon = " \xe2\x9b\x86"; // Rain
                 weatherColor = IM_COL32(140, 180, 240, 220);
-            } else if (weatherType == 2 && weatherIntensity > 0.05f) {
+            } else if (weatherKind == game::WeatherKind::SNOW && weatherIntensity > 0.05f) {
                 weatherIcon = " \xe2\x9d\x84"; // Snow
                 weatherColor = IM_COL32(210, 230, 255, 220);
-            } else if (weatherType == 3 && weatherIntensity > 0.05f) {
+            } else if (weatherKind != game::WeatherKind::NONE && weatherIntensity > 0.05f) {
                 weatherIcon = " \xe2\x98\x81"; // Storm/fog
                 weatherColor = IM_COL32(160, 160, 190, 220);
             }
@@ -1528,39 +1529,29 @@ void GameScreen::renderMinimapReadouts(const MinimapFrame& frame, game::GameHand
 
             ImGui::Separator();
 
-            // Toggle options with checkmarks
-            bool rotWithCam = minimap->isRotateWithCamera();
+            // Toggle options with checkmarks.
+            //
+            // Each goes through the setter and is saved, as the panel's own
+            // boxes are. Written to the members alone, a toggle lasted until
+            // the client closed: nothing saved it, and rotation is bound to a
+            // CVar whose stored value is applied over the file at start-up.
+            const auto toggle = [this](const char* key, bool on) {
+                settingsPanel_.setSettingValue(key, on ? "1" : "0");
+                saveSettings();
+            };
+            const bool rotWithCam = minimap->isRotateWithCamera();
             if (ImGui::MenuItem("Rotate with Camera", nullptr, rotWithCam)) {
-                // Through the setting as well as the minimap. The settings
-                // panel pushes minimapRotate_ back at the minimap whenever it
-                // refreshes, so a toggle that only told the minimap was undone
-                // by the next thing to touch settings, with nothing on screen
-                // saying why.
-                minimap->setRotateWithCamera(!rotWithCam);
-                settingsPanel_.minimapRotate_ = !rotWithCam;
-                settingsPanel_.pendingMinimapRotate = !rotWithCam;
+                toggle("minimaprotate", !rotWithCam);
             }
 
-            bool squareShape = minimap->isSquareShape();
+            const bool squareShape = minimap->isSquareShape();
             if (ImGui::MenuItem("Square Shape", nullptr, squareShape)) {
-                // Through the setting, for the same reason as Rotate above:
-                // the settings panel pushes minimapSquare_ back at the minimap
-                // when it refreshes. Every item in this menu had a version of
-                // the same fault - two told the minimap and not the setting,
-                // the third told the live member and not the saved one.
-                minimap->setSquareShape(!squareShape);
-                settingsPanel_.minimapSquare_ = !squareShape;
-                settingsPanel_.pendingMinimapSquare = !squareShape;
+                toggle("minimapsquare", !squareShape);
             }
 
-            bool npcDots = settingsPanel_.minimapNpcDots_;
+            const bool npcDots = settingsPanel_.minimapNpcDots_;
             if (ImGui::MenuItem("Show NPC Dots", nullptr, npcDots)) {
-                // Both, the way the loader sets both. This one wrote only the
-                // live member, which is not the one the file is written from -
-                // so the dots came on, stayed on for the session, saved as
-                // whatever they had been, and were put back by the next apply.
-                settingsPanel_.minimapNpcDots_ = !npcDots;
-                settingsPanel_.pendingMinimapNpcDots = !npcDots;
+                toggle("minimapnpcdots", !npcDots);
             }
 
             ImGui::EndPopup();
@@ -1725,12 +1716,14 @@ void GameScreen::saveSettings() {
     // Interface
     out << "ui_opacity=" << settingsPanel_.pendingUiOpacity << "\n";
     out << "window_ui_scale=" << settingsPanel_.pendingWindowUiScale << "\n";
+    out << "scroll_speed=" << settingsPanel_.pendingScrollSpeed << "\n";
     out << "minimap_rotate=" << (settingsPanel_.pendingMinimapRotate ? 1 : 0) << "\n";
     out << "minimap_square=" << (settingsPanel_.pendingMinimapSquare ? 1 : 0) << "\n";
     out << "minimap_npc_dots=" << (settingsPanel_.pendingMinimapNpcDots ? 1 : 0) << "\n";
     out << "show_minimap_clock=" << (settingsPanel_.pendingShowMinimapClock ? 1 : 0) << "\n";
     out << "show_minimap_coordinates=" << (settingsPanel_.pendingShowMinimapCoordinates ? 1 : 0) << "\n";
     out << "show_latency_meter=" << (settingsPanel_.pendingShowLatencyMeter ? 1 : 0) << "\n";
+    out << "check_for_updates=" << (settingsPanel_.pendingCheckForUpdates ? 1 : 0) << "\n";
     out << "show_dps_meter=" << (settingsPanel_.showDPSMeter_ ? 1 : 0) << "\n";
     {
         // Only written once the user has dragged it; otherwise the meter keeps
@@ -1743,6 +1736,7 @@ void GameScreen::saveSettings() {
     }
     out << "show_cooldown_tracker=" << (settingsPanel_.showCooldownTracker_ ? 1 : 0) << "\n";
     out << "show_rare_tracker=" << (settingsPanel_.showRareTracker_ ? 1 : 0) << "\n";
+    out << "map_window=" << (settingsPanel_.showMapWindow_ ? 1 : 0) << "\n";
     out << "show_chest_tracker=" << (settingsPanel_.showChestTracker_ ? 1 : 0) << "\n";
     out << "separate_bags=" << (settingsPanel_.pendingSeparateBags ? 1 : 0) << "\n";
     out << "show_keyring=" << (settingsPanel_.pendingShowKeyring ? 1 : 0) << "\n";
@@ -1800,6 +1794,7 @@ void GameScreen::saveSettings() {
     out << "auto_sell_grey=" << (settingsPanel_.pendingAutoSellGrey ? 1 : 0) << "\n";
     out << "auto_repair=" << (settingsPanel_.pendingAutoRepair ? 1 : 0) << "\n";
     out << "secure_ability_toggle=" << (settingsPanel_.pendingSecureAbilityToggle ? 1 : 0) << "\n";
+    out << "auto_face_target=" << (settingsPanel_.pendingAutoFaceTarget ? 1 : 0) << "\n";
     out << "graphics_preset=" << static_cast<int>(settingsPanel_.currentGraphicsPreset) << "\n";
     out << "ground_clutter_density=" << settingsPanel_.pendingGroundClutterDensity << "\n";
     // The five that came off the game's own Effects panel. Saved here like any
@@ -1820,7 +1815,11 @@ void GameScreen::saveSettings() {
     out << "view_distance=" << settingsPanel_.pendingViewDistance << "\n";
     out << "fog_sky_blend=" << settingsPanel_.pendingFogSkyBlend << "\n";
     out << "fog_strength=" << settingsPanel_.pendingFogStrength << "\n";
+    out << "light_shafts=" << settingsPanel_.pendingVolumetricFog << "\n";
+    out << "ray_traced_lighting=" << settingsPanel_.pendingRtLighting << "\n";
+    out << "mist_density=" << settingsPanel_.pendingVolumetricDensity << "\n";
     out << "sharp_stars=" << (settingsPanel_.pendingSharpStars ? 1 : 0) << "\n";
+    out << "sun_shafts=" << (settingsPanel_.pendingSunShafts ? 1 : 0) << "\n";
     out << "brightness=" << settingsPanel_.pendingBrightness << "\n";
     out << "water_refraction=" << (settingsPanel_.pendingWaterRefraction ? 1 : 0) << "\n";
     out << "antialiasing=" << settingsPanel_.pendingAntiAliasing << "\n";
@@ -1847,6 +1846,10 @@ void GameScreen::saveSettings() {
     out << "camera_max_distance=" << settingsPanel_.pendingCameraMaxDistance << "\n";
     out << "camera_pivot_height=" << settingsPanel_.pendingPivotHeight << "\n";
     out << "camera_smooth_follow=" << (settingsPanel_.pendingSmoothCameraFollow ? 1 : 0) << "\n";
+    out << "gamepad=" << (settingsPanel_.pendingGamepadEnabled ? 1 : 0) << "\n";
+    out << "gamepad_look_speed=" << settingsPanel_.pendingGamepadLookSpeed << "\n";
+    out << "gamepad_invert_look=" << (settingsPanel_.pendingGamepadInvertLook ? 1 : 0) << "\n";
+    out << "gamepad_deadzone=" << settingsPanel_.pendingGamepadDeadzone << "\n";
     out << "fov=" << settingsPanel_.pendingFov << "\n";
     out << "camera_shake=" << settingsPanel_.pendingCameraShake << "\n";
 
@@ -1927,6 +1930,8 @@ void GameScreen::loadSettings() {
                     std::clamp(std::stof(val), windowUiScaleRange().first,
                                windowUiScaleRange().second);
                 windowScaleLoaded = true;
+            } else if (key == "scroll_speed") {
+                settingsPanel_.pendingScrollSpeed = std::clamp(std::stof(val), 0.25f, 4.0f);
             } else if (key == "minimap_rotate") {
                 // Honoured since 2026-09-06. It was read and dropped before,
                 // every run starting north-up, until the rotated map had been
@@ -1964,6 +1969,8 @@ void GameScreen::loadSettings() {
                 settingsPanel_.showCooldownTracker_ = (std::stoi(val) != 0);
             } else if (key == "show_rare_tracker") {
                 settingsPanel_.showRareTracker_ = (std::stoi(val) != 0);
+            } else if (key == "map_window") {
+                settingsPanel_.showMapWindow_ = (std::stoi(val) != 0);
             } else if (key == "show_chest_tracker") {
                 settingsPanel_.showChestTracker_ = (std::stoi(val) != 0);
             } else if (key == "separate_bags") {
@@ -2056,6 +2063,7 @@ void GameScreen::loadSettings() {
             else if (key == "auto_sell_grey") settingsPanel_.pendingAutoSellGrey = (std::stoi(val) != 0);
             else if (key == "auto_repair") settingsPanel_.pendingAutoRepair = (std::stoi(val) != 0);
             else if (key == "secure_ability_toggle") settingsPanel_.pendingSecureAbilityToggle = (std::stoi(val) != 0);
+            else if (key == "auto_face_target") settingsPanel_.pendingAutoFaceTarget = (std::stoi(val) != 0);
             else if (key == "graphics_preset") {
                 int presetVal = std::clamp(std::stoi(val), 0, 4);
                 settingsPanel_.currentGraphicsPreset = static_cast<SettingsPanel::GraphicsPreset>(presetVal);
@@ -2076,7 +2084,11 @@ void GameScreen::loadSettings() {
             else if (key == "view_distance") settingsPanel_.pendingViewDistance = std::clamp(std::stof(val), 400.0f, 2400.0f);
             else if (key == "fog_sky_blend") settingsPanel_.pendingFogSkyBlend = std::clamp(std::stof(val), 0.0f, 1.0f);
             else if (key == "fog_strength") settingsPanel_.pendingFogStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
+            else if (key == "light_shafts") settingsPanel_.pendingVolumetricFog = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "ray_traced_lighting") settingsPanel_.pendingRtLighting = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "mist_density") settingsPanel_.pendingVolumetricDensity = std::clamp(std::stof(val), 0.0f, 3.0f);
             else if (key == "sharp_stars") settingsPanel_.pendingSharpStars = (val == "1");
+            else if (key == "sun_shafts") settingsPanel_.pendingSunShafts = (val == "1");
             // No apply here either: brightness is on the graphics load list,
             // which is walked once the renderer exists. This branch ran from
             // the constructor, where services_.renderer is still null.
@@ -2084,6 +2096,7 @@ void GameScreen::loadSettings() {
             else if (key == "water_refraction") settingsPanel_.pendingWaterRefraction = (std::stoi(val) != 0);
             else if (key == "antialiasing") settingsPanel_.pendingAntiAliasing = std::clamp(std::stoi(val), 0, 3);
             else if (key == "fxaa") settingsPanel_.pendingFXAA = (std::stoi(val) != 0);
+            else if (key == "check_for_updates") settingsPanel_.pendingCheckForUpdates = (std::stoi(val) != 0);
             else if (key == "normal_mapping") settingsPanel_.pendingNormalMapping = (std::stoi(val) != 0);
             else if (key == "normal_map_strength") settingsPanel_.pendingNormalMapStrength = std::clamp(std::stof(val), 0.0f, 2.0f);
             else if (key == "lens_flare") settingsPanel_.pendingLensFlare = std::clamp(std::stof(val), 0.0f, 2.0f);
@@ -2111,6 +2124,10 @@ void GameScreen::loadSettings() {
             else if (key == "camera_max_distance") settingsPanel_.pendingCameraMaxDistance = std::clamp(std::stoi(val), 22, 50);
             else if (key == "camera_pivot_height") settingsPanel_.pendingPivotHeight = std::clamp(std::stof(val), 0.0f, 3.0f);
             else if (key == "camera_smooth_follow") settingsPanel_.pendingSmoothCameraFollow = (std::stoi(val) != 0);
+            else if (key == "gamepad") settingsPanel_.pendingGamepadEnabled = (std::stoi(val) != 0);
+            else if (key == "gamepad_look_speed") settingsPanel_.pendingGamepadLookSpeed = std::clamp(std::stof(val), 60.0f, 540.0f);
+            else if (key == "gamepad_invert_look") settingsPanel_.pendingGamepadInvertLook = (std::stoi(val) != 0);
+            else if (key == "gamepad_deadzone") settingsPanel_.pendingGamepadDeadzone = std::clamp(std::stof(val), 0.0f, 0.5f);
             // No apply here: this runs from the constructor, where there is
             // no renderer to hand it to. applyCameraControlSettings does it,
             // and this function ends by calling it.
@@ -2190,8 +2207,21 @@ void GameScreen::loadSettings() {
 // Screen-space weather overlay (rain / snow / storm)
 // ---------------------------------------------------------------------------
 void GameScreen::renderWeatherOverlay(game::GameHandler& gameHandler) {
-    uint32_t wType     = gameHandler.getWeatherType();
-    float    intensity = gameHandler.getWeatherIntensity();
+    (void)gameHandler;
+    // What the world's weather particles are drawing, so this stops where they
+    // do: indoors, and in Duskwood.
+    auto* renderer = services_.renderer;
+    const rendering::Weather* weather = renderer ? renderer->getWeather() : nullptr;
+    if (!weather || !weather->isEnabled()) return;
+    // 1 rain, 2 snow, 3 storm, as drawn below.
+    uint32_t wType = 0;
+    switch (weather->getWeatherType()) {
+        case rendering::Weather::Type::RAIN:  wType = 1; break;
+        case rendering::Weather::Type::SNOW:  wType = 2; break;
+        case rendering::Weather::Type::STORM: wType = 3; break;
+        default: break;
+    }
+    float    intensity = weather->getIntensity();
     if (wType == 0 || intensity < 0.05f) return;
 
     const ImGuiIO& io = ImGui::GetIO();

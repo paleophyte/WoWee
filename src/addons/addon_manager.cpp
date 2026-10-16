@@ -413,6 +413,10 @@ void AddonManager::loadAllAddons() {
             LOG_WARNING("UI scale confirmation did not apply: ",
                         luaEngine_.lastError());
         }
+        // Picked talents lit, and let go when the talent frame closes.
+        if (!luaEngine_.executeString(kTalentPreviewLua)) {
+            LOG_WARNING("Talent preview hooks did not install: ", luaEngine_.lastError());
+        }
         // Said once, after the interface is up: anything neither handed over
         // nor hidden is about to be on screen twice.
         ui::frameXmlReportUnaccountedElements();
@@ -716,10 +720,11 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         // nothing about the one case that matters - a file that never returns
         // prints nothing at all, and the load simply stops with the last
         // successful file as the only clue.
-        // At warning level because release builds drop INFO, and this is the
-        // one line that identifies a file which never returns. Noisy for 139
-        // files, and worth it only while this path is still experimental.
-        LOG_WARNING("FrameXML: loading ", filename);
+        // At debug level: 139 lines on every load, and a Lua file that stops
+        // making progress is cut off by the chunk budget above and named in
+        // the failures at the end. What is left is a hang outside Lua, and
+        // WOWEE_LOG_LEVEL=debug brings this back for that.
+        LOG_DEBUG("FrameXML: loading ", filename);
         std::string lower = filename;
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const std::filesystem::path resolved = resolvePath(dir, filename);
@@ -1205,6 +1210,25 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "        CURRENT_MAP_QUESTS[questID] = i\n"
         "      end\n"
         "    end\n"
+        // Nothing matched, so the question could not be answered rather than
+        // answered with none. A quest sits under the zone its query response
+        // named, and until that lands it sits under Miscellaneous - which
+        // matches no zone, so a log of quests the server has not described yet
+        // filters down to an empty tracker. The panel then hides its own
+        // header and disables the button that would expand it, which reads as
+        // three faults: quests not being tracked, a collapsed panel, and a
+        // dead button. They are one.
+        //
+        // Showing a quest from the wrong zone is a smaller wrong than showing
+        // none, so an empty match falls back to every quest in the log.
+        "    if not next(CURRENT_MAP_QUESTS) then\n"
+        "      for i = 1, GetNumQuestLogEntries() do\n"
+        "        local _, _, _, _, isHeader, _, _, _, questID = GetQuestLogTitle(i)\n"
+        "        if not isHeader and questID and questID ~= 0 then\n"
+        "          CURRENT_MAP_QUESTS[questID] = i\n"
+        "        end\n"
+        "      end\n"
+        "    end\n"
         "  end\n"
         "end\n");
 
@@ -1244,7 +1268,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  end)\n"
         "end\n");
 
-    // Let the bag windows and the character sheet be dragged around.
+    // Let the bag windows, the character sheet and the PvP panels be dragged
+    // around.
     //
     // A deliberate departure from 3.3.5, where neither can be moved: the bags
     // arrange themselves up the right-hand side and the character sheet is a
@@ -1261,7 +1286,35 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         "  f:SetScript('OnDragStop', function(self) self:StopMovingOrSizing() end)\n"
         "end\n"
         "for i = 1, 13 do draggable(_G['ContainerFrame' .. i]) end\n"
-        "draggable(CharacterFrame)\n");
+        "draggable(CharacterFrame)\n"
+        // The PvP window (H), the battlemaster's list and the scoreboard -
+        // asked for with the rest, and fixed panels in 3.3.5 for the same
+        // reason the character sheet is.
+        "draggable(PVPParentFrame)\n"
+        "draggable(BattlefieldFrame)\n"
+        "draggable(WorldStateScoreFrame)\n");
+
+    // The PvP window and the battlemaster's list open in the middle of the
+    // screen, where they were asked for.
+    //
+    // Both are "left" panels in UIPanelWindows, which the panel manager
+    // re-anchors to the left edge every time one opens - so an anchor set
+    // here would be overwritten on the next show. Out of that table,
+    // ShowUIPanel and HideUIPanel simply show and hide them; UISpecialFrames
+    // keeps Escape closing them, which the panel table used to do.
+    luaEngine_.executeString(
+        "local function centered(f)\n"
+        "  if not f or not UIPanelWindows then return end\n"
+        "  local name = f:GetName()\n"
+        "  UIPanelWindows[name] = nil\n"
+        "  if UISpecialFrames then tinsert(UISpecialFrames, name) end\n"
+        "  f:HookScript('OnShow', function(self)\n"
+        "    self:ClearAllPoints()\n"
+        "    self:SetPoint('CENTER', UIParent, 'CENTER')\n"
+        "  end)\n"
+        "end\n"
+        "centered(PVPParentFrame)\n"
+        "centered(BattlefieldFrame)\n");
 
     // A search box on the trainer, which 3.3.5 has no equivalent of.
     //

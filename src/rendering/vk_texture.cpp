@@ -17,7 +17,8 @@ VkTexture::~VkTexture() {
 VkTexture::VkTexture(VkTexture&& other) noexcept
     : image_(other.image_), sampler_(other.sampler_), mipLevels_(other.mipLevels_),
       ownsSampler_(other.ownsSampler_), device_(other.device_),
-      allocator_(other.allocator_) {
+      allocator_(other.allocator_), averageColor_(other.averageColor_),
+      alphaCoverage_(other.alphaCoverage_) {
     other.image_ = {};
     other.sampler_ = VK_NULL_HANDLE;
     // Source no longer owns the sampler - ownership transferred to this instance
@@ -37,6 +38,8 @@ VkTexture& VkTexture::operator=(VkTexture&& other) noexcept {
         ownsSampler_ = other.ownsSampler_;
         device_ = other.device_;
         allocator_ = other.allocator_;
+        averageColor_ = other.averageColor_;
+        alphaCoverage_ = other.alphaCoverage_;
         other.image_ = {};
         other.sampler_ = VK_NULL_HANDLE;
         other.ownsSampler_ = false;
@@ -66,8 +69,35 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
     // no queue submission and no barriers: the pixels go into the image and
     // the layout moves on the host. Mipped textures still take the staging
     // path, because their levels are built by a GPU blit chain that has to
-    // read back from the image anyway.
-    const bool useHostCopy = ctx.isHostImageCopySupported() && !generateMips;
+    // read back from the image anyway. Host transfer is per format - the
+    // terrain's R8 alpha maps lack it on some NVIDIA drivers - so the format
+    // is asked too.
+    bool useHostCopy = !generateMips && ctx.canHostCopyFormat(format);
+
+    // Create image with transfer dst + src (src for mipmap generation) + sampled
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (generateMips) {
+        usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
+    // Release anything this object already held: a second upload over the
+    // same texture used to abandon the first, which is how three quest
+    // marker textures survived every re-initialisation.
+    destroy(device_, allocator_);
+    device_ = ctx.getDevice();
+    allocator_ = ctx.getAllocator();
+    image_ = createImage(ctx.getDevice(), ctx.getAllocator(), width, height,
+        format, useHostCopy ? usage | VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT : usage,
+        VK_SAMPLE_COUNT_1_BIT, mipLevels_, where);
+
+    // A driver can report host transfer for a format and still refuse the
+    // image. Without the usage bit it is an ordinary staged texture.
+    if (!image_.image && useHostCopy) {
+        ctx.markHostCopyFormatUnusable(format);
+        useHostCopy = false;
+        image_ = createImage(ctx.getDevice(), ctx.getAllocator(), width, height,
+            format, usage, VK_SAMPLE_COUNT_1_BIT, mipLevels_, where);
+    }
+    if (!image_.image) return false;
 
     AllocatedBuffer staging{};
     if (!useHostCopy) {
@@ -78,28 +108,6 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
         vmaMapMemory(ctx.getAllocator(), staging.allocation, &mapped);
         std::memcpy(mapped, pixels, imageSize);
         vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
-    }
-
-    // Create image with transfer dst + src (src for mipmap generation) + sampled
-    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (generateMips) {
-        usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    }
-    if (useHostCopy) {
-        usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
-    }
-    // Release anything this object already held: a second upload over the
-    // same texture used to abandon the first, which is how three quest
-    // marker textures survived every re-initialisation.
-    destroy(device_, allocator_);
-    device_ = ctx.getDevice();
-    allocator_ = ctx.getAllocator();
-    image_ = createImage(ctx.getDevice(), ctx.getAllocator(), width, height,
-        format, usage, VK_SAMPLE_COUNT_1_BIT, mipLevels_, where);
-
-    if (!image_.image) {
-        if (!useHostCopy) destroyBuffer(ctx.getAllocator(), staging);
-        return false;
     }
 
     if (useHostCopy) {
@@ -265,6 +273,12 @@ VkTexture::BlockUploadTally VkTexture::blockUploadTally() {
 
 bool VkTexture::uploadBLP(VkContext& ctx, const pipeline::BLPImage& image) {
     if (!image.isValid()) return false;
+
+    {
+        float rgb[3];
+        image.averageColor(rgb, alphaCoverage_);
+        averageColor_ = glm::vec3(rgb[0], rgb[1], rgb[2]);
+    }
 
     if (!image.isBlockCompressed()) {
         return upload(ctx, image.data.data(),

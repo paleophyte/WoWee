@@ -3553,14 +3553,31 @@ void registerSocialLuaAPI(lua_State* L) {
                 // own registry - so /reload, /reloadui and /rl all landed here
                 // and did nothing while the client's own reload sat behind
                 // them. Routed to the same request ReloadUI makes.
+                //
+                // And `name value`, which is /console's everyday use: setting a
+                // CVar from a macro. Handed to SetCVar so it is applied exactly
+                // as the options panel would apply it.
                 {"ConsoleExec", [](lua_State* L) -> int {
-            std::string cmd(luaL_optstring(L, 1, ""));
-            toLowerInPlace(cmd);
-            if (cmd == "reloadui") {
+            const std::string line(luaL_optstring(L, 1, ""));
+            const size_t start = line.find_first_not_of(' ');
+            if (start == std::string::npos) return 0;
+            const size_t space = line.find(' ', start);
+            std::string name = line.substr(start, space == std::string::npos ? std::string::npos : space - start);
+            std::string lower = name;
+            toLowerInPlace(lower);
+            if (lower == "reloadui") {
                 if (auto* svc = getLuaServices(L); svc && svc->requestReloadUI) {
                     svc->requestReloadUI();
                 }
+                return 0;
             }
+            if (space == std::string::npos) return 0;
+            const size_t valueStart = line.find_first_not_of(' ', space);
+            if (valueStart == std::string::npos) return 0;
+            const size_t valueEnd = line.find_last_not_of(' ');
+            lua_pushstring(L, name.c_str());
+            lua_pushstring(L, line.substr(valueStart, valueEnd - valueStart + 1).c_str());
+            callGlobal(L, "SetCVar", 2);
             return 0;
         }},
                 // The two buttons under the AddOns list. EnableAddOn and

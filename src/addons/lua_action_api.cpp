@@ -8,16 +8,22 @@
 #include "game/inventory_slots.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
+#include "ui/settings_panel.hpp"
+#include "addons/binding_file.hpp"
+#include "ui/gamepad_controls.hpp"
+
+#include <span>
 #include "core/config_paths.hpp"
 #include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include "game/current_action.hpp"
 #include "game/pet_action.hpp"
 #include "imgui.h"
 #include <optional>
-#include <SDL2/SDL_keyboard.h>
+#include <SDL3/SDL_keyboard.h>
 
 namespace wowee::addons {
 
@@ -37,7 +43,7 @@ namespace wowee::addons {
 // window puts one there on every left-click - PickupMerchantItem - and buying
 // is what happens when it is dropped into a bag, so without it a left-click at
 // a vendor did nothing at all and only right-click bought.
-enum class CursorType { NONE, SPELL, ITEM, ACTION, MACRO, MERCHANT, MONEY, GUILDBANK };
+enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK };
 static CursorType s_cursorType = CursorType::NONE;
 static uint32_t   s_cursorId   = 0;    // spellId, itemId, or action slot
 static int        s_cursorSlot = 0;    // source slot for placement
@@ -207,9 +213,18 @@ static int lua_GetActionTexture(lua_State* L) {
 
 // IsCurrentAction(slot) → boolean
 static int lua_IsCurrentAction(lua_State* L) {
-    // Currently no "active action" tracking; return false
-    (void)L;
-    lua_pushboolean(L, 0);
+    auto* gh = getGameHandler(L);
+    const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
+    bool current = false;
+    if (gh && slot >= 0) {
+        const auto& bar = gh->getActionBar();
+        if (slot < static_cast<int>(bar.size()) &&
+            bar[slot].type == game::ActionBarSlot::SPELL) {
+            current = game::isCurrentSpellAction(bar[slot].id, gh->getActiveActionSpellId(),
+                                                 gh->isAutoAttacking());
+        }
+    }
+    lua_pushboolean(L, current);
     return 1;
 }
 
@@ -244,7 +259,7 @@ static int lua_IsUsableAction(lua_State* L) {
                 auto pe = gh->getEntityManager().getEntity(gh->getPlayerGuid());
                 if (pe) {
                     auto* unit = dynamic_cast<game::Unit*>(pe.get());
-                    if (unit && unit->getPower() < spellData.manaCost) {
+                    if (unit && unit->getPowerByType(spellData.powerType) < spellData.manaCost) {
                         noMana = true;
                         usable = false;
                     }
@@ -276,28 +291,7 @@ static int lua_IsActionInRange(lua_State* L) {
         lua_pushnil(L);
         return 1;
     }
-    if (spellId == 0) { return luaReturnNil(L); }
-
-    auto data = gh->getSpellData(spellId);
-    if (data.maxRange <= 0.0f) {
-        // Melee or self-cast spells: no range indicator
-        lua_pushnil(L);
-        return 1;
-    }
-
-    // Need a target to check range against
-    uint64_t targetGuid = gh->getTargetGuid();
-    if (targetGuid == 0) { return luaReturnNil(L); }
-    auto targetEnt = gh->getEntityManager().getEntity(targetGuid);
-    auto playerEnt = gh->getEntityManager().getEntity(gh->getPlayerGuid());
-    if (!targetEnt || !playerEnt) { return luaReturnNil(L); }
-
-    float dx = playerEnt->getX() - targetEnt->getX();
-    float dy = playerEnt->getY() - targetEnt->getY();
-    float dz = playerEnt->getZ() - targetEnt->getZ();
-    float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-    lua_pushnumber(L, dist <= data.maxRange ? 1 : 0);
-    return 1;
+    return pushSpellRangeAnswer(L, gh, spellId, gh->getTargetGuid());
 }
 
 // GetActionInfo(slot) → actionType, id, subType
@@ -488,10 +482,6 @@ static int lua_GetCursorInfo(lua_State* L) {
             lua_pushstring(L, "item");
             lua_pushnumber(L, s_cursorId);
             return 2;
-        case CursorType::ACTION:
-            lua_pushstring(L, "action");
-            lua_pushnumber(L, s_cursorSlot);
-            return 2;
         case CursorType::MACRO:
             lua_pushstring(L, "macro");
             lua_pushnumber(L, s_cursorId);
@@ -574,10 +564,15 @@ static int lua_PickupAction(lua_State* L) {
 
     if (hadAction) {
         // What was there goes to the cursor, whether this was a swap or a
-        // plain pick-up.
+        // plain pick-up. existing.type is never EMPTY here (hadAction), so
+        // this covers every case - CursorType::ACTION was a dead end lua_
+        // PlaceAction had no branch for, and picking a macro up off the bar
+        // fell to it by default: the macro left its slot, rode the cursor as
+        // an unplaceable "action", and vanished on drop instead of landing
+        // anywhere.
         setCursorType(L, (existing.type == game::ActionBarSlot::SPELL) ? CursorType::SPELL :
                        (existing.type == game::ActionBarSlot::ITEM)  ? CursorType::ITEM :
-                       CursorType::ACTION);
+                       CursorType::MACRO);
         s_cursorId = existing.id;
         s_cursorSlot = slot;
         // Which button, not which slot of which bag - a fourth numbering, and
@@ -600,7 +595,9 @@ static int lua_PickupAction(lua_State* L) {
             wowee::ui::frameXmlSetCursorItem(
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
         } else {
-            wowee::ui::frameXmlSetCursorItem(std::string());
+            std::string icon = gh->getMacroIcon(existing.id);
+            if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
+            wowee::ui::frameXmlSetCursorItem(icon);
         }
     } else {
         clearCursorItem(L);
@@ -609,20 +606,23 @@ static int lua_PickupAction(lua_State* L) {
 }
 
 // PlaceAction(slot) - places cursor content into an action bar slot
+//
+// A swap, as the real one is: whatever the slot held goes onto the cursor, so
+// a bar can be rearranged by dropping one action on another and then placing
+// the one that came off. This wrote the new action over the old and cleared
+// the cursor, so the action underneath was simply gone - and it is PlaceAction
+// an action button's OnReceiveDrag calls, so every drop onto an occupied
+// button lost what was there.
+//
+// PickupAction while holding something is exactly that swap, so this is it.
+// With nothing placeable held it does nothing, and leaves the cursor alone.
 static int lua_PlaceAction(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    if (!gh) return 0;
-    int slot = static_cast<int>(luaL_checknumber(L, 1));
-    if (slot < 1 || slot > static_cast<int>(gh->getActionBar().size())) return 0;
-    if (s_cursorType == CursorType::SPELL && s_cursorId != 0) {
-        gh->setActionBarSlot(slot - 1, game::ActionBarSlot::SPELL, s_cursorId);
-    } else if (s_cursorType == CursorType::ITEM && s_cursorId != 0) {
-        gh->setActionBarSlot(slot - 1, game::ActionBarSlot::ITEM, s_cursorId);
-    } else if (s_cursorType == CursorType::MACRO && s_cursorId != 0) {
-        gh->setActionBarSlot(slot - 1, game::ActionBarSlot::MACRO, s_cursorId);
-    }
-    clearCursorItem(L);
-    return 0;
+    const bool holding = s_cursorId != 0 &&
+                         (s_cursorType == CursorType::SPELL ||
+                          s_cursorType == CursorType::ITEM ||
+                          s_cursorType == CursorType::MACRO);
+    if (!holding) return 0;
+    return lua_PickupAction(L);
 }
 
 // PickupSpell(bookSlot, bookType) - picks up a spell from the spellbook
@@ -1321,9 +1321,9 @@ static int lua_AutoEquipCursorItem(lua_State* L) {
 // owns the mouse. lua_system_api registers the same three names against
 // SDL_GetModState; these agree with it now instead of racing it, and the
 // duplicate Is*KeyDown bindings that used to live here are gone with them.
-static bool shiftHeld() { return (SDL_GetModState() & KMOD_SHIFT) != 0; }
-static bool ctrlHeld()  { return (SDL_GetModState() & KMOD_CTRL)  != 0; }
-static bool altHeld()   { return (SDL_GetModState() & KMOD_ALT)   != 0; }
+static bool shiftHeld() { return (SDL_GetModState() & SDL_KMOD_SHIFT) != 0; }
+static bool ctrlHeld()  { return (SDL_GetModState() & SDL_KMOD_CTRL)  != 0; }
+static bool altHeld()   { return (SDL_GetModState() & SDL_KMOD_ALT)   != 0; }
 
 
 /// What bindings.xml declares for a modified-click action, or empty.
@@ -1626,25 +1626,18 @@ ImGuiKey imGuiKeyFromWow(const std::string& name) {
     return ImGuiKey_None;
 }
 
-/// Tells the client what a command is bound to now, for the commands it acts
-/// on. Silent for the rest, which are listed and saved but not yet answered.
 /// Hand a binding to the client's own keybinding manager, if it answers that
 /// command at all.
 ///
-/// Two things do not survive this, both worth knowing before chasing either as
-/// a bug.
+/// The interface allows two keys per command and the manager holds one per
+/// action, so what is pushed here is keys[0] - the primary. The second stays
+/// in the Lua map above. Both are kept past the session: SaveBindings writes
+/// the two slots of every command in that map, and LoadBindings reads them
+/// back and pushes the primary here again.
 ///
-/// A second key for one command is accepted, works for the session and is gone
-/// at the next start. The interface allows two per command and this manager
-/// holds one per action, so what is pushed here is keys[0] - the primary - and
-/// the other lives only in the Lua map above, which nothing saves. Setting a
-/// primary does persist: rebinding the bags from B to N writes toggle_bags=N
-/// and comes back as N. Making the second key stick means the manager holding
-/// two, which is a change to what a binding is here rather than a repair.
-///
-/// A binding for a command not in kLiveBindings does not reach the client at
-/// all, and is not saved either. That is the intended half of this: those are
-/// the commands the interface answers for itself.
+/// A binding for a command not in kLiveBindings does not reach the manager at
+/// all. That is intended: those are the commands the interface answers for
+/// itself.
 void pushBindingToClient(const std::string& command, const std::string& key) {
     for (const auto& live : kLiveBindings) {
         if (command != live.command) continue;
@@ -1672,11 +1665,43 @@ std::optional<std::string> liveKeyFor(const std::string& command) {
     return std::nullopt;
 }
 
+/// What SaveBindings wrote, over whatever is in the map. `pushLive` also hands
+/// the client's own commands to its manager; at start-up it does not, because
+/// the manager keeps those keys itself and a rebind made in the client's
+/// settings panel is newer than this file.
+void applySavedBindings(bool pushLive) {
+    std::ifstream in(bindingsFilePath());
+    if (!in) return;   // Nothing saved yet is not a failure.
+    for (const auto& [command, saved] : wowee::addons::parseSavedBindings(in)) {
+        if (!pushLive && liveKeyFor(command)) continue;
+        bindingKeys()[command] = saved;
+        // A binding saved in the second slot alone is still a binding.
+        if (pushLive) pushBindingToClient(command, saved[0].empty() ? saved[1] : saved[0]);
+    }
+    if (pushLive) return;
+    // The manager's keys win, so none of them may also sit on another command:
+    // GetBindingAction would answer with whichever the map holds first.
+    for (const auto& live : kLiveBindings) {
+        const auto key = liveKeyFor(live.command);
+        if (!key) continue;
+        for (auto& [command, slots] : bindingKeys()) {
+            if (command == live.command) continue;
+            for (auto& slot : slots) {
+                if (slot == *key) slot.clear();
+            }
+        }
+    }
+}
+
 /// The keys the client is actually listening for, asked of the manager that
 /// listens rather than restated here - a second copy would be wrong the moment
 /// either side moved. Commands the client has no action for keep their retail
 /// default, so the list reads correctly even where nothing acts on it yet.
-void seedBindingDefaults() {
+///
+/// Then what the player saved, unless only the defaults are wanted: this is
+/// the first thing any binding lookup calls, so it is also where a binding
+/// made in an earlier session comes back.
+void seedBindingDefaults(bool withSaved = true) {
     auto& keys = bindingKeys();
     if (!keys.empty()) return;
 
@@ -1685,6 +1710,9 @@ void seedBindingDefaults() {
         {"TURNLEFT", "A"},      {"TURNRIGHT", "D"},
         {"STRAFELEFT", "Q"},    {"STRAFERIGHT", "E"},
         {"JUMP", "SPACE"},      {"TOGGLEAUTORUN", "NUMLOCK"},
+        // Tab targets, and has since the client was written; the panel said
+        // this one was unbound because nothing had ever told it.
+        {"TARGETNEARESTENEMY", "TAB"},
         {"TOGGLEGAMEMENU", "ESCAPE"},
         {"SCREENSHOT", "PRINTSCREEN"},
         {"ACTIONBUTTON1", "1"}, {"ACTIONBUTTON2", "2"},
@@ -1703,6 +1731,37 @@ void seedBindingDefaults() {
         const std::string key = wowKeyFromImGui(manager.getKeyForAction(live.action));
         if (!key.empty()) keys[live.command] = {key, ""};
     }
+
+    // And the controller's own defaults, as second keys.
+    //
+    // The pad's scheme was written in C++ and pressed keys directly, so the
+    // game's Key Bindings panel showed Action Button 3 on "3" and said
+    // nothing about the D-pad: a player who opened the one screen that exists
+    // for finding out what a button does saw a controller bound to nothing,
+    // and had no way to change any of it.
+    //
+    // Read off the table that performs the scheme rather than restated here,
+    // so the two cannot drift. The rows with no command - the bumper that is
+    // only a modifier, the button that raises the pointer, the stick click
+    // that sits down - stay the client's own, having nothing in the
+    // interface's vocabulary to be.
+    //
+    // Second rather than first, so the keyboard's key is still the one shown
+    // where only one fits.
+    const auto seedPad = [&keys](std::span<const wowee::ui::PadBinding> rows) {
+        for (const wowee::ui::PadBinding& row : rows) {
+            const char* command = row.command;
+            if (!command || !*command) continue;
+            const char* padKey = wowee::ui::padKeyName(row.button);
+            if (!padKey || !*padKey) continue;
+            auto& pair = keys[command];
+            if (pair[1].empty()) pair[1] = padKey;
+        }
+    };
+    seedPad(wowee::ui::padBindings());
+    seedPad(wowee::ui::padExtraBindings());
+
+    if (withSaved) applySavedBindings(false);
 }
 
 /// The command list the emitter built, or zero if bindings.xml never loaded.
@@ -1759,6 +1818,15 @@ bool clientActsOnBinding(const std::string& command) {
     return false;
 }
 
+int clientImGuiKeyForBinding(const std::string& command) {
+    for (const auto& live : kLiveBindings) {
+        if (command != live.command) continue;
+        return static_cast<int>(
+            wowee::ui::KeybindingManager::getInstance().getKeyForAction(live.action));
+    }
+    return 0;
+}
+
 // GetBindingKey(command) → key1, key2 (or nil)
 static int lua_GetBindingKey(lua_State* L) {
     seedBindingDefaults();
@@ -1776,7 +1844,20 @@ static int lua_GetBindingKey(lua_State* L) {
     return 2;
 }
 
-// GetBindingAction(key) → command (or nil)
+// GetBindingAction(key) → command, or "" for a key that holds nothing
+//
+// Empty rather than nil, which is what the real client answers and what the
+// interface is written against. Blizzard's key binding panel reads it as
+//
+//     local oldAction = GetBindingAction(keyPressed, KeyBindingFrame.mode);
+//     if ( oldAction ~= "" and oldAction ~= KeyBindingFrame.selected ) then
+//         local key1, key2 = GetBindingKey(oldAction, ...)
+//
+// and nil is not equal to "", so a nil sent the panel into that branch with
+// nil in hand: "bad argument #1 to 'GetBindingKey' (string expected, got
+// nil)", thrown out of OnKeyDown before the new binding was ever set. Every
+// attempt to bind a key that was not already bound to something failed that
+// way - a controller button being the case where that is always true.
 static int lua_GetBindingAction(lua_State* L) {
     seedBindingDefaults();
     const std::string key = luaL_checkstring(L, 1);
@@ -1786,7 +1867,7 @@ static int lua_GetBindingAction(lua_State* L) {
             return 1;
         }
     }
-    lua_pushnil(L);
+    lua_pushstring(L, "");
     return 1;
 }
 
@@ -1868,31 +1949,34 @@ static int lua_SaveBindings(lua_State* L) {
         // so a command that lost one is recorded as having lost it.
         out << command << "=" << keys[0] << "," << keys[1] << "\n";
     }
+    // The commands the client's own manager answers are saved by it too, so
+    // the two files never disagree about a key on the next start.
+    wowee::ui::KeybindingManager::getInstance().saveToConfigFile(
+        wowee::ui::SettingsPanel::getSettingsPath());
     return 0;
 }
 
-// LoadBindings(which) → what a previous run saved, over the defaults
+// LoadBindings(which) → the defaults for DEFAULT_BINDINGS (0), otherwise what
+// a previous run saved over them. The key binding panel's Default button
+// passes 0 and its Cancel passes the current set.
 static int lua_LoadBindings(lua_State* L) {
-    (void)L;
-    seedBindingDefaults();
-    std::ifstream in(bindingsFilePath());
-    if (!in) return 0;   // Nothing saved yet is not a failure.
-    std::string line;
-    while (std::getline(in, line)) {
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string command = line.substr(0, eq);
-        const std::string rest = line.substr(eq + 1);
-        const size_t comma = rest.find(',');
-        bindingKeys()[command] = {
-            rest.substr(0, comma),
-            comma == std::string::npos ? "" : rest.substr(comma + 1)
-        };
-        // What was saved is what the client should answer to, not what it
-        // started with - otherwise a rebind survives in the list and nowhere
-        // else, and only until the next save overwrites it.
-        pushBindingToClient(command, bindingKeys()[command][0]);
+    const bool defaultsOnly = luaL_optinteger(L, 1, 1) == 0;
+    auto& manager = wowee::ui::KeybindingManager::getInstance();
+    if (defaultsOnly) {
+        for (const auto& live : kLiveBindings) {
+            manager.setKeyForAction(live.action, manager.getDefaultKeyForAction(live.action));
+        }
+    } else {
+        // Back to what was last saved, including what this panel changed in
+        // the client's own manager since.
+        manager.loadFromConfigFile(wowee::ui::SettingsPanel::getSettingsPath());
     }
+    bindingKeys().clear();
+    seedBindingDefaults(false);
+    // What was saved is what the client should answer to, not what it
+    // started with - otherwise a rebind survives in the list and nowhere
+    // else, and only until the next save overwrites it.
+    if (!defaultsOnly) applySavedBindings(true);
     if (auto* gh = getGameHandler(L)) gh->fireAddonEvent("UPDATE_BINDINGS", {});
     return 0;
 }

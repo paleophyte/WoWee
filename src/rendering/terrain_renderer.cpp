@@ -1,6 +1,7 @@
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/shadow_params.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/rt_scene.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -399,6 +400,7 @@ bool TerrainRenderer::loadTerrain(const pipeline::TerrainMesh& mesh,
                 continue;
             }
 
+            registerRtChunk(gpuChunk, chunk);
             chunks.push_back(std::move(gpuChunk));
         }
     }
@@ -471,6 +473,7 @@ bool TerrainRenderer::loadTerrainIncremental(const pipeline::TerrainMesh& mesh,
             continue;
         }
 
+        registerRtChunk(gpuChunk, chunk);
         chunks.push_back(std::move(gpuChunk));
         uploaded++;
     }
@@ -1051,7 +1054,8 @@ bool TerrainRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         device, vkCtx->getPipelineCache(),
         vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
         fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT),
-        vertBind, vertAttrs, shadowPipelineLayout_, shadowRenderPass);
+        vertBind, vertAttrs, shadowPipelineLayout_, shadowRenderPass,
+        vkCtx->useDynamicRendering());
 
     vertShader.destroy();
     fragShader.destroy();
@@ -1090,14 +1094,38 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
         megaShadowBound = true;
     }
 
+    // Culled against the map's own footprint, not a sphere round the player.
+    // The map is a box reaching hundreds of yards toward the sun, and a ridge
+    // that far off in that direction is exactly what shades the ground and the
+    // air round the player - the sphere left it out, so the sun lit the mist
+    // straight through it. A chunk is kept if its centre lands on the map
+    // across the light, at any depth along it; the orthographic scale of the
+    // matrix is what turns the chunk's radius into the same units.
+    //
+    // Bounded in depth as well. Beyond the player, on the side away from the
+    // sun, terrain shades nothing the camera is near - and left in, a low sun
+    // turned the footprint into a strip the length of the loaded world, and
+    // the shadow pass drew thousands of chunks a frame.
+    const glm::vec4 centreLs = lightSpaceMatrix * glm::vec4(shadowCenter, 1.0f);
+    const float scaleZ = glm::length(glm::vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2],
+                                               lightSpaceMatrix[2][2]));
+    const float scaleX = glm::length(glm::vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0],
+                                               lightSpaceMatrix[2][0]));
+    const float scaleY = glm::length(glm::vec3(lightSpaceMatrix[0][1], lightSpaceMatrix[1][1],
+                                               lightSpaceMatrix[2][1]));
+
+    uint32_t shadowChunksDrawn = 0;
     for (const auto& chunk : chunks) {
         if (!chunk.isValid()) continue;
 
-        // Sphere-cull chunk against shadow region
-        glm::vec3 diff = chunk.boundingSphereCenter - shadowCenter;
-        float distSq = glm::dot(diff, diff);
-        float combinedRadius = shadowRadius + chunk.boundingSphereRadius;
-        if (distSq > combinedRadius * combinedRadius) continue;
+        const glm::vec4 ls = lightSpaceMatrix * glm::vec4(chunk.boundingSphereCenter, 1.0f);
+        if (std::abs(ls.x) > 1.0f + chunk.boundingSphereRadius * scaleX ||
+            std::abs(ls.y) > 1.0f + chunk.boundingSphereRadius * scaleY) {
+            continue;
+        }
+        // Depth grows away from the light in either depth convention.
+        if (ls.z > centreLs.z + (shadowRadius + chunk.boundingSphereRadius) * scaleZ) continue;
+        ++shadowChunksDrawn;
 
         if (useMegaShadow && chunk.megaBaseVertex >= 0) {
             // Rebound after a fallback chunk, for the reason given in the main
@@ -1117,6 +1145,15 @@ void TerrainRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSp
             vkCmdDrawIndexed(cmd, chunk.indexCount, 1, 0, 0, 0);
             megaShadowBound = false;
         }
+    }
+    // How many chunks cast, said when it moves by a quarter: the count is the
+    // cost of this pass, and the cull that decides it is not obvious.
+    static uint32_t lastReported = 0;
+    if (shadowChunksDrawn > lastReported + lastReported / 4 + 16 ||
+        shadowChunksDrawn + lastReported / 4 + 16 < lastReported) {
+        LOG_WARNING("Terrain shadow pass: ", shadowChunksDrawn, " of ", chunks.size(),
+                    " chunks cast");
+        lastReported = shadowChunksDrawn;
     }
 }
 
@@ -1150,8 +1187,42 @@ void TerrainRenderer::clear() {
     evictProtectFrom_ = 0;
 }
 
+void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk) {
+    if (!rtScene_) return;
+    RtScene::MeshSource src;
+    src.positions.reserve(chunk.vertices.size());
+    for (const auto& v : chunk.vertices) {
+        src.positions.emplace_back(v.position[0], v.position[1], v.position[2]);
+    }
+    src.indices.assign(chunk.indices.begin(), chunk.indices.end());
+
+    // One colour for the chunk: the base layer's, with each layer over it in
+    // proportion to how much of the chunk its alpha map covers.
+    glm::vec3 albedo = gpuChunk.baseTexture ? gpuChunk.baseTexture->averageColor() : glm::vec3(0.5f);
+    for (int i = 0; i < 3 && i + 1 < static_cast<int>(chunk.layers.size()); ++i) {
+        const VkTexture* tex = gpuChunk.layerTextures[i];
+        const auto& alpha = chunk.layers[i + 1].alphaData;
+        if (!tex || alpha.empty()) continue;
+        uint64_t sum = 0;
+        for (uint8_t a : alpha) sum += a;
+        const float cover = static_cast<float>(sum) / (255.0f * static_cast<float>(alpha.size()));
+        albedo = glm::mix(albedo, tex->averageColor(), cover);
+    }
+    src.surfaces.push_back(packRtSurface(albedo, 1.0f));
+
+    gpuChunk.rtMesh = rtScene_->addMesh(std::move(src));
+    // Terrain vertices are already in world space.
+    gpuChunk.rtInstance = rtScene_->addInstance(gpuChunk.rtMesh, glm::mat4(1.0f));
+}
+
 void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     if (!vkCtx) return;
+
+    if (rtScene_ && chunk.rtMesh != RtScene::kInvalid) {
+        rtScene_->removeInstance(chunk.rtInstance);
+        rtScene_->removeMesh(chunk.rtMesh);
+        chunk.rtInstance = chunk.rtMesh = RtScene::kInvalid;
+    }
 
     VkDevice device = vkCtx->getDevice();
     VmaAllocator allocator = vkCtx->getAllocator();

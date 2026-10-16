@@ -44,7 +44,7 @@
 #include "core/app_clock.hpp"
 #include "core/window.hpp"
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include "game/expansion_profile.hpp"
 #include "core/coordinates.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
@@ -3580,20 +3580,20 @@ static int lua_GetWeaponEnchantInfo(lua_State* L) {
 /// falsely, because a shift-click means something different from a click and
 /// FrameXML asks these on every button press.
 static int lua_IsShiftKeyDown(lua_State* L) {
-    lua_pushboolean(L, (SDL_GetModState() & KMOD_SHIFT) != 0);
+    lua_pushboolean(L, (SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
     return 1;
 }
 static int lua_IsControlKeyDown(lua_State* L) {
-    lua_pushboolean(L, (SDL_GetModState() & KMOD_CTRL) != 0);
+    lua_pushboolean(L, (SDL_GetModState() & SDL_KMOD_CTRL) != 0);
     return 1;
 }
 static int lua_IsAltKeyDown(lua_State* L) {
-    lua_pushboolean(L, (SDL_GetModState() & KMOD_ALT) != 0);
+    lua_pushboolean(L, (SDL_GetModState() & SDL_KMOD_ALT) != 0);
     return 1;
 }
 static int lua_IsModifierKeyDown(lua_State* L) {
     const SDL_Keymod m = SDL_GetModState();
-    lua_pushboolean(L, (m & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT)) != 0);
+    lua_pushboolean(L, (m & (SDL_KMOD_SHIFT | SDL_KMOD_CTRL | SDL_KMOD_ALT)) != 0);
     return 1;
 }
 
@@ -4462,7 +4462,7 @@ static int lua_JoinBattlefield(lua_State* L) {
     // is not what the real client sends. Nought is.
     const uint64_t battlemaster =
         gh->isGossipWindowOpen() ? gh->getCurrentGossip().npcGuid : 0;
-    LOG_INFO("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
+    LOG_WARNING("CMSG_BATTLEMASTER_JOIN: bgTypeId=", bgTypeId, " instance=", instanceId,
              " asGroup=", asGroup, " battlemaster=0x", std::hex, battlemaster, std::dec);
     gh->joinBattlefield(battlemaster, bgTypeId, instanceId, asGroup);
     return 0;
@@ -4714,27 +4714,6 @@ static std::vector<std::string> splitBar(const char* text) {
     return out;
 }
 
-// One Lua global called with the arguments already pushed, its one result
-// left as a string. Empty when the global is not a function or raised.
-static std::string callGlobal(lua_State* L, const char* name, int nargs) {
-    // The function has to sit under its arguments.
-    lua_getglobal(L, name);
-    if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 1 + nargs);
-        return {};
-    }
-    lua_insert(L, -(nargs + 1));
-    std::string out;
-    if (lua_pcall(L, nargs, 1, 0) == 0) {
-        if (lua_isboolean(L, -1)) out = lua_toboolean(L, -1) ? "1" : "0";
-        else if (const char* text = lua_tostring(L, -1)) out = text;
-    } else {
-        LOG_WARNING("Setting store: ", name, " raised: ",
-                    lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
-    }
-    lua_pop(L, 1);
-    return out;
-}
 
 // A row on a store - see SettingDesc::store - read in the units its control
 // shows: the index of its choice for an enum with `values`, the raw text
@@ -5744,9 +5723,19 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetBattlefieldTimeWaited", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int index = static_cast<int>(luaL_optnumber(L, 1, 1));
+            // Counted on from the server's last word, which comes about once
+            // a minute - answered as it stood, the minimap tooltip's time in
+            // queue sat still for a minute and then jumped.
             double ms = 0.0;
-            if (gh && index >= 1 && index <= 3)
-                ms = gh->getBgQueues()[static_cast<size_t>(index - 1)].timeInQueueSec * 1000.0;
+            if (gh && index >= 1 && index <= 3) {
+                const auto& q = gh->getBgQueues()[static_cast<size_t>(index - 1)];
+                ms = q.timeInQueueSec * 1000.0;
+                if (q.statusId == 1 &&
+                    q.queueTimeReceivedAt != std::chrono::steady_clock::time_point{}) {
+                    ms += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - q.queueTimeReceivedAt).count();
+                }
+            }
             lua_pushnumber(L, ms);
             return 1;
         }},
@@ -5903,7 +5892,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"GetMuteStatus",            lua_ReturnFalse},
                 {"GetActiveVoiceChannel",    lua_ReturnNil},
                 {"GetVoiceCurrentSessionID", lua_ReturnNil},
-                {"GetPartyMember",           lua_ReturnFalse},
                 // GetZonePVPInfo() → pvpType, isSubZonePvP, factionName
                 //
                 // minimap.lua unpacks three and answered nil for all of them,
@@ -6448,21 +6436,17 @@ void registerSystemLuaAPI(lua_State* L) {
             return 1;
         }},
                 // IsAutoRepeatAction(slot) - the button flashes for as long as
-                // an auto-repeat is running. There are exactly two in 3.3.5,
-                // Auto Shot and the wand's Shoot, which is how IsAttackAction
-                // beside it identifies auto-attack: by id rather than by an
-                // attribute word this client does not cache.
+                // an auto-repeat is running: Auto Shot or the wand's Shoot, and
+                // only while it actually repeats.
                 {"IsAutoRepeatAction", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
             const int slot = static_cast<int>(luaL_optnumber(L, 1, 0)) - 1;
             bool repeating = false;
-            if (gh && slot >= 0) {
+            if (gh && slot >= 0 && gh->getAutoRepeatSpellId() != 0) {
                 const auto& bar = gh->getActionBar();
-                if (slot < static_cast<int>(bar.size()) &&
-                    bar[slot].type == game::ActionBarSlot::SPELL) {
-                    constexpr uint32_t kAutoShot = 75, kShoot = 5019;
-                    repeating = bar[slot].id == kAutoShot || bar[slot].id == kShoot;
-                }
+                repeating = slot < static_cast<int>(bar.size()) &&
+                            bar[slot].type == game::ActionBarSlot::SPELL &&
+                            bar[slot].id == gh->getAutoRepeatSpellId();
             }
             lua_pushboolean(L, repeating);
             return 1;

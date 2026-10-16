@@ -130,9 +130,8 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
                 bool isPet = ((highGuid & kGuidTypeMask) == kGuidTypePet) ||
                              ((highGuid & kGuidTypeMask) == kGuidTypeVehicle);
                 if (!isPlayer && !isPet) {
-                    // Read receiver name (SizedCString), which we skip rather
-                    // than keep - but the skip has to be one the packet can
-                    // actually take. A length past the end walked the read
+                    // The receiver's name, which an NPC's $n is filled from.
+                    // Bounds-checked: a length past the end walked the read
                     // position off the buffer, and the message length below
                     // then read a clamped zero, passed its own bounds test on
                     // the strength of it, and delivered an empty monster line
@@ -140,7 +139,11 @@ bool MessageChatParser::parse(network::Packet& packet, MessageChatData& data) {
                     // about the packet, so refuse the packet.
                     const uint32_t recvNameLen = packet.readUInt32();
                     if (recvNameLen > packet.getRemainingSize()) return false;
-                    packet.setReadPos(packet.getReadPos() + recvNameLen);
+                    data.receiverName.clear();
+                    for (uint32_t i = 0; i < recvNameLen; ++i) {
+                        const char c = static_cast<char>(packet.readUInt8());
+                        if (c != '\0') data.receiverName.push_back(c);
+                    }
                 }
             }
             break;
@@ -1177,14 +1180,19 @@ network::Packet ReadyCheckConfirmPacket::build(bool ready) {
 // Duel
 // ============================================================
 
-network::Packet DuelAcceptPacket::build() {
+// Both answers name the duel flag. The server reads the guid before anything
+// else, and a packet too short for it is dropped unread - sent empty, as they
+// were, a duel could be neither accepted nor declined.
+network::Packet DuelAcceptPacket::build(uint64_t arbiterGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_DUEL_ACCEPTED));
+    packet.writeUInt64(arbiterGuid);
     LOG_DEBUG("Built CMSG_DUEL_ACCEPTED");
     return packet;
 }
 
-network::Packet DuelCancelPacket::build() {
+network::Packet DuelCancelPacket::build(uint64_t arbiterGuid) {
     network::Packet packet(wireOpcode(Opcode::CMSG_DUEL_CANCELLED));
+    packet.writeUInt64(arbiterGuid);
     LOG_DEBUG("Built CMSG_DUEL_CANCELLED");
     return packet;
 }
