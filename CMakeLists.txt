@@ -2088,6 +2088,7 @@ list(REMOVE_ITEM WOWEE_HEADLESS_SOURCES src/main.cpp)
 add_executable(wowee_headless
     tools/headless_client/main.cpp
     ${WOWEE_HEADLESS_SOURCES}
+    ${WOWEE_MACOS_SOURCES}
 )
 target_compile_definitions(wowee_headless PRIVATE WOWEE_HEADLESS_DEFAULT=1)
 if(TARGET opcodes-generate)
@@ -2123,6 +2124,9 @@ target_link_libraries(wowee_headless PRIVATE
 )
 if(UNIX AND NOT APPLE)
     target_link_libraries(wowee_headless PRIVATE X11)
+endif()
+if(APPLE)
+    target_link_libraries(wowee_headless PRIVATE "-framework Foundation")
 endif()
 if(WIN32)
     target_link_libraries(wowee_headless PRIVATE ws2_32 winmm)
