@@ -2112,7 +2112,7 @@ if(HAVE_FFMPEG)
     endif()
 endif()
 target_link_libraries(wowee_headless PRIVATE
-    SDL2::SDL2
+    SDL3::SDL3
     Vulkan::Vulkan
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -2125,7 +2125,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(wowee_headless PRIVATE X11)
 endif()
 if(WIN32)
-    target_link_libraries(wowee_headless PRIVATE ws2_32)
+    target_link_libraries(wowee_headless PRIVATE ws2_32 winmm)
 endif()
 if(TARGET imgui)
     target_link_libraries(wowee_headless PRIVATE imgui)
@@ -2144,7 +2144,9 @@ if(HAVE_UNICORN)
     target_include_directories(wowee_headless PRIVATE ${UNICORN_INCLUDE_DIR})
     target_compile_definitions(wowee_headless PRIVATE HAVE_UNICORN)
 endif()
-if(TARGET glm::glm)
+if(TARGET glm::glm-header-only)
+    target_link_libraries(wowee_headless PRIVATE glm::glm-header-only)
+elseif(TARGET glm::glm)
     target_link_libraries(wowee_headless PRIVATE glm::glm)
 elseif(glm_FOUND)
     target_include_directories(wowee_headless PRIVATE ${GLM_INCLUDE_DIRS})
