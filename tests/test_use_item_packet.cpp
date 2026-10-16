@@ -222,6 +222,13 @@ TEST_CASE("Addon chat is identified before it reaches visible whisper history", 
         REQUIRE_FALSE(decodeAddonChatPayload(addon, prefix, payload));
     }
 
+    SECTION("unprefixed Playerbots debug replies retain their payload") {
+        addon.message = "Target: kill Young Wolf\nStatus: traveling";
+        REQUIRE(decodeAddonChatPayload(addon, prefix, payload));
+        CHECK(prefix.empty());
+        CHECK(payload == addon.message);
+    }
+
     SECTION("tabs in ordinary say messages remain player chat") {
         addon.type = ChatType::SAY;
         addon.language = ChatLanguage::COMMON;

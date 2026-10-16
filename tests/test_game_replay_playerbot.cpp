@@ -3,6 +3,7 @@
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "rendering/camera_controller.hpp"
+#include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <cmath>
 
@@ -33,6 +34,22 @@ Packet tbcSpline(uint64_t guid, bool stop = false, bool corner = false) {
 void addPlayer(Session& s) {
     s.handler().getEntityManager().addEntity(Session::kPlayerGuid,
         std::make_shared<wowee::game::Player>(Session::kPlayerGuid));
+}
+
+Packet botChat(const std::string& text, bool prefixed = false) {
+    Packet p(wowee::game::wireOpcode(Opcode::SMSG_MESSAGECHAT));
+    // CMaNGOS PlayerbotAI::HandleCommand sends raw debug replies as type 0xFF;
+    // TellPlayerNoFacing sends #a replies as PARTY + LANG_ADDON + BOT prefix.
+    p.writeUInt8(prefixed ? 2 : 0xFF);
+    p.writeUInt32(0xFFFFFFFF);
+    p.writeUInt64(Session::kPlayerGuid);
+    p.writeUInt32(0);
+    p.writeUInt64(0);
+    const auto payload = prefixed ? "BOT\t" + text : text;
+    p.writeUInt32(static_cast<uint32_t>(payload.size() + 1));
+    p.writeString(payload);
+    p.writeUInt8(0);
+    return p;
 }
 
 } // namespace
@@ -154,4 +171,113 @@ TEST_CASE("movement keys interrupt playerbot camera follow but respect chat and 
     controller.update(0.016f);
     REQUIRE(sent.size() == 1);
     CHECK(sent[0] == Opcode::MSG_MOVE_START_FORWARD);
+}
+
+TEST_CASE("self Playerbot replies reach addons without appearing in chat",
+          "[replay][chat][addon][playerbot]") {
+    Session s("tbc");
+    addPlayer(s);
+    auto player = std::dynamic_pointer_cast<wowee::game::Player>(
+        s.handler().getEntityManager().getEntity(Session::kPlayerGuid));
+    player->setName("Jizzle");
+    std::vector<std::vector<std::string>> messages;
+    s.handler().setAddonEventCallback([&](const std::string& event, const auto& args) {
+        if (event == "CHAT_MSG_ADDON") messages.push_back(args);
+    });
+    s.receive(botChat("move to travel target"));
+    REQUIRE(messages.size() == 1);
+    REQUIRE(messages[0].size() == 4);
+    CHECK(messages[0][0].empty());
+    CHECK(messages[0][1] == "move to travel target");
+    CHECK(messages[0][3] == "Jizzle");
+    s.receive(botChat("Traveling to Northshire Abbey", true));
+    REQUIRE(messages.size() == 2);
+    CHECK(messages[1][0] == "BOT");
+    CHECK(messages[1][1] == "Traveling to Northshire Abbey");
+    CHECK(s.handler().getChatHistory().empty());
+    s.handler().setAddonEventCallback({});
+}
+
+TEST_CASE("bot activity addon displays the reported quest and expires stale status",
+          "[replay][addon][playerbot]") {
+    Session s("tbc");
+    addPlayer(s);
+    std::dynamic_pointer_cast<wowee::game::Player>(
+        s.handler().getEntityManager().getEntity(Session::kPlayerGuid))->setName("Jizzle");
+    std::vector<std::string> errors;
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    lua->widgets().noteScreenSize(1920.0f, 1080.0f);
+    REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
+    const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
+    REQUIRE(lua->executeFile(root + "Status.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
+    REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
+    lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    lua->widgets().layout(1920.0f, 1080.0f);
+    lua->dispatchOnUpdate(0.25f);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == 3);
+    s.handler().setAddonEventCallback([lua](const std::string& event, const auto& args) {
+        lua->fireEvent(event, args);
+    });
+    struct ClearCallback {
+        wowee::game::GameHandler& handler;
+        ~ClearCallback() { handler.setAddonEventCallback({}); }
+    } cleanup{s.handler()};
+    s.receive(botChat("quest objective travel target\nTarget: kill Young Wolf (objective 1)\nDistance 45y\nLocation: Northshire Valley (45y)\nStatus: traveling [for 120s]"));
+    s.receive(botChat("move to travel target"));
+    s.receive(botChat("Traveling 45y to Northshire Valley for |cffffff00|Hquest:33:2|h[Wolves Across the Border]|h|r to kill Young Wolf (objective 1)", true));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('45 yd',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('120',1,true) == nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last action: move to travel target'"));
+
+    // Match the reported quest ID to the live quest log, including completion.
+    s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
+        {{wowee::game::UF::PLAYER_QUEST_LOG_START, 33}}).packet(true));
+    Packet complete(wowee::game::wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+    complete.writeUInt32(1);
+    complete.writeUInt8(0); // TBC hasTransport
+    complete.writeUInt8(0); // VALUES
+    complete.writePackedGuid(Session::kPlayerGuid);
+    const auto stateField = wowee::game::fieldIndex(wowee::game::UF::PLAYER_QUEST_LOG_START) + 1;
+    complete.writeUInt8(static_cast<uint8_t>(stateField / 32 + 1));
+    for (int block = 0; block <= stateField / 32; ++block)
+        complete.writeUInt32(block == stateField / 32 ? 1u << (stateField % 32) : 0u);
+    complete.writeUInt32(1); // QUEST_STATE_COMPLETE
+    s.receive(complete);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusProgress:GetText() == 'Ready to turn in'"));
+
+    s.receive(botChat("rpg travel target\nTarget: sell items to Brother Danil\nDistance 8y\nStatus: working [for 30s]"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Goal: sell items to Brother Danil'"));
+    REQUIRE(lua->executeString("testNow=30"));
+    lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == ''"));
+    const auto beforeGroup = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
+    REQUIRE(lua->executeString("GetNumPartyMembers=function() return 1 end; testNow=38"));
+    lua->dispatchOnUpdate(0.25f);
+    // Private raw queries continue, while where must not produce party chat.
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == beforeGroup + 2);
+    REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide()"));
+    lua->widgets().layout(1920.0f, 1080.0f);
+    const auto count = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
+    REQUIRE(lua->executeString("testNow=60"));
+    lua->dispatchOnUpdate(0.25f);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == count);
+    CHECK(lua->dispatchSlashCommand("/botstatus", ""));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusFrame:IsShown()"));
+    lua->fireEvent("CHAT_MSG_SYSTEM", {"Disable player ai"});
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Player AI disabled'"));
+    const auto disabledCount = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
+    REQUIRE(lua->executeString("testNow=100"));
+    lua->widgets().layout(1920.0f, 1080.0f);
+    lua->dispatchOnUpdate(0.25f);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == disabledCount);
+    CAPTURE(errors);
+    CHECK(errors.empty());
 }

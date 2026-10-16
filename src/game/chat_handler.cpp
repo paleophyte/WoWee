@@ -422,7 +422,10 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
     }
 
     // Skip server echo of our own messages (we already added a local echo)
-    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0) {
+    // A self-controlled Playerbot sends status replies from our own GUID.
+    // Addon traffic has no local echo and must still reach Lua.
+    if (data.senderGuid == owner_.getPlayerGuid() && data.senderGuid != 0 &&
+        data.language != ChatLanguage::ADDON) {
         if (data.type == ChatType::WHISPER && !data.senderName.empty()) {
             owner_.lastWhisperSenderRef() = data.senderName;
         }
@@ -433,6 +436,9 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
 }
 
 void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
+    if (data.senderName.empty() && data.senderGuid == owner_.getPlayerGuid()) {
+        if (const auto* character = owner_.getActiveCharacter()) data.senderName = character->name;
+    }
     // Resolve sender name from entity/cache if not already set by parser
     if (data.senderName.empty() && data.senderGuid != 0) {
         auto nameIt = owner_.getPlayerNameCache().find(data.senderGuid);
@@ -562,7 +568,7 @@ void ChatHandler::deliverChatMessage(MessageChatData data, bool alreadyWaited) {
     std::string addonPrefix;
     std::string addonPayload;
     if (decodeAddonChatPayload(data, addonPrefix, addonPayload)) {
-        if (owner_.addonEventCallbackRef() && !addonPrefix.empty()) {
+        if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()(
                 "CHAT_MSG_ADDON",
                 {addonPrefix, addonPayload, getChatTypeString(data.type), data.senderName});

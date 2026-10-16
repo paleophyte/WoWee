@@ -67,6 +67,9 @@ bool decodeAddonChatPayload(const MessageChatData& data,
     if (hasEnvelope) {
         prefix = data.message.substr(0, separator);
         payload = data.message.substr(separator + 1);
+    } else {
+        // Playerbots' debug replies use LANG_ADDON without a prefix envelope.
+        payload = data.message;
     }
     return true;
 }

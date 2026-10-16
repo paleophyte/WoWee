@@ -791,6 +791,7 @@ public:
 // prefix<TAB>payload envelope when present. Some legacy clients send the
 // envelope with a spoken language instead of LANG_ADDON, so the envelope itself
 // is also authoritative.
+// Unprefixed LANG_ADDON replies retain their text and have an empty prefix.
 bool decodeAddonChatPayload(const MessageChatData& data,
                             std::string& prefix,
                             std::string& payload);
