@@ -1500,16 +1500,16 @@ public:
 // Duel
 // ============================================================
 
-/** CMSG_DUEL_ACCEPTED packet builder (no payload) */
+/** CMSG_DUEL_ACCEPTED: the duel flag's guid */
 class DuelAcceptPacket {
 public:
-    static network::Packet build();
+    static network::Packet build(uint64_t arbiterGuid);
 };
 
-/** CMSG_DUEL_CANCELLED packet builder */
+/** CMSG_DUEL_CANCELLED: the duel flag's guid */
 class DuelCancelPacket {
 public:
-    static network::Packet build();
+    static network::Packet build(uint64_t arbiterGuid);
 };
 
 // ============================================================
@@ -2091,15 +2091,18 @@ struct AttackerStateUpdateData {
     int32_t totalDamage = 0;
     uint8_t subDamageCount = 0;
     std::vector<SubDamage> subDamages;
-    uint32_t victimState = 0;    // 0=hit, 1=dodge, 2=parry, 3=interrupt, 4=block, etc.
+    // VictimState: 0 unaffected (a miss), 1 hit, 2 dodge, 3 parry,
+    // 4 interrupt, 5 full block, 6 evade, 7 immune, 8 deflect.
+    uint32_t victimState = 0;
     int32_t overkill = -1;
     uint32_t blocked = 0;
 
     [[nodiscard]] bool isValid() const { return attackerGuid != 0; }
-    [[nodiscard]] bool isCrit() const     { return (hitInfo & 0x0200) != 0; }
-    [[nodiscard]] bool isMiss() const     { return (hitInfo & 0x0010) != 0; }
-    [[nodiscard]] bool isGlancing() const { return (hitInfo & 0x0800) != 0; }
-    [[nodiscard]] bool isCrushing() const { return (hitInfo & 0x1000) != 0; }
+    // WotLK's HitInfo bits; classic and TBC number these differently.
+    [[nodiscard]] bool isCrit() const     { return (hitInfo & 0x00000200) != 0; }
+    [[nodiscard]] bool isMiss() const     { return (hitInfo & 0x00000010) != 0; }
+    [[nodiscard]] bool isGlancing() const { return (hitInfo & 0x00010000) != 0; }
+    [[nodiscard]] bool isCrushing() const { return (hitInfo & 0x00020000) != 0; }
 };
 
 class AttackerStateUpdateParser {
@@ -2279,7 +2282,7 @@ public:
 /** SMSG_SPELL_GO data (simplified) */
 struct SpellGoMissEntry {
     uint64_t targetGuid = 0;
-    uint8_t  missType   = 0;  // 0=MISS 1=DODGE 2=PARRY 3=BLOCK 4=EVADE 5=IMMUNE 6=DEFLECT 7=ABSORB 8=RESIST 11=REFLECT
+    uint8_t  missType   = 0;  // SpellMissInfo (spell_defines.hpp)
 };
 
 struct SpellGoData {
@@ -2414,6 +2417,7 @@ struct LootItem {
     uint32_t randomPropertyId = 0;
     uint8_t lootSlotType = 0;
     bool isQuestItem = false;
+    bool looted = false;
 };
 
 /** SMSG_LOOT_RESPONSE data */
@@ -2421,7 +2425,19 @@ struct LootResponseData {
     uint64_t lootGuid = 0;
     uint8_t lootType = 0;
     uint32_t gold = 0;           // In copper
+    bool goldLooted = false;     // Taken; the coin keeps its slot
     std::vector<LootItem> items;
+
+    /// Whether display slot one is the coin, taken or not.
+    [[nodiscard]] bool hasCoinSlot() const { return gold > 0; }
+    [[nodiscard]] bool goldLeft() const { return gold > 0 && !goldLooted; }
+
+    [[nodiscard]] bool nothingLeft() const {
+        if (goldLeft()) return false;
+        for (const auto& item : items)
+            if (!item.looted) return false;
+        return true;
+    }
 
     [[nodiscard]] bool isValid() const { return true; }
     [[nodiscard]] uint32_t getGold() const { return gold / 10000; }

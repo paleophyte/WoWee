@@ -263,6 +263,24 @@ TEST_CASE("Nothing to draw is not drawn", "[widget][draworder]") {
     REQUIRE(tree.drawOrder().size() == 1);
 }
 
+TEST_CASE("A cooldown frame is drawn while its cooldown runs", "[widget][draworder]") {
+    WidgetTree tree;
+    const uint32_t cd = tree.create(WidgetKind::Frame, 0, "Cooldown");
+    tree.get(cd)->width = 36.0f;
+    tree.get(cd)->height = 36.0f;
+    tree.get(cd)->isCooldown = true;
+    tree.addPoint(cd, Anchor{});
+
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.drawOrder().empty());
+
+    tree.get(cd)->cooldownStart = 10.0;
+    tree.get(cd)->cooldownDuration = 6.0;
+    tree.layout(kScreenW, kScreenH);
+    REQUIRE(tree.drawOrder().size() == 1);
+    REQUIRE(tree.drawOrder()[0] == tree.get(cd));
+}
+
 TEST_CASE("A zero-sized region is skipped rather than drawn degenerate",
           "[widget][draworder]") {
     WidgetTree tree;

@@ -96,6 +96,7 @@ void EntityController::clearAll() {
     transportGuids_.clear();
     serverUpdatedTransportGuids_.clear();
     entityManager.clear();
+    playerFeigningDeath_ = false;
 }
 
 // ============================================================
@@ -687,6 +688,7 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
         .combatReach = fieldIndex(UF::UNIT_FIELD_COMBATREACH),
         .bytes0 = fieldIndex(UF::UNIT_FIELD_BYTES_0),
         .bytes1 = fieldIndex(UF::UNIT_FIELD_BYTES_1),
+        .bytes2 = fieldIndex(UF::UNIT_FIELD_BYTES_2),
         .petXp = fieldIndex(UF::UNIT_FIELD_PETEXPERIENCE),
         .petNextLevelXp = fieldIndex(UF::UNIT_FIELD_PETNEXTLEVELEXP),
         .stat0 = fieldIndex(UF::UNIT_FIELD_STAT0),
@@ -695,6 +697,23 @@ EntityController::UnitFieldIndices EntityController::UnitFieldIndices::resolve()
         .minDamage = fieldIndex(UF::UNIT_FIELD_MINDAMAGE),
         .maxDamage = fieldIndex(UF::UNIT_FIELD_MAXDAMAGE)
     };
+}
+
+void EntityController::setPlayerShapeshiftForm(uint8_t newForm) {
+    if (newForm != owner_.shapeshiftFormIdRef()) {
+        owner_.shapeshiftFormIdRef() = newForm;
+        LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
+        pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
+        pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
+        // The stance bar and the action bar are two different
+        // things. These two move the stance bar; the extra action
+        // bar a form brings with it is shown and hidden by
+        // UPDATE_BONUS_ACTIONBAR, and actionbutton.lua repages on
+        // the same event. Neither was fired, so the bar never
+        // appeared and the buttons kept reading page one.
+        pendingEvents_.emit("UPDATE_BONUS_ACTIONBAR", {});
+        pendingEvents_.emit("ACTIONBAR_PAGE_CHANGED", {});
+    }
 }
 
 EntityController::PlayerFieldIndices EntityController::PlayerFieldIndices::resolve() {
@@ -920,6 +939,11 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         }
         else if (key == ufi.npcFlags) { unit->setNpcFlags(val); }
         else if (key == ufi.npcEmoteState) { unit->setNpcEmoteState(val); }
+        else if (ufi.bytes2 != 0xFFFF && key == ufi.bytes2) {
+            if (block.guid == owner_.getPlayerGuid()) {
+                setPlayerShapeshiftForm(static_cast<uint8_t>((val >> 24) & 0xFF));
+            }
+        }
         else if (key == ufi.dynFlags) {
             unit->setDynamicFlags(val);
             if ((block.objectType == ObjectType::UNIT ||
@@ -968,6 +992,16 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         unitInitiallyDead = true;
     }
     return unitInitiallyDead;
+}
+
+// Feign Death sets UNIT_DYNFLAG_DEAD and takes it away again with health
+// untouched; TBC and later also set UNIT_FLAG2_FEIGN_DEATH beside it. Read as a
+// death, it raised the release spirit popup, and its end a resurrection.
+static bool isFeigningDeath(const Entity& entity, const Unit& unit) {
+    constexpr uint32_t UNIT_FLAG2_FEIGN_DEATH = 0x1;
+    const uint16_t flags2 = fieldIndex(UF::UNIT_FIELD_FLAGS_2);
+    return (flags2 != 0xFFFF && (entity.getField(flags2) & UNIT_FLAG2_FEIGN_DEATH) != 0) ||
+           unit.getHealth() > 0;
 }
 
 // Consolidates player-death state into one place so both the health==0 and
@@ -1107,21 +1141,16 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stealthStateCallbackRef()(nowStealthed);
                 }
 
-                uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
-                if (newForm != owner_.shapeshiftFormIdRef()) {
-                    owner_.shapeshiftFormIdRef() = newForm;
-                    LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
-                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
-                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
-                    // The stance bar and the action bar are two different
-                    // things. These two move the stance bar; the extra action
-                    // bar a form brings with it is shown and hidden by
-                    // UPDATE_BONUS_ACTIONBAR, and actionbutton.lua repages on
-                    // the same event. Neither was fired, so the bar never
-                    // appeared and the buttons kept reading page one.
-                    pendingEvents_.emit("UPDATE_BONUS_ACTIONBAR", {});
-                    pendingEvents_.emit("ACTIONBAR_PAGE_CHANGED", {});
-                }
+                // Where the expansion keeps the form here; WotLK moved it to
+                // BYTES_2 and uses this byte for the animation tier, which a
+                // ghost sets to 1 - read as a form, releasing spirit paged the
+                // action bar to an empty bonus bar.
+                if (ufi.bytes2 == 0xFFFF) setPlayerShapeshiftForm(static_cast<uint8_t>((val >> 24) & 0xFF));
+            }
+        }
+        else if (ufi.bytes2 != 0xFFFF && key == ufi.bytes2) {
+            if (block.guid == owner_.getPlayerGuid()) {
+                setPlayerShapeshiftForm(static_cast<uint8_t>((val >> 24) & 0xFF));
             }
         }
         else if (key == ufi.dynFlags) {
@@ -1130,7 +1159,11 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             if (block.guid == owner_.getPlayerGuid()) {
                 bool wasDead = (oldDyn & UNIT_DYNFLAG_DEAD) != 0;
                 bool nowDead = (val & UNIT_DYNFLAG_DEAD) != 0;
-                if (!wasDead && nowDead) {
+                if (!wasDead && nowDead && isFeigningDeath(*entity, *unit)) {
+                    playerFeigningDeath_ = true;
+                } else if (wasDead && !nowDead && playerFeigningDeath_) {
+                    playerFeigningDeath_ = false;
+                } else if (!wasDead && nowDead) {
                     markPlayerDead("dynFlags");
                     // And tell the interface, which the health=0 path did and
                     // this one did not. The server marks a death either way -
@@ -1409,18 +1442,11 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
         else if (pfi.pBytes2 != 0xFFFF && key == pfi.pBytes2) {
             uint8_t bankBagSlots = static_cast<uint8_t>((val >> 16) & 0xFF);
             owner_.inventoryRef().setPurchasedBankBagSlots(bankBagSlots);
-            // Byte 3 (bits 24-31): REST_STATE
-            // 0 = not resting, 1 = REST_TYPE_IN_TAVERN, 2 = REST_TYPE_IN_CITY
-            uint8_t restStateByte = static_cast<uint8_t>((val >> 24) & 0xFF);
+            // Byte 3 is the XP rest state (1 rested, 2 normal), not whether
+            // the player is resting - that is PLAYER_FLAGS 0x20, read below.
             if (isCreate) {
                 LOG_DEBUG("PLAYER_BYTES_2 (CREATE): raw=0x", std::hex, val, std::dec,
                            " bankBagSlots=", static_cast<int>(bankBagSlots));
-                bool wasResting = owner_.isRestingRef();
-                owner_.isRestingRef() = (restStateByte != 0);
-                if (owner_.isRestingRef() != wasResting) {
-                    pendingEvents_.emit("UPDATE_EXHAUSTION", {});
-                    pendingEvents_.emit("PLAYER_UPDATE_RESTING", {});
-                }
             } else {
                 // Byte 0 (bits 0-7): facial hair / piercings
                 uint8_t facialHair = static_cast<uint8_t>(val & 0xFF);
@@ -1430,7 +1456,6 @@ bool EntityController::applyPlayerStatFields(const FlatFieldMap& fields,
                 LOG_DEBUG("PLAYER_BYTES_2 (VALUES): raw=0x", std::hex, val, std::dec,
                            " bankBagSlots=", static_cast<int>(bankBagSlots),
                            " facial=", static_cast<int>(facialHair));
-                owner_.isRestingRef() = (restStateByte != 0);
                 if (owner_.appearanceChangedCallbackRef())
                     owner_.appearanceChangedCallbackRef()();
                 if (owner_.playerModelRebuildCallbackRef())
@@ -2055,17 +2080,21 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
 
     // Self-player post-unit-field handling
     if (block.guid == owner_.getPlayerGuid()) {
-        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && !owner_.onTaxiFlightRef() && owner_.taxiLandingCooldownRef() <= 0.0f) {
-            owner_.onTaxiFlightRef() = true;
+        // Not GameHandler's legacy onTaxiFlight_: setting it here arms a
+        // reconnect recovery that has no position to recover to.
+        if ((unit->getUnitFlags() & UNIT_FLAG_TAXI_FLIGHT) != 0 && owner_.taxiLandingCooldownRef() <= 0.0f) {
             owner_.taxiStartGraceRef() = std::max(owner_.taxiStartGraceRef(), 2.0f);
             owner_.sanitizeMovementForTaxi();
             if (owner_.getMovementHandler()) owner_.getMovementHandler()->applyTaxiMountForCurrentNode();
         }
     }
-    if (block.guid == owner_.getPlayerGuid() &&
-        (unit->getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0) {
-        owner_.playerDeadRef() = true;
-        LOG_INFO("Player logged in dead (dynamic flags)");
+    if (block.guid == owner_.getPlayerGuid()) {
+        const bool deadFlag = (unit->getDynamicFlags() & UNIT_DYNFLAG_DEAD) != 0;
+        playerFeigningDeath_ = deadFlag && isFeigningDeath(*entity, *unit);
+        if (deadFlag && !playerFeigningDeath_) {
+            owner_.playerDeadRef() = true;
+            LOG_INFO("Player logged in dead (dynamic flags)");
+        }
     }
     // Detect ghost state on login via PLAYER_FLAGS
     if (block.guid == owner_.getPlayerGuid()) {
@@ -2881,12 +2910,15 @@ void EntityController::handleNameQueryResponse(network::Packet& packet) {
 
     if (data.isValid()) {
         playerNameCache[data.guid] = data.name;
-        // Chat lines held back for this name can go out now, with it on them.
-        if (owner_.getChatHandler()) owner_.getChatHandler()->flushChatAwaitingName(data.guid);
-        // Cache class/race from name query for UnitClass/UnitRace fallback
+        // Cache class/race from name query for UnitClass/UnitRace fallback,
+        // and the gender an NPC's $g switch chooses by.
         if (data.classId != 0 || data.race != 0) {
-            playerClassRaceCache_[data.guid] = {.classId = data.classId, .raceId = data.race};
+            playerClassRaceCache_[data.guid] = {.classId = data.classId, .raceId = data.race,
+                                                .gender = data.gender};
         }
+        // Chat lines held back for this name can go out now, with it on them.
+        // After the cache above, which a held NPC line reads for its $-tokens.
+        if (owner_.getChatHandler()) owner_.getChatHandler()->flushChatAwaitingName(data.guid);
         // Update entity name
         auto entity = entityManager.getEntity(data.guid);
         if (entity && entity->getType() == ObjectType::PLAYER) {

@@ -34,6 +34,9 @@ namespace {
 
 constexpr float kMaxPhysicsDelta = 1.0f / 30.0f;
 
+/// WoW's own key bone id for the head, as the M2 skeleton names it.
+constexpr int32_t kKeyBoneHead = 6;
+
 std::optional<float> selectReachableFloor(const std::optional<float>& terrainH,
                                           const std::optional<float>& wmoH,
                                           float refZ,
@@ -240,6 +243,30 @@ float CameraController::raymarchTerrainCameraLimit(const glm::vec3& pivot, const
     return maxDist;
 }
 
+std::optional<float> CameraController::cameraTerrainFloor(float x, float y,
+                                                         const glm::vec3& targetPos) const {
+    if (!terrainManager) return std::nullopt;
+    auto feetH = terrainManager->getHeightAt(targetPos.x, targetPos.y);
+    if (feetH && targetPos.z < *feetH - 0.2f) return std::nullopt;
+
+    // The near plane is wider than a point. On a ridge or a bank the ground a
+    // few hand-widths to the side can stand well above the ground straight
+    // below, and a camera held clear of only the latter looks into the hill.
+    constexpr float kFootprint = 0.35f;
+    //
+    // A hole-cut quad is a cave mouth or a way underground; the height across
+    // it is interpolated and is not ground, so it holds nothing up.
+    std::optional<float> best;
+    for (const auto& [ox, oy] : {std::pair{0.0f, 0.0f},
+                                 std::pair{kFootprint, 0.0f}, std::pair{-kFootprint, 0.0f},
+                                 std::pair{0.0f, kFootprint}, std::pair{0.0f, -kFootprint}}) {
+        if (terrainManager->isHoleAt(x + ox, y + oy)) continue;
+        auto h = terrainManager->getHeightAt(x + ox, y + oy);
+        if (h && (!best || *h > *best)) best = h;
+    }
+    return best;
+}
+
 void CameraController::triggerShake(float magnitude, float frequency, float duration) {
     // Scaled here rather than at each caller, so the setting covers the sources
     // that exist - a spell's shake and a thunderstorm's - and any added later.
@@ -303,6 +330,18 @@ glm::vec3 CameraController::sweepAgainstWalls(const glm::vec3& from, const glm::
 // The movement intent - walking, swimming, flying, jumping, falling - and the
 // swept wall collision that keeps it out of geometry. Answers the position it
 // arrived at; the floor has not been consulted yet.
+void CameraController::setFlyingActive(bool active) {
+    // Said when it changes, as take-off and landing are: whether space climbs
+    // or jumps comes down to this one flag from the server, and a report that
+    // the mount "will not fly" is otherwise a guess at whether it was sent.
+    if (active != flyingActive_) {
+        LOG_WARNING("Flight: ", active ? "the server allows flying here"
+                                       : "flying is no longer allowed");
+    }
+    flyingActive_ = active;
+    if (!active) flightAirborne_ = false;
+}
+
 glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInput& f,
                                                   glm::vec3& prevTargetPos) {
     // Move the follow target (character position) instead of the camera
@@ -499,7 +538,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         // Spacebar = swim up, X = swim down (both continuous, not a jump)
         bool diveKey = f.xDown;
         bool diveIntent = diveKey || (f.nowForward && (f.forward3D.z < -0.28f));
-        if (f.swimUpHeld) {
+        if (f.spaceHeld) {
             verticalVelocity = SWIM_BUOYANCY;
         } else if (diveKey) {
             verticalVelocity = -SWIM_BUOYANCY;
@@ -663,17 +702,27 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
         }
         swimming = false;
 
+        // Taking off: space, on something allowed to fly. It climbs from the
+        // first frame rather than jumping first, which is what the key means
+        // once a flying mount is under the player.
+        if (flyingActive_ && !flightAirborne_ && f.spaceHeld) {
+            flightAirborne_ = true;
+            LOG_WARNING("Flight: took off");
+        }
+
         // Player-controlled flight (flying mount / druid Flight Form):
         // Use 3D pitch-following movement with no gravity or grounding.
-        if (flyingActive_) {
+        if (flyingActive_ && flightAirborne_) {
             grounded = true;  // suppress fall-damage checks
             verticalVelocity = 0.0f;
             jumpBufferTimer = 0.0f;
             coyoteTimer = 0.0f;
 
-            // Forward/back follows camera 3D direction (same as swim)
-            glm::vec3 flyFwd = glm::normalize(f.forward3D);
+            // Forward/back along the mount's facing at the flight pitch - see
+            // flightForward. The camera's own look direction is not it.
+            glm::vec3 flyFwd = f.flightForward;
             if (glm::dot(flyFwd, flyFwd) < 1e-8f) flyFwd = f.forward;
+            const glm::vec3 flightFrom = targetPos;
             glm::vec3 flyMove(0.0f);
             if (f.nowForward)     flyMove += flyFwd;
             if (f.nowBackward)    flyMove -= flyFwd;
@@ -682,8 +731,8 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             // Space = ascend, X = descend while airborne (works on foot too,
             // e.g. .gm fly, not just on a flying mount).
             bool flyDescend = !f.uiWantsKeyboard && f.xDown;
-            if (f.nowJump)       flyMove.z += 1.0f;
-            if (flyDescend)    flyMove.z -= 1.0f;
+            if (f.spaceHeld)     flyMove.z += 1.0f;
+            if (flyDescend)      flyMove.z -= 1.0f;
             float flyMoveLenSq = glm::dot(flyMove, flyMove);
             if (flyMoveLenSq > 1e-6f) {
                 flyMove *= glm::inversesqrt(flyMoveLenSq);
@@ -697,6 +746,26 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 targetPos += flyMove * flySpeed * f.physicsDeltaTime;
             }
             targetPos.z += verticalVelocity * f.physicsDeltaTime;
+
+            // The ground holds a flying mount up - see flightStepAgainstGround.
+            // Not where a WMO floor lies at the feet under the heightfield: that
+            // is a tunnel burrowing under unholed ground, flown into, not over.
+            if (terrainManager) {
+                // Half a heightfield cell, as the slope reading in
+                // sampleFloorUnderFeet uses, for the same reason.
+                constexpr float kGroundNormalSpacing = 2.0f;
+                const glm::vec3 slid = movement::flightStepAgainstGround(
+                    [this](float x, float y) -> std::optional<float> {
+                        if (terrainManager->isHoleAt(x, y)) return std::nullopt;
+                        return terrainManager->getHeightAt(x, y);
+                    },
+                    flightFrom, targetPos, kGroundNormalSpacing);
+                if (slid != targetPos &&
+                    !(wmoRenderer && wmoRenderer->getFloorHeight(
+                          targetPos.x, targetPos.y, targetPos.z + 1.5f))) {
+                    targetPos = slid;
+                }
+            }
             // Skip all ground physics - go straight to collision/WMO sections
         } else {
 
@@ -769,7 +838,7 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
                 verticalVelocity = -2.0f;
         }
         targetPos.z += verticalVelocity * f.physicsDeltaTime;
-        } // end !flyingActive_ ground physics
+        } // end ground physics (not airborne in flight)
         } // end !inWater
     } else {
         // External follow (e.g., taxi): trust server position without grounding.
@@ -1643,7 +1712,10 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             *groundH >= targetPos.z - 2.0f &&
             *groundH <= targetPos.z + 0.6f;
 
-        if (!swimming && !flyingActive_ && !hoverActive_ && !externalFollow_ &&
+        // In flight as well: flightStepAgainstGround keeps a mount from flying
+        // into a hill, and this is what brings one back out that is already in
+        // it.
+        if (!swimming && !hoverActive_ && !externalFollow_ &&
             !cachedInsideWMO && !nearStructureSpace && !standingOnStructure &&
             centerTerrainH && verticalVelocity <= 0.0f) {
             const float penetration = *centerTerrainH - targetPos.z;
@@ -1711,6 +1783,48 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             }
         } else {
             terrainRescueActive_ = false;
+        }
+
+        // On the ground under a building's floor.
+        //
+        // A raised floor sits a yard or so over the heightfield it is built on,
+        // which is more than a step. Once the feet are down on that ground -
+        // one frame at the doorway where the floor query misses the threshold
+        // is enough - the floor is out of reach of the step-up, so it is never
+        // chosen again, and the player walks about inside the building sunk to
+        // the chest in its floor. Reported entering a house at an angle.
+        //
+        // Nowhere legitimate to stand has a walkable floor across the whole
+        // footprint at waist height: the body would be inside it. Put the feet
+        // back on it. The centre is asked first, so the four around it cost
+        // nothing on the frames that matter least - every one where the answer
+        // is no.
+        if (!isFlightAirborne() && !hoverActive_ && !externalFollow_ && wmoRenderer &&
+            nearWmoSpace && groundH && centerTerrainH && *groundH == *centerTerrainH) {
+            constexpr float kWaistHeight = 1.8f;
+            const float feetZ = targetPos.z;
+            const auto slabAt = [&](const glm::vec2& o) -> std::optional<float> {
+                float nz = 1.0f;
+                const auto h = wmoRenderer->getFloorHeight(
+                    targetPos.x + o.x, targetPos.y + o.y, feetZ + kWaistHeight, &nz);
+                if (!h || nz < MIN_WALKABLE_NORMAL_WMO) return std::nullopt;
+                if (*h <= feetZ + stepUpBudget || *h >= feetZ + kWaistHeight) return std::nullopt;
+                return h;
+            };
+            const auto cross = feetCross(0.35f);
+            std::optional<float> slab = slabAt(cross[0]);
+            for (std::size_t i = 1; slab && i < cross.size(); ++i) {
+                if (!slabAt(cross[i])) slab = std::nullopt;
+            }
+            if (slab) {
+                LOG_WARNING("Under a floor: feet ", feetZ, " on the ground at (", targetPos.x,
+                            ", ", targetPos.y, ") with a WMO floor at ", *slab,
+                            " across the footprint - back onto it");
+                targetPos.z = *slab;
+                groundH = slab;
+                lastGroundZ = *slab;
+                verticalVelocity = 0.0f;
+            }
         }
 
         // WOWEE_FLOOR_DEBUG=1 - what every floor query answered and which
@@ -1784,8 +1898,12 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                 std::max(0.5f, std::abs(verticalVelocity) * f.physicsDeltaTime * 2.0f));
             bool airFalling = (!grounded && verticalVelocity < -5.0f
                                && dz >= -airSnapRange);
+            // Not while climbing in flight: a frame's climb at a high frame
+            // rate is less than the quarter yard this reaches down, so taking
+            // off was pulled back to the ground every frame and never left it.
             bool slopeGrace = (grounded && verticalVelocity > -1.0f &&
-                               dz >= -0.25f && dz <= stepUp * 1.5f);
+                               dz >= -0.25f && dz <= stepUp * 1.5f) &&
+                              !(isFlightAirborne() && f.spaceHeld);
 
             if (dz >= -fallCatch && (nearGround || airFalling || slopeGrace)) {
                 // HOVER: float at fixed height above ground instead of standing on it
@@ -1892,17 +2010,45 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
 
             float desiredLift = 0.0f;
             if (terrainAtCam) {
-                // Keep pivot high enough so near-hill camera rays don't cut through terrain.
-                constexpr float kMinRayClearance = 2.0f;
-                float basePivotZ = targetPos.z + pivotHeightFor(followedHeight_) + mountedOffset;
-                float rayClearance = basePivotZ - *terrainAtCam;
-                if (rayClearance < kMinRayClearance) {
-                    desiredLift = std::clamp(kMinRayClearance - rayClearance, 0.0f, 1.4f);
-                }
+                // Keep the camera high enough that its ray does not cut
+                // through a hill behind the character.
+                //
+                // Measured at the camera, which is the thing that has to
+                // clear the ground. It was measured at the pivot, against a
+                // fixed two metres above the terrain - and an absolute height
+                // undoes any attempt to place the pivot on the character, by
+                // exactly the amount that attempt moved it. On flat ground a
+                // gnome's pivot at 0.65 was lifted 1.35 and a human's at 1.60
+                // was lifted 0.40, both landing on 2.00 above the feet. Every
+                // race got the same pivot, every time, and which character was
+                // being followed made no difference to it.
+                //
+                // That is why zooming in on a gnome put them at the bottom of
+                // the frame: the camera was aiming at a point nearly twice
+                // their height, on level ground, with no hill in sight.
+                const float basePivotZ = targetPos.z + followedPivotHeight() + mountedOffset;
+                // The camera sits behind the character along the look
+                // direction, which carries the pitch with it.
+                desiredLift = terrainPivotLift(basePivotZ, (-f.forward3D).z,
+                                               currentDistance, *terrainAtCam);
             }
             // If character is already below local terrain sample, avoid lifting aggressively.
             if (terrainAtPivot && targetPos.z < *terrainAtPivot - 0.2f) {
                 desiredLift = 0.0f;
+            }
+            // Said when it starts and when it stops, because a lift is the
+            // camera being moved by the ground rather than by the player and
+            // there was no way to tell the two apart from outside. This one
+            // was applying on flat ground in every session ever played.
+            const bool lifting = desiredLift > 0.01f;
+            if (lifting != pivotLiftActive_) {
+                pivotLiftActive_ = lifting;
+                LOG_WARNING("Camera pivot: terrain lift ",
+                            lifting ? "on, raising the pivot by " : "off, was ",
+                            desiredLift, " (pivot ", followedPivotHeight(),
+                            " above the feet, ground at the camera ",
+                            terrainAtCam ? *terrainAtCam - targetPos.z : 0.0f,
+                            " relative to them)");
             }
             cachedPivotLift_ = desiredLift;
         }
@@ -1912,7 +2058,7 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // are not relevant for camera pivoting.
         cachedPivotLift_ = 0.0f;
     }
-    glm::vec3 pivot = targetPos + glm::vec3(0.0f, 0.0f, pivotHeightFor(followedHeight_) + mountedOffset + pivotLift);
+    glm::vec3 pivot = targetPos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset + pivotLift);
 
     // Camera direction from yaw/pitch (already computed as forward3D)
     glm::vec3 camDir = -f.forward3D;  // Camera looks at pivot, so it's behind
@@ -2268,6 +2414,17 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
             camFloorH = selectReachableFloor(
                 camTerrainH, camWmoH, smoothedCamPos.z, 0.5f);
         }
+        // Terrain has no underside. The reachability filter above is for
+        // structure floors, where something half a yard over the camera may be
+        // a deck it is under; applied to the heightfield it meant that a
+        // camera which had sunk more than half a yard into a hill - coming in
+        // from a taxi, or on a sharp rise - was left there, the ground now
+        // counting as a ceiling. While the character stands on or above the
+        // terrain, the camera belongs above it too.
+        if (!cachedInsideInteriorWMO) {
+            auto groundH = cameraTerrainFloor(smoothedCamPos.x, smoothedCamPos.y, targetPos);
+            if (groundH && (!camFloorH || *groundH > *camFloorH)) camFloorH = groundH;
+        }
         if (camFloorH && smoothedCamPos.z < *camFloorH + MIN_FLOOR_CLEARANCE) {
             smoothedCamPos.z = *camFloorH + MIN_FLOOR_CLEARANCE;
         }
@@ -2288,7 +2445,39 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
         // not answer does not snap the camera.
         float height = 0.0f;
         if (characterRenderer->getInstanceHeight(playerInstanceId, height) && height > 0.01f) {
+            // The head bone, which is what the pivot is placed against. A
+            // skeleton that does not name one leaves this zero and falls back
+            // to the height.
+            //
+            // A frame that cannot answer keeps the last answer. The height
+            // above is already guarded that way by the enclosing `if`; the
+            // head bone was not, and zeroing it dropped the pivot to a lower
+            // tier of pivotHeightFor - a gnome went 0.65 to 0.88, or to the
+            // flat 1.6 when the height was missing too. Entering a building is
+            // where this showed: the WMO transition re-registers the instance
+            // and the bone query returns false for a frame, so the camera rose
+            // on the doorstep and stayed up.
+            float headZ = 0.0f;
+            const bool measuredHead =
+                characterRenderer->getInstanceKeyBonePivotZ(playerInstanceId, kKeyBoneHead, headZ)
+                && headZ > 0.01f;
+            if (!measuredHead) headZ = followedHeadZ_;
+            if (std::abs(height - followedHeight_) > 0.01f ||
+                std::abs(headZ - followedHeadZ_) > 0.01f) {
+                // Said when it changes, which is when a character is first
+                // drawn and whenever its model does. These numbers settle
+                // whether the camera is pivoting where it should, and none of
+                // them was knowable from outside: a report of "still too high"
+                // can mean nothing was measured, or that it was and the
+                // proportion is wrong, and they tell the two apart.
+                LOG_WARNING("Camera pivot: character is ", height,
+                            " tall with its head bone at ", headZ,
+                            ", pivoting at ", pivotHeightFor(pivotHeight_, height, headZ),
+                            " (setting ", pivotHeight_, " against a ",
+                            kPivotReferenceHeadZ, " head reference)");
+            }
             followedHeight_ = height;
+            if (measuredHead) followedHeadZ_ = headZ;
         }
 
         // Hide only on first-person *intent* (the user's zoom), not on a
@@ -2315,6 +2504,14 @@ void CameraController::updateThirdPersonCamera(float deltaTime, FrameInput& f) {
     glm::vec3 prevTargetPos(0.0f);
     glm::vec3 targetPos = moveFollowedCharacter(deltaTime, f, prevTargetPos);
     groundFollowedCharacter(deltaTime, f, targetPos, prevTargetPos);
+    // Landing: flying down onto real ground, or skimming it, without climbing.
+    // Grounding has just put the feet on the floor if they were within reach
+    // of it; on a floor that was actually found, that is touching down.
+    if (isFlightAirborne() && grounded && hasRealGround_ && !f.spaceHeld &&
+        std::abs(targetPos.z - lastGroundZ) < 0.3f) {
+        flightAirborne_ = false;
+        LOG_WARNING("Flight: landed");
+    }
     updateOrbitCamera(deltaTime, f, targetPos);
 }
 
@@ -2543,7 +2740,7 @@ void CameraController::update(float deltaTime) {
 
             // Pivot point at upper chest/neck
             float mountedOffset = mounted_ ? mountHeightOffset_ : 0.0f;
-            glm::vec3 pivot = targetPos + glm::vec3(0.0f, 0.0f, pivotHeightFor(followedHeight_) + mountedOffset);
+            glm::vec3 pivot = targetPos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset);
 
             // Camera direction from yaw/pitch
             glm::vec3 camDir = -forward3D;
@@ -2570,8 +2767,21 @@ void CameraController::update(float deltaTime) {
                 ? 1.0f : (1.0f - std::exp(-camSmoothSpeed_ * deltaTime));
             smoothedCamPos += (actualCam - smoothedCamPos) * camLerp;
 
+            // A flight path skims ridges and lands on hillsides.
+            if (auto groundH = cameraTerrainFloor(smoothedCamPos.x, smoothedCamPos.y, targetPos)) {
+                constexpr float kTaxiFloorClearance = 0.35f;
+                smoothedCamPos.z = std::max(smoothedCamPos.z, *groundH + kTaxiFloorClearance);
+            }
+
             camera->setPosition(smoothedCamPos);
         }
+
+        // The ground limits are not kept up in flight. Left as they were at
+        // takeoff, the first frames on the ground eased toward them from a
+        // limit measured somewhere else entirely; starting over takes the
+        // ground as it is at the landing.
+        smoothedCollisionDist_ = -1.0f;
+        smoothedTerrainDist_ = -1.0f;
 
         return;
     }
@@ -2603,11 +2813,11 @@ void CameraController::update(float deltaTime) {
     bool shiftDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LSHIFT) || input.isKeyPressed(SDL_SCANCODE_RSHIFT));
     bool ctrlDown = !uiWantsKeyboard && (input.isKeyPressed(SDL_SCANCODE_LCTRL) || input.isKeyPressed(SDL_SCANCODE_RCTRL));
     bool nowJump = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyJustPressed(SDL_SCANCODE_SPACE);
-    // Swimming needs the held state, not the press edge: on land space is a
-    // one-shot jump, but in water it is continuous ascent, and an edge gave a
-    // single impulse that then bled away.
-    bool swimUpHeld = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_SPACE);
-    bool spaceDown = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_SPACE);
+    // Swimming and flying need the held state, not the press edge: on land
+    // space is a one-shot jump, but in water and in the air it is continuous
+    // ascent, and an edge gave a single impulse that then bled away - or, in
+    // flight, a single frame of climb per press.
+    bool spaceHeld = !uiWantsKeyboard && !sitting && !movementSuppressed && input.isKeyPressed(SDL_SCANCODE_SPACE);
 
     // Idle camera: any input resets the timer; timeout triggers a slow orbit pan
     bool anyInput = leftMouseDown || rightMouseDown || keyW || keyS || keyA || keyD || keyQ || keyE || nowJump;
@@ -2651,7 +2861,7 @@ void CameraController::update(float deltaTime) {
             }
         }
         // Suppress player movement/input during intro.
-        keyW = keyS = keyA = keyD = keyQ = keyE = nowJump = swimUpHeld = false;
+        keyW = keyS = keyA = keyD = keyQ = keyE = nowJump = spaceHeld = false;
     }
 
     // Tilde or NumLock toggles auto-run; any forward/backward key cancels it
@@ -2837,6 +3047,23 @@ void CameraController::update(float deltaTime) {
     glm::vec3 forward(std::cos(moveYawRad), std::sin(moveYawRad), 0.0f);
     glm::vec3 right(-std::sin(moveYawRad), std::cos(moveYawRad), 0.0f);
 
+    // Flight goes where the mount faces, not where the camera looks. Orbiting
+    // the camera with the left button is looking around, and it took the
+    // flight direction with it: W flew toward the camera's view, whatever the
+    // mount was pointing at. The pitch follows the camera only while the
+    // camera steers, as the facing does, and holds otherwise.
+    if (cameraDrivesFacing && !externalFollow_) {
+        const float len = glm::length(forward3D);
+        if (len > 1e-4f) {
+            flightPitchDeg_ = glm::degrees(std::asin(std::clamp(forward3D.z / len, -1.0f, 1.0f)));
+        }
+    }
+    if (!isFlightAirborne()) flightPitchDeg_ = 0.0f;
+    const float flightPitchRad = glm::radians(flightPitchDeg_);
+    const glm::vec3 flightForward(std::cos(moveYawRad) * std::cos(flightPitchRad),
+                                  std::sin(moveYawRad) * std::cos(flightPitchRad),
+                                  std::sin(flightPitchRad));
+
     // Toggle sit/crouch with X key (edge-triggered) - only when UI doesn't want keyboard
     // Blocked while mounted
     bool prevSitting = sitting;
@@ -2916,6 +3143,7 @@ void CameraController::update(float deltaTime) {
     f.forward = forward;
     f.right = right;
     f.forward3D = forward3D;
+    f.flightForward = flightForward;
     f.movement = movement;
     f.nowForward = nowForward;
     f.nowBackward = nowBackward;
@@ -2924,7 +3152,7 @@ void CameraController::update(float deltaTime) {
     f.nowTurnLeft = nowTurnLeft;
     f.nowTurnRight = nowTurnRight;
     f.nowJump = nowJump;
-    f.swimUpHeld = swimUpHeld;
+    f.spaceHeld = spaceHeld;
     f.xDown = xDown;
     f.uiWantsKeyboard = uiWantsKeyboard;
 
@@ -2980,8 +3208,10 @@ void CameraController::update(float deltaTime) {
             }
         }
 
-        // Jump
-        if (nowJump && !wasJumping && grounded) {
+        // Jump. Not in flight, where space climbs - and where grounded is held
+        // true only to keep the fall-damage checks quiet, so every press sent
+        // the server a jump from mid-air.
+        if (nowJump && !wasJumping && grounded && !isFlightAirborne()) {
             movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
         }
 
@@ -3013,10 +3243,11 @@ void CameraController::update(float deltaTime) {
 
     // Flight ascend/descend transitions (Space = ascend, X = descend while mounted+flying)
     if (movementCallback && !externalFollow_) {
-        const bool nowAscending = flyingActive_ && spaceDown;
-        const bool nowDescending = flyingActive_ && xDown && mounted_;
+        const bool airborne = isFlightAirborne();
+        const bool nowAscending = airborne && spaceHeld;
+        const bool nowDescending = airborne && xDown && mounted_;
 
-        if (flyingActive_) {
+        if (airborne) {
             if (nowAscending && !wasAscending_) {
                 movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_START_ASCEND));
             } else if (!nowAscending && wasAscending_) {
@@ -3150,18 +3381,19 @@ void CameraController::processMouseButton(const SDL_MouseButtonEvent& event) {
     bool uiWantsMouse = ImGui::GetIO().WantCaptureMouse || ui::frameXmlOwnsMouse();
 
     if (event.button == SDL_BUTTON_LEFT) {
-        leftMouseDown = (event.state == SDL_PRESSED) && !uiWantsMouse;
-        if (event.state == SDL_PRESSED && event.clicks >= 2) {
+        leftMouseDown = (event.down) && !uiWantsMouse;
+        if (event.down && event.clicks >= 2) {
             autoRunning = false;
         }
     }
     if (event.button == SDL_BUTTON_RIGHT) {
-        rightMouseDown = (event.state == SDL_PRESSED) && !uiWantsMouse;
+        rightMouseDown = (event.down) && !uiWantsMouse;
     }
 
     bool anyDown = leftMouseDown || rightMouseDown;
     if (anyDown && !mouseButtonDown) {
-        SDL_SetRelativeMouseMode(SDL_TRUE);
+        // SDL3 captures per window rather than globally. The focused window is the one the player is pointing at, and relative mode means nothing for any other - so that is the one to ask.
+        SDL_SetWindowRelativeMouseMode(SDL_GetKeyboardFocus(), true);
         // Throw away the delta the switch itself makes. Entering relative
         // mode hands over the movement since the last relative read, which on
         // a press is everything the cursor did on its way to the thing being
@@ -3173,7 +3405,7 @@ void CameraController::processMouseButton(const SDL_MouseButtonEvent& event) {
         dragOffsetX_ = 0.0f;
         dragOffsetY_ = 0.0f;
     } else if (!anyDown && mouseButtonDown) {
-        SDL_SetRelativeMouseMode(SDL_FALSE);
+        SDL_SetWindowRelativeMouseMode(SDL_GetKeyboardFocus(), false);
         rotateArmed_ = false;
     }
     mouseButtonDown = anyDown;
@@ -3186,8 +3418,8 @@ void CameraController::releaseMouseCapture() {
     rotateArmed_ = false;
     dragOffsetX_ = 0.0f;
     dragOffsetY_ = 0.0f;
-    SDL_SetRelativeMouseMode(SDL_FALSE);
-    SDL_ShowCursor(SDL_ENABLE);
+    SDL_SetWindowRelativeMouseMode(SDL_GetKeyboardFocus(), false);
+    SDL_ShowCursor();
 }
 
 void CameraController::resetAngles() {
@@ -3275,7 +3507,7 @@ void CameraController::reset() {
             currentDistance = userTargetDistance;
             collisionDistance = currentDistance;
             float mountedOffset = mounted_ ? mountHeightOffset_ : 0.0f;
-            glm::vec3 pivot = spawnPos + glm::vec3(0.0f, 0.0f, pivotHeightFor(followedHeight_) + mountedOffset);
+            glm::vec3 pivot = spawnPos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset);
             glm::vec3 camDir = -forward3D;
             glm::vec3 camPos = pivot + camDir * currentDistance;
             smoothedCamPos = camPos;
@@ -3417,7 +3649,7 @@ void CameraController::reset() {
         collisionDistance = currentDistance;
 
         float mountedOffset = mounted_ ? mountHeightOffset_ : 0.0f;
-        glm::vec3 pivot = spawnPos + glm::vec3(0.0f, 0.0f, pivotHeightFor(followedHeight_) + mountedOffset);
+        glm::vec3 pivot = spawnPos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset);
         glm::vec3 camDir = -forward3D;
         glm::vec3 camPos = pivot + camDir * currentDistance;
         smoothedCamPos = camPos;
@@ -3456,7 +3688,7 @@ void CameraController::teleportTo(const glm::vec3& pos) {
         camera->setRotation(yaw, pitch);
         glm::vec3 forward3D = camera->getForward();
         float mountedOffset = mounted_ ? mountHeightOffset_ : 0.0f;
-        glm::vec3 pivot = pos + glm::vec3(0.0f, 0.0f, pivotHeightFor(followedHeight_) + mountedOffset);
+        glm::vec3 pivot = pos + glm::vec3(0.0f, 0.0f, followedPivotHeight() + mountedOffset);
         glm::vec3 camDir = -forward3D;
         glm::vec3 camPos = pivot + camDir * currentDistance;
         smoothedCamPos = camPos;

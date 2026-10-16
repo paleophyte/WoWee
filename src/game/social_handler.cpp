@@ -25,6 +25,15 @@
 #include <set>
 #include <vector>
 
+namespace {
+const std::pair<uint32_t, const char*> kBgNames[] = {
+    {1,"Alterac Valley"},{2,"Warsong Gulch"},{3,"Arathi Basin"},
+    {4,"Nagrand Arena"},{5,"Blade's Edge Arena"},{6,"All Arenas"},
+    {7,"Eye of the Storm"},{8,"Ruins of Lordaeron"},{9,"Strand of the Ancients"},
+    {10,"Dalaran Sewers"},{11,"Ring of Valor"},{30,"Isle of Conquest"},{32,"Random Battleground"},
+};
+}  // namespace
+
 namespace wowee {
 namespace game {
 
@@ -733,8 +742,53 @@ void SocialHandler::registerOpcodes(DispatchTable& table) {
     table[Opcode::SMSG_REMOVED_FROM_PVP_QUEUE] = [this](network::Packet& /*packet*/) {
         owner_.addSystemChatMessage("You have been removed from the PvP queue.");
     };
-    table[Opcode::SMSG_GROUP_JOINED_BATTLEGROUND] = [this](network::Packet& /*packet*/) {
-        owner_.addSystemChatMessage("Your group has joined the battleground.");
+    // The answer to a join, and most often a refusal. A positive value is the
+    // battleground joined; the negative ones are the reasons a queue was
+    // refused. It was read as "joined" whatever it said, so a Deserter or a
+    // third queue was reported as success and nothing appeared on the minimap.
+    table[Opcode::SMSG_GROUP_JOINED_BATTLEGROUND] = [this](network::Packet& packet) {
+        if (!packet.hasRemaining(4)) return;
+        bgJoinPendingType_ = 0;  // answered
+        const int32_t result = static_cast<int32_t>(packet.readUInt32());
+        std::string msg;
+        switch (result) {
+            case -1: return;  // nothing to say
+            case 0:   msg = "Your group has joined a battleground queue, but you are not eligible"; break;
+            case -2:  msg = "You cannot join the battleground yet because you or one of your party members is flagged as a Deserter."; break;
+            case -3:  msg = "Incorrect party size for this arena."; break;
+            case -4:  msg = "You can only be queued for 2 battles at once"; break;
+            case -5:  msg = "You cannot queue for a rated match while queued for other battles"; break;
+            case -6:  msg = "You cannot queue for another battle while queued for a rated arena match"; break;
+            case -7:  msg = "Your team has left the arena queue"; break;
+            case -8:  msg = "You can't do that in a battleground."; break;
+            case -10: msg = "Cannot join the queue unless all members of your party are in the same battleground level range."; break;
+            case -11: {
+                std::string who = "A party member";
+                if (packet.hasRemaining(8)) {
+                    auto it = owner_.getPlayerNameCache().find(packet.readUInt64());
+                    if (it != owner_.getPlayerNameCache().end() && !it->second.empty()) who = it->second;
+                }
+                msg = who + " was unavailable to join the queue.";
+                break;
+            }
+            case -12: msg = "Join as a group failed"; break;
+            case -13: msg = "You cannot queue for a battleground or arena while using the dungeon system."; break;
+            case -14: msg = "Can't do that while in a Random Battleground queue."; break;
+            case -15: msg = "Can't queue for Random Battleground while in another Battleground queue."; break;
+            default:
+                if (result > 0) {
+                    std::string bgName = "a battleground";
+                    for (const auto& kv : kBgNames)
+                        if (kv.first == static_cast<uint32_t>(result)) { bgName = kv.second; break; }
+                    owner_.addSystemChatMessage("Your group has joined the queue for " + bgName);
+                    return;
+                }
+                msg = "Could not join the battleground queue (" + std::to_string(result) + ").";
+                break;
+        }
+        LOG_WARNING("Battleground join refused: ", result, " - ", msg);
+        owner_.addUIError(msg);
+        owner_.addSystemChatMessage(msg);
     };
     table[Opcode::SMSG_JOINED_BATTLEGROUND_QUEUE] = [this](network::Packet& /*packet*/) {
         owner_.addSystemChatMessage("You have joined the battleground queue.");
@@ -1377,7 +1431,8 @@ void SocialHandler::requestPlayedTime() {
 
 void SocialHandler::queryWho(const std::string& playerName) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
-    auto packet = WhoPacket::build(0, 0, playerName);
+    // Every level: the server drops anyone above the maximum asked for.
+    auto packet = WhoPacket::build(0, 100, playerName);
     owner_.getSocket()->send(packet);
     LOG_INFO("Sent WHO query", playerName.empty() ? "" : " for: " + playerName);
 }
@@ -1732,7 +1787,7 @@ void SocialHandler::respondToReadyCheck(bool ready) {
 void SocialHandler::acceptDuel() {
     if (!pendingDuelRequest_ || owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     pendingDuelRequest_ = false;
-    auto pkt = DuelAcceptPacket::build();
+    auto pkt = DuelAcceptPacket::build(duelArbiterGuid_);
     owner_.getSocket()->send(pkt);
     owner_.addSystemChatMessage("You accept the duel.");
 }
@@ -1740,7 +1795,7 @@ void SocialHandler::acceptDuel() {
 void SocialHandler::forfeitDuel() {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     pendingDuelRequest_ = false;
-    auto packet = DuelCancelPacket::build();
+    auto packet = DuelCancelPacket::build(duelArbiterGuid_);
     owner_.getSocket()->send(packet);
     owner_.addSystemChatMessage("You have forfeited the duel.");
 }
@@ -1767,11 +1822,18 @@ void SocialHandler::reportPlayer(uint64_t targetGuid, const std::string& reason)
 
 void SocialHandler::handleDuelRequested(network::Packet& packet) {
     if (!packet.hasRemaining(16)) { packet.skipAll(); return; }
+    // The flag first, then the challenger. Read the other way round, the
+    // challenger was the flag - a game object no name lookup could find, so
+    // the challenge came from a hex number - and the flag, which the accept
+    // and the refusal both have to name, was thrown away.
+    duelArbiterGuid_ = packet.readUInt64();
     duelChallengerGuid_ = packet.readUInt64();
-    // The duel flag's guid follows, and nothing here wants it - the arbiter
-    // object is the server's business. Read rather than skipped so the two
-    // stay one statement apart if a third field is ever added.
-    packet.readUInt64();
+    // The server sends this to both players. The one who issued the challenge
+    // keeps the flag, to be able to call it off, and is not asked to accept it.
+    if (duelChallengerGuid_ == owner_.getPlayerGuid()) {
+        pendingDuelRequest_ = false;
+        return;
+    }
     duelChallengerName_.clear();
     auto entity = owner_.getEntityManager().getEntity(duelChallengerGuid_);
     if (auto* unit = dynamic_cast<Unit*>(entity.get()))
@@ -2567,7 +2629,13 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
     GuildEventData data;
     if (!GuildEventParser::parse(packet, data)) return;
 
+    // What the game prints for each, in its own words (ERR_GUILD_* and the
+    // friend list's online and offline lines) and as a system line. These went
+    // out as guild chat with no sender, and the interface puts the player's own
+    // name on a local line without one: "[Guild] [You]: [Guild] Coggs has come
+    // online."
     std::string msg;
+    bool guildLine = false;  // the MOTD, which is the one that is guild chat
     switch (data.eventType) {
         case GuildEvent::PROMOTION:
             if (data.numStrings >= 3)
@@ -2581,8 +2649,10 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             // The interface writes this one itself, from the GUILD_MOTD event
             // fired further down: chatframe.lua formats GUILD_MOTD_TEMPLATE
             // and adds it. Only the client's own window needs a line here.
-            if (data.numStrings >= 1 && !ui::frameXmlOwns(ui::UiElement::Chat))
-                msg = "Guild MOTD: " + data.strings[0];
+            if (data.numStrings >= 1 && !ui::frameXmlOwns(ui::UiElement::Chat)) {
+                msg = "Guild Message of the Day: " + data.strings[0];
+                guildLine = true;
+            }
             break;
         case GuildEvent::JOINED:
             if (data.numStrings >= 1) msg = data.strings[0] + " has joined the guild.";
@@ -2591,13 +2661,15 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             if (data.numStrings >= 1) msg = data.strings[0] + " has left the guild.";
             break;
         case GuildEvent::REMOVED:
-            if (data.numStrings >= 2) msg = data.strings[1] + " has been kicked from the guild by " + data.strings[0] + ".";
+            // The member removed, then who removed them - the order the server
+            // sends and ERR_GUILD_REMOVE_SS reads them in.
+            if (data.numStrings >= 2) msg = data.strings[0] + " has been kicked out of the guild by " + data.strings[1] + ".";
             break;
         case GuildEvent::LEADER_IS:
-            if (data.numStrings >= 1) msg = data.strings[0] + " is the guild leader.";
+            if (data.numStrings >= 1) msg = data.strings[0] + " is the leader of your guild.";
             break;
         case GuildEvent::LEADER_CHANGED:
-            if (data.numStrings >= 2) msg = data.strings[0] + " has made " + data.strings[1] + " the new guild leader.";
+            if (data.numStrings >= 2) msg = data.strings[0] + " has made " + data.strings[1] + " the new Guild Master.";
             break;
         case GuildEvent::DISBANDED:
             msg = "Guild has been disbanded.";
@@ -2620,12 +2692,12 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
             // player's idea of what is worth reading.
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], true) &&
                 addons::storedCVarValue("guildMemberNotify", "1") != "0")
-                msg = "[Guild] " + data.strings[0] + " has come online.";
+                msg = "|Hplayer:" + data.strings[0] + "|h[" + data.strings[0] + "]|h has come online.";
             break;
         case GuildEvent::SIGNED_OFF:
             if (data.numStrings >= 1 && guildMemberOnlineTransition(data.strings[0], false) &&
                 addons::storedCVarValue("guildMemberNotify", "1") != "0")
-                msg = "[Guild] " + data.strings[0] + " has gone offline.";
+                msg = data.strings[0] + " has gone offline.";
             break;
         // The bank's half of the event list. The server broadcasts these to
         // every member whenever anyone touches the bank, so they are frequent,
@@ -2664,7 +2736,7 @@ void SocialHandler::handleGuildEvent(network::Packet& packet) {
 
     if (!msg.empty()) {
         MessageChatData chatMsg;
-        chatMsg.type = ChatType::GUILD;
+        chatMsg.type = guildLine ? ChatType::GUILD : ChatType::SYSTEM;
         chatMsg.language = ChatLanguage::UNIVERSAL;
         chatMsg.message = msg;
         owner_.addLocalChatMessage(chatMsg);
@@ -3349,16 +3421,11 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
         return;
     }
     const uint32_t queueSlot = status.queueSlot;
+    bgJoinPendingType_ = 0;  // answered
     const uint8_t arenaType = status.arenaType;
     const uint32_t bgTypeId = status.bgTypeId;
     const uint32_t statusId = status.statusId;
 
-    static const std::pair<uint32_t, const char*> kBgNames[] = {
-        {1,"Alterac Valley"},{2,"Warsong Gulch"},{3,"Arathi Basin"},
-        {4,"Nagrand Arena"},{5,"Blade's Edge Arena"},{6,"All Arenas"},
-        {7,"Eye of the Storm"},{8,"Ruins of Lordaeron"},{9,"Strand of the Ancients"},
-        {10,"Dalaran Sewers"},{11,"Ring of Valor"},{30,"Isle of Conquest"},{32,"Random Battleground"},
-    };
     std::string bgName = "Battleground";
     for (const auto& kv : kBgNames) { if (kv.first == bgTypeId) { bgName = kv.second; break; } }
     if (bgName == "Battleground") bgName = "Battleground #" + std::to_string(bgTypeId);
@@ -3392,13 +3459,20 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
         bgQueues_[queueSlot].maxLevel = status.maxLevel;
         bgQueues_[queueSlot].instanceId = status.instanceId;
         bgQueues_[queueSlot].isRated = status.isRated;
-        if (statusId == 1) { bgQueues_[queueSlot].avgWaitTimeSec = avgWaitSec; bgQueues_[queueSlot].timeInQueueSec = timeInQueueSec; }
+        if (statusId == 1) {
+            bgQueues_[queueSlot].avgWaitTimeSec = avgWaitSec;
+            bgQueues_[queueSlot].timeInQueueSec = timeInQueueSec;
+            bgQueues_[queueSlot].queueTimeReceivedAt = std::chrono::steady_clock::now();
+        }
         if (statusId == 2 && !wasInvite) { bgQueues_[queueSlot].inviteTimeout = inviteTimeout; bgQueues_[queueSlot].inviteReceivedTime = std::chrono::steady_clock::now(); }
     } else {
         statusChanged = true;
     }
 
     if (statusChanged) {
+        LOG_WARNING("Battleground queue ", queueSlot + 1, ": status ", statusId,
+                    " for type ", bgTypeId, " (", bgName, "), average wait ",
+                    avgWaitSec, " s, waited ", timeInQueueSec, " s");
         switch (statusId) {
             case 1: owner_.addSystemChatMessage("Queued for " + bgName + "."); break;
             case 2: owner_.addSystemChatMessage(bgName + " is ready!"); break;
@@ -3406,7 +3480,13 @@ void SocialHandler::handleBattlefieldStatus(network::Packet& packet) {
             default: break;
         }
     }
-    if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(statusId)});
+    // The argument is which queue changed, counted from one, not what it
+    // changed to. battlefieldframe.lua takes it as the index and raises the
+    // "enter battleground" prompt only for the queue it names - handed the
+    // status, an invitation (2) to the first queue named the second, and the
+    // prompt never came up however long the player had waited for it.
+    if (owner_.addonEventCallbackRef())
+        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(queueSlot + 1)});
 }
 
 void SocialHandler::handleBattlefieldList(network::Packet& packet) {
@@ -3466,6 +3546,8 @@ void SocialHandler::joinBattlefield(uint64_t battlemasterGuid, uint32_t bgTypeId
     packet.writeUInt32(instanceId);
     packet.writeUInt8(asGroup ? 1 : 0);
     owner_.getSocket()->send(packet);
+    bgJoinPendingType_ = bgTypeId;
+    bgJoinWaitSec_ = 5.0f;
 }
 
 // CMSG_BATTLEFIELD_LIST: ask which instances of one battleground are running.
@@ -3506,15 +3588,26 @@ void SocialHandler::declineBattlefield(uint32_t queueSlot) {
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
     const BgQueueSlot* slot = nullptr;
     if (queueSlot == 0xFFFFFFFF) { for (const auto& s : bgQueues_) { if (s.statusId == 2) { slot = &s; break; } } }
-    else if (queueSlot < bgQueues_.size() && bgQueues_[queueSlot].statusId == 2) slot = &bgQueues_[queueSlot];
+    // A named queue is left whether it has popped or is still waiting: the
+    // server takes the same refusal for both.
+    else if (queueSlot < bgQueues_.size() &&
+             (bgQueues_[queueSlot].statusId == 1 || bgQueues_[queueSlot].statusId == 2))
+        slot = &bgQueues_[queueSlot];
     if (!slot) { owner_.addSystemChatMessage("No battleground invitation pending."); return; }
+    const bool wasInvite = slot->statusId == 2;
+    const std::string bgName = slot->bgName;
     network::Packet pkt(wireOpcode(Opcode::CMSG_BATTLEFIELD_PORT));
     pkt.writeUInt8(slot->arenaType); pkt.writeUInt8(0x00); pkt.writeUInt32(slot->bgTypeId);
     pkt.writeUInt16(0x0000); pkt.writeUInt8(0);
     owner_.getSocket()->send(pkt);
     uint32_t clearSlot = slot->queueSlot;
     if (clearSlot < bgQueues_.size()) bgQueues_[clearSlot] = BgQueueSlot{};
-    owner_.addSystemChatMessage("Battleground invitation declined.");
+    owner_.addSystemChatMessage(wasInvite ? "Battleground invitation declined."
+                                          : "Left the queue for " + bgName + ".");
+    // The minimap icon and the panel read the queues on this event; without
+    // it they kept showing the queue until the server's next word.
+    if (owner_.addonEventCallbackRef())
+        owner_.addonEventCallbackRef()("UPDATE_BATTLEFIELD_STATUS", {std::to_string(clearSlot + 1)});
 }
 
 void SocialHandler::requestPvpLog() {
@@ -4534,6 +4627,24 @@ void SocialHandler::handlePvpLogData(network::Packet& packet) {
 }
 
 void SocialHandler::updateLogoutCountdown(float deltaTime) {
+    // A queue request the server let pass without a word. A realm that keeps
+    // a battleground back - ChromieCraft opens the random one at level sixty,
+    // and only through a command of its own - drops the join unanswered, and
+    // the panel then did nothing at all when its button was pressed.
+    if (bgJoinPendingType_ != 0) {
+        bgJoinWaitSec_ -= deltaTime;
+        if (bgJoinWaitSec_ <= 0.0f) {
+            std::string name = "that battleground";
+            for (const auto& kv : kBgNames)
+                if (kv.first == bgJoinPendingType_) { name = kv.second; break; }
+            const std::string msg = "The server did not answer the request to queue for " +
+                                    name + " - this realm may not offer it to you.";
+            LOG_WARNING("Battleground join unanswered: type ", bgJoinPendingType_);
+            owner_.addUIError(msg);
+            owner_.addSystemChatMessage(msg);
+            bgJoinPendingType_ = 0;
+        }
+    }
     if (loggingOut_ && logoutCountdown_ > 0.0f) {
         logoutCountdown_ -= deltaTime;
         if (logoutCountdown_ < 0.0f) logoutCountdown_ = 0.0f;
@@ -4595,17 +4706,25 @@ void SocialHandler::handleInitializeFactions(network::Packet& packet) {
     // moved. The reputation tab drew every bar empty at Neutral however much
     // the character had earned, and so did this client's own panel and the
     // watched-faction bar, all three reading the same empty map.
+    //
+    // And each made whole: the packet carries what has been earned, and the
+    // standing is that on top of where the faction starts for this race and
+    // class. See factionBaseReputation.
     owner_.loadFactionNameCache();
     for (size_t repListId = 0; repListId < owner_.initialFactionsRef().size(); ++repListId) {
         const uint32_t factionId =
             owner_.getFactionIdByRepListId(static_cast<uint32_t>(repListId));
         if (factionId == 0) continue;
-        owner_.factionStandingsRef()[factionId] =
-            owner_.initialFactionsRef()[repListId].standing;
+        auto& standing = owner_.initialFactionsRef()[repListId].standing;
+        standing += owner_.factionBaseReputation(factionId);
+        owner_.factionStandingsRef()[factionId] = standing;
     }
     LOG_INFO("Reputation: ", owner_.initialFactionsRef().size(),
              " factions initialised, ", owner_.factionStandingsRef().size(),
              " resolved to a faction id");
+    // Whether each faction with a standing is hostile is the at-war flag this
+    // packet carries, so units judged before it arrived are judged again.
+    owner_.refreshUnitHostility();
 }
 
 void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
@@ -4640,6 +4759,8 @@ void SocialHandler::handleSetFactionStanding(network::Packet& packet) {
                         " standing=", standing);
             continue;
         }
+        // Earned only, as at login: the whole is this on top of the start.
+        standing += owner_.factionBaseReputation(factionId);
 
         int32_t  oldStanding = 0;
         // SMSG_INITIALIZE_FACTIONS is indexed by ReputationListID and supplies the
@@ -4678,6 +4799,7 @@ void SocialHandler::handleSetFactionAtWar(network::Packet& packet) {
             owner_.initialFactionsRef()[repListId].flags |=  GameHandler::FACTION_FLAG_AT_WAR;
         else
             owner_.initialFactionsRef()[repListId].flags &= ~GameHandler::FACTION_FLAG_AT_WAR;
+        owner_.refreshUnitHostility();
     }
 }
 

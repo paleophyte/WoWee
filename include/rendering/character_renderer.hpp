@@ -82,6 +82,8 @@ public:
     // persistent work/state loop instead of idling.
     void playAnimation(uint32_t instanceId, uint32_t animationId, bool loop = true,
                        uint32_t oneShotReturnAnim = 0);
+    /// Play other animations on each arm alone, until the next playAnimation.
+    void setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim);
 
     void update(float deltaTime, const glm::vec3& cameraPos = glm::vec3(0.0f));
 
@@ -131,6 +133,15 @@ public:
     /// How tall this character stands, from its feet to the top of its head,
     /// with its scale applied. The model origin is at the feet.
     bool getInstanceHeight(uint32_t instanceId, float& outHeight) const;
+
+    /// Where one of the skeleton's named bones sits, in model Z with the
+    /// instance's scale applied. The key bone ids are WoW's own: 4 is the
+    /// lower spine, 6 the head, 7 the jaw.
+    ///
+    /// A bone is where a thing actually is. A fraction of the bounding box is
+    /// where it usually is, which is not the same for a race whose hair is
+    /// half the distance from its chin to the top of the box.
+    bool getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId, float& outZ) const;
     bool getInstanceFootZ(uint32_t instanceId, float& outFootZ) const;
     bool getInstancePosition(uint32_t instanceId, glm::vec3& outPos) const;
 
@@ -244,6 +255,9 @@ private:
         // Animation state
         uint32_t currentAnimationId = 0;
         int currentSequenceIndex = -1;  // Index into M2Model::sequences
+        int armSequenceIndex[2] = {-1, -1};  // Left, right arm on their own sequences; -1 follows the body
+        bool armSequenceLoops[2] = {false, false};  // Idle arm loops; a reaching arm holds its last frame
+        std::vector<int8_t> boneArm;  // Per bone: 0 left arm, 1 right arm, -1 neither; built by setArmAnimations
         float animationTime = 0.0f;
         float globalSequenceTime = 0.0f; // Separate timer for global sequences (accumulates without wrapping at sequence duration)
         bool animationLoop = true;

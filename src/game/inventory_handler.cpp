@@ -439,9 +439,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
 
     // ---- Item push result ----
     table[Opcode::SMSG_ITEM_PUSH_RESULT] = [this](network::Packet& packet) {
-        // WotLK 3.3.5a: guid(8)+received(4)+created(4)+displayInChat(4)+bagSlot(1)
-        //   +slot(4)+itemId(4)+suffixFactor(4)+randomPropertyId(4)+count(4)+countInInventory(4)
-        if (!packet.hasRemaining(45)) return;
+        // guid(8)+received(4)+created(4)+displayInChat(4)+bagSlot(1)
+        //   +slot(4)+itemId(4)+suffixFactor(4)+randomPropertyId(4)+count(4)
+        // TBC and WotLK then add countInInventory(4); classic does not.
+        if (!packet.hasRemaining(41)) return;
         uint64_t guid = packet.readUInt64();
         if (guid != owner_.getPlayerGuid()) { packet.skipAll(); return; }
         /*uint32_t received      =*/ packet.readUInt32();
@@ -1085,7 +1086,7 @@ void InventoryHandler::lootItem(uint8_t slotIndex, bool confirmed) {
         // answers it with GetLootSlotInfo, which counts the coin as a slot of
         // its own and the items after it.
         const auto& loot = owner_.getCurrentLoot();
-        int display = (loot.gold > 0) ? 1 : 0;
+        int display = loot.hasCoinSlot() ? 1 : 0;
         for (const auto& item : loot.items) {
             ++display;
             if (item.slotIndex != slotIndex) continue;
@@ -1131,16 +1132,18 @@ void InventoryHandler::cancelTempEnchantment(uint8_t handIndex) {
 }
 
 void InventoryHandler::clearLootMoney() {
-    if (currentLoot_.gold == 0) return;
-    currentLoot_.gold = 0;
+    if (!currentLoot_.goldLeft()) return;
+    // Marked rather than zeroed: the coin is display slot one, and dropping it
+    // would move every item button onto the item after its own.
+    currentLoot_.goldLooted = true;
     auto it = localLootState_.find(currentLoot_.lootGuid);
-    if (it != localLootState_.end()) it->second.data.gold = 0;
+    if (it != localLootState_.end()) it->second.data.goldLooted = true;
     // Display slot one, which is where the coin sits whenever there is one.
     if (lootWindowOpen_ && owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {"1"});
     }
     // A corpse that held only money is empty now.
-    if (lootWindowOpen_ && currentLoot_.items.empty()) closeLoot();
+    if (lootWindowOpen_ && currentLoot_.nothingLeft()) closeLoot();
 }
 
 void InventoryHandler::closeLoot() {
@@ -1280,7 +1283,7 @@ void InventoryHandler::handleLootRemoved(network::Packet& packet) {
             // emits the single "Received item" notification. Slot removal only
             // updates the open loot window; announcing here duplicated chat and
             // the loot sound for the same item.
-            currentLoot_.items.erase(it);
+            it->looted = true;
             if (owner_.addonEventCallbackRef())
                 owner_.addonEventCallbackRef()("LOOT_SLOT_CLEARED", {std::to_string(slotIndex + 1)});
             break;
@@ -1297,7 +1300,7 @@ void InventoryHandler::handleLootRemoved(network::Packet& packet) {
     // in the same breath at open, so items empty with no gold left is a corpse
     // with nothing on it. Retail closes it here too, for a manual last-item
     // loot as much as an automatic one.
-    if (lootWindowOpen_ && currentLoot_.items.empty() && currentLoot_.gold == 0) {
+    if (lootWindowOpen_ && currentLoot_.nothingLeft()) {
         closeLoot();
     }
 }
@@ -4472,7 +4475,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         // as long as the corpse is open. LOOT_SLOT_CHANGED is the event the
         // loot frame redraws one button on.
         if (lootWindowOpen_ && owner_.addonEventCallbackRef()) {
-            const int coinSlots = currentLoot_.gold > 0 ? 1 : 0;
+            const int coinSlots = currentLoot_.hasCoinSlot() ? 1 : 0;
             for (size_t i = 0; i < currentLoot_.items.size(); ++i) {
                 if (currentLoot_.items[i].itemId != data.entry) continue;
                 owner_.addonEventCallbackRef()(

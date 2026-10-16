@@ -13,7 +13,13 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 shadowParams;
     vec4 playerPos;   // xyz = player world position, w = horizontal speed
     vec4 playerWake;  // xyz = trailing player position (springback reference)
+    vec4 localLightPosRadius[64];
+    vec4 localLightColorIntensity[64];
+    ivec4 localLightMeta;
+    vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
 };
+
+layout(set = 0, binding = 2) uniform sampler3D uFogVolume;
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -32,6 +38,7 @@ layout(set = 1, binding = 0) uniform WaterMaterial {
     float waterAlpha;
     float shimmerStrength;
     float alphaScale;
+    float bodyFloor;   // least the water's own colour shows, however shallow
 };
 
 layout(set = 2, binding = 0) uniform sampler2D SceneColor;
@@ -215,6 +222,33 @@ float cellularFoam(vec2 p, float jitter) {
 }
 float cellularFoam(vec2 p) { return cellularFoam(p, 1.0); }
 
+// The air between the camera and this point, out of the fog volume: rgb is
+// the light it scatters toward the camera, a how much of the point shows
+// through it. See VolumetricFog.
+vec4 fogVolumeAt(vec3 worldPos) {
+    vec4 clip = projection * view * vec4(worldPos, 1.0);
+    float depth = max(clip.w, 1e-4);
+    vec2 uv = clip.xy / depth * 0.5 + 0.5;
+    float slice = log(max(depth, volumetricParams.y) / volumetricParams.y) * volumetricParams.z;
+    // Each slice holds the air up to its far edge, so a point is read half a
+    // slice back from where it stands.
+    return textureLod(uFogVolume, vec3(uv, slice - 0.5 / volumetricParams.w), 0.0);
+}
+
+// The zone's distance fog, then the air in front of it. The distance fog is
+// the far haze the sky is painted to meet, so it goes on first; the volume is
+// everything between the camera and that, sunlit shafts and torch glow
+// included.
+vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
+    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
+    color = mix(fogColor.rgb, color, fogFactor);
+    if (volumetricParams.x > 0.5) {
+        vec4 air = fogVolumeAt(worldPos);
+        color = color * air.a + air.rgb;
+    }
+    return color;
+}
+
 void main() {
     float time = fogParams.z;
     float basicType = push.liquidBasicType;
@@ -262,8 +296,7 @@ void main() {
         // Emissive brightening for hot areas
         color *= 1.0 + coreMask * 0.6;
 
-        float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
-        color = mix(fogColor.rgb, color, fogFactor);
+        color = applyFog(color, FragPos, dist);
         outColor = vec4(color, 0.97);
         return;
     }
@@ -368,7 +401,7 @@ void main() {
 
     vec3 shallowColor = waterColor.rgb * 1.2;
     vec3 deepColor = waterColor.rgb * vec3(0.3, 0.5, 0.7);
-    float depthFade = 1.0 - exp(-verticalDepth * 0.15);
+    float depthFade = max(1.0 - exp(-verticalDepth * 0.15), bodyFloor);
     vec3 waterBody = mix(shallowColor, deepColor, depthFade);
 
     // Whether the refraction capture holds a frame is a fact the renderer
@@ -692,8 +725,7 @@ void main() {
     // edge straight back.
     alpha *= smoothstep(2400.0, 600.0, dist);
 
-    float fogFactor = clamp((fogParams.y - dist) / (fogParams.y - fogParams.x), 0.0, 1.0);
-    color = mix(fogColor.rgb, color, fogFactor);
+    color = applyFog(color, FragPos, dist);
 
     outColor = vec4(color, alpha);
 }

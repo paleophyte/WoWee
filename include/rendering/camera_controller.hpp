@@ -2,7 +2,7 @@
 
 #include "rendering/camera.hpp"
 #include "core/input.hpp"
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 #include <algorithm>
 #include <functional>
 #include <optional>
@@ -239,8 +239,19 @@ public:
     void setGravityDisabled(bool disabled) { gravityDisabled_ = disabled; }
     void setFeatherFallActive(bool active) { featherFallActive_ = active; }
     void setWaterWalkActive(bool active) { waterWalkActive_ = active; }
-    void setFlyingActive(bool active) { flyingActive_ = active; }
+    /// Permission to fly - a flying mount where flight is allowed, or .gm fly.
+    /// Not the same as being in the air: see isFlightAirborne.
+    void setFlyingActive(bool active);
     [[nodiscard]] bool isFlyingActive() const { return flyingActive_; }
+    /// In the air on it. Space takes off, and touching real ground without
+    /// climbing lands - after which the mount runs, falls and jumps like any
+    /// other until it takes off again. Flight physics, the flight animations
+    /// and the FLYING movement flag all follow this rather than permission.
+    [[nodiscard]] bool isFlightAirborne() const { return flyingActive_ && flightAirborne_; }
+    /// The pitch the player is flying at, in radians: the camera's while it
+    /// steers, and held when it does not. What the mount tilts to and what
+    /// the server is told.
+    [[nodiscard]] float getFlightPitchRad() const { return glm::radians(flightPitchDeg_); }
     [[nodiscard]] bool isAscending() const { return wasAscending_; }
     [[nodiscard]] bool isDescending() const { return wasDescending_; }
     void setHoverActive(bool active) { hoverActive_ = active; }
@@ -330,6 +341,7 @@ private:
         glm::vec3 forward{0.0f};      ///< movement axes, flattened onto XY
         glm::vec3 right{0.0f};
         glm::vec3 forward3D{0.0f};    ///< the camera's own forward, with pitch
+        glm::vec3 flightForward{0.0f};   ///< where W flies: the facing, at the flight pitch
         glm::vec3 movement{0.0f};     ///< the horizontal move this frame; the modes adjust it
         bool nowForward = false;
         bool nowBackward = false;
@@ -338,7 +350,7 @@ private:
         bool nowTurnLeft = false;
         bool nowTurnRight = false;
         bool nowJump = false;
-        bool swimUpHeld = false;
+        bool spaceHeld = false;       ///< held, not pressed: rising in water and in flight
         bool xDown = false;
         bool uiWantsKeyboard = false;
     };
@@ -480,25 +492,91 @@ public:
     ///
     /// pivotHeight_ is a distance in metres, and a metre is a different part
     /// of a gnome than it is of a tauren: at a fixed 1.6 the camera orbited a
-    /// point above a short character's head and zoomed into thin air. The
-    /// setting is read as a proportion of the height it was chosen against -
-    /// a night elf, who stands about that - and applied to whoever is actually
-    /// being followed.
-    [[nodiscard]] float pivotHeightFor(float characterHeight) const {
-        if (characterHeight <= 0.01f) return pivotHeight_;
-        const float share = pivotHeight_ / kPivotReferenceHeight;
-        return std::clamp(characterHeight * share, 0.2f, 3.0f);
+    /// point above a short character's head and zoomed into thin air.
+    ///
+    /// Scaling it by total height was not enough. Measured against the head
+    /// bone afterwards, it put the pivot between 81% and 92% of the way up to
+    /// the head for every race in the game - and at 126% for a gnome female
+    /// and 132% for a gnome male, a quarter of a metre above the bone, on a
+    /// character 1.3 tall. A gnome's head and hair are 40% of its height
+    /// where everyone else's are 15%, so its box says nothing about where its
+    /// face is. The setting is read as a proportion of the head bone it was
+    /// chosen against and applied to the head bone of whoever is being
+    /// followed. Height stays as the fallback, for a skeleton with no head
+    /// bone in it.
+    ///
+    /// Static and given the setting, so the arithmetic can be checked against
+    /// the measured models without standing a camera up.
+    [[nodiscard]] static float pivotHeightFor(float setting, float characterHeight,
+                                              float headBoneZ) {
+        if (headBoneZ > 0.01f) {
+            return std::clamp(headBoneZ * (setting / kPivotReferenceHeadZ), 0.2f, 3.0f);
+        }
+        if (characterHeight <= 0.01f) return setting;
+        return std::clamp(characterHeight * (setting / kPivotReferenceHeight), 0.2f, 3.0f);
+    }
+
+    /// How far the pivot has to rise for the camera to clear the ground.
+    ///
+    /// The camera sits behind the character along the look direction, so on a
+    /// slope it can end up inside the hill; raising the pivot raises it with
+    /// it. All four arguments are in world Z except the direction, which is
+    /// the vertical part of the unit vector from pivot to camera.
+    ///
+    /// Measured at the camera rather than at the pivot, and against a small
+    /// clearance rather than a fixed height above the terrain. The rule was
+    /// "keep the pivot two metres above the ground under the camera", which
+    /// is an absolute height and therefore undoes any attempt to put the
+    /// pivot on the character by exactly the amount that attempt moved it: on
+    /// flat ground a gnome's 0.65 was lifted by 1.35 and a human's 1.60 by
+    /// 0.40, and both ended up at 2.00 above the feet. It made no difference
+    /// which character was being followed, which is what made three separate
+    /// fixes to the pivot itself change nothing on screen.
+    ///
+    /// Static and given everything it uses, so the rule can be checked
+    /// against a gnome on flat ground without standing a world up.
+    [[nodiscard]] static float terrainPivotLift(float pivotZ, float camDirZ, float distance,
+                                                float terrainZAtCamera) {
+        constexpr float kMinCamClearance = 0.6f;
+        constexpr float kMaxLift = 1.4f;
+        const float camZ = pivotZ + camDirZ * distance;
+        const float clearance = camZ - terrainZAtCamera;
+        if (clearance >= kMinCamClearance) return 0.0f;
+        return std::clamp(kMinCamClearance - clearance, 0.0f, kMaxLift);
+    }
+
+    /// The pivot for whoever is being followed right now.
+    [[nodiscard]] float followedPivotHeight() const {
+        return pivotHeightFor(pivotHeight_, followedHeight_, followedHeadZ_);
     }
 private:
     static constexpr float PIVOT_HEIGHT_DEFAULT = 1.6f;
-    /// The height PIVOT_HEIGHT_DEFAULT was chosen against, so that the default
-    /// still puts the pivot exactly where it always did for a character of
-    /// that size and only moves it for the ones it was wrong for.
-    static constexpr float kPivotReferenceHeight = 2.0f;
+    /// The height PIVOT_HEIGHT_DEFAULT was chosen against, so the default puts
+    /// the pivot exactly where it always did for a character of that size and
+    /// only moves it for the ones it was wrong for.
+    ///
+    /// Measured off the models rather than guessed: a human male stands 2.13
+    /// in bind pose, a night elf 2.29, a tauren 2.33, a gnome 1.17. Guessed at
+    /// two metres this put every pivot at 80% of height - which lowered a
+    /// gnome's, the point of the change, but quietly raised a night elf's from
+    /// 1.60 to 1.83. Against the real figure the tall races keep what they had.
+    static constexpr float kPivotReferenceHeight = 2.13f;
+    /// Where the head bone sits on the character the default was chosen
+    /// against - a human male's is at 1.843 - so that camera stays exactly
+    /// where it was and only the ones the metre was wrong for move. Against
+    /// it a night elf female goes 1.72 -> 1.77, a tauren male 1.75 -> 1.64,
+    /// and a gnome male 1.00 -> 0.65.
+    static constexpr float kPivotReferenceHeadZ = 1.843f;
     float pivotHeight_ = PIVOT_HEIGHT_DEFAULT;  // User-configurable pivot height
     /// The followed character's height, refreshed as it is followed. Zero
     /// until something has been measured, which reads as the old behaviour.
     float followedHeight_ = 0.0f;
+    /// The followed character's head bone in model Z, zero until measured or
+    /// if its skeleton names no head.
+    float followedHeadZ_ = 0.0f;
+    /// Whether the terrain is currently raising the pivot, so that starting
+    /// and stopping is said once each rather than every frame.
+    bool pivotLiftActive_ = false;
     static constexpr float CAM_SPHERE_RADIUS = 0.32f;  // Keep camera farther from geometry to avoid clipping-through surfaces
     static constexpr float CAM_EPSILON = 0.22f;        // Extra wall offset to avoid near-plane clipping artifacts
     static constexpr float COLLISION_FOCUS_RADIUS_THIRD_PERSON = 20.0f;  // Reduced for performance
@@ -581,6 +659,12 @@ private:
     // Returns maxDist when the ray stays clear (or terrain is unavailable).
     [[nodiscard]] float raymarchTerrainCameraLimit(const glm::vec3& pivot, const glm::vec3& camDir,
                                      float maxDist) const;
+
+    // The terrain a camera at (x, y) must stay above, or nothing when the
+    // character is under the heightfield (a cave, a tunnel) and the terrain
+    // over them is a roof rather than a floor.
+    [[nodiscard]] std::optional<float> cameraTerrainFloor(float x, float y,
+                                                          const glm::vec3& targetPos) const;
 
     // Swimming
     bool swimming = false;
@@ -709,6 +793,8 @@ private:
     bool waterWalkActive_ = false;
     // Player-controlled flight (CAN_FLY + FLYING): 3D movement, no gravity.
     bool flyingActive_ = false;
+    bool flightAirborne_ = false;
+    float flightPitchDeg_ = 0.0f;
     // Server-driven hover (HOVER flag): float at fixed height above ground.
     bool hoverActive_ = false;
     bool mounted_ = false;

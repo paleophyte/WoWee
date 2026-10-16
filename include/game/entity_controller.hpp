@@ -85,6 +85,11 @@ public:
         auto it = playerClassRaceCache_.find(guid);
         return it != playerClassRaceCache_.end() ? it->second.raceId : 0;
     }
+    /// 0 male, 1 female, as the name query answers; 0xFF when not known.
+    [[nodiscard]] uint8_t lookupPlayerGender(uint64_t guid) const {
+        auto it = playerClassRaceCache_.find(guid);
+        return it != playerClassRaceCache_.end() ? it->second.gender : 0xFF;
+    }
 
     // --- Transport GUID tracking ---
     [[nodiscard]] bool isTransportGuid(uint64_t guid) const { return transportGuids_.count(guid) > 0; }
@@ -108,7 +113,7 @@ private:
     // ---- Name caches ----
     std::unordered_map<uint64_t, std::string> playerNameCache;
     // Class/race cache from SMSG_NAME_QUERY_RESPONSE (guid → {classId, raceId})
-    struct PlayerClassRace { uint8_t classId = 0; uint8_t raceId = 0; };
+    struct PlayerClassRace { uint8_t classId = 0; uint8_t raceId = 0; uint8_t gender = 0xFF; };
     std::unordered_map<uint64_t, PlayerClassRace> playerClassRaceCache_;
     std::unordered_set<uint64_t> pendingNameQueries;
     std::unordered_map<uint32_t, CreatureQueryResponseData> creatureInfoCache;
@@ -182,6 +187,9 @@ private:
 
     void handleCreateObject(const UpdateBlock& block, bool& newItemCreated);
     void handleValuesUpdate(const UpdateBlock& block);
+    /// The player's shapeshift form changed: the stance bar and the bonus
+    /// action bar it brings both repage.
+    void setPlayerShapeshiftForm(uint8_t newForm);
     void handleMovementUpdate(const UpdateBlock& block);
     /// Seed a transport's route phase from the server's own path clock, so the
     /// client stops animating on a period it invented for itself.
@@ -213,7 +221,7 @@ private:
         uint16_t displayId, mountDisplayId, npcFlags, npcEmoteState;
         /// How wide a unit is and how far it reaches, for edge-to-edge range.
         uint16_t boundingRadius, combatReach;
-        uint16_t bytes0, bytes1;
+        uint16_t bytes0, bytes1, bytes2;
         /// A hunter pet carries its own experience, on the pet's unit rather
         /// than on the player's.
         uint16_t petXp, petNextLevelXp;
@@ -335,6 +343,9 @@ private:
     };
     PendingEvents pendingEvents_;
     void flushPendingEvents();
+
+    // The player's UNIT_DYNFLAG_DEAD is Feign Death, not a death.
+    bool playerFeigningDeath_ = false;
 };
 
 } // namespace game

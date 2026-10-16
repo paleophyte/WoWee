@@ -7,6 +7,7 @@
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
+#include "game/tab_target.hpp"
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
 #include "rendering/renderer.hpp"
@@ -329,7 +330,15 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     // Only dismount once this is a valid attack attempt. Doing it before the
     // target/range gate knocked the player off a mount even though no combat
     // request was sent.
+    //
+    // Never in the air, unless Auto Dismount in Flight asks for it: a hostile
+    // right-clicked from a flying mount dropped the player out of the sky.
     if (owner_.isMounted()) {
+        if (owner_.isPlayerFlying() && !owner_.isTaxiMountActive() &&
+            addons::storedCVarValue("autoDismountFlying", "0") == "0") {
+            owner_.addUIError("You can't do that while flying.");
+            return;
+        }
         owner_.dismount();
     }
 
@@ -342,11 +351,16 @@ void CombatHandler::startAutoAttack(uint64_t targetGuid) {
     autoAttackOutOfRange_ = false;
     autoAttackOutOfRangeTime_ = 0.0f;
     autoAttackResendTimer_ = 0.0f;
-    // Face the target, once, on the command to attack it - the same turn the
-    // real client makes when an attack is ordered on something behind the
-    // player. This is the only place combat turns the player: it used to be
-    // re-aimed every fifth of a second for as long as the attack lasted.
-    if (auto target = owner_.getEntityManager().getEntity(targetGuid)) {
+    // Face the target, once, on the command to attack it. This is the only
+    // place combat turns the player: it used to be re-aimed every fifth of a
+    // second for as long as the attack lasted.
+    //
+    // Only with the Combat page's debug setting on. The original client does
+    // not turn the player at all; attacking something behind them is refused
+    // until they face it themselves.
+    auto target = owner_.isAutoFaceTarget() ? owner_.getEntityManager().getEntity(targetGuid)
+                                            : nullptr;
+    if (target) {
         const float toTargetX = target->getLatestX() - owner_.movementInfoRef().x;
         const float toTargetY = target->getLatestY() - owner_.movementInfoRef().y;
         if (std::abs(toTargetX) > 0.01f || std::abs(toTargetY) > 0.01f) {
@@ -636,6 +650,10 @@ void CombatHandler::handleAttackStop(network::Packet& packet) {
     }
 }
 
+// VictimState, the same in every expansion's servers.
+constexpr uint32_t VICTIMSTATE_DODGE = 2, VICTIMSTATE_PARRY = 3, VICTIMSTATE_BLOCKS = 5,
+                   VICTIMSTATE_EVADES = 6, VICTIMSTATE_IS_IMMUNE = 7, VICTIMSTATE_DEFLECTS = 8;
+
 void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
     AttackerStateUpdateData data;
     if (!owner_.getPacketParsers()->parseAttackerStateUpdate(packet, data)) return;
@@ -683,7 +701,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
             auto weaponSize = audio::CombatSoundManager::WeaponSize::MEDIUM;
             if (data.isMiss()) {
                 csm->playWeaponMiss(false);
-            } else if (data.victimState == 1 || data.victimState == 2) {
+            } else if (data.victimState == VICTIMSTATE_DODGE || data.victimState == VICTIMSTATE_PARRY) {
                 // Dodge/parry - swing whoosh but no impact
                 csm->playWeaponSwing(weaponSize, false);
             } else {
@@ -694,34 +712,31 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         }
         // Character vocalizations
         if (auto* asm_ = ac->getActivitySoundManager()) {
-            if (isPlayerAttacker && !data.isMiss() && data.victimState != 1 && data.victimState != 2) {
+            if (isPlayerAttacker && !data.isMiss() && data.victimState != VICTIMSTATE_DODGE &&
+                data.victimState != VICTIMSTATE_PARRY) {
                 asm_->playAttackGrunt();
             }
-            if (isPlayerTarget && !data.isMiss() && data.victimState != 1 && data.victimState != 2) {
+            if (isPlayerTarget && !data.isMiss() && data.victimState != VICTIMSTATE_DODGE &&
+                data.victimState != VICTIMSTATE_PARRY) {
                 asm_->playWound(data.isCrit());
             }
         }
     }
 
-    if (data.isMiss()) {
-        addCombatText(CombatTextEntry::MISS, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 1) {
-        addCombatText(CombatTextEntry::DODGE, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 2) {
-        addCombatText(CombatTextEntry::PARRY, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 4) {
-        // VICTIMSTATE_BLOCKS: show reduced damage and the blocked amount
-        if (data.totalDamage > 0)
-            addCombatText(CombatTextEntry::MELEE_DAMAGE, data.totalDamage, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-        addCombatText(CombatTextEntry::BLOCK, static_cast<int32_t>(data.blocked), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 5) {
-        // VICTIMSTATE_EVADE: NPC evaded (out of combat zone).
+    // An evade comes with the miss flag set as well, so it is asked first.
+    if (data.victimState == VICTIMSTATE_EVADES) {
         addCombatText(CombatTextEntry::EVADE, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 6) {
-        // VICTIMSTATE_IS_IMMUNE: Target is immune to this attack.
+    } else if (data.isMiss()) {
+        addCombatText(CombatTextEntry::MISS, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
+    } else if (data.victimState == VICTIMSTATE_DODGE) {
+        addCombatText(CombatTextEntry::DODGE, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
+    } else if (data.victimState == VICTIMSTATE_PARRY) {
+        addCombatText(CombatTextEntry::PARRY, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
+    } else if (data.victimState == VICTIMSTATE_BLOCKS) {
+        addCombatText(CombatTextEntry::BLOCK, static_cast<int32_t>(data.blocked), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
+    } else if (data.victimState == VICTIMSTATE_IS_IMMUNE) {
         addCombatText(CombatTextEntry::IMMUNE, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
-    } else if (data.victimState == 7) {
-        // VICTIMSTATE_DEFLECT: Attack was deflected (e.g. shield slam reflect).
+    } else if (data.victimState == VICTIMSTATE_DEFLECTS) {
         addCombatText(CombatTextEntry::DEFLECT, 0, 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
     } else {
         CombatTextEntry::Type type;
@@ -744,15 +759,18 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
             addCombatText(CombatTextEntry::ABSORB, static_cast<int32_t>(totalAbsorbed), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
         if (totalResisted > 0)
             addCombatText(CombatTextEntry::RESIST, static_cast<int32_t>(totalResisted), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
+        // A partial block is a hit like any other, with the blocked part beside it.
+        if (data.blocked > 0)
+            addCombatText(CombatTextEntry::BLOCK, static_cast<int32_t>(data.blocked), 0, isPlayerAttacker, 0, data.attackerGuid, data.targetGuid);
     }
 
     // Fire hit reaction animation on the victim
     if (owner_.hitReactionCallbackRef() && !data.isMiss()) {
         using HR = GameHandler::HitReaction;
         HR reaction = HR::WOUND;
-        if (data.victimState == 1) reaction = HR::DODGE;
-        else if (data.victimState == 2) reaction = HR::PARRY;
-        else if (data.victimState == 4) reaction = HR::BLOCK;
+        if (data.victimState == VICTIMSTATE_DODGE) reaction = HR::DODGE;
+        else if (data.victimState == VICTIMSTATE_PARRY) reaction = HR::PARRY;
+        else if (data.victimState == VICTIMSTATE_BLOCKS || data.blocked > 0) reaction = HR::BLOCK;
         else if (data.isCrit()) reaction = HR::CRIT_WOUND;
         owner_.hitReactionCallbackRef()(data.targetGuid, reaction);
     }
@@ -1330,7 +1348,8 @@ void CombatHandler::setTarget(uint64_t guid) {
         owner_.lastTargetGuidRef() = previous;
         auto entity = owner_.getEntityManager().getEntity(previous);
         if (auto* unit = dynamic_cast<Unit*>(entity.get())) {
-            if (unit->isHostile() || isAggressiveTowardPlayer(previous)) {
+            if (!owner_.isFriendlyFaction(unit->getFactionTemplate()) ||
+                isAggressiveTowardPlayer(previous)) {
                 lastEnemyTargetGuid_ = previous;
             } else {
                 lastFriendTargetGuid_ = previous;
@@ -1525,8 +1544,16 @@ void CombatHandler::targetEnemy(bool reverse) {
         if (t != ObjectType::UNIT && t != ObjectType::PLAYER) return false;
         auto* unit = dynamic_cast<Unit*>(&e);
         if (!unit || unit->getHealth() == 0) return false;
-        return unit->isHostile() || isAggressiveTowardPlayer(guid);
+        return isEnemyTarget(guid, *unit);
     });
+}
+
+bool CombatHandler::isEnemyTarget(uint64_t guid, const Unit& unit) const {
+    return isTabTargetable(unit.isHostile(),
+                           owner_.isFriendlyFaction(unit.getFactionTemplate()),
+                           isAggressiveTowardPlayer(guid),
+                           owner_.getCreatureType(unit.getEntry()),
+                           unit.getUnitFlags());
 }
 
 void CombatHandler::targetFriend(bool reverse) {
@@ -1593,7 +1620,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
 
     const bool playerInCombat = owner_.isInCombat();
 
-    // Helper: returns true if the entity is a hostile that can be tab-targeted.
+    // Helper: returns true if the entity is an enemy that can be tab-targeted.
     // Corpses are never tab targets while fighting; out of combat they only
     // qualify when they still hold loot.
     auto isValidTabTarget = [&](const std::shared_ptr<Entity>& e) -> bool {
@@ -1607,9 +1634,7 @@ void CombatHandler::tabTarget(float playerX, float playerY, float playerZ) {
             return lootIt != owner_.localLootStateRef().end() &&
                    !lootIt->second.data.items.empty();
         }
-        const bool hostileByFaction = unit->isHostile();
-        const bool hostileByCombat = isAggressiveTowardPlayer(guid);
-        return hostileByFaction || hostileByCombat;
+        return isEnemyTarget(guid, *unit);
     };
 
     // Restart the cycle after a pause - the player has moved on; the next tab

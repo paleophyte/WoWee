@@ -36,6 +36,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/env_flag.hpp"
+#include "core/geoset_rules.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -2046,6 +2047,7 @@ void CharacterRenderer::playAnimation(uint32_t instanceId, uint32_t animationId,
     // Find animation sequence index by ID
     instance.currentAnimationId = animationId;
     instance.currentSequenceIndex = -1;
+    instance.armSequenceIndex[0] = instance.armSequenceIndex[1] = -1;
     instance.animationTime = 0.0f;
     instance.animationLoop = loop;
 
@@ -2333,7 +2335,39 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
 }
 // --- Bone transform calculation ---
 
+constexpr int32_t kKeyBoneShoulderL = 2;
+constexpr int32_t kKeyBoneShoulderR = 3;
 constexpr int32_t kKeyBoneSpineLow = 4;
+
+void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    auto& instance = it->second;
+    const auto& model = models[instance.modelId].data;
+    const auto& sequences = model.sequences;
+    const uint32_t anims[2] = {leftArmAnim, rightArmAnim};
+    for (int arm = 0; arm < 2; arm++) {
+        instance.armSequenceIndex[arm] = -1;
+        instance.armSequenceLoops[arm] = anims[arm] == anim::STAND;
+        for (size_t i = 0; i < sequences.size(); i++) {
+            if (sequences[i].id == anims[arm] && sequences[i].variationIndex == 0) {
+                instance.armSequenceIndex[arm] = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    // Which arm each bone is in - a shoulder and everything below it. Parents
+    // come first, so one pass finds both.
+    instance.boneArm.assign(model.bones.size(), -1);
+    for (size_t i = 0; i < model.bones.size(); i++) {
+        const auto& bone = model.bones[i];
+        instance.boneArm[i] = bone.keyBoneId == kKeyBoneShoulderL ? 0
+                            : bone.keyBoneId == kKeyBoneShoulderR ? 1
+                            : bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < i
+                                ? instance.boneArm[bone.parentBone] : -1;
+    }
+}
 
 void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     if (!instance.cachedModel) return;
@@ -2366,13 +2400,27 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
     // call, after it, instead of on a bone the loop happens to reach.
     static int diagFrames = 0;
 
+    const bool armsOwnSequences = (instance.armSequenceIndex[0] >= 0 || instance.armSequenceIndex[1] >= 0) &&
+                                  instance.boneArm.size() == numBones;
+
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
+        int sequence = instance.currentSequenceIndex;
+        float time = instance.animationTime;
+        const int arm = armsOwnSequences ? instance.boneArm[i] : -1;
+        if (arm >= 0 && instance.armSequenceIndex[arm] >= 0) {
+            sequence = instance.armSequenceIndex[arm];
+            const float duration = static_cast<float>(model.sequences[sequence].duration);
+            if (duration > 0.0f) {
+                time = instance.armSequenceLoops[arm] ? std::fmod(time, duration) : std::min(time, duration);
+            }
+        }
+
         // Local transform includes pivot bracket: T(pivot)*T*R*S*T(-pivot)
         // At rest this is identity, so no separate bind pose is needed
-        glm::mat4 localTransform = getBoneTransform(bone, instance.animationTime, instance.globalSequenceTime,
-                                                    instance.currentSequenceIndex, gsd);
+        glm::mat4 localTransform = getBoneTransform(bone, time, instance.globalSequenceTime,
+                                                    sequence, gsd);
 
         if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
             glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
@@ -3038,8 +3086,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // displacement moves each mirrored half in opposite screen
                 // directions, producing crossed eyes and a center-squashed
                 // mouth at oblique angles. Keep normal lighting, but never
-                // displace UVs on group 0 body/head surfaces.
-                if (batchGroup == 0) {
+                // displace UVs on group 0 body/head surfaces - nor on the
+                // no-cloak panel, which is a patch of the same torso.
+                if (batchGroup == 0 || batch.submeshId == core::kGeosetNoCape) {
                     normalMap = flatNormalTexture_.get();
                     matData.specularIntensity = 0.20f;
                     matData.enableNormalMap = 0;
@@ -3287,7 +3336,8 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
         device, vkCtx_->getPipelineCache(),
         vertShader.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
         fragShader.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT),
-        vertBind, vertAttrs, shadowPipelineLayout_, shadowRenderPass);
+        vertBind, vertAttrs, shadowPipelineLayout_, shadowRenderPass,
+        vkCtx_->useDynamicRendering());
 
     vertShader.destroy();
     fragShader.destroy();
@@ -3552,7 +3602,8 @@ VkTexture* CharacterRenderer::resolveBatchTexture(const CharacterInstance& inst,
                             // Only apply skin override to skin groups
                             uint16_t grp = b.submeshId / 100;
                             bool isSkinGroup = (grp == 0 || grp == 3 || grp == 4 || grp == 5 ||
-                                                grp == 8 || grp == 9 || grp == 13 || grp == 20);
+                                                grp == 8 || grp == 9 || grp == 13 || grp == 15 ||
+                                                grp == 20);
                             if (isSkinGroup) texPtr = itO->second;
                         } else {
                             texPtr = itO->second;
@@ -4091,6 +4142,21 @@ bool CharacterRenderer::getInstanceBounds(uint32_t instanceId, glm::vec3& outCen
     outCenter = inst.position + glm::vec3(rotation * glm::vec4(localCenter * scale, 0.0f));
     outRadius = std::max(0.5f, radius * scale);
     return true;
+}
+
+bool CharacterRenderer::getInstanceKeyBonePivotZ(uint32_t instanceId, int32_t keyBoneId,
+                                                 float& outZ) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return false;
+    auto mIt = models.find(it->second.modelId);
+    if (mIt == models.end()) return false;
+
+    for (const auto& bone : mIt->second.data.bones) {
+        if (bone.keyBoneId != keyBoneId) continue;
+        outZ = bone.pivot.z * std::max(0.001f, it->second.scale);
+        return true;
+    }
+    return false;
 }
 
 bool CharacterRenderer::getInstanceHeight(uint32_t instanceId, float& outHeight) const {

@@ -1,6 +1,7 @@
 #include "game/spell_handler.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "game/protocol_constants.hpp"
+#include "game/current_action.hpp"
 #include "game/gather_spells.hpp"
 #include "game/spell_classification.hpp"
 #include "game/pet_action.hpp"
@@ -288,9 +289,7 @@ static CombatTextEntry::Type combatTextTypeFromSpellMissInfo(uint8_t missInfo) {
         case SpellMissInfo::DEFLECT: return CombatTextEntry::DEFLECT;
         case SpellMissInfo::ABSORB:  return CombatTextEntry::ABSORB;
         case SpellMissInfo::RESIST:  return CombatTextEntry::RESIST;
-        case SpellMissInfo::IMMUNE2:
-        case SpellMissInfo::IMMUNE3:
-            return CombatTextEntry::IMMUNE;
+        case SpellMissInfo::IMMUNE2: return CombatTextEntry::IMMUNE;
         case SpellMissInfo::REFLECT: return CombatTextEntry::REFLECT;
         default: return CombatTextEntry::MISS;
     }
@@ -339,6 +338,40 @@ uint32_t SpellHandler::resolveSpellVisualId(uint32_t spellId) {
     owner_.loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.spellVisualId : 0;
+}
+
+float SpellHandler::resolveSpellMissileSpeed(uint32_t spellId) {
+    owner_.loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    return (it != owner_.spellNameCacheRef().end()) ? it->second.missileSpeed : 0.0f;
+}
+
+bool SpellHandler::launchSpellMissile(uint32_t spellId, uint32_t visualId, uint64_t casterGuid,
+                                      uint64_t targetGuid, bool impactAtEnd) {
+    if (targetGuid == 0 || targetGuid == casterGuid) return false;
+    auto* renderer = owner_.services().renderer;
+    auto* svs = renderer ? renderer->getSpellVisualSystem() : nullptr;
+    if (!svs || !svs->hasSpellMissile(visualId)) return false;
+    // A speed outside this is not a missile speed: Fireball flies at 24, the
+    // fastest bolts at about 60. Anything else is a field read from the wrong
+    // column, and a missile crawling for seconds is worse than none.
+    const float speed = resolveSpellMissileSpeed(spellId);
+    if (!std::isfinite(speed) || speed < 1.0f || speed > 200.0f) return false;
+
+    glm::vec3 start, end;
+    if (!resolveUnitPosition(casterGuid, start) || !resolveUnitPosition(targetGuid, end))
+        return false;
+    // From the casting hand when the caster is drawn, else about chest high;
+    // into the target's chest.
+    start.z += 1.5f;
+    if (auto* characters = renderer->getCharacterRenderer()) {
+        glm::mat4 hand(1.0f);
+        const uint32_t casterInstance = owner_.resolveUnitRenderInstance(casterGuid);
+        if (casterInstance != 0 && characters->getAttachmentTransform(casterInstance, 1, hand))
+            start = glm::vec3(hand[3]);
+    }
+    end.z += 1.0f;
+    return svs->playSpellMissile(visualId, start, end, speed, impactAtEnd);
 }
 
 bool SpellHandler::resolveUnitPosition(uint64_t guid, glm::vec3& outPos) {
@@ -676,14 +709,6 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     LOG_DEBUG("castSpell: spellId=", spellId, " target=0x", std::hex, targetGuid, std::dec);
     if (owner_.getState() != WorldState::IN_WORLD || !owner_.getSocket()) return;
 
-    // Auto Shot and the wand's Shoot keep going once started, and the action
-    // button flashes for as long as they do. The stop half comes from the
-    // server on SMSG_CANCEL_AUTO_REPEAT; this is the start.
-    constexpr uint32_t kAutoShot = 75, kShoot = 5019;
-    if ((spellId == kAutoShot || spellId == kShoot) && owner_.addonEventCallbackRef()) {
-        owner_.addonEventCallbackRef()("START_AUTOREPEAT_SPELL", {});
-    }
-
     // Food and water are server auras, but using any action interrupts them.
     // Cancel the aura and stand first, then allow the requested action to proceed.
     if (restorationActive_) cancelCast();
@@ -990,9 +1015,6 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
             // hostile. Match normal right-click combat by rejecting only
             // service NPCs and targets the server explicitly marks as
             // non-attackable/immune, rather than requiring hostile faction.
-            constexpr uint32_t UNIT_FLAG_NON_ATTACKABLE = 0x00000002;
-            constexpr uint32_t UNIT_FLAG_IMMUNE_TO_PC   = 0x00000100;
-            constexpr uint32_t UNIT_FLAG_NOT_SELECTABLE = 0x02000000;
             constexpr uint32_t kBlockedChargeFlags =
                 UNIT_FLAG_NON_ATTACKABLE |
                 UNIT_FLAG_IMMUNE_TO_PC |
@@ -1047,7 +1069,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
                     owner_.raiseUiError("Out of range.");
                     return;
                 }
-                owner_.faceCanonicalYaw(std::atan2(-dy, dx));
+                if (owner_.isAutoFaceTarget()) owner_.faceCanonicalYaw(std::atan2(-dy, dx));
                 facingHandled = true;
             }
         }
@@ -1056,7 +1078,12 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // Face the target before casting any targeted spell (server checks facing arc).
     // Only send if a spell-specific block above didn't already handle facing,
     // to avoid redundant SET_FACING packets that waste bandwidth.
-    if (!facingHandled && target != 0) {
+    //
+    // Only with the Combat page's debug setting on, here and for melee above:
+    // the original client never turns the player to cast, and a target behind
+    // them is refused as not in front. Charge still turns - its dash runs
+    // along that line.
+    if (!facingHandled && target != 0 && owner_.isAutoFaceTarget()) {
         auto entity = owner_.getEntityManager().getEntity(target);
         if (entity) {
             float dx = entity->getX() - owner_.movementInfoRef().x;
@@ -1093,13 +1120,31 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         return;
     }
 
+    // Never 0: the server's own casts, such as each Auto Shot after the
+    // first, are refused with castCount 0, and no press of ours may look like
+    // one of them.
+    if (++castCount_ == 0) ++castCount_;
     auto packet = owner_.getPacketParsers()
-        ? owner_.getPacketParsers()->buildCastSpell(spellId, target, ++castCount_)
-        : CastSpellPacket::build(spellId, target, ++castCount_);
+        ? owner_.getPacketParsers()->buildCastSpell(spellId, target, castCount_)
+        : CastSpellPacket::build(spellId, target, castCount_);
     LOG_DEBUG("CMSG_CAST_SPELL: spellId=", spellId, " target=0x", std::hex, target, std::dec,
               " castCount=", static_cast<int>(castCount_), " packetSize=", packet.getSize());
     owner_.getSocket()->send(packet);
     LOG_INFO("Casting spell: ", spellId, " on 0x", std::hex, target, std::dec);
+
+    // Auto Shot and the wand's Shoot keep going once started, and the action
+    // button flashes for as long as they do. Only once the cast is sent: a
+    // press refused above never reaches the server, so nothing would stop it.
+    // The stop half comes from the server on SMSG_CANCEL_AUTO_REPEAT. A press
+    // while it already runs starts nothing, and the server ignores it.
+    constexpr uint32_t kAutoShot = 75, kShoot = 5019;
+    if ((spellId == kAutoShot || spellId == kShoot) && autoRepeatSpellId_ != spellId) {
+        autoRepeatSpellId_ = spellId;
+        autoRepeatCastCount_ = castCount_;
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("START_AUTOREPEAT_SPELL", {});
+        }
+    }
 
     // Fire UNIT_SPELLCAST_SENT for cast bar addons
     if (owner_.addonEventCallbackRef()) {
@@ -1108,10 +1153,22 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         owner_.addonEventCallbackRef()("UNIT_SPELLCAST_SENT", {"player", targetName, std::to_string(spellId)});
     }
 
-    // Optimistically start GCD immediately on cast
-    if (!isGCDActive()) {
+    // Optimistically start GCD immediately on cast. Nothing else announces this
+    // GCD, so without these the buttons are not asked again and the sweep for
+    // a spell with no cooldown of its own never draws.
+    owner_.loadSpellNameCache();
+    const auto spellInfo = owner_.spellNameCacheRef().find(spellId);
+    const bool nextSwing = spellInfo != owner_.spellNameCacheRef().end() &&
+                           isOnNextSwingSpell(spellInfo->second.attr);
+    if (!nextSwing && !isGCDActive()) {
         gcdTotal_ = 1.5f;
         gcdStartedAt_ = std::chrono::steady_clock::now();
+        optimisticGcdSpellId_ = spellId;
+        optimisticGcdCastCount_ = castCount_;
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+        }
     }
 }
 
@@ -1668,6 +1725,20 @@ void SpellHandler::updateTimers(float dt) {
         owner_.addonEventCallbackRef()("SPELL_UPDATE_USABLE", {});
         owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
     }
+    // A cast starts, finishes, fails or is interrupted along a dozen paths, and
+    // the swing toggles along its own; the buttons only redraw their checked
+    // state on ACTIONBAR_UPDATE_STATE. Comparing here announces each change
+    // once, within the frame, whichever path made it.
+    const uint32_t castNow = getActiveActionSpellId();
+    const bool swingNow = owner_.isAutoAttacking();
+    if ((castNow != announcedCastSpellId_ || swingNow != announcedAutoAttack_) &&
+        owner_.addonEventCallbackRef()) {
+        const bool castChanged = castNow != announcedCastSpellId_;
+        announcedCastSpellId_ = castNow;
+        announcedAutoAttack_ = swingNow;
+        owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_STATE", {});
+        if (castChanged) owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
+    }
     // Tick down unit cast states
     for (auto it = unitCastStates_.begin(); it != unitCastStates_.end(); ) {
         if (it->second.casting && it->second.timeRemaining > 0.0f) {
@@ -1841,6 +1912,13 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     }
 }
 
+// Whether a refusal answers the press sent with castCount. WotLK and TBC
+// echo the press's castCount; Classic echoes nothing, so there a refusal is
+// taken to answer the latest press.
+bool SpellHandler::answersPress(const CastFailedData& data, uint8_t castCount) const {
+    return isClassicLikeExpansion() ? castCount_ == castCount : data.castCount == castCount;
+}
+
 void SpellHandler::handleCastFailed(network::Packet& packet) {
     CastFailedData data;
     bool ok = owner_.getPacketParsers() ? owner_.getPacketParsers()->parseCastFailed(packet, data)
@@ -1862,7 +1940,31 @@ void SpellHandler::handleCastFailed(network::Packet& packet) {
     casting_ = false;
     castIsChannel_ = false;
     currentCastSpellId_ = 0;
+    // Only the refusal of the press that queued it: pressing it again while it
+    // waits for the swing is refused, and the first is still queued.
+    if (data.spellId == nextSwingSpellId_ && answersPress(data, nextSwingCastCount_)) nextSwingSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
+    // Refused before it ever repeated, so the start announced on the press
+    // needs its stop: the server only cancels a repeat that was running. A
+    // refused later press leaves the running one alone.
+    if (data.spellId != 0 && data.spellId == autoRepeatSpellId_ &&
+        answersPress(data, autoRepeatCastCount_)) {
+        autoRepeatSpellId_ = 0;
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("STOP_AUTOREPEAT_SPELL", {});
+        }
+    }
+    // The server cancels the GCD of a cast it refuses, so the guess goes too.
+    // Not for a refused press during it: that press started no GCD.
+    if (data.spellId == optimisticGcdSpellId_ && isGCDActive() &&
+        answersPress(data, optimisticGcdCastCount_)) {
+        gcdTotal_ = 0.0f;
+        optimisticGcdSpellId_ = 0;
+        if (owner_.addonEventCallbackRef()) {
+            owner_.addonEventCallbackRef()("SPELL_UPDATE_COOLDOWN", {});
+            owner_.addonEventCallbackRef()("ACTIONBAR_UPDATE_COOLDOWN", {});
+        }
+    }
     owner_.lastInteractedGoGuidRef() = 0;
     owner_.pendingGameObjectInteractGuidRef() = 0;
     craftQueueSpellId_ = 0;
@@ -1972,6 +2074,18 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         }
     }
 
+    // Player's on-next-swing ability (Raptor Strike, Heroic Strike): a zero cast
+    // time, then nothing until SMSG_SPELL_GO when the swing lands. Its button
+    // stays lit for that wait.
+    if (data.casterUnit == owner_.getPlayerGuid() && data.castTime == 0) {
+        owner_.loadSpellNameCache();
+        auto it = owner_.spellNameCacheRef().find(data.spellId);
+        if (it != owner_.spellNameCacheRef().end() && isOnNextSwingSpell(it->second.attr)) {
+            nextSwingSpellId_ = data.spellId;
+            nextSwingCastCount_ = isClassicLikeExpansion() ? castCount_ : data.castCount;
+        }
+    }
+
     // Player's own cast
     if (data.casterUnit == owner_.getPlayerGuid() && data.castTime > 0 && !rangedWeaponAttack) {
         // Cancel pending GO retries
@@ -1985,7 +2099,6 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         currentCastSpellId_ = data.spellId;
         castTimeTotal_ = data.castTime / 1000.0f;
         castTimeRemaining_ = castTimeTotal_;
-        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("CURRENT_SPELL_CAST_CHANGED", {});
 
         // Play precast sound - skip profession/tradeskill spells
         if (!owner_.isProfessionSpell(data.spellId)) {
@@ -2047,6 +2160,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
     const bool rangedWeaponAttack = spellclass::isRangedWeaponAutoAttack(data.spellId);
 
     if (data.casterUnit == owner_.getPlayerGuid()) {
+        if (data.spellId == nextSwingSpellId_) nextSwingSpellId_ = 0;
         owner_.loadSpellNameCache();
         spellclass::RestChannelKind restKind = spellclass::RestChannelKind::NONE;
         auto spellNameIt = owner_.spellNameCacheRef().find(data.spellId);
@@ -2267,11 +2381,19 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
                     }
                 }
             }
-            // Impact visual at each hit target
+            // The missile, where the spell has one, and the impact at each hit
+            // target - played by the missile when it lands, or straight away
+            // for a spell that does not fly.
             for (const auto& tgt : data.hitTargets) {
-                if (tgt != 0) {
+                if (tgt == 0) continue;
+                if (!launchSpellMissile(data.spellId, visualId, data.casterUnit, tgt,
+                                        /*impactAtEnd=*/true)) {
                     triggerImpactVisual(data.spellId, tgt);
                 }
+            }
+            for (const auto& miss : data.missTargets) {
+                launchSpellMissile(data.spellId, visualId, data.casterUnit, miss.targetGuid,
+                                   /*impactAtEnd=*/false);
             }
         }
     }
@@ -3024,6 +3146,7 @@ void SpellHandler::resetCastState() {
     currentCastSpellId_ = 0;
     castTimeRemaining_ = 0.0f;
     castTimeTotal_ = 0.0f;  // Must match castTimeRemaining_ to keep getCastProgress() == 0
+    nextSwingSpellId_ = 0;
     craftQueueSpellId_ = 0;
     craftQueueRemaining_ = 0;
     queuedSpellId_ = 0;
@@ -3038,6 +3161,7 @@ void SpellHandler::resetCastState() {
 }
 
 void SpellHandler::resetAllState() {
+    autoRepeatSpellId_ = 0;
     knownSpells_.clear();
     spellCooldowns_.clear();
     spellCooldownTotals_.clear();
@@ -3268,6 +3392,7 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t rangeIdxField = spellL ? spellL->field("RangeIndex") : 0xFFFFFFFF;
     const uint32_t targetAuraStateField = spellL ? spellL->field("TargetAuraState") : 0xFFFFFFFF;
     const uint32_t spellVisualIdField = spellL ? spellL->field("SpellVisualID") : 0xFFFFFFFF;
+    const uint32_t speedField = spellL ? spellL->field("Speed") : 0xFFFFFFFF;
     // Read off the file's own shape. Only TBC's layout named these two, so on
     // WotLK, Classic and Turtle every cooldown this client worked out for itself
     // came back zero - which is most of them, since the server sends a cooldown
@@ -3343,18 +3468,14 @@ void SpellHandler::loadSpellNameCache() const {
             // SpellVisualID: references SpellVisual.dbc for cast/impact M2 effects
             if (spellVisualIdField != 0xFFFFFFFF && spellVisualIdField < dbc->getFieldCount())
                 entry.spellVisualId = dbc->getUInt32(i, spellVisualIdField);
+            if (speedField != 0xFFFFFFFF && speedField < fieldCount)
+                entry.missileSpeed = dbc->getFloat(i, speedField);
             if (recoveryField != 0xFFFFFFFF && recoveryField < fieldCount)
                 entry.recoveryMs = dbc->getUInt32(i, recoveryField);
             if (categoryRecoveryField != 0xFFFFFFFF && categoryRecoveryField < fieldCount)
                 entry.categoryRecoveryMs = dbc->getUInt32(i, categoryRecoveryField);
             if (hasEffectFields) {
-                for (int e = 0; e < 3; ++e) {
-                    const uint32_t effect = dbc->getUInt32(i, effectFields[e]);
-                    if (effect == 24 || effect == 114) {   // CREATE_ITEM, CREATE_ITEM_2
-                        entry.createdItemId = dbc->getUInt32(i, itemTypeFields[e]);
-                        break;
-                    }
-                }
+                entry.createdItemId = pipeline::spellCreatedItem(*dbc, i, effectFields, itemTypeFields);
             }
             if (hasReagentFields) {
                 for (int r = 0; r < 8; ++r) {
@@ -4018,8 +4139,8 @@ void SpellHandler::handleCastResult(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellFailedOther(network::Packet& packet) {
-    const bool tbcLike2 = isPreWotlk();
-    uint64_t failOtherGuid = tbcLike2
+    // A whole guid on classic, packed on TBC and WotLK.
+    uint64_t failOtherGuid = isClassicLikeExpansion()
         ? (packet.hasRemaining(8) ? packet.readUInt64() : 0)
         : packet.readPackedGuid();
     if (failOtherGuid != 0 && failOtherGuid != owner_.getPlayerGuid()) {
@@ -4109,9 +4230,10 @@ void SpellHandler::handleSpellModifier(network::Packet& packet, bool isFlat) {
 }
 
 void SpellHandler::handleSpellDelayed(network::Packet& packet) {
-    const bool spellDelayTbcLike = isPreWotlk();
-    if (!packet.hasRemaining(spellDelayTbcLike ? 8u : 1u) ) return;
-    uint64_t caster = spellDelayTbcLike
+    // A whole guid on classic, packed on TBC and WotLK.
+    const bool spellDelayFullGuid = isClassicLikeExpansion();
+    if (!packet.hasRemaining(spellDelayFullGuid ? 8u : 1u) ) return;
+    uint64_t caster = spellDelayFullGuid
         ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(4)) return;
     uint32_t delayMs = packet.readUInt32();
@@ -4142,27 +4264,13 @@ void SpellHandler::handleSpellDelayed(network::Packet& packet) {
 // ============================================================
 
 void SpellHandler::handleSpellLogMiss(network::Packet& packet) {
-    // All expansions: uint32 spellId first.
-    // WotLK/Classic: spellId(4) + packed_guid caster + uint8 unk + uint32 count
-    //                 + count × (packed_guid victim + uint8 missInfo)
-    // TBC:            spellId(4) + uint64 caster + uint8 unk + uint32 count
-    //                 + count × (uint64 victim + uint8 missInfo)
-    // All expansions append uint32 reflectSpellId + uint8 reflectResult when
-    // missInfo==REFLECT (11).
-    const bool spellMissUsesFullGuid = isActiveExpansion("tbc");
-    auto readSpellMissGuid = [&]() -> uint64_t {
-        if (spellMissUsesFullGuid)
-            return (packet.hasRemaining(8)) ? packet.readUInt64() : 0;
-        return packet.readPackedGuid();
-    };
-    // spellId prefix present in all expansions
-    if (!packet.hasRemaining(4)) return;
+    // spellId(4) + uint64 caster + uint8 unk + uint32 count
+    //   + count × (uint64 victim + uint8 missInfo), guids whole in every
+    // expansion (AzerothCore's WorldObject::SendSpellMiss, cmangos's
+    // Unit::SendSpellMiss).
+    if (!packet.hasRemaining(12)) { packet.skipAll(); return; }
     uint32_t spellId = packet.readUInt32();
-    if (!packet.hasRemaining(spellMissUsesFullGuid ? 8u : 1u)
-        || (!spellMissUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
-    }
-    uint64_t casterGuid = readSpellMissGuid();
+    uint64_t casterGuid = packet.readUInt64();
     if (!packet.hasRemaining(5)) return;
     /*uint8_t unk =*/ packet.readUInt8();
     const uint32_t rawCount = packet.readUInt32();
@@ -4174,79 +4282,51 @@ void SpellHandler::handleSpellLogMiss(network::Packet& packet) {
     struct SpellMissLogEntry {
         uint64_t victimGuid = 0;
         uint8_t missInfo = 0;
-        uint32_t reflectSpellId = 0;  // Only valid when missInfo==REFLECT
     };
     std::vector<SpellMissLogEntry> parsedMisses;
     parsedMisses.reserve(storedLimit);
 
-    bool truncated = false;
     for (uint32_t i = 0; i < rawCount; ++i) {
-        if (!packet.hasRemaining(spellMissUsesFullGuid ? 9u : 2u)
-            || (!spellMissUsesFullGuid && !packet.hasFullPackedGuid())) {
-            truncated = true;
+        if (!packet.hasRemaining(9)) {
+            packet.skipAll();
             return;
         }
-        const uint64_t victimGuid = readSpellMissGuid();
-        if (!packet.hasRemaining(1)) {
-            truncated = true;
-            return;
-        }
+        const uint64_t victimGuid = packet.readUInt64();
         const uint8_t missInfo = packet.readUInt8();
-        // REFLECT: extra uint32 reflectSpellId + uint8 reflectResult
-        uint32_t reflectSpellId = 0;
-        if (missInfo == SpellMissInfo::REFLECT) {
-            if (packet.hasRemaining(5)) {
-                reflectSpellId = packet.readUInt32();
-                /*uint8_t reflectResult =*/ packet.readUInt8();
-            } else {
-                truncated = true;
-                return;
-            }
-        }
         if (i < storedLimit) {
-            parsedMisses.push_back({.victimGuid = victimGuid, .missInfo = missInfo, .reflectSpellId = reflectSpellId});
+            parsedMisses.push_back({.victimGuid = victimGuid, .missInfo = missInfo});
         }
-    }
-
-    if (truncated) {
-        packet.skipAll();
-        return;
     }
 
     for (const auto& miss : parsedMisses) {
         const uint64_t victimGuid = miss.victimGuid;
-        const uint8_t missInfo = miss.missInfo;
-        CombatTextEntry::Type ct = combatTextTypeFromSpellMissInfo(missInfo);
-        // For REFLECT, use the reflected spell ID so combat text shows the spell name
-        uint32_t combatSpellId = (ct == CombatTextEntry::REFLECT && miss.reflectSpellId != 0)
-                                 ? miss.reflectSpellId : spellId;
+        const CombatTextEntry::Type ct = combatTextTypeFromSpellMissInfo(miss.missInfo);
         if (casterGuid == owner_.getPlayerGuid()) {
             // We cast a spell and it missed the target
-            owner_.addCombatText(ct, 0, combatSpellId, true, 0, casterGuid, victimGuid);
+            owner_.addCombatText(ct, 0, spellId, true, 0, casterGuid, victimGuid);
         } else if (victimGuid == owner_.getPlayerGuid()) {
             // Enemy spell missed us (we dodged/parried/blocked/resisted/etc.)
-            owner_.addCombatText(ct, 0, combatSpellId, false, 0, casterGuid, victimGuid);
+            owner_.addCombatText(ct, 0, spellId, false, 0, casterGuid, victimGuid);
         }
     }
 }
 
 void SpellHandler::handleSpellFailure(network::Packet& packet) {
     // WotLK: packed_guid + uint8 castCount + uint32 spellId + uint8 failReason
-    // TBC:   full uint64 + uint8 castCount + uint32 spellId + uint8 failReason
+    // TBC:   packed_guid + uint32 spellId + uint8 failReason  (NO castCount)
     // Classic: full uint64 + uint32 spellId + uint8 failReason  (NO castCount)
     const bool isClassic = isClassicLikeExpansion();
-    const bool isTbc     = isActiveExpansion("tbc");
-    uint64_t failGuid = (isClassic || isTbc)
+    const bool hasCastCount = !isPreWotlk();
+    uint64_t failGuid = isClassic
         ? (packet.hasRemaining(8) ? packet.readUInt64() : 0)
         : packet.readPackedGuid();
-    // Classic omits the castCount byte; TBC and WotLK include it
-    const size_t remainingFields = isClassic ? 5u : 6u;  // spellId(4)+reason(1) [+castCount(1)]
+    const size_t remainingFields = hasCastCount ? 6u : 5u;  // spellId(4)+reason(1) [+castCount(1)]
+    uint32_t failSpellId = 0;
     if (packet.hasRemaining(remainingFields)) {
-        if (!isClassic) /*uint8_t castCount =*/ packet.readUInt8();
-        uint32_t failSpellId = packet.readUInt32();
+        if (hasCastCount) /*uint8_t castCount =*/ packet.readUInt8();
+        failSpellId = packet.readUInt32();
         uint8_t rawFailReason = packet.readUInt8();
-        // Classic result enum starts at 0=AFFECTING_COMBAT; shift +1 for WotLK table
-        uint8_t failReason = isClassic ? static_cast<uint8_t>(rawFailReason + 1) : rawFailReason;
+        uint8_t failReason = owner_.getPacketParsers()->castResult(rawFailReason);
         if (failGuid == owner_.getPlayerGuid() && failReason != 0) {
             // Show interruption/failure reason in chat and error overlay for player
             int pt = -1;
@@ -4282,6 +4362,7 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
         // Player's own cast failed - clear gather-node loot target so the
         // next timed cast doesn't try to loot a stale interrupted gather node.
         casting_ = false; castIsChannel_ = false; currentCastSpellId_ = 0;
+        if (failSpellId == nextSwingSpellId_) nextSwingSpellId_ = 0;
         owner_.lastInteractedGoGuidRef() = 0;
         craftQueueSpellId_ = 0;
         craftQueueRemaining_ = 0;
@@ -4360,31 +4441,15 @@ void SpellHandler::handleItemCooldown(network::Packet& packet) {
 }
 
 void SpellHandler::handleDispelFailed(network::Packet& packet) {
-    // WotLK:       uint32 dispelSpellId + packed_guid caster + packed_guid victim
-    //              [+ count × uint32 failedSpellId]
-    // Classic:     uint32 dispelSpellId + packed_guid caster + packed_guid victim
-    //              [+ count × uint32 failedSpellId]
-    // TBC:         uint64 caster + uint64 victim + uint32 spellId
-    //              [+ count × uint32 failedSpellId]
-    const bool dispelUsesFullGuid = isActiveExpansion("tbc");
+    // uint64 caster + uint64 victim + uint32 dispelSpellId + count × uint32 failedSpellId
+    // Classic/Turtle have no dispelSpellId.
+    if (!packet.hasRemaining(16)) return;
+    const uint64_t dispelCasterGuid = packet.readUInt64();
+    /*uint64_t victim =*/ packet.readUInt64();
     uint32_t dispelSpellId = 0;
-    uint64_t dispelCasterGuid = 0;
-    if (dispelUsesFullGuid) {
-        if (!packet.hasRemaining(20)) return;
-        dispelCasterGuid = packet.readUInt64();
-        /*uint64_t victim =*/ packet.readUInt64();
-        dispelSpellId = packet.readUInt32();
-    } else {
+    if (!isClassicLikeExpansion()) {
         if (!packet.hasRemaining(4)) return;
         dispelSpellId = packet.readUInt32();
-        if (!packet.hasFullPackedGuid()) {
-            packet.skipAll(); return;
-        }
-        dispelCasterGuid = packet.readPackedGuid();
-        if (!packet.hasFullPackedGuid()) {
-            packet.skipAll(); return;
-        }
-        /*uint64_t victim =*/ packet.readPackedGuid();
     }
     // Only show failure to the player who attempted the dispel
     if (dispelCasterGuid == owner_.getPlayerGuid()) {
@@ -4392,8 +4457,10 @@ void SpellHandler::handleDispelFailed(network::Packet& packet) {
         char buf[128];
         if (!name.empty())
             std::snprintf(buf, sizeof(buf), "%s failed to dispel.", name.c_str());
-        else
+        else if (dispelSpellId != 0)
             std::snprintf(buf, sizeof(buf), "Dispel failed! (spell %u)", dispelSpellId);
+        else
+            std::snprintf(buf, sizeof(buf), "Dispel failed!");
         owner_.addSystemChatMessage(buf);
     }
 }
@@ -4530,25 +4597,16 @@ void SpellHandler::handlePeriodicAuraLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
-    // WotLK: packed_guid victim + packed_guid caster + uint32 spellId + uint32 powerType + int32 amount
-    // TBC: full uint64 victim + uint64 caster + uint32 spellId + uint32 powerType + int32 amount
-    // Classic/Vanilla: packed_guid (same as WotLK). PowerType is uint32 in every expansion.
-    const bool energizeTbc = isActiveExpansion("tbc");
-    auto readEnergizeGuid = [&]() -> uint64_t {
-        if (energizeTbc)
-            return (packet.hasRemaining(8)) ? packet.readUInt64() : 0;
-        return packet.readPackedGuid();
-    };
-    if (!packet.hasRemaining(energizeTbc ? 8u : 1u)
-        || (!energizeTbc && !packet.hasFullPackedGuid())) {
+    // packed_guid victim + packed_guid caster + uint32 spellId + uint32 powerType + int32 amount,
+    // in every expansion.
+    if (!packet.hasFullPackedGuid()) {
         packet.skipAll(); return;
     }
-    uint64_t victimGuid = readEnergizeGuid();
-    if (!packet.hasRemaining(energizeTbc ? 8u : 1u)
-        || (!energizeTbc && !packet.hasFullPackedGuid())) {
+    uint64_t victimGuid = packet.readPackedGuid();
+    if (!packet.hasFullPackedGuid()) {
         packet.skipAll(); return;
     }
-    uint64_t casterGuid = readEnergizeGuid();
+    uint64_t casterGuid = packet.readPackedGuid();
     // spellId(4) + powerType(4) + amount(4) = 12. PowerType is a uint32 on the wire in
     // every expansion (Vanilla/TBC/WotLK); reading it as a uint8 left 3 bytes in front of
     // amount, turning a small power gain (e.g. 10 = 0x0000000A after powerType 0x00000001)
@@ -4628,37 +4686,31 @@ void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
 }
 
 void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed casterGuid + packed victimGuid + uint32 dispelSpell + uint8 isStolen
-    // TBC:                  full uint64 casterGuid + full uint64 victimGuid + ...
-    // + uint32 count + count × (uint32 dispelled_spellId + uint32 unk)
-    const bool dispelUsesFullGuid = isActiveExpansion("tbc");
-    if (!packet.hasRemaining(dispelUsesFullGuid ? 8u : 1u)
-        || (!dispelUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
+    // Victim first, then caster, both packed, in every expansion. TBC and
+    // WotLK then add the dispel spell and an unused byte, and a byte after
+    // each dispelled spell id.
+    const bool classicLayout = isClassicLikeExpansion();
+    if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+    uint64_t victimGuid = packet.readPackedGuid();
+    if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+    uint64_t casterGuid = packet.readPackedGuid();
+    uint8_t isStolen = 0;
+    if (!classicLayout) {
+        if (!packet.hasRemaining(5)) { packet.skipAll(); return; }
+        /*uint32_t dispelSpell =*/ packet.readUInt32();
+        isStolen = packet.readUInt8();
     }
-    uint64_t casterGuid = dispelUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (!packet.hasRemaining(dispelUsesFullGuid ? 8u : 1u)
-        || (!dispelUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
-    }
-    uint64_t victimGuid = dispelUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (!packet.hasRemaining(9)) return;
-    /*uint32_t dispelSpell =*/ packet.readUInt32();
-    uint8_t isStolen = packet.readUInt8();
+    if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
     uint32_t count   = packet.readUInt32();
     // Preserve every dispelled aura in the combat log instead of collapsing
     // multi-aura packets down to the first entry only.
-    const size_t dispelEntrySize = dispelUsesFullGuid ? 8u : 5u;
+    const size_t dispelEntrySize = classicLayout ? 4u : 5u;
     std::vector<uint32_t> dispelledIds;
     dispelledIds.reserve(count);
     for (uint32_t i = 0; i < count && packet.hasRemaining(dispelEntrySize); ++i) {
         uint32_t dispelledId = packet.readUInt32();
-        if (dispelUsesFullGuid) {
-            /*uint32_t unk =*/ packet.readUInt32();
-        } else {
-            /*uint8_t isPositive =*/ packet.readUInt8();
+        if (!classicLayout) {
+            /*uint8_t cleansed =*/ packet.readUInt8();
         }
         if (dispelledId != 0) {
             dispelledIds.push_back(dispelledId);
@@ -4718,22 +4770,12 @@ void SpellHandler::handleSpellDispelLog(network::Packet& packet) {
 void SpellHandler::handleSpellStealLog(network::Packet& packet) {
     // Sent to the CASTER (Mage) when Spellsteal succeeds.
     // Wire format mirrors SPELLDISPELLOG:
-    // WotLK/Classic/Turtle: packed victim + packed caster + uint32 spellId + uint8 isStolen + uint32 count
-    //                        + count × (uint32 stolenSpellId + uint8 isPositive)
-    // TBC:                   full uint64 victim + full uint64 caster + same tail
-    const bool stealUsesFullGuid = isActiveExpansion("tbc");
-    if (!packet.hasRemaining(stealUsesFullGuid ? 8u : 1u)
-        || (!stealUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
-    }
-    uint64_t stealVictim = stealUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (!packet.hasRemaining(stealUsesFullGuid ? 8u : 1u)
-        || (!stealUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
-    }
-    uint64_t stealCaster = stealUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
+    // packed victim + packed caster + uint32 spellId + uint8 unused + uint32 count
+    //   + count × (uint32 stolenSpellId + uint8 transferred), in TBC and WotLK alike
+    if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+    uint64_t stealVictim = packet.readPackedGuid();
+    if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+    uint64_t stealCaster = packet.readPackedGuid();
     if (!packet.hasRemaining(9)) {
         packet.skipAll(); return;
     }
@@ -4741,16 +4783,11 @@ void SpellHandler::handleSpellStealLog(network::Packet& packet) {
     /*uint8_t  isStolen    =*/ packet.readUInt8();
     uint32_t stealCount   = packet.readUInt32();
     // Preserve every stolen aura in the combat log instead of only the first.
-    const size_t stealEntrySize = stealUsesFullGuid ? 8u : 5u;
     std::vector<uint32_t> stolenIds;
     stolenIds.reserve(stealCount);
-    for (uint32_t i = 0; i < stealCount && packet.hasRemaining(stealEntrySize); ++i) {
+    for (uint32_t i = 0; i < stealCount && packet.hasRemaining(5); ++i) {
         uint32_t stolenId = packet.readUInt32();
-        if (stealUsesFullGuid) {
-            /*uint32_t unk =*/ packet.readUInt32();
-        } else {
-            /*uint8_t isPos  =*/ packet.readUInt8();
-        }
+        /*uint8_t transferred =*/ packet.readUInt8();
         if (stolenId != 0) {
             stolenIds.push_back(stolenId);
         }
@@ -4818,25 +4855,14 @@ void SpellHandler::handleSpellChanceProcLog(network::Packet& packet) {
 
 void SpellHandler::handleSpellInstaKillLog(network::Packet& packet) {
     // Sent when a unit is killed by a spell with SPELL_ATTR_EX2_INSTAKILL (e.g. Execute, Obliterate, etc.)
-    // WotLK/Classic/Turtle: packed_guid caster + packed_guid victim + uint32 spellId
-    // TBC:                  full uint64 caster + full uint64 victim + uint32 spellId
-    const bool ikUsesFullGuid = isActiveExpansion("tbc");
-    auto ik_rem = [&]() { return packet.getRemainingSize(); };
-    if (ik_rem() < (ikUsesFullGuid ? 8u : 1u)
-        || (!ikUsesFullGuid && !packet.hasFullPackedGuid())) {
+    // TBC/WotLK: uint64 caster + uint64 victim + uint32 spellId
+    // Classic/Turtle: uint64 victim + uint32 spellId, with no caster
+    const bool hasCaster = !isClassicLikeExpansion();
+    if (!packet.hasRemaining(hasCaster ? 20u : 12u)) {
         packet.skipAll(); return;
     }
-    uint64_t ikCaster = ikUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (ik_rem() < (ikUsesFullGuid ? 8u : 1u)
-        || (!ikUsesFullGuid && !packet.hasFullPackedGuid())) {
-        packet.skipAll(); return;
-    }
-    uint64_t ikVictim = ikUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
-    if (ik_rem() < 4) {
-        packet.skipAll(); return;
-    }
+    uint64_t ikCaster = hasCaster ? packet.readUInt64() : 0;
+    uint64_t ikVictim = packet.readUInt64();
     uint32_t ikSpell = packet.readUInt32();
     // Show kill/death feedback for the local player
     if (ikCaster == owner_.getPlayerGuid()) {
@@ -4855,22 +4881,18 @@ void SpellHandler::handleSpellInstaKillLog(network::Packet& packet) {
 
 namespace {
 
-/// The target guid an effect-log entry opens with, in whichever form this
-/// server writes it.
-///
-/// SMSG_SPELLLOGEXECUTE names its target with a packed guid, and some cores
-/// write a full eight-byte one instead - which is what exeUsesFullGuid decides,
-/// once, for the whole packet. Each per-effect parser then had to read it that
-/// way, with the right guard for each form: eight bytes for a full guid, and
-/// for a packed one a byte plus the check that the mask's bytes are all there.
-///
-/// Written out in three of them. False means the packet cannot honour it, and
-/// every caller answers that the same way - abandon the rest of the packet,
-/// because a target read short leaves every field after it misaligned.
-bool readEffectLogTarget(network::Packet& packet, bool usesFullGuid, uint64_t& out) {
-    if (!packet.hasRemaining(usesFullGuid ? 8u : 1u)) return false;
-    if (!usesFullGuid && !packet.hasFullPackedGuid()) return false;
-    out = usesFullGuid ? packet.readUInt64() : packet.readPackedGuid();
+/// The target guid an effect-log entry opens with: packed on TBC and WotLK,
+/// whole on classic. False means the packet cannot honour it, and every
+/// caller answers that the same way - abandon the rest of the packet, because
+/// a target read short leaves every field after it misaligned.
+bool readEffectLogTarget(network::Packet& packet, uint64_t& out) {
+    if (isClassicLikeExpansion()) {
+        if (!packet.hasRemaining(8)) return false;
+        out = packet.readUInt64();
+        return true;
+    }
+    if (!packet.hasFullPackedGuid()) return false;
+    out = packet.readPackedGuid();
     return true;
 }
 
@@ -4878,12 +4900,12 @@ bool readEffectLogTarget(network::Packet& packet, bool usesFullGuid, uint64_t& o
 
 void SpellHandler::parseEffectPowerDrain(network::Packet& packet, uint32_t effectLogCount,
                                           uint64_t caster, uint32_t spellId,
-                                          bool isPlayerCaster, bool usesFullGuid) {
+                                          bool isPlayerCaster) {
     // SPELL_EFFECT_POWER_DRAIN: packed_guid target + uint32 amount + uint32 powerType + float multiplier
     const uint64_t playerGuid = owner_.getPlayerGuid();
     for (uint32_t li = 0; li < effectLogCount; ++li) {
         uint64_t drainTarget = 0;
-        if (!readEffectLogTarget(packet, usesFullGuid, drainTarget)) { packet.skipAll(); break; }
+        if (!readEffectLogTarget(packet, drainTarget)) { packet.skipAll(); break; }
         if (!packet.hasRemaining(12)) { packet.skipAll(); break; }
         uint32_t drainAmount = packet.readUInt32();
         uint32_t drainPower  = packet.readUInt32(); // 0=mana,1=rage,3=energy,6=runic
@@ -4916,12 +4938,12 @@ void SpellHandler::parseEffectPowerDrain(network::Packet& packet, uint32_t effec
 
 void SpellHandler::parseEffectHealthLeech(network::Packet& packet, uint32_t effectLogCount,
                                            uint64_t caster, uint32_t spellId,
-                                           bool isPlayerCaster, bool usesFullGuid) {
+                                           bool isPlayerCaster) {
     // SPELL_EFFECT_HEALTH_LEECH: packed_guid target + uint32 amount + float multiplier
     const uint64_t playerGuid = owner_.getPlayerGuid();
     for (uint32_t li = 0; li < effectLogCount; ++li) {
         uint64_t leechTarget = 0;
-        if (!readEffectLogTarget(packet, usesFullGuid, leechTarget)) { packet.skipAll(); break; }
+        if (!readEffectLogTarget(packet, leechTarget)) { packet.skipAll(); break; }
         if (!packet.hasRemaining(8)) { packet.skipAll(); break; }
         uint32_t leechAmount = packet.readUInt32();
         float    leechMult   = packet.readFloat();
@@ -4974,12 +4996,12 @@ void SpellHandler::parseEffectCreateItem(network::Packet& packet, uint32_t effec
 
 void SpellHandler::parseEffectInterruptCast(network::Packet& packet, uint32_t effectLogCount,
                                              uint64_t caster, uint32_t spellId,
-                                             bool isPlayerCaster, bool usesFullGuid) {
+                                             bool isPlayerCaster) {
     // SPELL_EFFECT_INTERRUPT_CAST: packed_guid target + uint32 interrupted_spell_id
     const uint64_t playerGuid = owner_.getPlayerGuid();
     for (uint32_t li = 0; li < effectLogCount; ++li) {
         uint64_t icTarget = 0;
-        if (!readEffectLogTarget(packet, usesFullGuid, icTarget)) { packet.skipAll(); break; }
+        if (!readEffectLogTarget(packet, icTarget)) { packet.skipAll(); break; }
         if (!packet.hasRemaining(4)) { packet.skipAll(); break; }
         uint32_t icSpellId = packet.readUInt32();
         // Clear the interrupted unit's cast bar immediately
@@ -5014,24 +5036,18 @@ void SpellHandler::parseEffectFeedPet(network::Packet& packet, uint32_t effectLo
 }
 
 void SpellHandler::handleSpellLogExecute(network::Packet& packet) {
-    // WotLK/Classic/Turtle: packed_guid caster + uint32 spellId + uint32 effectCount
-    // TBC:                  uint64 caster + uint32 spellId + uint32 effectCount
-    // Per-effect: uint8 effectType + uint32 effectLogCount + effect-specific data
-    // Effect 10 = POWER_DRAIN:   packed_guid target + uint32 amount + uint32 powerType + float multiplier
-    // Effect 11 = HEALTH_LEECH:  packed_guid target + uint32 amount + float multiplier
-    // Effect 24 = CREATE_ITEM:   uint32 itemEntry
-    // Effect 26 = INTERRUPT_CAST: packed_guid target + uint32 interrupted_spell_id
-    // Effect 49 = FEED_PET:      uint32 itemEntry
-    // Effect 114= CREATE_ITEM2:  uint32 itemEntry (same layout as CREATE_ITEM)
-    const bool exeUsesFullGuid = isActiveExpansion("tbc");
-    if (!packet.hasRemaining(exeUsesFullGuid ? 8u : 1u) ) {
+    // packed_guid caster + uint32 spellId + uint32 effectCount, in every expansion
+    // Per-effect: uint32 effectType + uint32 effectLogCount + effect-specific data
+    // A target is a packed guid on TBC and WotLK and a whole one on classic.
+    // POWER_DRAIN, POWER_BURN: target + uint32 amount + uint32 powerType + float multiplier
+    // CREATE_ITEM, CREATE_ITEM2, FEED_PET: uint32 itemEntry
+    // INTERRUPT_CAST:          target + uint32 interrupted_spell_id
+    // HEALTH_LEECH is read as target + uint32 amount + float multiplier, though
+    // no server checked logs it.
+    if (!packet.hasFullPackedGuid()) {
         packet.skipAll(); return;
     }
-    if (!exeUsesFullGuid && !packet.hasFullPackedGuid()) {
-        packet.skipAll(); return;
-    }
-    uint64_t exeCaster = exeUsesFullGuid
-        ? packet.readUInt64() : packet.readPackedGuid();
+    uint64_t exeCaster = packet.readPackedGuid();
     if (!packet.hasRemaining(8)) {
         packet.skipAll(); return;
     }
@@ -5046,18 +5062,18 @@ void SpellHandler::handleSpellLogExecute(network::Packet& packet) {
         uint32_t effectLogCount = packet.readUInt32();
         effectLogCount = std::min(effectLogCount, 64u); // sanity
 
-        if (effectType == SpellEffect::POWER_DRAIN) {
+        if (effectType == SpellEffect::POWER_DRAIN || effectType == SpellEffect::POWER_BURN) {
             parseEffectPowerDrain(packet, effectLogCount, exeCaster, exeSpellId,
-                                  isPlayerCaster, exeUsesFullGuid);
+                                  isPlayerCaster);
         } else if (effectType == SpellEffect::HEALTH_LEECH) {
             parseEffectHealthLeech(packet, effectLogCount, exeCaster, exeSpellId,
-                                   isPlayerCaster, exeUsesFullGuid);
+                                   isPlayerCaster);
         } else if (effectType == SpellEffect::CREATE_ITEM || effectType == SpellEffect::CREATE_ITEM2) {
             parseEffectCreateItem(packet, effectLogCount, exeCaster, exeSpellId,
                                   isPlayerCaster);
         } else if (effectType == SpellEffect::INTERRUPT_CAST) {
             parseEffectInterruptCast(packet, effectLogCount, exeCaster, exeSpellId,
-                                     isPlayerCaster, exeUsesFullGuid);
+                                     isPlayerCaster);
         } else if (effectType == SpellEffect::FEED_PET) {
             parseEffectFeedPet(packet, effectLogCount, exeCaster, exeSpellId,
                                isPlayerCaster);

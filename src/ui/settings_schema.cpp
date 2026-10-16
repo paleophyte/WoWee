@@ -86,6 +86,13 @@ constexpr SettingDesc kSchema[] = {
      "How much distant fog is tinted toward the sky behind it, so the\n"
      "horizon does not stand out pale against a dark sky. 0 uses the\n"
      "zone's fog colour alone; 1 matches the sky.", "", 0.7f},
+    // The light shafts' own thickness. Their switch and its quality are on
+    // the Detail page; see there.
+    {"mistdensity", "Mist density", SettingKind::Float, 0, 3, 0.1f, "Graphics", "",
+     "How thick the lit mist is, when light shafts are on (Detail).\n"
+     "1 is a light haze; above it the air closes in. Rain, snow, dawn\n"
+     "and foggy zones thicken it further.",
+     "", 1.0f, "lightshafts!=0"},
 
     // Labelled for what it does, with the term of art in brackets: nobody
     // looks for "multisampling" when their edges are jagged.
@@ -116,6 +123,12 @@ constexpr SettingDesc kSchema[] = {
      "Draw the night sky's stars as crisp points. Off, they come from\n"
      "the sky's own small star texture, which goes soft at high\n"
      "resolutions.", "", 1},
+    // A check box and not a strength slider: the page has room for the one
+    // and not the other.
+    {"sunshafts", "Sun shafts", SettingKind::Bool, 0, 0, 0, "Graphics", "",
+     "Rays of light streaming from the sun through gaps in trees and\n"
+     "between buildings when you look toward it. Cheap; drawn over\n"
+     "the finished picture.", "", 1},
 
     // ------------------------------------------------------------------ Detail
     //
@@ -162,6 +175,36 @@ constexpr SettingDesc kSchema[] = {
      "ahead, a floor underfoot. Costs little on any modern card, and\n"
      "applies to textures loaded from here on.",
      "Off|2x|4x|8x|16x", 4},
+    // Its own switch rather than riding on fog thickness: the distance fog
+    // is the zone's haze and costs nothing, this is a compute pass every
+    // frame, and a player may want either without the other. Here, with the
+    // other settings that trade frames for detail, while how thick the mist
+    // is sits on the Graphics page beside the fog: both rows there put sharp
+    // stars past the bottom of its second column, and both here put the
+    // density slider thirty pixels past the bottom of this page's.
+    // Named for what it looks like, key included: "volumetric" in either put
+    // it first in a search for "volume", ahead of the master volume.
+    {"lightshafts", "Light shafts and mist", SettingKind::Enum, 0, 3, 1,
+     "Detail", "Atmosphere",
+     "Mist that light moves through: the sun casts shafts past trees\n"
+     "and buildings, and torches and lava glow in it. Higher settings\n"
+     "are sharper and cost more; Low suits weaker hardware.",
+     "Off|Low|Medium|High", 2},
+
+    // Off by default: the compute tracer is what most machines get, and it
+    // costs real frames. One row rather than three switches, because each
+    // term builds on the previous one's rays. A page of its own because
+    // Graphics and Detail are both full to the bottom of their columns.
+    {"raytracedlighting", "Ray traced lighting (highly experimental)", SettingKind::Enum, 0, 3, 1,
+     "Ray Tracing", "Highly experimental",
+     "HIGHLY EXPERIMENTAL: expect visual artefacts and a large\n"
+     "frame rate cost, especially without ray tracing hardware.\n"
+     "Traces rays against the world for the sun's shadows, the\n"
+     "darkening in corners and crevices, and light bounced off the\n"
+     "ground and walls. Uses the graphics card's ray tracing where it\n"
+     "has it and a slower compute path where it does not.\n"
+     "Characters still cast shadows from the shadow map.",
+     "Off|Sun shadows|Shadows and occlusion|Shadows, occlusion and bounce light", 0},
 
     // --------------------------------------------------------------- Upscaling
     {"upscaling", "Upscaling", SettingKind::Enum, 0, 2, 1, "Upscaling", "Mode",
@@ -235,6 +278,11 @@ constexpr SettingDesc kSchema[] = {
      "for frames nobody sees. Vertical sync already caps at the display's\n"
      "rate; use this to cap below it.",
      "Unlimited|30|60|90|120|144|240", 0},
+    {"mapwindow", "Map in its own window", SettingKind::Bool, 0, 0, 0, "Display", "",
+     "The world map in a window of its own, to put on a second monitor.\n"
+     "It follows your zone and can be browsed; left alone, it comes back\n"
+     "to where you are. Drag it where you want it - it opens there again.",
+     "", 0},
     {"brightness", "Brightness", SettingKind::Int, 0, 100, 5, "Display", "",
      "How bright the picture is. 50 leaves it as the zone was lit; below\n"
      "darkens and above lifts the shadows. The game's own panel called\n"
@@ -286,6 +334,20 @@ constexpr SettingDesc kSchema[] = {
      "both wrote this one value.", "", 0.2f},
     {"invertmouse", "Invert mouse look", SettingKind::Bool, 0, 0, 0, "Camera", "",
      "Push the mouse forward to look up, as in a flight sim.", "", 0},
+    {"gamepad", "Use a controller", SettingKind::Bool, 0, 0, 0, "Camera", "Controller",
+     "Let a connected controller move, look, target and cast. The left stick\n"
+     "walks, the right stick looks, the triggers zoom, and the face buttons\n"
+     "and D-pad are the first six action slots - hold the left bumper for the\n"
+     "other six.", "", 1},
+    {"gamepadlookspeed", "Controller look speed", SettingKind::Float, 60, 540, 10, "Camera", "",
+     "How fast the right stick turns the view, in degrees a second at full\n"
+     "deflection. Separate from the mouse: the two are different instruments\n"
+     "and slowing one says nothing about the other.", "", 180, "gamepad"},
+    {"gamepadinvertlook", "Invert controller look", SettingKind::Bool, 0, 0, 0, "Camera", "",
+     "Push the right stick forward to look down.", "", 0, "gamepad"},
+    {"gamepaddeadzone", "Controller deadzone", SettingKind::Float, 0, 0.5f, 0.01f, "Camera", "",
+     "How much of each stick counts as resting. Raise it for a worn stick\n"
+     "that drifts when nobody is touching it; lower it for finer control.", "", 0.18f, "gamepad"},
 
     // --------------------------------------------------------------- Interface
     //
@@ -308,11 +370,18 @@ constexpr SettingDesc kSchema[] = {
     {"windowuiscale", "Window scale", SettingKind::Float, 0.75f, 3.0f, 0.05f, "Interface", "",
      "Size of the text and controls in this client's own windows. The\n"
      "game interface's own scale is in the game's Video panel.", "", 1},
+    {"scrollspeed", "Scroll speed", SettingKind::Float, 0.25f, 4.0f, 0.25f, "Interface", "",
+     "How far the mouse wheel or a trackpad scrolls text in chat, the\n"
+     "quest log and other windows. 1 is a line per click of a wheel.", "", 1.0f},
     {"latencymeter", "Latency meter", SettingKind::Bool, 0, 0, 0, "Interface", "",
      "Show your ping - the round trip to the server - beside the minimap.", "", 1},
     {"micromenu", "Micro menu buttons", SettingKind::Bool, 0, 0, 0, "Interface", "",
      "The row of shortcut buttons to the character sheet, spellbook,\n"
      "talents and the rest.", "", 0},
+    {"checkforupdates", "Check for new versions", SettingKind::Bool, 0, 0, 0, "Interface", "",
+     "Ask GitHub once at startup whether a newer WoWee has been\n"
+     "released, and say so on the login screen. Nothing is downloaded\n"
+     "or installed, and nothing about you is sent.", "", 1},
 
     {"bagscale", "Bag scale", SettingKind::Float, 0.75f, 1.5f, 0.05f, "Interface", "Bags",
      "Size of the bag windows.", "", 1},
@@ -448,6 +517,11 @@ constexpr SettingDesc kSchema[] = {
      "Combat", "",
      "A second press of Attack within half a second is ignored, so a\n"
      "double tap cannot switch auto-attack straight back off.", "", 0},
+    {"autofacetarget", "Turn to face the target (debug)", SettingKind::Bool, 0, 0, 0,
+     "Combat", "",
+     "Turn your character toward the target when you start attacking it\n"
+     "or cast at it. Off, as in the original client, a target behind you\n"
+     "has to be faced first. A debugging aid.", "", 0},
 
     {"autoselfcast", "Cast helpful spells on yourself", SettingKind::Bool, 0, 0, 0, "Combat", "Casting",
      "A helpful spell cast with no friendly target goes on you, rather\n"
@@ -504,35 +578,44 @@ constexpr SettingDesc kSchema[] = {
     {"enemytotemnames", "Enemy totems", SettingKind::Bool, 0, 0, 0, "Names", "",
      "Names over their totems.", "", 1, "", "cvar:UnitNameEnemyTotemName"},
 
-    {"friendlyplates", "Friendly nameplates", SettingKind::Bool, 0, 0, 0, "Names", "Nameplates",
+    // Nameplates are a panel of their own, not a section of Names.
+    //
+    // Twenty-five controls do not fit on one options panel. The container the
+    // game puts them in is 413 by 428, which is two columns of about 180 and
+    // a little over 360 of height each, and the last four of these were laid
+    // out past the bottom of the second one - registered, refreshed,
+    // answering correctly, and not on screen. The two halves are already
+    // separate ideas: names drawn over heads, and the plates with the health
+    // bars on them.
+    {"friendlyplates", "Friendly nameplates", SettingKind::Bool, 0, 0, 0, "Nameplates", "Nameplates",
      "Name and health bars over friendly players and creatures, not\n"
      "only hostile ones. Shift+V toggles this too.", "", 0},
-    {"friendlypetplates", "Friendly pets", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"friendlypetplates", "Friendly pets", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over friendly pets.", "", 1, "friendlyplates", "cvar:nameplateShowFriendlyPets"},
-    {"friendlyguardianplates", "Friendly guardians", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"friendlyguardianplates", "Friendly guardians", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over friendly guardians.", "", 1, "friendlyplates",
      "cvar:nameplateShowFriendlyGuardians"},
-    {"friendlytotemplates", "Friendly totems", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"friendlytotemplates", "Friendly totems", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over friendly totems.", "", 0, "friendlyplates", "cvar:nameplateShowFriendlyTotems"},
-    {"enemyplates", "Enemy nameplates", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"enemyplates", "Enemy nameplates", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Name and health bars over hostile players and creatures. The V\n"
      "key toggles this too.", "", 1},
-    {"enemypetplates", "Enemy pets", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"enemypetplates", "Enemy pets", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over enemy pets.", "", 1, "enemyplates", "cvar:nameplateShowEnemyPets"},
-    {"enemyguardianplates", "Enemy guardians", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"enemyguardianplates", "Enemy guardians", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over enemy guardians.", "", 1, "enemyplates", "cvar:nameplateShowEnemyGuardians"},
-    {"enemytotemplates", "Enemy totems", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"enemytotemplates", "Enemy totems", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over enemy totems.", "", 1, "enemyplates", "cvar:nameplateShowEnemyTotems"},
-    {"nameplateoverlap", "Let nameplates overlap", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"nameplateoverlap", "Let nameplates overlap", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Plates over units standing in a line may cover each other. Off,\n"
      "each is pushed clear of the others.", "", 0, "", "cvar:nameplateAllowOverlap"},
     {"nameplateclasscolours", "Class colours for enemy players", SettingKind::Bool, 0, 0, 0,
-     "Names", "", "Colour an enemy player's health bar by their class.", "", 0,
+     "Nameplates", "", "Colour an enemy player's health bar by their class.", "", 0,
      "", "cvar:ShowClassColorInNameplate"},
-    {"nameplatecastbar", "Cast bar on the target's plate", SettingKind::Bool, 0, 0, 0, "Names", "",
+    {"nameplatecastbar", "Cast bar on the target's plate", SettingKind::Bool, 0, 0, 0, "Nameplates", "",
      "Show what your target is casting under its nameplate.", "", 1,
      "", "cvar:showVKeyCastbar"},
-    {"nameplatescale", "Nameplate scale", SettingKind::Float, 0.5f, 2.0f, 0.05f, "Names", "",
+    {"nameplatescale", "Nameplate scale", SettingKind::Float, 0.5f, 2.0f, 0.05f, "Nameplates", "",
      "Size of the name and health bars over creatures' heads.", "", 1},
 
     // ------------------------------------------------------------- Combat Text

@@ -872,15 +872,15 @@ std::string EntitySpawner::getModelPathForDisplayId(uint32_t displayId) const {
         return "";
     }
 
-    // Which model a humanoid display actually resolved to, once, at warning
-    // level so it shows in a default run. An asset overlay can re-point a
-    // display id at a different model, and there is no other way from outside
-    // to tell "the re-point never reached the client" from "it reached it and
-    // the model looks the same".
+    // Which model a humanoid display actually resolved to, once. An asset
+    // overlay can re-point a display id at a different model, and there is no
+    // other way from outside to tell "the re-point never reached the client"
+    // from "it reached it and the model looks the same". At debug, with the
+    // other per-creature lines: WOWEE_LOG_LEVEL=debug when that is the question.
     if (itData->second.extraDisplayId != 0 &&
         humanoidDisplayCanaryCount_ < 5) {
         ++humanoidDisplayCanaryCount_;
-        LOG_WARNING("Humanoid display ", displayId, " -> model ",
+        LOG_DEBUG("Humanoid display ", displayId, " -> model ",
                     itData->second.modelId, " -> ", itPath->second);
     }
 
@@ -1253,13 +1253,6 @@ if (deadCreatureGuids_.count(guid)) {
             npcEmoteAnim = activeIt->second;
         }
     }
-    if (npcEmoteAnim != 0) {
-        const uint32_t stateAnim =
-            rendering::EmoteRegistry::instance().getStateVariant(npcEmoteAnim);
-        if (stateAnim != 0 && charRenderer->hasAnimation(instanceId, stateAnim)) {
-            npcEmoteAnim = stateAnim;
-        }
-    }
     if (npcEmoteAnim != 0 && charRenderer->hasAnimation(instanceId, npcEmoteAnim)) {
         creatureActiveEmotes_[guid] = npcEmoteAnim;
         charRenderer->playAnimation(instanceId, npcEmoteAnim, true);
@@ -1356,7 +1349,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         uint16_t selectedFacial100 = 100;
         uint16_t selectedFacial200 = 200;
         uint16_t selectedFacial300 = 300;
-        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0;
+        uint32_t equipChestGG = 0, equipLegsGG = 0, equipFeetGG = 0, equipGlovesGG = 0, equipCapeGG = 0;
         if (itDisplayData != displayDataMap_.end() &&
             itDisplayData->second.extraDisplayId != 0) {
             auto itExtra = humanoidExtraMap_.find(itDisplayData->second.extraDisplayId);
@@ -1438,6 +1431,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                     equipLegsGG = readGG(itExtra->second.equipDisplayId[5]);
                     equipFeetGG = readGG(itExtra->second.equipDisplayId[6]);
                     equipGlovesGG = readGG(itExtra->second.equipDisplayId[8]);
+                    equipCapeGG = readGG(itExtra->second.equipDisplayId[10]);
                 }
             }
         }
@@ -1581,7 +1575,7 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
         // use "no cape" back panel to cover the single-sided torso.
         if (hasGroup15) {
             if (hasRenderableCape) {
-                uint16_t capeSid = resolveGeoset(kGeosetWithCape, allGeosets);
+                uint16_t capeSid = resolveGeoset(cloakGeoset(equipCapeGG), allGeosets);
                 if (capeSid != 0) normalizedGeosets.insert(capeSid);
             } else if (allGeosets.count(kGeosetNoCape) > 0) {
                 // Only the real "no cape" panel, never a substitute. The
@@ -1699,7 +1693,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                                 extra.raceId, extra.sexId, 1, extra.faceId, extra.skinId, 0);
                             const std::string faceUpper = lookupCharSection(
                                 extra.raceId, extra.sexId, 1, extra.faceId, extra.skinId, 1);
-                            LOG_WARNING("NPC head detail: displayId=", displayId,
+                            LOG_DEBUG("NPC head detail: displayId=", displayId,
                                         " race=", static_cast<int>(extra.raceId),
                                         " sex=", static_cast<int>(extra.sexId),
                                         " skin=", static_cast<int>(extra.skinId),
@@ -2221,14 +2215,12 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                     }
                 }
             }
-            // At warning, because the log carries nothing below it, and
-            // this line is what every creature question needs first. Four
-            // separate reports this session - a bat's size, a goblin's
-            // portrait, an elemental's skin, an elemental's geometry - each
-            // began by working out which model a creature name draws, and
-            // the client already knew and was saying it where nobody looked.
-            // Sixty displays, once each.
-            LOG_WARNING("Creature display ", displayId, " (", (name.empty() ? "?" : name),
+            // What every creature question needs first - a bat's size, a
+            // goblin's portrait, an elemental's skin and an elemental's
+            // geometry each began by working out which model a creature name
+            // draws. At debug: sixty displays once each is most of a session's
+            // log, and WOWEE_LOG_LEVEL=debug brings it back for the question.
+            LOG_DEBUG("Creature display ", displayId, " (", (name.empty() ? "?" : name),
                         ", entry ", entry, ") draws ", path,
                         " at ", scale, " (server ", serverScale,
                         " x display ", dispScale,

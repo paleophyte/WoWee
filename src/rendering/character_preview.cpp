@@ -18,6 +18,7 @@
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "core/logger.hpp"
+#include <cstdlib>
 #include "core/application.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -33,6 +34,9 @@ namespace wowee {
 namespace rendering {
 
 namespace {
+
+/// WoW's own key bone numbering: 4 is the lower spine, 6 the head, 7 the jaw.
+constexpr int32_t kKeyBoneHead = 6;
 
 bool isFiniteVec3(const glm::vec3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -252,9 +256,27 @@ void CharacterPreview::createFBO() {
     VmaAllocator allocator = vkCtx_->getAllocator();
 
     // 1. Create off-screen render target with depth
+    // WOWEE_PREVIEW_MSAA=1|2|4|8 overrides the preview's own sample count. A
+    // diagnostic for the NVIDIA device loss at character select (#154), which
+    // needs scene MSAA on and a draw into this 4x pass: it separates "the
+    // preview's multisampling" from "the scene's".
+    static const VkSampleCountFlagBits previewSamples = [] {
+        const char* v = std::getenv("WOWEE_PREVIEW_MSAA");
+        if (!v || !*v) return VK_SAMPLE_COUNT_4_BIT;
+        switch (std::atoi(v)) {
+            case 1: return VK_SAMPLE_COUNT_1_BIT;
+            case 2: return VK_SAMPLE_COUNT_2_BIT;
+            case 8: return VK_SAMPLE_COUNT_8_BIT;
+            default: return VK_SAMPLE_COUNT_4_BIT;
+        }
+    }();
+    if (previewSamples != VK_SAMPLE_COUNT_4_BIT) {
+        LOG_WARNING("CharacterPreview: WOWEE_PREVIEW_MSAA - ", static_cast<int>(previewSamples),
+                    "x instead of 4x");
+    }
     renderTarget_ = std::make_unique<VkRenderTarget>();
     if (!renderTarget_->create(*vkCtx_, fboWidth_, fboHeight_, VK_FORMAT_R8G8B8A8_UNORM, true,
-                               VK_SAMPLE_COUNT_4_BIT)) {
+                               previewSamples)) {
         LOG_ERROR("CharacterPreview: failed to create render target");
         renderTarget_.reset();
         return;
@@ -355,13 +377,13 @@ void CharacterPreview::createFBO() {
         });
     }
 
-    // 3. Create descriptor pool for per-frame sets (2 UBO + 2 sampler)
+    // 3. Create descriptor pool for per-frame sets (2 UBO + 2 shadow + 2 fog volume)
     {
         VkDescriptorPoolSize sizes[2]{};
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES;
+        sizes[1].descriptorCount = MAX_FRAMES * 4;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
@@ -417,7 +439,20 @@ void CharacterPreview::createFBO() {
         shadowImg.imageView = dummyShadowView_;
         shadowImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        VkWriteDescriptorSet writes[2]{};
+        // Binding 2 is the fog volume, which a portrait has no air for: the
+        // renderer's neutral one, with the block's switch left at zero. Its
+        // sampler is immutable in the layout, like binding 1's.
+        VkDescriptorImageInfo fogImg{};
+        fogImg.imageView = appRenderer->getNeutralFogVolumeView();
+        fogImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        // Bindings 3 and 4 are the world's ray traced lighting; the neutral
+        // image, with the block's switch left at zero.
+        VkDescriptorImageInfo rtImg{};
+        rtImg.imageView = appRenderer->getNeutralRtLightingView();
+        rtImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[5]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = previewPerFrameSet_[i];
         writes[0].dstBinding = 0;
@@ -430,8 +465,22 @@ void CharacterPreview::createFBO() {
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[1].pImageInfo = &shadowImg;
+        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet = previewPerFrameSet_[i];
+        writes[2].dstBinding = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[2].pImageInfo = &fogImg;
+        for (uint32_t b = 3; b <= 4; ++b) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = previewPerFrameSet_[i];
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[b].pImageInfo = &rtImg;
+        }
 
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture
@@ -529,6 +578,13 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         frameCameraForModelBounds(*camera_, frameMin, frameMax);
         modelBoundMinZ_ = frameMin.z;
         modelBoundMaxZ_ = frameMax.z;
+        modelHeadZ_ = 0.0f;
+        if (charRenderer_ && instanceId_ > 0) {
+            float headZ = 0.0f;
+            if (charRenderer_->getInstanceKeyBonePivotZ(instanceId_, kKeyBoneHead, headZ)) {
+                modelHeadZ_ = headZ;
+            }
+        }
         fullBodyDistance_ = camera_->getPosition().y;
         // A player model is framed by its bounds; no creature portrait camera
         // is in play, and a stale one from the shared preview must not be.
@@ -881,8 +937,9 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     if (geosetSleeves != 0) geosets.insert(geosetSleeves);
     if (geosetPants != 0) geosets.insert(geosetPants);
     if (geosetBelt != 0) geosets.insert(geosetBelt);
+    uint32_t capeGG = getGeosetGroup(findDisplayId({16}), geosetGroup1Field);
     uint16_t geosetCape = pickGeoset(
-        hasInvType({16}) ? core::kGeosetWithCape : core::kGeosetNoCape,
+        hasInvType({16}) ? core::cloakGeoset(capeGG) : core::kGeosetNoCape,
         core::kGeosetNoCape);
     if (geosetCape != 0) geosets.insert(geosetCape); // Cloak mesh toggle (visual may still be limited)
     if (hasInvType({19})) {
@@ -1062,6 +1119,13 @@ bool CharacterPreview::loadCreature(
         frameCameraForModelBounds(*camera_, frameMin, frameMax);
         modelBoundMinZ_ = frameMin.z;
         modelBoundMaxZ_ = frameMax.z;
+        modelHeadZ_ = 0.0f;
+        if (charRenderer_ && instanceId_ > 0) {
+            float headZ = 0.0f;
+            if (charRenderer_->getInstanceKeyBonePivotZ(instanceId_, kKeyBoneHead, headZ)) {
+                modelHeadZ_ = headZ;
+            }
+        }
         fullBodyDistance_ = camera_->getPosition().y;
     }
 
@@ -1475,7 +1539,23 @@ void CharacterPreview::applyPreviewView() {
 
     const float modelHeight = std::max(modelBoundMaxZ_ - modelBoundMinZ_, 0.1f);
     const float bodyFocusZ = (modelBoundMinZ_ + modelBoundMaxZ_) * 0.5f;
-    const float faceFocusZ = modelBoundMinZ_ + modelHeight * 0.82f;
+
+    // Aim at the bone the head is on, not at a share of the bounding box.
+    //
+    // Measured across the player models, the head bone sits at 82% of height
+    // on a tauren and a dwarf - which is why 82% was chosen and why it looked
+    // right - but at 87% on a human, 89% on a night elf and 60% on a gnome. A
+    // gnome's hair and oversized head are 40% of everything above its feet, so
+    // the fraction aimed 26cm over the top of its skull and the face fell out
+    // of the bottom of the frame. The skeleton has no such opinion: the head
+    // bone is where the head is, on every race, by construction.
+    //
+    // This is what the creature path already does by another route, reading
+    // the artist's own portrait camera - whose target for a gnoll is within a
+    // few centimetres of that model's head bone.
+    const float faceFocusZ = modelHeadZ_ > 0.001f
+                                 ? modelHeadZ_
+                                 : modelBoundMinZ_ + modelHeight * 0.82f;
     const float focusZ = bodyFocusZ + (faceFocusZ - bodyFocusZ) * zoomLevel_;
 
     // Stay outside the near plane while getting close enough to inspect facial

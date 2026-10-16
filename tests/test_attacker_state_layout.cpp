@@ -153,3 +153,127 @@ TEST_CASE("a truncated packet is refused and the read position restored",
     // Rewound, so the caller can try another reader against the same bytes.
     CHECK(packet.getReadPos() == before);
 }
+
+// WotLK, laid out as AzerothCore's Unit::SendAttackStateUpdate writes it:
+// sub-damages of school, float and integer damage only; then the absorbs and
+// the resists as runs of their own when the hit flags say so; then the victim
+// state as one byte, an unknown, a melee spell id, and blocked on a block.
+namespace {
+
+constexpr uint32_t kAffectsVictim = 0x2, kPartialAbsorb = 0x40, kPartialResist = 0x100;
+constexpr uint32_t kFullAbsorb = 0x20, kBlock = 0x2000, kGlancing = 0x10000, kCrushing = 0x20000;
+constexpr uint32_t kRageGain = 0x800000;
+
+std::vector<uint8_t> wotlkHit(uint32_t hitInfo, uint8_t victimState, uint32_t blocked) {
+    Writer w;
+    w.u32(hitInfo);
+    w.packedGuid(0x0102030405ull);
+    w.packedGuid(0x1112131415ull);
+    w.u32(1234);   // total
+    w.u32(7);      // overkill
+    w.u8(2);
+    for (int i = 0; i < 2; ++i) {
+        w.u32(static_cast<uint32_t>(1 << i));
+        w.f32(100.0f + i);
+        w.u32(600 + i);
+    }
+    if (hitInfo & (kFullAbsorb | kPartialAbsorb)) { w.u32(10); w.u32(11); }
+    if (hitInfo & kPartialResist) { w.u32(20); w.u32(21); }
+    w.u8(victimState);
+    w.u32(0);
+    w.u32(0);
+    if (hitInfo & kBlock) w.u32(blocked);
+    if (hitInfo & kRageGain) w.u32(0);
+    return w.bytes;
+}
+
+}  // namespace
+
+TEST_CASE("WotLK attacker state: a plain hit has no absorb and its victim state",
+          "[attackerstate]") {
+    wowee::network::Packet packet(0, wotlkHit(kAffectsVictim, 1, 0));
+    WotlkPacketParsers parsers;
+    AttackerStateUpdateData data;
+    REQUIRE(parsers.parseAttackerStateUpdate(packet, data));
+    CHECK(data.totalDamage == 1234);
+    CHECK(data.overkill == 7);
+    REQUIRE(data.subDamages.size() == 2);
+    CHECK(data.subDamages[1].intDamage == 601u);
+    CHECK(data.subDamages[0].absorbed == 0u);
+    CHECK(data.subDamages[0].resisted == 0u);
+    CHECK(data.victimState == 1u);
+    CHECK(data.blocked == 0u);
+}
+
+TEST_CASE("WotLK attacker state: absorbs, resists and blocked when flagged",
+          "[attackerstate]") {
+    wowee::network::Packet packet(
+        0, wotlkHit(kAffectsVictim | kPartialAbsorb | kPartialResist | kBlock | kGlancing, 1, 55));
+    WotlkPacketParsers parsers;
+    AttackerStateUpdateData data;
+    REQUIRE(parsers.parseAttackerStateUpdate(packet, data));
+    REQUIRE(data.subDamages.size() == 2);
+    CHECK(data.subDamages[1].absorbed == 11u);
+    CHECK(data.subDamages[1].resisted == 21u);
+    CHECK(data.victimState == 1u);
+    CHECK(data.blocked == 55u);
+    CHECK(data.isGlancing());
+    CHECK_FALSE(data.isCrushing());
+}
+
+TEST_CASE("WotLK attacker state: a dodge reads as one", "[attackerstate]") {
+    wowee::network::Packet packet(0, wotlkHit(kAffectsVictim, 2, 0));
+    WotlkPacketParsers parsers;
+    AttackerStateUpdateData data;
+    REQUIRE(parsers.parseAttackerStateUpdate(packet, data));
+    CHECK(data.victimState == 2u);
+}
+
+TEST_CASE("WotLK attacker state: resists alone, and a full absorb alone", "[attackerstate]") {
+    WotlkPacketParsers parsers;
+    {
+        wowee::network::Packet packet(0, wotlkHit(kAffectsVictim | kPartialResist, 1, 0));
+        AttackerStateUpdateData data;
+        REQUIRE(parsers.parseAttackerStateUpdate(packet, data));
+        CHECK(data.subDamages[0].resisted == 20u);
+        CHECK(data.subDamages[0].absorbed == 0u);
+        CHECK(data.victimState == 1u);
+    }
+    {
+        wowee::network::Packet packet(0, wotlkHit(kAffectsVictim | kFullAbsorb | kCrushing | kRageGain, 1, 0));
+        AttackerStateUpdateData data;
+        REQUIRE(parsers.parseAttackerStateUpdate(packet, data));
+        CHECK(data.subDamages[1].absorbed == 11u);
+        CHECK(data.subDamages[1].resisted == 0u);
+        CHECK(data.isCrushing());
+        CHECK_FALSE(data.isGlancing());
+    }
+}
+
+TEST_CASE("WotLK attacker state: a short packet is refused and rewound", "[attackerstate]") {
+    WotlkPacketParsers parsers;
+    const auto refused = [&](std::vector<uint8_t> bytes) {
+        wowee::network::Packet packet(0, std::move(bytes));
+        AttackerStateUpdateData data;
+        const bool ok = parsers.parseAttackerStateUpdate(packet, data);
+        return !ok && packet.getReadPos() == 0;
+    };
+    auto full = wotlkHit(kAffectsVictim, 1, 0);
+    // The tail cut short: victim state, unknown and spell id need nine bytes.
+    CHECK(refused(std::vector<uint8_t>(full.begin(), full.end() - 1)));
+    // The absorb flag with no absorbs behind it.
+    auto noAbsorbs = wotlkHit(kAffectsVictim, 1, 0);
+    noAbsorbs[0] = static_cast<uint8_t>(kAffectsVictim | kPartialAbsorb);
+    noAbsorbs.resize(noAbsorbs.size() - 9);
+    CHECK(refused(noAbsorbs));
+    // A count no packet of this size could hold.
+    Writer w;
+    w.u32(kAffectsVictim);
+    w.packedGuid(0x0102030405ull);
+    w.packedGuid(0x1112131415ull);
+    w.u32(0);
+    w.u32(0);
+    w.u8(200);
+    for (int i = 0; i < 12; ++i) w.u8(0);
+    CHECK(refused(w.bytes));
+}

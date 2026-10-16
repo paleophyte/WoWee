@@ -6,12 +6,14 @@
 #include <string>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 
 #include "game/item_text.hpp"
 #include "addons/lua_services.hpp"
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
+#include "game/spell_classification.hpp"
 #include "game/update_field_table.hpp"
 #include "game/inventory_slots.hpp"
 #include "game/reputation_standing.hpp"
@@ -77,6 +79,33 @@ inline int interfaceVersion(lua_State* L) {
 inline int luaReturnNil(lua_State* L)  { lua_pushnil(L); return 1; }
 inline int luaReturnZero(lua_State* L) { lua_pushnumber(L, 0); return 1; }
 inline int luaReturnFalse(lua_State* L){ lua_pushboolean(L, 0); return 1; }
+
+/// IsActionInRange and IsSpellInRange's answer for one spell against one unit:
+/// 1 in range, 0 out, and nil where there is no range to speak of - a spell
+/// with none, nothing targeted, either side not known to the client. Edge to
+/// edge, as the server measures it; see spellclass::withinSpellRange.
+inline int pushSpellRangeAnswer(lua_State* L, game::GameHandler* gh,
+                                uint32_t spellId, uint64_t targetGuid) {
+    if (!gh || spellId == 0 || targetGuid == 0) return luaReturnNil(L);
+    const auto data = gh->getSpellData(spellId);
+    // Self-cast spells have no range and show no indicator.
+    if (data.maxRange <= 0.0f) return luaReturnNil(L);
+    const auto target = gh->getEntityManager().getEntity(targetGuid);
+    const auto player = gh->getEntityManager().getEntity(gh->getPlayerGuid());
+    if (!target || !player) return luaReturnNil(L);
+    const float dx = player->getX() - target->getX();
+    const float dy = player->getY() - target->getY();
+    const float dz = player->getZ() - target->getZ();
+    const auto reach = [](const game::Entity& e) {
+        const auto* unit = dynamic_cast<const game::Unit*>(&e);
+        return unit ? unit->getCombatReach() : 0.0f;
+    };
+    const bool inRange = game::spellclass::withinSpellRange(
+        std::sqrt(dx * dx + dy * dy + dz * dz), data.minRange, data.maxRange,
+        reach(*player), reach(*target));
+    lua_pushnumber(L, inRange ? 1 : 0);
+    return 1;
+}
 
 // ---- Lenient numeric argument, for values that came out of a widget ----
 //
@@ -351,10 +380,13 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         try { idx = std::stoi(uid.substr(5)); } catch (...) { return 0; }
         if (idx < 1 || idx > 4) return 0;
         const auto& pd = gh->getPartyData();
-        // party members exclude self; index 1-based
+        // party members exclude self; index 1-based. In a raid the party is
+        // the player's own subgroup, as GetNumPartyMembers counts it.
+        const bool raid = game::groupIsRaid(pd.groupType);
         int found = 0;
         for (const auto& m : pd.members) {
             if (m.guid == gh->getPlayerGuid()) continue;
+            if (raid && m.subGroup != pd.subGroup) continue;
             if (++found == idx) return m.guid;
         }
         return 0;
@@ -939,5 +971,27 @@ void invalidateTradeSkillRows();
 /// right - and an index convention is the kind of thing that goes wrong once
 /// and is then copied.
 uint32_t arenaTeamIdAtIndex(game::GameHandler* gh, int index);
+
+// One Lua global called with the arguments already pushed, its one result
+// left as a string. Empty when the global is not a function or raised.
+inline std::string callGlobal(lua_State* L, const char* name, int nargs) {
+    // The function has to sit under its arguments.
+    lua_getglobal(L, name);
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1 + nargs);
+        return {};
+    }
+    lua_insert(L, -(nargs + 1));
+    std::string out;
+    if (lua_pcall(L, nargs, 1, 0) == 0) {
+        if (lua_isboolean(L, -1)) out = lua_toboolean(L, -1) ? "1" : "0";
+        else if (const char* text = lua_tostring(L, -1)) out = text;
+    } else {
+        LOG_WARNING(name, " raised: ",
+                    lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+    }
+    lua_pop(L, 1);
+    return out;
+}
 
 } // namespace wowee::addons

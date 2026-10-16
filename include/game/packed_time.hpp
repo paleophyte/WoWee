@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 namespace wowee {
@@ -65,6 +66,18 @@ constexpr uint32_t packWowPackedTime(const WowDate& d) {
     const uint32_t year    = static_cast<uint32_t>(d.yearSince2000) & 0xFFu;
     return minute | (hour << 6) | (weekday << 11) | (day << 14) |
            (month << 20) | (year << 24);
+}
+
+/// The time of day, in hours, `seconds` of real time after the server said it
+/// was `hours`. The speed is game minutes per real second: the 1/60 every
+/// server sends keeps the clock in step with the realm's own. The server sends
+/// the time once at login, so the client keeps it moving from there.
+///
+/// Measured from that packet rather than added up a frame at a time: a float
+/// near 24 cannot hold a sixtieth of a frame, so per-frame steps round away and
+/// at a high frame rate the clock stops.
+inline float gameClockHour(float hours, double seconds, float minutesPerSecond) {
+    return static_cast<float>(std::fmod(hours + seconds * minutesPerSecond / 60.0, 24.0));
 }
 
 }  // namespace game

@@ -471,10 +471,65 @@ static std::unordered_map<std::string, std::string> buildCaseMap(const std::stri
 }
 
 // Discover archive files with expansion-specific and locale-aware loading
-static std::vector<std::string> discoverArchives(const std::string& mpqDir,
+static std::vector<std::string> discoverArchives(const std::string& mpqDirIn,
                                                   const std::string& expansion,
-                                                  const std::string& locale) {
+                                                  const std::string& localeIn) {
     std::vector<std::string> result;
+
+    // The folder that was handed over, or the Data folder inside it.
+    //
+    // "Choose your World of Warcraft folder" is answered with the folder that
+    // has Data in it at least as often as with Data itself, and both are
+    // right. This read only the one it was given and reported no archives
+    // found, naming a path with a Data folder sitting in plain sight.
+    // Case-insensitively, because an unpacked repack may spell it `data`.
+    std::string mpqDir = mpqDirIn;
+    {
+        std::error_code ec;
+        bool hasArchive = false;
+        for (fs::directory_iterator it(mpqDir, ec), end; it != end && !ec; it.increment(ec)) {
+            if (toLowerStr(it->path().extension().string()) == ".mpq") {
+                hasArchive = true;
+                break;
+            }
+        }
+        if (!hasArchive) {
+            const std::string inner = findCaseInsensitiveDirectory(mpqDir, "Data");
+            if (!inner.empty()) {
+                const fs::path candidate = fs::path(mpqDir) / inner;
+                for (fs::directory_iterator it(candidate, ec), end; it != end && !ec;
+                     it.increment(ec)) {
+                    if (toLowerStr(it->path().extension().string()) == ".mpq") {
+                        mpqDir = candidate.string();
+                        std::cout << "Reading archives from " << mpqDir << "\n";
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // The locale folder sits beside the archives, so which locale this is can
+    // only be asked once the Data folder above has been found.
+    //
+    // Nothing else asked at all: the GUI never sets a locale, and the command
+    // line detects one against the folder it was handed - which is the game
+    // folder as often as Data, and the locale folder is not in that one. With
+    // no locale the whole locale sequence below is skipped, and those archives
+    // are where DBFilesClient and Interface live: the extraction ran to the
+    // end, wrote world and character and creature, and came out with no DBCs
+    // and no FrameXML.
+    std::string locale = localeIn;
+    if (locale.empty()) {
+        locale = Extractor::detectLocale(mpqDir);
+        if (!locale.empty()) {
+            std::cout << "Using locale archives: " << locale << "\n";
+        } else {
+            std::cerr << "Warning: no locale folder beside the archives in " << mpqDir
+                      << " - DBFilesClient and Interface come from the locale archives, "
+                         "so an extraction without one is missing both.\n";
+        }
+    }
 
     auto caseMap = buildCaseMap(mpqDir);
     std::string lowerLocale = toLowerStr(locale);
@@ -625,40 +680,6 @@ static std::vector<std::string> discoverArchives(const std::string& mpqDir,
     return result;
 }
 
-// Extract the (listfile) from an MPQ archive into a set of filenames
-static void extractInternalListfile(HANDLE hMpq, std::set<std::string>& out) {
-    HANDLE hFile = nullptr;
-    if (!SFileOpenFileEx(hMpq, "(listfile)", 0, &hFile)) return;
-
-    DWORD size = SFileGetFileSize(hFile, nullptr);
-    if (size == SFILE_INVALID_SIZE || size == 0) {
-        SFileCloseFile(hFile);
-        return;
-    }
-
-    std::vector<char> buf(size);
-    DWORD bytesRead = 0;
-    if (!SFileReadFile(hFile, buf.data(), size, &bytesRead, nullptr)) {
-        SFileCloseFile(hFile);
-        return;
-    }
-    SFileCloseFile(hFile);
-
-    // Parse newline/CR-delimited entries
-    std::string entry;
-    for (DWORD i = 0; i < bytesRead; ++i) {
-        if (buf[i] == '\n' || buf[i] == '\r') {
-            if (!entry.empty()) {
-                out.insert(std::move(entry));
-                entry.clear();
-            }
-        } else {
-            entry += buf[i];
-        }
-    }
-    if (!entry.empty()) out.insert(std::move(entry));
-}
-
 std::vector<std::string> Extractor::archiveChain(const std::string& mpqDir,
                                                  const std::string& expansion,
                                                  const std::string& locale) {
@@ -673,7 +694,32 @@ bool enumerateFilesImpl(const Extractor::Options& opts,
                                std::vector<std::string>& outFiles) {
     auto archives = discoverArchives(opts.mpqDir, opts.expansion, opts.locale);
     if (archives.empty()) {
+        // What is in there, since what is not in there has already been said
+        // and has never been enough to act on.
         std::cerr << "No MPQ archives found in: " << opts.mpqDir << "\n";
+        std::error_code ec;
+        int files = 0;
+        int folders = 0;
+        std::string examples;
+        for (fs::directory_iterator it(opts.mpqDir, ec), end; it != end && !ec;
+             it.increment(ec)) {
+            if (it->is_directory(ec)) {
+                ++folders;
+                if (examples.size() < 120) examples += "  " + it->path().filename().string() + "/";
+            } else {
+                ++files;
+            }
+        }
+        if (ec || (files == 0 && folders == 0)) {
+            std::cerr << "  That folder is empty or cannot be read.\n";
+        } else {
+            std::cerr << "  It holds " << files << " file(s) and " << folders
+                      << " folder(s):" << examples << "\n";
+            std::cerr << "  Point this at the folder holding the .mpq archives - the Data "
+                         "folder of a World of Warcraft installation, or the folder that "
+                         "has Data inside it. If the game is still in a .zip or an "
+                         "installer, unpack it first.\n";
+        }
         return false;
     }
 
@@ -941,6 +987,16 @@ bool Extractor::run(const Options& opts) {
                 std::cout << "\r  Extracted " << done << " / " << totalFiles << " files..."
                           << std::flush;
             }
+            // And to whoever is watching a window rather than a terminal.
+            // Every value of `done` is produced exactly once - the increment
+            // above is atomic - so the modulo fires on one thread only, and
+            // the callback is left to do its own locking. More often than
+            // the line above because a progress bar that moves in thousandths
+            // of the whole reads as stuck on a small extraction.
+            if (opts.onProgress && done % 128 == 0) {
+                opts.onProgress(static_cast<std::size_t>(done),
+                                static_cast<std::size_t>(totalFiles));
+            }
         }
     };
 
@@ -962,6 +1018,12 @@ bool Extractor::run(const Options& opts) {
     auto extracted = stats.filesExtracted.load();
     auto failed = stats.filesFailed.load();
     auto skipped = stats.filesSkipped.load();
+    // The last one, so a bar that has been counting in 128s arrives at the
+    // end rather than stopping just short of it.
+    if (opts.onProgress) {
+        opts.onProgress(static_cast<std::size_t>(totalFiles),
+                        static_cast<std::size_t>(totalFiles));
+    }
     std::cout << "\n  Extracted " << extracted << " files ("
               << stats.bytesExtracted.load() / (1024 * 1024) << " MB), "
               << skipped << " skipped, "

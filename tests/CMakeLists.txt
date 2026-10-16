@@ -104,7 +104,7 @@ set(TEST_COMMON_SOURCES $<TARGET_OBJECTS:wowee_test_common>)
 #
 #   wowee_add_test(test_foo SOURCES test_foo.cpp ${TEST_COMMON_SOURCES})
 #
-# Tests that also need SDL2, OpenSSL or Vulkan keep their own block: the link
+# Tests that also need SDL3, OpenSSL or Vulkan keep their own block: the link
 # set is the interesting part of those.
 function(wowee_add_test target)
     cmake_parse_arguments(ARG "" "" "SOURCES" ${ARGN})
@@ -150,7 +150,7 @@ function(wowee_add_packet_test target)
                              ${TEST_PACKET_SOURCES} ${ARG_SOURCES})
     target_include_directories(${target} PRIVATE ${TEST_INCLUDE_DIRS})
     target_include_directories(${target} SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-    target_link_libraries(${target} PRIVATE catch2_main SDL2::SDL2 ZLIB::ZLIB
+    target_link_libraries(${target} PRIVATE catch2_main SDL3::SDL3 ZLIB::ZLIB
                                             OpenSSL::SSL OpenSSL::Crypto)
     wowee_test_link_glm(${target})
     if(TARGET Vulkan::Vulkan)
@@ -166,6 +166,10 @@ endfunction()
 # What a vendor sell asks for. Header-only arithmetic, no game state.
 wowee_add_test(test_sell_count
     SOURCES test_sell_count.cpp)
+
+# Which action bar spell IsCurrentAction reports. Header-only, no game state.
+wowee_add_test(test_current_action
+    SOURCES test_current_action.cpp)
 
 # Stock-style hill climbing regression test. Run directly with:
 #   cmake --build build --target test_hill_climbing && ctest --test-dir build -R hill_climbing
@@ -196,6 +200,11 @@ wowee_add_test(test_asset_inventory
 # manifest is written last and a folder without one is a run that stopped.
 wowee_add_test(test_data_paths
     SOURCES test_data_paths.cpp)
+
+# ── test_log_privacy ────────────────────────────────────────
+# The home directory, and with it the account name, written as ~ in the log.
+wowee_add_test(test_log_privacy
+    SOURCES test_log_privacy.cpp)
 
 # ── test_asset_profiles ─────────────────────────────────────
 # The asset sets on offer. Pinned because the upgrades used to be written per
@@ -328,6 +337,20 @@ target_link_libraries(test_lua_generic_for PRIVATE catch2_main lua51)
 wowee_test_link_glm(test_lua_generic_for)
 add_test(NAME lua_generic_for COMMAND test_lua_generic_for)
 register_test_target(test_lua_generic_for)
+
+# ── test_lua_bit_lib ────────────────────────────────────────
+# WoW's bit library, which this client supplies in Lua. FrameXML builds its
+# combat log masks with five-argument bit.bor calls.
+add_executable(test_lua_bit_lib
+    test_lua_bit_lib.cpp
+)
+target_include_directories(test_lua_bit_lib PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_lua_bit_lib SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_link_libraries(test_lua_bit_lib PRIVATE catch2_main lua51)
+wowee_test_link_glm(test_lua_bit_lib)
+add_test(NAME lua_bit_lib COMMAND test_lua_bit_lib)
+register_test_target(test_lua_bit_lib)
 
 # ── test_lua_arg_coercion ───────────────────────────────────
 # The lenient numeric argument, which is a pure function of the Lua stack and
@@ -1113,6 +1136,23 @@ wowee_add_test(test_frustum
     SOURCES test_frustum.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/frustum.cpp)
 
+# ── test_rt_bvh ──────────────────────────────────────────────
+# The hierarchy the software ray tracer walks, against a brute-force scan.
+wowee_add_test(test_rt_bvh
+    SOURCES test_rt_bvh.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/rt_bvh.cpp)
+
+# ── test_recording_size ──────────────────────────────────────
+# Header-only: the size a screen recording is encoded at.
+wowee_add_test(test_recording_size
+    SOURCES test_recording_size.cpp)
+
+# ── test_volumetric_fog_math ─────────────────────────────────
+# Header-only: where the fog volume's cells are, against where the shaders
+# look for them.
+wowee_add_test(test_volumetric_fog_math
+    SOURCES test_volumetric_fog_math.cpp)
+
 # ── test_packed_time ─────────────────────────────────────────
 # Header-only domain logic: the one uint32 that carries a whole date, which
 # four separate readers in this tree got wrong in four different ways.
@@ -1294,6 +1334,18 @@ target_link_libraries(test_text_markup PRIVATE catch2_main)
 add_test(NAME text_markup COMMAND test_text_markup)
 register_test_target(test_text_markup)
 
+# ── test_simple_html ─────────────────────────────────────────
+add_executable(test_simple_html
+    test_simple_html.cpp
+)
+target_include_directories(test_simple_html PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_simple_html SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+)
+target_link_libraries(test_simple_html PRIVATE catch2_main)
+add_test(NAME simple_html COMMAND test_simple_html)
+register_test_target(test_simple_html)
+
 # ── test_link_hit ────────────────────────────────────────────
 add_executable(test_link_hit
     test_link_hit.cpp
@@ -1461,11 +1513,156 @@ wowee_test_link_glm(test_open_format_emitter)
 add_test(NAME open_format_emitter COMMAND test_open_format_emitter)
 register_test_target(test_open_format_emitter)
 
+# ── test_frame_pacer ─────────────────────────────────────────
+# Frame timing at 144Hz, where a millisecond is a seventh of the budget.
+wowee_add_test(test_frame_pacer
+    SOURCES test_frame_pacer.cpp
+            ${CMAKE_SOURCE_DIR}/src/core/frame_pacer.cpp
+            ${TEST_COMMON_SOURCES})
+if(WIN32)
+    # Same winmm the client links, for the same two timer calls.
+    target_link_libraries(test_frame_pacer PRIVATE winmm)
+endif()
+
+# ── test_update_check ────────────────────────────────────────
+# Version ordering for the update notice. No network: the ordering is the
+# part that decides whether anybody is told anything.
+add_executable(test_update_check
+    test_update_check.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/update_check.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_update_check PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated   # version.hpp, written by wowee_version
+)
+if(TARGET wowee_version)
+    add_dependencies(test_update_check wowee_version)
+endif()
+target_include_directories(test_update_check SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/extern/nlohmann
+)
+target_link_libraries(test_update_check PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+wowee_test_link_glm(test_update_check)
+add_test(NAME update_check COMMAND test_update_check)
+register_test_target(test_update_check)
+
+# ── test_realm_patches ───────────────────────────────────────
+# What a realm may name and where its archives may land. No network: the
+# naming and the parsing are the part that decides whether a manifest can
+# reach outside the directory its realm was given.
+add_executable(test_realm_patches
+    test_realm_patches.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/realm_patches.cpp
+    ${TEST_COMMON_SOURCES}
+)
+target_include_directories(test_realm_patches PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}
+)
+target_include_directories(test_realm_patches SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/extern/nlohmann
+)
+target_link_libraries(test_realm_patches PRIVATE catch2_main OpenSSL::SSL OpenSSL::Crypto)
+wowee_test_link_glm(test_realm_patches)
+add_test(NAME realm_patches COMMAND test_realm_patches)
+register_test_target(test_realm_patches)
+
+# ── test_extract_progress ────────────────────────────────────
+# Extraction is the long stage of a build, and the only one that can say how
+# far through it is. Needs StormLib: it builds a real archive to extract.
+if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
+    add_executable(test_extract_progress
+        test_extract_progress.cpp
+        ${CMAKE_SOURCE_DIR}/tools/asset_extract/extractor.cpp
+        ${CMAKE_SOURCE_DIR}/tools/asset_extract/path_mapper.cpp
+        ${CMAKE_SOURCE_DIR}/tools/asset_extract/manifest_writer.cpp
+        ${CMAKE_SOURCE_DIR}/tools/asset_extract/open_format_emitter.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/blp_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/dds_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/m2_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/wmo_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/adt_loader.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_model.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_building.cpp
+        ${CMAKE_SOURCE_DIR}/src/pipeline/wowee_collision.cpp
+        ${CMAKE_SOURCE_DIR}/src/rendering/m2_model_classifier.cpp
+        ${TEST_COMMON_SOURCES}
+    )
+    target_include_directories(test_extract_progress PRIVATE
+        ${TEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}
+        ${STORMLIB_INCLUDE_DIR}
+    )
+    target_include_directories(test_extract_progress SYSTEM PRIVATE
+        ${TEST_SYSTEM_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/extern/nlohmann
+    )
+    target_link_libraries(test_extract_progress PRIVATE catch2_main)
+    wowee_test_link_glm(test_extract_progress)
+    wowee_link_stormlib(test_extract_progress)
+    # The one test that can skip its whole body: on Linux the archive it
+    # writes to set itself up aborts inside Ubuntu's StormLib, so the case
+    # SKIPs. Catch2 then exits 4 for "no tests ran" and ctest called that a
+    # failure. Only this test needs the flag, and only this test gets it -
+    # elsewhere an empty run is a test that lost its cases, which should fail.
+    add_test(NAME extract_progress
+             COMMAND test_extract_progress --allow-running-no-tests)
+    register_test_target(test_extract_progress)
+endif()
+
 # ── test_camera ──────────────────────────────────────────────
 wowee_add_test(test_camera
     SOURCES test_camera.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/camera.cpp
             ${TEST_COMMON_SOURCES})
+
+# ── test_install_probe ───────────────────────────────────────
+# Which folder the archives are in, given whatever somebody pointed at. Links
+# the probe alone: it is deliberately free of the extractor and the MPQ
+# library, because the question is about directories.
+add_executable(test_install_probe
+    test_install_probe.cpp
+    ${CMAKE_SOURCE_DIR}/tools/asset_manager/install_probe.cpp)
+target_include_directories(test_install_probe PRIVATE ${TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/tools/asset_manager)
+target_include_directories(test_install_probe SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_install_probe PRIVATE catch2_main)
+add_test(NAME install_probe COMMAND test_install_probe)
+register_test_target(test_install_probe)
+
+# ── test_gamepad ─────────────────────────────────────────────
+# The stick arithmetic and the binding table. The table sits in its own file
+# for exactly this reason: what applies it drives the camera and ImGui, and
+# none of that is needed to ask whether a button has been bound twice.
+add_executable(test_gamepad
+    test_gamepad.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/gamepad.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/gamepad_bindings.cpp
+    ${TEST_COMMON_SOURCES})
+target_include_directories(test_gamepad PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_gamepad SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_gamepad PRIVATE catch2_main SDL3::SDL3)
+wowee_test_link_glm(test_gamepad)
+add_test(NAME gamepad COMMAND test_gamepad)
+register_test_target(test_gamepad)
+
+# ── test_camera_pivot ────────────────────────────────────────
+# Header-only: the pivot arithmetic is a static member, so this needs SDL3's
+# headers (camera_controller.hpp includes them) but none of its symbols.
+add_executable(test_camera_pivot test_camera_pivot.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_camera_pivot PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_camera_pivot SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_camera_pivot PRIVATE catch2_main SDL3::SDL3)
+wowee_test_link_glm(test_camera_pivot)
+add_test(NAME camera_pivot COMMAND test_camera_pivot)
+register_test_target(test_camera_pivot)
 
 # ── test_gltf_terrain_bin ────────────────────────────────────
 # The BIN chunk of a terrain .glb, packed byte for byte by two exporters.
@@ -1712,7 +1909,7 @@ add_executable(test_calendar_packet
 )
 target_include_directories(test_calendar_packet PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_calendar_packet SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_calendar_packet PRIVATE catch2_main SDL2::SDL2 ZLIB::ZLIB
+target_link_libraries(test_calendar_packet PRIVATE catch2_main SDL3::SDL3 ZLIB::ZLIB
                                                  OpenSSL::SSL OpenSSL::Crypto)
 wowee_test_link_glm(test_calendar_packet)
 if(TARGET Vulkan::Vulkan)
@@ -2088,6 +2285,19 @@ wowee_add_test(test_auction_slot_filter
     SOURCES test_auction_slot_filter.cpp
             ${TEST_COMMON_SOURCES})
 
+# ── test_binding_file ────────────────────────────────────────
+# The saved key bindings file the key binding panel writes and every start
+# reads back.
+wowee_add_test(test_binding_file
+    SOURCES test_binding_file.cpp)
+
+# ── test_tab_target ──────────────────────────────────────────
+# Which units Tab and TargetNearestEnemy may pick: hostile and neutral alike,
+# but not friendly units, critters, or units the server marks unselectable,
+# unattackable or immune to players.
+wowee_add_test(test_tab_target
+    SOURCES test_tab_target.cpp)
+
 # ── test_player_model_path ───────────────────────────────────
 # Which body a character wears. Gender alone does not answer it: a nonbinary
 # character picks one, and the preview, the world spawn and the skin textures
@@ -2349,6 +2559,41 @@ wowee_add_test(test_grass_cull_math
 wowee_add_test(test_pass_ablation
     SOURCES test_pass_ablation.cpp
             ${CMAKE_SOURCE_DIR}/src/rendering/pass_ablation.cpp)
+
+# ── test_game_replay ─────────────────────────────────────────
+# Server packets through GameHandler's own dispatch, against the real
+# tables. GameHandler reaches into nearly every part of the client, so this
+# links the client's own objects, minus its main, rather than a source list:
+# nothing is compiled twice, and nothing here can drift from what the client
+# is built from. The properties are read when the build is generated, so
+# libraries the root file adds to the client after this directory are seen.
+# The filter drops main by the object names Makefiles, Ninja, Xcode and Visual
+# Studio give it; src/main.cpp is the only file of that name in the client.
+if(NOT ANDROID)
+    add_executable(test_game_replay test_game_replay.cpp test_game_replay_quests.cpp
+        "$<FILTER:$<TARGET_OBJECTS:wowee>,EXCLUDE,/main([.]cpp)?[.]o(bj)?$>")
+    target_include_directories(test_game_replay PRIVATE ${TEST_INCLUDE_DIRS}
+        $<TARGET_PROPERTY:wowee,INCLUDE_DIRECTORIES>)
+    target_include_directories(test_game_replay SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+    target_compile_definitions(test_game_replay PRIVATE
+        WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        $<TARGET_PROPERTY:wowee,COMPILE_DEFINITIONS>)
+    target_link_libraries(test_game_replay PRIVATE catch2_main
+        $<TARGET_PROPERTY:wowee,LINK_LIBRARIES>)
+    wowee_test_link_glm(test_game_replay)
+    target_link_directories(test_game_replay PRIVATE
+        $<TARGET_PROPERTY:wowee,LINK_DIRECTORIES>)
+    target_sources(test_game_replay PRIVATE test_game_replay_item_push.cpp)
+    target_link_options(test_game_replay PRIVATE
+        $<TARGET_PROPERTY:wowee,LINK_OPTIONS>)
+    target_sources(test_game_replay PRIVATE test_game_replay_cast_guids.cpp)
+    add_dependencies(test_game_replay wowee)
+    target_sources(test_game_replay PRIVATE test_game_replay_spell_execute.cpp)
+    add_test(NAME game_replay COMMAND test_game_replay)
+    target_sources(test_game_replay PRIVATE test_game_replay_energize.cpp)
+    register_test_target(test_game_replay)
+    target_sources(test_game_replay PRIVATE test_game_replay_spell_logs.cpp)
+endif()
 
 # ── Sanitizers, once every test target exists ────────────────
 # This must be the last thing in this file. The loop walks ALL_TEST_TARGETS,

@@ -21,6 +21,7 @@ enum class UF : uint16_t {
     UNIT_FIELD_TARGET_HI,
     UNIT_FIELD_BYTES_0,
     UNIT_FIELD_BYTES_1,  // byte2 = visibility flags; byte3 is expansion-dependent
+    UNIT_FIELD_BYTES_2,  // WotLK: byte3 = shapeshift form (BYTES_1 byte3 is the anim tier there)
     UNIT_FIELD_HEALTH,
     UNIT_FIELD_POWER1,
     UNIT_FIELD_MAXHEALTH,
@@ -46,6 +47,7 @@ enum class UF : uint16_t {
     UNIT_FIELD_PETEXPERIENCE,   // A hunter pet's experience toward its next level
     UNIT_FIELD_PETNEXTLEVELEXP, // ...and what that level costs
     UNIT_FIELD_RESISTANCES,   // Physical armor (index 0 of the resistance array)
+    UNIT_FIELD_BASE_MANA,     // Mana before gear and stats, which percent costs are taken of
     UNIT_FIELD_STAT0,         // Strength (effective base, includes items)
     UNIT_FIELD_STAT1,         // Agility
     UNIT_FIELD_STAT2,         // Stamina

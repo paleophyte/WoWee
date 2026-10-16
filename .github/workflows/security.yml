@@ -7,6 +7,13 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# A newer push to the same branch, or to the same pull request, supersedes
+# this run. Without it every commit queued its own full run, and a busy day
+# left the release build waiting hours behind builds nobody would look at.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -23,7 +30,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -34,8 +41,7 @@ jobs:
             cmake \
             build-essential \
             pkg-config \
-            libsdl2-dev \
-            libglm-dev \
+              libglm-dev \
             libssl-dev \
             zlib1g-dev \
             libvulkan-dev \
@@ -46,11 +52,37 @@ jobs:
             libswscale-dev \
             libavutil-dev \
             libunicorn-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxfixes-dev \
+            libxss-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            wayland-protocols \
+            libdecor-0-dev \
             libx11-dev
           sudo apt-get install -y libstorm-dev || true
 
+      - name: Build SDL3 from source
+        run: |
+          # Ubuntu 24.04 has no libsdl3-dev: SDL3 landed in 25.04. Built here
+          # the way StormLib already is, rather than pinning the job to a
+          # newer runner image for one package.
+          set -euo pipefail
+          git clone --depth 1 --branch release-3.2.24 \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL3
+          cmake -S /tmp/SDL3 -B /tmp/SDL3/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF
+          cmake --build /tmp/SDL3/build --parallel "$(nproc)"
+          sudo cmake --install /tmp/SDL3/build
+          sudo ldconfig
+
+
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: cpp
           config-file: ./.github/codeql/codeql-config.yml
@@ -61,19 +93,19 @@ jobs:
           cmake --build build --parallel $(nproc)
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
   semgrep:
     name: Semgrep
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -95,7 +127,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -106,8 +138,7 @@ jobs:
             cmake \
             build-essential \
             pkg-config \
-            libsdl2-dev \
-            libglm-dev \
+              libglm-dev \
             libssl-dev \
             zlib1g-dev \
             libvulkan-dev \
@@ -118,8 +149,34 @@ jobs:
             libswscale-dev \
             libavutil-dev \
             libunicorn-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxfixes-dev \
+            libxss-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            wayland-protocols \
+            libdecor-0-dev \
             libx11-dev
           sudo apt-get install -y libstorm-dev || true
+
+      - name: Build SDL3 from source
+        run: |
+          # Ubuntu 24.04 has no libsdl3-dev: SDL3 landed in 25.04. Built here
+          # the way StormLib already is, rather than pinning the job to a
+          # newer runner image for one package.
+          set -euo pipefail
+          git clone --depth 1 --branch release-3.2.24 \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL3
+          cmake -S /tmp/SDL3 -B /tmp/SDL3/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF
+          cmake --build /tmp/SDL3/build --parallel "$(nproc)"
+          sudo cmake --install /tmp/SDL3/build
+          sudo ldconfig
+
 
       - name: Configure (ASan/UBSan)
         run: |

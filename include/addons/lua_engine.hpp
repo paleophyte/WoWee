@@ -84,6 +84,8 @@ public:
         bool left = false;
         bool right = false;
         bool middle = false;
+        bool button4 = false;
+        bool button5 = false;
     };
     /// Window pixels from the top-left, as ImGui reports them, plus the
     /// window height - converted here rather than by the caller, so the
@@ -120,6 +122,13 @@ public:
     /// the camera - scrolling a quest log and pulling the camera in at the same
     /// time is what happens otherwise. delta is WoW's: positive is up.
     bool dispatchMouseWheel(float x, float y, float delta);
+
+    /// How many notches a unit of wheel travel is worth in the interface's
+    /// scrolling windows. 1 is a notch per click of a wheel; a trackpad's many
+    /// small deltas add up to the same. The Interface page's scroll speed.
+    void setWheelSensitivity(float notchesPerUnit) {
+        wheelSensitivity_ = notchesPerUnit > 0.0f ? notchesPerUnit : 1.0f;
+    }
 
     /// Tells a scroll frame when the room its child has to move changed.
     ///
@@ -186,6 +195,10 @@ public:
     /// key this client answers itself - see KeybindingManager::answersKey -
     /// because most bindings toggle something and two answers to one press
     /// cancel out.
+    ///
+    /// A release runs the command its press ran, and only for the commands
+    /// bindings.xml marks runOnUp. Every action bar but the main one clicks
+    /// its button on the release.
     bool dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool alt,
                             bool down);
 
@@ -194,6 +207,21 @@ public:
     /// apart is what lets a declined key be told from an unbound one.
     std::string bindingCommandFor(int sdlKeycode, bool shift, bool ctrl,
                                   bool alt);
+    /// The command a key holds, by WoW's name for it - "SHIFT-1", "PAD3" - or
+    /// empty.
+    std::string bindingCommandForKey(const std::string& key);
+
+    /// A controller button, by its binding name.
+    ///
+    /// Given to the key binding panel while it is waiting for a key, which is
+    /// the only way a button can be bound: the panel learns keys from
+    /// OnKeyDown. Otherwise looked up as a binding - run here when the
+    /// interface performs the command, handed back when the client does.
+    struct PadKeyOutcome {
+        bool taken = false;   ///< the panel captured it, or a binding script ran
+        std::string command;  ///< a command the client performs itself, else empty
+    };
+    PadKeyOutcome dispatchPadKey(const char* padKey);
     /// Whether an edit box currently has focus, so the client knows not to
     /// treat the same keystrokes as movement.
     ///
@@ -262,6 +290,9 @@ public:
 private:
     lua_State* L_ = nullptr;
     ui::WidgetTree widgets_;
+    /// runOnUp commands whose key is down, by keycode, so the release reaches
+    /// the same command even when a modifier was let go first.
+    std::unordered_map<int, std::string> heldBindings_;
     game::GameHandler* gameHandler_ = nullptr;
     LuaServices luaServices_;
     LuaErrorCallback luaErrorCallback_;
@@ -284,6 +315,10 @@ private:
 
     /// The frame a typed key belongs to - see dispatchFrameKey.
     [[nodiscard]] const ui::Widget* topKeyboardFrame() const;
+    /// Runs a binding command's script. False when it has none, or it failed.
+    bool runBindingScript(const std::string& command, bool down);
+    /// Whether bindings.xml marks the command runOnUp.
+    bool bindingRunsOnUp(const std::string& command);
 
     void callFrameScript(uint32_t wid, const char* script, const char* arg = nullptr);
     /// The same, with a number. A handler that compares its argument against
@@ -369,7 +404,7 @@ private:
     /// Per button, because a press and its release belong together: sliding off
     /// a button between them is how a player changes their mind, and holding
     /// one button while clicking another must not confuse the first.
-    static constexpr int kMouseButtons = 3;
+    static constexpr int kMouseButtons = 5;
     uint32_t pressedWid_[kMouseButtons] = {0, 0, 0};
     bool buttonDown_[kMouseButtons] = {false, false, false};
     /// Where each button went down, so a drag can be told from a click by how
@@ -403,6 +438,21 @@ private:
     void registerEventAPI();
 
 private:
+    // The wheel, gathered into whole notches; see dispatchMouseWheel.
+    float wheelSensitivity_ = 1.0f;
+    float wheelCarry_ = 0.0f;
+    // The scroll bar a wheel frame's notches were seen to move, and how far
+    // one notch moved it - signed, so it carries which way is up.
+    struct WheelBinding { uint32_t slider = 0; float perNotch = 0.0f; };
+    std::unordered_map<uint32_t, WheelBinding> wheelBindings_;
+    // The scroll bar easing toward where the wheel sent it. lastSet is the
+    // value this last gave it, so a move from anywhere else is noticed.
+    struct WheelGlide { uint32_t slider = 0; float target = 0.0f; float lastSet = 0.0f; };
+    WheelGlide wheelGlide_;
+    bool glideWheel(uint32_t wheelFrame, float notches);
+    void advanceWheelGlide(float elapsed);
+    void setSliderValue(uint32_t wid, float value);
+
     static bool uiSoundsSuppressed_;
 };
 

@@ -1283,8 +1283,11 @@ void WidgetTree::collectDrawOrder() {
         //
         // Not gated on holding text. The caret is what says which box is
         // listening, and an empty box still has to show it.
+        // A cooldown paints its sweep while it has a duration set; drawCooldown
+        // draws nothing once that time has passed.
         if (w.kind == WidgetKind::Frame && !w.hasBackdrop && !w.isStatusBar &&
             !w.isEditBox && w.externalTexture == 0 &&
+            !(w.isCooldown && w.cooldownDuration > 0.0) &&
             !(w.isSimpleHtml && !w.text.empty()) &&
             !(w.isMessageFrame && !w.messages.empty()) &&
             !(w.isTooltip && !w.tooltipLines.empty())) continue;
