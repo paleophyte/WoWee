@@ -141,7 +141,7 @@ constexpr uint32_t SPELL_SHADOWFORM      = 15473;
 constexpr uint32_t RX_SILENCE_WARNING_MS       = 10000;  // 10 s
 constexpr uint32_t RX_SILENCE_CRITICAL_MS      = 15000;  // 15 s
 constexpr float    WARDEN_GATE_LOG_INTERVAL_SEC = 30.0f;
-constexpr float    CLASSIC_PING_INTERVAL_SEC    = 10.0f;
+constexpr float    CLASSIC_PING_INTERVAL_SEC    = 30.0f; // CMaNGOS rejects repeated pings under 27 s
 
 // ---------------------------------------------------------------------------
 // Heartbeat / area-trigger intervals (seconds)

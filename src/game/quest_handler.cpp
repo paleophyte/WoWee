@@ -2010,9 +2010,11 @@ bool QuestHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
     const size_t removed = localBefore - questLog_.size();
 
     size_t added = 0;
+    std::unordered_set<uint32_t> addedQuestIds;
     for (uint32_t questId : serverQuestIds) {
         if (hasQuestInLog(questId)) continue;
         addQuestToLocalLogIfMissing(questId, "Quest #" + std::to_string(questId), "");
+        addedQuestIds.insert(questId);
         ++added;
     }
 
@@ -2037,21 +2039,32 @@ bool QuestHandler::resyncQuestLogFromServerSlots(bool forceQueryMetadata) {
         }
     }
 
-    if (forceQueryMetadata) {
-        for (uint32_t questId : serverQuestIds) {
-            requestQuestQuery(questId, false);
-        }
+    for (uint32_t questId : serverQuestIds) {
+        if (!forceQueryMetadata && !addedQuestIds.count(questId)) continue;
+        requestQuestQuery(questId, false);
+    }
+    if (!forceQueryMetadata && (removed || marked) && owner_.addonEventCallbackRef()) {
+        owner_.addonEventCallbackRef()("QUEST_LOG_UPDATE", {});
+        owner_.addonEventCallbackRef()("UNIT_QUEST_LOG_CHANGED", {"player"});
     }
 
-    LOG_INFO("Quest log resync from server slots: server=", serverQuestIds.size(),
-             " localBefore=", localBefore, " removed=", removed, " added=", added,
-             " markedComplete=", marked);
+    if (forceQueryMetadata || removed || added || marked) {
+        LOG_INFO("Quest log resync from server slots: server=", serverQuestIds.size(),
+                 " localBefore=", localBefore, " removed=", removed, " added=", added,
+                 " markedComplete=", marked);
+    }
     return true;
 }
 
 void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
     const uint16_t ufQuestStart = fieldIndex(UF::PLAYER_QUEST_LOG_START);
     if (ufQuestStart == 0xFFFF) return;
+
+    // TBC Playerbots accepts/rewards quests on the server, without a pending
+    // local Accept click or the usual quest-dialog packets. Reconcile its known
+    // slot layout on live updates as well as login. Keep classic-family realm
+    // layout workarounds unchanged.
+    if (isActiveExpansion("tbc")) resyncQuestLogFromServerSlots(false);
 
     const uint8_t qStride = owner_.getPacketParsers() ? owner_.getPacketParsers()->questLogStride() : 5;
     if (qStride < 2) return;
@@ -2064,10 +2077,13 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
         uint32_t questId = idIt->second;
         if (questId == 0) continue;
 
-        // Add quest to local log only if we have a pending accept for it
-        if (!hasQuestInLog(questId) && pendingQuestAcceptTimeouts_.count(questId) != 0) {
-            addQuestToLocalLogIfMissing(questId, "Quest #" + std::to_string(questId), "");
-            requestQuestQuery(questId, false);
+        // Finish pending local accepts even when TBC slot reconciliation added
+        // the quest first, so its NPC status refresh and timeout cleanup still run.
+        if (pendingQuestAcceptTimeouts_.count(questId) != 0) {
+            if (!hasQuestInLog(questId)) {
+                addQuestToLocalLogIfMissing(questId, "Quest #" + std::to_string(questId), "");
+                requestQuestQuery(questId, false);
+            }
             // Re-query quest giver status for the NPC that gave us this quest
             auto pendingIt = pendingQuestAcceptNpcGuids_.find(questId);
             if (pendingIt != pendingQuestAcceptNpcGuids_.end() && pendingIt->second != 0 && owner_.getSocket()) {

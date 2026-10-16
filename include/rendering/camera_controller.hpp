@@ -258,7 +258,10 @@ public:
     void setMounted(bool m) { mounted_ = m; }
     void setIntoxication(float amount) { intoxication_ = std::clamp(amount, 0.0f, 1.0f); }
     void setMountHeightOffset(float offset) { mountHeightOffset_ = offset; }
-    void setExternalFollow(bool enabled) { externalFollow_ = enabled; }
+    void setExternalFollow(bool enabled, bool interruptible = false) {
+        externalFollow_ = enabled;
+        externalFollowInterruptible_ = enabled && interruptible;
+    }
     void setExternalMoving(bool moving) { externalMoving_ = moving; }
     void setFacingYaw(float yaw) { facingYaw = yaw; }  // For taxi/scripted movement
     void clearMovementInputs();
@@ -444,6 +447,7 @@ private:
     float currentDistance = 10.0f;      // Smoothed actual distance
     float collisionDistance = 10.0f;    // Max allowed by collision
     bool externalFollow_ = false;
+    bool externalFollowInterruptible_ = false;
     static constexpr float MIN_DISTANCE = 0.5f;     // Minimum zoom (first-person threshold)
     static constexpr float MAX_DISTANCE_NORMAL = 22.0f;   // Default max zoom out
     static constexpr float MAX_DISTANCE_EXTENDED = 50.0f;  // Extended max zoom out

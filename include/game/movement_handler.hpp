@@ -182,6 +182,11 @@ public:
     float& timeSinceLastMoveHeartbeatRef() { return timeSinceLastMoveHeartbeat_; }
     [[nodiscard]] float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
     [[nodiscard]] bool isServerMovementAllowed() const { return serverMovementAllowed_; }
+    // Own-character splines (for example Playerbots) own position until the
+    // player explicitly starts moving again. Keep the final pose between paths.
+    [[nodiscard]] bool hasServerDrivenMovement() const { return serverDrivenMovement_; }
+    [[nodiscard]] bool isServerDrivenMoving() const;
+    void syncServerDrivenMovement();
     /// Whether the player is in the air on a flying mount, as the movement
     /// code worked it out - which sets and clears FLYING, the flag the server
     /// reads flight from. Only while flight is allowed: a FLYING the server
@@ -271,6 +276,7 @@ private:
     std::chrono::steady_clock::time_point movementClockStart_ = std::chrono::steady_clock::now();
     uint32_t lastMovementTimestampMs_ = 0;
     bool serverMovementAllowed_ = true;
+    bool serverDrivenMovement_ = false;
     uint32_t monsterMovePacketsThisTick_ = 0;
     uint32_t monsterMovePacketsDroppedThisTick_ = 0;
 

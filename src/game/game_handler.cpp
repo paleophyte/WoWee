@@ -949,6 +949,7 @@ void GameHandler::update(float deltaTime) {
         closeIfTooFar(isTrainerWindowOpen(), getTrainerSpells().trainerGuid, [this]{ closeTrainer(); }, "Trainer");
 
         updateEntityInterpolation(deltaTime);
+        if (movementHandler_) movementHandler_->syncServerDrivenMovement();
 
     }
 }

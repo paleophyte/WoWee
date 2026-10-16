@@ -3,6 +3,7 @@
 
 #include "game_replay.hpp"
 #include "game/quest_handler.hpp"
+#include "game/entity.hpp"
 
 #include <algorithm>
 #include <string>
@@ -114,4 +115,28 @@ TEST_CASE("a quest player kill is shown as ERR_QUEST_ADD_PLAYER_KILL_SII", "[rep
     s.receive(p);
     CHECK(info.lines == std::vector<std::string>{"Players slain: 2/5"});
     CHECK_FALSE(chatMentions(s, "2/5"));
+}
+
+TEST_CASE("TBC server-assigned quests appear and disappear without local dialog clicks",
+          "[replay][quest][playerbot]") {
+    Session s("tbc");
+    s.handler().getEntityManager().addEntity(Session::kPlayerGuid,
+        std::make_shared<wowee::game::Player>(Session::kPlayerGuid));
+    constexpr uint32_t questId = 783;
+    s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
+        {{wowee::game::UF::PLAYER_QUEST_LOG_START, questId}}).packet(true));
+    REQUIRE(s.handler().getQuestLog().size() == 1);
+    CHECK(s.handler().getQuestLog()[0].questId == questId);
+    const auto queries = s.sent().of(Opcode::CMSG_QUEST_QUERY).size();
+    CHECK(queries == 1);
+
+    // A partial health update must retain the quest and not repeatedly query it.
+    s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
+        {{wowee::game::UF::UNIT_FIELD_HEALTH, 100}}).packet(true));
+    CHECK(s.handler().getQuestLog().size() == 1);
+    CHECK(s.sent().of(Opcode::CMSG_QUEST_QUERY).size() == queries);
+
+    s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
+        {{wowee::game::UF::PLAYER_QUEST_LOG_START, 0}}).packet(true));
+    CHECK(s.handler().getQuestLog().empty());
 }

@@ -489,6 +489,23 @@ void MovementHandler::sendMovement(Opcode opcode) {
         return;
     }
 
+    if (serverDrivenMovement_) {
+        const bool manualStart = opcode == Opcode::MSG_MOVE_START_FORWARD ||
+            opcode == Opcode::MSG_MOVE_START_BACKWARD ||
+            opcode == Opcode::MSG_MOVE_START_STRAFE_LEFT ||
+            opcode == Opcode::MSG_MOVE_START_STRAFE_RIGHT ||
+            opcode == Opcode::MSG_MOVE_START_TURN_LEFT ||
+            opcode == Opcode::MSG_MOVE_START_TURN_RIGHT ||
+            opcode == Opcode::MSG_MOVE_JUMP;
+        if (!manualStart || !serverMovementAllowed_) return;
+        syncServerDrivenMovement();
+        serverDrivenMovement_ = false;
+        // Discard the old spline so its next interpolation tick cannot undo input.
+        if (auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid()))
+            player->setPosition(movementInfo.x, movementInfo.y, movementInfo.z,
+                                movementInfo.orientation);
+    }
+
     // Block manual movement while taxi is active/mounted, but always allow
     // stop/heartbeat opcodes so stuck states can be recovered.
     bool taxiAllowed =
@@ -901,6 +918,7 @@ void MovementHandler::sanitizeMovementForTaxi() {
 // ============================================================
 
 void MovementHandler::forceClearTaxiAndMovementState() {
+    serverDrivenMovement_ = false;
     taxiActivatePending_ = false;
     taxiActivateTimer_ = 0.0f;
     taxiClientActive_ = false;
@@ -1640,6 +1658,19 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         return;
     }
 
+    if (data.guid == owner_.getPlayerGuid() && data.hasDest && !onTaxiFlight_ &&
+        !taxiMountActive_ && !taxiActivatePending_ && !owner_.isOnTransport()) {
+        serverDrivenMovement_ = true;
+        const auto start = core::coords::serverToCanonical(glm::vec3(data.x, data.y, data.z));
+        entity->setPosition(start.x, start.y, start.z, entity->getOrientation());
+        movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::FORWARD) |
+            static_cast<uint32_t>(MovementFlags::BACKWARD) |
+            static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) |
+            static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) |
+            static_cast<uint32_t>(MovementFlags::TURN_LEFT) |
+            static_cast<uint32_t>(MovementFlags::TURN_RIGHT));
+    }
+
     // Classic/TBC creature patrols encode ground locomotion in the spline:
     // RUNMODE set means Run, while a clear bit means Walk. Publish it before
     // the render callback. WotLK uses the separate spline mode opcodes already
@@ -1753,6 +1784,31 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
             }
         }
     }
+}
+
+bool MovementHandler::isServerDrivenMoving() const {
+    auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    return serverDrivenMovement_ && player && player->isActivelyMoving();
+}
+
+void MovementHandler::syncServerDrivenMovement() {
+    if (!serverDrivenMovement_) return;
+    if (onTaxiFlight_ || taxiMountActive_ || taxiActivatePending_ || owner_.isOnTransport()) {
+        serverDrivenMovement_ = false;
+        return;
+    }
+    auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    if (!player) {
+        serverDrivenMovement_ = false;
+        return;
+    }
+    // Entity's dead reckoning is useful for remote units, but our own character
+    // must stop at the server's endpoint instead of overshooting it.
+    const bool moving = player->isActivelyMoving();
+    movementInfo.x = moving ? player->getX() : player->getLatestX();
+    movementInfo.y = moving ? player->getY() : player->getLatestY();
+    movementInfo.z = moving ? player->getZ() : player->getLatestZ();
+    movementInfo.orientation = player->getOrientation();
 }
 
 void MovementHandler::handleMonsterMoveTransport(network::Packet& packet) {
@@ -2205,6 +2261,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     movementInfo.flags = 0;
     movementInfo.flags2 = 0;
     serverMovementAllowed_ = true;
+    serverDrivenMovement_ = false;
     owner_.resurrectPendingRef() = false;
     owner_.resurrectRequestPendingRef() = false;
     onTaxiFlight_ = false;

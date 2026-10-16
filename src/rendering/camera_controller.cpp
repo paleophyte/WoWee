@@ -2720,6 +2720,35 @@ void CameraController::update(float deltaTime) {
     const float physicsDeltaTime = std::min(deltaTime, kMaxPhysicsDelta);
     intoxicationTime_ += deltaTime;
 
+    auto& input = core::Input::getInstance();
+    const bool uiWantsKeyboard = ImGui::GetIO().WantTextInput ||
+                                ui::interfaceTakingTypedInput();
+    // Let a teleport's input suppression expire even while a bot or taxi owns
+    // movement; an external-follow early return must not freeze the timer.
+    if (movementSuppressTimer_ > 0.0f) movementSuppressTimer_ -= deltaTime;
+    // Playerbot splines allow manual input to resume local control. Taxi,
+    // charge and transfer freezes keep the default non-interruptible mode.
+    if (externalFollow_ && externalFollowInterruptible_ && !uiWantsKeyboard &&
+        !movementRooted_ && !sitting && movementSuppressTimer_ <= 0.0f) {
+        const bool moveKey = input.isKeyPressed(SDL_SCANCODE_W) ||
+            input.isKeyPressed(SDL_SCANCODE_S) || input.isKeyPressed(SDL_SCANCODE_A) ||
+            input.isKeyPressed(SDL_SCANCODE_D) || input.isKeyPressed(SDL_SCANCODE_Q) ||
+            input.isKeyPressed(SDL_SCANCODE_E) || input.isKeyPressed(SDL_SCANCODE_UP) ||
+            input.isKeyPressed(SDL_SCANCODE_DOWN) || input.isKeyPressed(SDL_SCANCODE_LEFT) ||
+            input.isKeyPressed(SDL_SCANCODE_RIGHT) || input.isKeyJustPressed(SDL_SCANCODE_SPACE) ||
+            (leftMouseDown && rightMouseDown);
+        if (moveKey) {
+            externalFollow_ = false;
+            externalMoving_ = false;
+            // A key held before external control must still produce a fresh
+            // START packet when it takes control back.
+            wasMovingForward = wasMovingBackward = false;
+            wasStrafingLeft = wasStrafingRight = false;
+            wasTurningLeft = wasTurningRight = false;
+            wasJumping = false;
+        }
+    }
+
     // During taxi flights, skip movement logic but keep camera orbit/zoom controls.
     if (externalFollow_) {
         // Cancel any active intro/idle orbit so mouse panning works during taxi.
@@ -2786,19 +2815,6 @@ void CameraController::update(float deltaTime) {
         return;
     }
 
-    auto& input = core::Input::getInstance();
-
-    // Don't process keyboard input when UI text input (e.g. chat box) has focus.
-    // Both interfaces are asked: the flag below is ImGui's own and says nothing
-    // about a chat box FrameXML draws, so on its own it let the character walk
-    // away while someone was typing.
-    bool uiWantsKeyboard = ImGui::GetIO().WantTextInput ||
-                           ui::interfaceTakingTypedInput();
-
-    // Suppress movement input after teleport/portal (keys may still be held)
-    if (movementSuppressTimer_ > 0.0f) {
-        movementSuppressTimer_ -= deltaTime;
-    }
     bool movementSuppressed = movementSuppressTimer_ > 0.0f;
 
     // Determine current key states

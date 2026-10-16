@@ -102,9 +102,10 @@ public:
         return *this;
     }
 
-    [[nodiscard]] wowee::network::Packet packet() const {
+    [[nodiscard]] wowee::network::Packet packet(bool preWotlk = false) const {
         wowee::network::Packet p(wowee::game::wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
         p.writeUInt32(blocks_);
+        if (preWotlk) p.writeUInt8(0); // Vanilla/TBC hasTransport byte
         const auto& body = body_.getData();
         p.writeBytes(body.data(), body.size());
         return p;
@@ -140,6 +141,8 @@ private:
 // Keeps what the client sends instead of writing it anywhere.
 class SentPackets : public wowee::network::WorldSocket {
 public:
+    [[nodiscard]] bool isConnected() const override { return true; }
+    void update() override {} // Frame updates must not touch a real socket.
     void send(const wowee::network::Packet& packet) override { sent_.push_back(packet); }
 
     // Everything sent with this opcode, oldest first.

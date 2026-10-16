@@ -2625,6 +2625,8 @@ void Application::applyServerMovementState(float deltaTime) {
         }
     }
 
+    const bool serverDrivenPlayer = gameHandler && gameHandler->getMovementHandler() &&
+        gameHandler->getMovementHandler()->hasServerDrivenMovement();
     bool onTaxi = gameHandler &&
                   (gameHandler->isOnTaxiFlight() ||
                    gameHandler->isTaxiMountActive() ||
@@ -2679,7 +2681,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // A ship carries the player's reference frame, but it must not
     // freeze local controls like a taxi flight. On-deck walking is
     // folded into the transport-local offset in the sync block below.
-    const bool externallyDrivenMotion = onTaxi ||
+    const bool externallyDrivenMotion = onTaxi || serverDrivenPlayer ||
         (animationCallbacks_ && animationCallbacks_->isCharging());
     // Keep physics frozen (externalFollow) during landing clamp when terrain
     // hasn't loaded yet - prevents gravity from pulling player through void.
@@ -2691,8 +2693,14 @@ void Application::applyServerMovementState(float deltaTime) {
                               !gameHandler->isMounted();
     renderer->getCameraController()->setExternalFollow(
         externallyDrivenMotion || landingClampActive || hearthFreeze ||
-        transportTransferFreeze || deckFloorPending_);
-    renderer->getCameraController()->setExternalMoving(externallyDrivenMotion);
+        transportTransferFreeze || deckFloorPending_,
+        serverDrivenPlayer && !onTaxi && !landingClampActive && !hearthFreeze &&
+        !transportTransferFreeze && !deckFloorPending_ &&
+        !(animationCallbacks_ && animationCallbacks_->isCharging()) &&
+        gameHandler->getMovementHandler()->isServerMovementAllowed());
+    renderer->getCameraController()->setExternalMoving(
+        onTaxi || (animationCallbacks_ && animationCallbacks_->isCharging()) ||
+        (serverDrivenPlayer && gameHandler->getMovementHandler()->isServerDrivenMoving()));
     if (externallyDrivenMotion) {
         // Drop any stale local movement toggles while server drives taxi motion.
         renderer->getCameraController()->clearMovementInputs();
@@ -3003,6 +3011,15 @@ void Application::applyServerMovementState(float deltaTime) {
     } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
         // Warrior Charge: interpolation delegated to AnimationCallbackHandler
         animationCallbacks_->updateCharge(deltaTime);
+    } else if (serverDrivenPlayer) {
+        const auto& move = gameHandler->getMovementInfo();
+        const glm::vec3 renderPos = core::coords::canonicalToRender(
+            glm::vec3(move.x, move.y, move.z));
+        renderer->getCharacterPosition() = renderPos;
+        renderer->setCharacterYaw(core::coords::canonicalToCharacterYawDeg(move.orientation));
+        if (auto* camera = renderer->getCameraController()) {
+            if (auto* followTarget = camera->getFollowTargetMutable()) *followTarget = renderPos;
+        }
     } else {
         hasWMORideLock_ = false;
         lastWMORideTransportGuid_ = 0;
