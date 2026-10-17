@@ -393,6 +393,106 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     CAPTURE(errors);
     CHECK(errors.empty());
 }
+TEST_CASE("social policy buttons require server confirmation and preserve manual control",
+          "[replay][addon][playerbot]") {
+    Session s("tbc");
+    addPlayer(s);
+    std::dynamic_pointer_cast<wowee::game::Player>(
+        s.handler().getEntityManager().getEntity(Session::kPlayerGuid))->setName("Jizzle");
+    s.handler().setRealmIdentity("TBC - Home", "realm.example:8085", 1);
+    std::vector<std::string> errors;
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    lua->widgets().noteScreenSize(1920.0f, 1080.0f);
+    REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; GetServerTime=function() return 1000+testNow end; UnitCharacterPoints=function() return 0 end; WoweeSaveVariables=function() end; WoweeBotStatusSettings={}"));
+    const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "Inbox.lua", "NotesUI.lua", "WoweeBotStatus.lua"})
+        REQUIRE(lua->executeFile(root + file));
+    lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    s.handler().setAddonEventCallback([lua](const std::string& event, const auto& args) {
+        lua->fireEvent(event, args);
+    });
+    struct ClearCallback {
+        wowee::game::GameHandler& handler;
+        ~ClearCallback() { handler.setAddonEventCallback({}); }
+    } cleanup{s.handler()};
+    auto tick = [&] { lua->dispatchOnUpdate(0.25f); };
+    auto sent = [&](const std::string& command) {
+        size_t count = 0;
+        for (auto packet : s.sent().of(Opcode::CMSG_MESSAGECHAT)) {
+            packet.readUInt32(); packet.readUInt32();
+            if (packet.readString() == command) ++count;
+        }
+        return count;
+    };
+    auto policy = [&](const std::string& id, const std::string& result, bool enabled,
+                      const std::string& storage, const std::string& reason) {
+        s.receive(botChat("WIDLEPOL\t1\t0_" + id + "\t1\t" + result + "\t" +
+            (enabled ? "1" : "0") + "\t" + storage + "\t" + reason));
+    };
+    CHECK(lua->dispatchSlashCommand("/botpolicy", ""));
+    lua->widgets().layout(1920.0f, 1080.0f);
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Waiting for control confirmation'"));
+    CHECK(lua->evaluateBoolean("WoweeBotSocialToggle:IsEnabled() == 0"));
+    tick();
+    CHECK(sent(".bot idle 0_1 status") == 1);
+    s.receive(botChat("WIDLE\t1\t0_1\tok\tmanual\t1\t0\tnone"));
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: unavailable'"));
+    s.receive(botChat("WIDLECAP\t1\t0_1\t1\tactivity_1,social_1"));
+    tick();
+    CHECK(sent(".bot idle 0_2 social 1 status") == 1);
+    lua->fireEvent("CHAT_MSG_ADDON", {"WIDLEPOL", "1\t0_2\t1\tok\t1\tstored\tnone", "WHISPER", "SomeoneElse"});
+    CHECK_FALSE(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: On (server confirmed)'"));
+    policy("2", "ok", false, "stored", "none");
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: Off (server confirmed)'"));
+    CHECK(lua->evaluateBoolean("WoweeBotSocialToggle:IsEnabled() == 1"));
+    REQUIRE(lua->executeString("WoweeBotSocialToggle:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: waiting for confirmation'"));
+    CHECK(lua->evaluateBoolean("WoweeBotSocialToggle:IsEnabled() == 0"));
+    tick();
+    CHECK(sent(".bot idle 0_3 social 1 on") == 1);
+    policy("3", "error", false, "unavailable", "persistence_failed");
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: unconfirmed'"));
+    tick();
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'I am playing (server confirmed)'"));
+    CHECK(lua->dispatchSlashCommand("/botnotes", ""));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  1 blocked  |  0 notes'"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesRow1.title:GetText():find('Social Detours policy needs attention',1,true) ~= nil"));
+    REQUIRE(lua->executeString("WoweeBotSocialRefresh:GetScript('OnClick')()"));
+    tick();
+    CHECK(sent(".bot idle 0_4 social 1 status") == 1);
+    policy("4", "ok", false, "stored", "none");
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  1 notes'"));
+    // The policy driver continues even when the activity panel is closed.
+    REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide(); WoweeBotSocialToggle:GetScript('OnClick')()"));
+    tick();
+    CHECK(sent(".bot idle 0_5 social 1 on") == 1);
+    policy("5", "ok", true, "stored", "none");
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: On (server confirmed)'"));
+    REQUIRE(lua->executeString("WoweeBotSocialToggle:GetScript('OnClick')()"));
+    tick();
+    CHECK(sent(".bot idle 0_6 social 1 off") == 1);
+    for (auto packet : s.sent().of(Opcode::CMSG_MESSAGECHAT)) {
+        packet.readUInt32(); packet.readUInt32();
+        CHECK(packet.readString().find(" control ") == std::string::npos);
+    }
+    // An unconfirmed policy edit must never delay a request to change control.
+    CHECK(lua->dispatchSlashCommand("/botplay", "bot"));
+    tick();
+    CHECK(sent(".bot idle 0_7 control 1 bot") == 1);
+    policy("6", "ok", false, "stored", "none");
+    CHECK(lua->evaluateBoolean("WoweeBotSocialState:GetText() == 'Social Detours: asking the server'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Switching control...'"));
+    s.receive(botChat("WIDLE\t1\t0_7\tok\tbot\t2\t0\tnone"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Bot is playing (server confirmed)'"));
+    CAPTURE(errors);
+    CHECK(errors.empty());
+}
+
 TEST_CASE("bot notes use real realm identity and actual learned-spell events",
           "[replay][addon][playerbot]") {
     Session s("tbc");

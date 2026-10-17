@@ -48,7 +48,7 @@ local interaction = label('Interaction', 'GameFontHighlightSmall', 16, -186, 655
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
-local autoButton, playButton
+local autoButton, playButton, drawPolicy
 local grindReason = ''
 
 local function automatic()
@@ -113,6 +113,7 @@ end
 
 local function draw()
     local now = GetTime()
+    if drawPolicy then drawPolicy() end
     progress:SetText('')
     action:SetText('')
     control:SetText('')
@@ -244,6 +245,78 @@ shortcut('Skills', 304, function() if ToggleCharacter then ToggleCharacter('Skil
 shortcut('Spellbook', 400, function() if ToggleSpellBook then ToggleSpellBook(BOOKTYPE_SPELL or 'spell') end end)
 shortcut('Map', 496, function() if ToggleWorldMap then ToggleWorldMap() end end)
 
+local policies = CreateFrame('Frame', 'WoweeBotPoliciesFrame', UIParent)
+policies:SetSize(430, 230); policies:SetPoint('CENTER', UIParent, 'CENTER', 0, 0)
+policies:SetFrameStrata('DIALOG'); policies:EnableMouse(true)
+policies:SetBackdrop({bgFile='Interface\\Tooltips\\UI-Tooltip-Background',
+    edgeFile='Interface\\Tooltips\\UI-Tooltip-Border',tile=true,tileSize=16,edgeSize=16,
+    insets={left=4,right=4,top=4,bottom=4}})
+policies:SetBackdropColor(0.035,0.04,0.025,0.97)
+local function policyText(name, font, y, height)
+    local text = policies:CreateFontString(name,'OVERLAY',font)
+    text:SetPoint('TOPLEFT',policies,'TOPLEFT',18,y); text:SetSize(394,height)
+    text:SetJustifyH('LEFT'); text:SetJustifyV('TOP'); text:SetWordWrap(true)
+    return text
+end
+policyText(nil,'GameFontNormalLarge',-17,25):SetText('Hero policies')
+policyText(nil,'GameFontHighlightSmall',-52,46):SetText('Social Detours allows optional NPC visits, conversations, and idle activities. Quest and maintenance work remain available with it Off.')
+local policyState = policyText('WoweeBotSocialState','GameFontNormal',-108,22)
+local policyDetail = policyText('WoweeBotSocialDetail','GameFontHighlightSmall',-137,40)
+local function policyButton(name, title, x, y, width, callback)
+    local b = CreateFrame('Button',name,policies,'UIPanelButtonTemplate')
+    b:SetSize(width,23); b:SetPoint('TOPLEFT',policies,'TOPLEFT',x,y)
+    b:SetText(title); b:SetScript('OnClick',callback); return b
+end
+policyButton(nil,'x',394,-12,22,function() policies:Hide() end)
+local policyToggle = policyButton('WoweeBotSocialToggle','Waiting...',18,-188,245,function()
+    local now = GetTime()
+    if inWorld and controller:fresh(now) and controller:socialFresh(now) and not controller.intent and not controller.failure then
+        controller:wantSocial(not controller.socialEnabled)
+        drawPolicy()
+    end
+end)
+policyButton('WoweeBotSocialRefresh','Refresh',278,-188,130,function()
+    controller:refreshSocial()
+    if not controller:fresh(GetTime()) or controller.failure then controller:refresh() end
+    drawPolicy()
+end)
+drawPolicy = function()
+    if not policies:IsShown() then return end
+    local now = GetTime()
+    local fresh = controller:socialFresh(now)
+    local pending = controller.socialIntent ~= nil or (controller.pending and controller.pending.verb == 'social')
+    policyToggle:Disable()
+    if not inWorld then
+        policyState:SetText('Log into a character to change policies')
+        policyDetail:SetText('Policies do not enable bot control.')
+    elseif not controller:fresh(now) or controller.failure then
+        policyState:SetText('Waiting for control confirmation')
+        policyDetail:SetText('Refresh to query the server. This does not enable AI.')
+    elseif not controller.socialSupported then
+        policyState:SetText('Social Detours: unavailable')
+        policyDetail:SetText('This server has not advertised Social Detours controls.')
+    elseif pending then
+        policyState:SetText('Social Detours: waiting for confirmation')
+        policyDetail:SetText('The server confirms and saves this preference.')
+    elseif controller.socialFailure then
+        policyState:SetText('Social Detours: unconfirmed')
+        policyDetail:SetText(controller.socialFailure .. '. Refresh to retry.')
+    elseif fresh then
+        policyState:SetText('Social Detours: ' .. (controller.socialEnabled and 'On' or 'Off') .. ' (server confirmed)')
+        policyDetail:SetText('Saved for this character. Changing it does not switch manual / bot control.')
+        if not controller.intent then policyToggle:Enable() end
+    else
+        policyState:SetText('Social Detours: asking the server')
+        policyDetail:SetText('No current policy confirmation. Default behavior on the patched server is Off.')
+    end
+    policyToggle:SetText(pending and 'Waiting...' or fresh and
+        (controller.socialEnabled and 'Disable social detours' or 'Allow social detours') or 'Awaiting confirmed policy')
+end
+local policyLauncher = CreateFrame('Button','WoweeBotPoliciesLauncher',panel,'UIPanelButtonTemplate')
+policyLauncher:SetSize(80,21); policyLauncher:SetPoint('BOTTOMLEFT',panel,'BOTTOMLEFT',592,8)
+policyLauncher:SetText('Policies'); policyLauncher:SetScript('OnClick',function() policies:Show(); drawPolicy() end)
+policies:Hide()
+
 panel:SetScript('OnDragStart', function(self) self:StartMoving() end)
 panel:SetScript('OnDragStop', function(self)
     self:StopMovingOrSizing()
@@ -276,6 +349,7 @@ driver:SetScript('OnUpdate', function()
         if WoweeBotReportStatusProblem then
             if controller.failure then WoweeBotReportStatusProblem('control', controller.failure) end
             if controller:isBot(now) and activity.failure then WoweeBotReportStatusProblem('activity', activity.failure) end
+            if controller.socialFailure then WoweeBotReportStatusProblem('social', controller.socialFailure) end
         end
     end
     if now >= nextDraw then draw(); nextDraw = now + 0.25 end
@@ -302,17 +376,21 @@ driver:SetScript('OnEvent', function(self, event, ...)
         local now, player = GetTime(), UnitName('player')
         local previousMode = controller.mode
         local received = controller:receive(prefix, text, sender, player, now)
-        if received and WoweeBotReportStatusProblem and not controller.failure then
+        if received and prefix == 'WIDLE' and WoweeBotReportStatusProblem and not controller.failure then
             WoweeBotReportStatusProblem('control', nil)
             if controller.mode == 'manual' then
                 WoweeBotReportStatusProblem('activity', nil, 'Activity queries are paused while you play manually.')
             end
+        end
+        if received and prefix == 'WIDLEPOL' and not controller.socialFailure and WoweeBotReportStatusProblem then
+            WoweeBotReportStatusProblem('social', nil, 'Social Detours preference confirmed by the server.')
         end
         if received and previousMode ~= controller.mode then
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
+        controller:capability(prefix, text, sender, player)
         if activity:capability(prefix, text, sender, player, controller) and not supported then nextPoll = 0 end
         local snapshot, activityReply = activity:receive(prefix, text, sender, player, controller.generation, now)
         if activityReply then
@@ -348,4 +426,6 @@ SlashCmdList.WOWEEBOTPLAY = function(command)
     if mode == 'manual' or mode == 'bot' then controller:want(mode); draw()
     else WoweeBotToggleControl() end
 end
+SLASH_WOWEEBOTPOLICY1 = '/botpolicy'
+SlashCmdList.WOWEEBOTPOLICY = function() policies:Show(); drawPolicy() end
 draw()
