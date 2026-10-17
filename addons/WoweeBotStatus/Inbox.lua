@@ -76,6 +76,57 @@ local function coins(value)
     return math.floor(value/10000) .. 'g ' .. math.floor(value/100)%100 .. 's ' .. value%100 .. 'c'
 end
 
+-- These are observed aggregate planner decisions, not individual trainer
+-- quotes. They inform the player without blocking other automatic work.
+function Inbox:trainingPlan(snapshot, now)
+    if type(snapshot) ~= 'table' or snapshot.status ~= 'ok' then return false end
+    local names={[0]='Class',[1]='Mount',[2]='Profession and secondary',[3]='Pet'}
+    local changed,present=false,{}
+    for _,row in ipairs(snapshot.rows) do
+        local key='training-plan:' .. row.type
+        present[key]=true
+        local previous=self:find(key)
+        do
+            if row.state~='none' or previous then
+                local title,text
+                if row.state=='none' then
+                    title='Training plan cleared: ' .. names[row.type]
+                    text='The automatic planner last found no remaining lessons in its current list. This is not confirmation that every possible lesson has been learned.'
+                else
+                    local cached=row.state=='cached_eligible' or row.state=='cached_deferred'
+                    title=(cached and 'Training planner awaiting recheck: ' or row.state=='deferred' and 'Training trip deferred: ' or 'Training budget check passed: ') .. names[row.type]
+                    text='Last automatic planner check for ' .. names[row.type]:lower() .. ' training.\n' ..
+                        'Combined lesson estimate before trainer discounts: ' .. coins(row.estimate) .. '.\n' ..
+                        'Wallet at that check: ' .. coins(row.money) .. '.\n' ..
+                        'Required by the planner budget gate: ' .. coins(row.required) .. '.'
+                    if row.reservations==1 then text=text .. '\nThis gate includes money reserved for earlier priorities.'
+                    else text=text .. '\nThis gate excludes earlier budget reservations.' end
+                    if cached then
+                        text=text .. '\nThe planner returned a cached ' .. (row.state=='cached_eligible' and 'allowed' or 'deferred') ..
+                            ' decision that differs from the current funds check. Its normal budget refresh is pending.'
+                    elseif row.state=='deferred' then
+                        text=text .. '\nMissing for this combined gate: ' .. coins(row.required-row.money) ..
+                            '. The planner skipped this trip; other activities can continue.'
+                    elseif row.cheat==1 then text=text .. '\nThe server gold-cheat policy bypassed this budget gate.'
+                    else text=text .. '\nThe budget gate permits a trip. A destination or purchase has not been confirmed.' end
+                    text=text .. '\nThis is a combined planning check, not a discounted price or shortfall for a specific lesson.'
+                end
+                changed=self:put(key,'note',title,text,now,'spellbook') or changed
+                local entry=self:find(key)
+                entry.planObserved,entry.planCurrent=row.observed,true
+            end
+        end
+    end
+    for _,entry in ipairs(self.data.entries) do
+        if entry.key:match('^training%-plan:%d+$') and entry.planCurrent and not present[entry.key] then
+            changed=self:put(entry.key,'note','Earlier automatic training plan',
+                'The server has no retained planner check for this category in this session. This earlier observation has not been rechecked.\n' .. entry.text,now,'spellbook') or changed
+            entry.planCurrent=false
+        end
+    end
+    return changed
+end
+
 -- A complete, authenticated server snapshot updates one durable option. These
 -- observations are advisory; they never purchase training or change control.
 function Inbox:training(snapshot, now)

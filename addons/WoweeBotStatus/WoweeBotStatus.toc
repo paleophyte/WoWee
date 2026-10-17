@@ -11,6 +11,7 @@ Activity.lua
 History.lua
 HistoryUI.lua
 Training.lua
+TrainingPlan.lua
 Inbox.lua
 NotesUI.lua
 WoweeBotStatus.lua

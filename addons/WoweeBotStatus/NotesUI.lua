@@ -183,6 +183,10 @@ function WoweeBotReportCollectionWarning(fact)
     if online and inbox and inbox:collectionWarning(fact, now()) then save(); render() end
 end
 
+function WoweeBotReportTrainingPlan(snapshot)
+    if online and inbox and inbox:trainingPlan(snapshot, now()) then save(); render() end
+end
+
 function WoweeBotReportTraining(snapshot)
     if online and inbox and inbox:training(snapshot, now()) then save(); render() end
 end
