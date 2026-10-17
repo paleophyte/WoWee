@@ -7,5 +7,6 @@
 Status.lua
 Grind.lua
 Control.lua
+Activity.lua
 WoweeBotStatus.lua
 Bindings.xml

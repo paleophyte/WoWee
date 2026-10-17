@@ -1,0 +1,124 @@
+-- Versioned, bounded snapshots. A complete reply replaces the whole activity;
+-- individual fragments never update the displayed goal or grind policy.
+WoweeBotActivity = {}
+local Activity = WoweeBotActivity
+Activity.__index = Activity
+
+function Activity.new(nonce)
+    return setmetatable({nonce = nonce or tostring(math.floor(GetTime() * 1000)), sequence = 0}, Activity)
+end
+
+local function integer(text, minimum, maximum)
+    if not text or not text:match('^%-?%d+$') then return end
+    local n = tonumber(text)
+    if n and n >= minimum and n <= maximum then return n end
+end
+
+local function unhex(text)
+    if text == '-' then return '' end
+    if not text or #text > 192 or #text % 2 ~= 0 or text:find('[^0-9a-f]') then return end
+    local value = text:gsub('..', function(pair) return string.char(tonumber(pair, 16)) end)
+    if value:find('[%z\1-\31\127]') then return end
+    return value
+end
+
+function Activity:capability(prefix, text, sender, player, control)
+    if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
+        type(text) ~= 'string' or #text > 120 then return false end
+    local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
+    if not id or id ~= control.ackId or tonumber(generation) ~= control.generation then return false end
+    if not (',' .. features .. ','):find(',activity_1,', 1, true) then return false end
+    self.supported = true
+    return true
+end
+
+function Activity:request(generation, now)
+    self.sequence = self.sequence + 1
+    local id = self.nonce .. '_a' .. self.sequence
+    self.pending = {id = id, generation = generation, sentAt = now, parts = {}}
+    self.failure = nil
+    return '.bot idle ' .. id .. ' snapshot ' .. generation
+end
+
+function Activity:expire(now, generation)
+    if self.pending and (now - self.pending.sentAt > 4 or self.pending.generation ~= generation) then
+        self.pending, self.failure = nil, 'Activity reply incomplete or missing'
+        return true
+    end
+end
+
+local states = {off=true, manual=true, combat=true, non_combat=true, dead=true, reaction=true, unknown=true}
+local kinds = {none=true, quest_offer=true, quest_turnin=true, quest_objective=true,
+    trainer=true, vendor=true, repair=true, social=true, other=true}
+local statuses = {none=true, preparing=true, ready=true, traveling=true, working=true, cooldown=true, expired=true}
+local objectives = {none=true, kill=true, creature_loot=true, object_loot=true, vendor_item=true, spell=true, interact=true}
+local interactions = {none=true, npc=true, object=true, player=true}
+
+function Activity.decode(body)
+    local f = {}
+    for field in (body .. '\t'):gmatch('(.-)\t') do f[#f+1] = field end
+    if #f ~= 19 or (f[1] ~= 'manual' and f[1] ~= 'bot') or not states[f[2]] or
+        not kinds[f[3]] or not statuses[f[4]] or not objectives[f[7]] or not interactions[f[13]] then return end
+    local s = {mode=f[1], state=f[2], kind=f[3], status=f[4], objectiveType=f[7], interactionType=f[13]}
+    s.questId = integer(f[5], 0, 4294967295)
+    s.objective = integer(f[6], -1, 3)
+    s.entry = integer(f[8], -2147483648, 2147483647)
+    s.distance = integer(f[9], -1, 20000000)
+    s.interactionEntry = integer(f[14], 0, 4294967295)
+    s.moveRetries, s.workRetries = integer(f[18], 0, 4294967295), integer(f[19], 0, 4294967295)
+    s.goal, s.questTitle, s.location = unhex(f[10]), unhex(f[11]), unhex(f[12])
+    s.interactionName, s.task, s.executed = unhex(f[15]), unhex(f[16]), unhex(f[17])
+    if not s.questId or not s.objective or not s.entry or not s.distance or not s.interactionEntry or
+        not s.moveRetries or not s.workRetries or not s.goal or not s.questTitle or not s.location or
+        not s.interactionName or not s.task or not s.executed then return end
+    if s.kind:match('^quest_') and s.questId == 0 then return end
+    if s.kind == 'quest_objective' and s.objective < 0 then return end
+    if s.mode == 'bot' and (s.state == 'manual' or s.state == 'off') then return end
+    return s
+end
+
+function Activity:receive(prefix, text, sender, player, generation, now)
+    local p = self.pending
+    if prefix ~= 'WIDLEACT' or not p or not WoweeBotStatus.samePlayer(sender, player) or
+        type(text) ~= 'string' or #text > 240 or now - p.sentAt > 4 or generation ~= p.generation then return end
+    local id, epoch, reason = text:match('^1\t([%w_-]+)\t(%d+)\terror\t([%w_]+)$')
+    if id == p.id and tonumber(epoch) and tonumber(epoch) >= generation then
+        self.pending, self.failure = nil, 'Activity unavailable: ' .. reason
+        return nil, true
+    end
+    local part, count, chunk
+    id, epoch, part, count, chunk = text:match('^1\t([%w_-]+)\t(%d+)\t(%d+)\t(%d+)\t(.*)$')
+    part, count = integer(part, 1, 12), integer(count, 1, 12)
+    if id ~= p.id or tonumber(epoch) ~= generation or not part or not count or part > count or
+        not chunk or #chunk > 160 then return end
+    if (p.count and p.count ~= count) or (p.parts[part] and p.parts[part] ~= chunk) then
+        self.pending, self.failure = nil, 'Conflicting activity fragments'
+        return nil, true
+    end
+    p.count, p.parts[part] = count, chunk
+    for i = 1, count do if not p.parts[i] then return end end
+    local snapshot = Activity.decode(table.concat(p.parts))
+    self.pending = nil
+    if not snapshot then self.failure = 'Invalid activity reply'; return nil, true end
+    self.failure = nil
+    return snapshot, true
+end
+
+local goalVerbs = {trainer='Train at ', vendor='Sell items to ', repair='Repair at ', social='Social visit: '}
+function Activity.apply(model, s, now)
+    model.typed, model.aiState, model.objectiveType = true, s.state, s.objectiveType
+    model.kind = s.kind == 'quest_objective' and 'questobjective' or s.kind
+    model.goal = (goalVerbs[s.kind] or '') .. (s.goal ~= '' and s.goal or 'No destination')
+    model.status, model.distance = s.status, s.distance >= 0 and s.distance or nil
+    model.location = s.location ~= '' and s.location or nil
+    model.questId = s.questId > 0 and s.questId or nil
+    model.questTitle = s.questTitle ~= '' and s.questTitle or nil
+    model.questAt, model.travelAt, model.unsupported = now, now, nil
+    model.objectiveEntry = s.entry
+    model.interactionName = s.interactionName ~= '' and s.interactionName or nil
+    model.interactionType = s.interactionType
+    model.interactionTask = s.task ~= '' and s.task or nil
+    model.moveRetries, model.workRetries = s.moveRetries, s.workRetries
+    model.action, model.actionAt = s.executed ~= '' and s.executed or nil, now
+    model.report, model.reportAt, model.actionDeadline = nil, nil, nil
+end

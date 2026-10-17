@@ -123,6 +123,12 @@ function Status:grindDecision(now, quest)
         if not id or not quest then return nil, 'waiting for quest details' end
         if quest.complete then return false, 'quest ready to turn in' end
         if quest.failed then return false, 'quest failed' end
+        if self.typed then
+            if self.objectiveType ~= 'kill' and self.objectiveType ~= 'creature_loot' then
+                return false, 'non-combat objective'
+            end
+            return self.status == 'working', self.status == 'working' and 'quest objective' or 'travelling to objective'
+        end
         local kill = self.goal and self.goal:match('^kill ')
         local mobLoot = self.goal and self.goal:match('^loot ') and
             self.objectiveEntry and self.objectiveEntry > 0

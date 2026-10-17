@@ -254,10 +254,11 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua"})
         REQUIRE(lua->executeFile(root + file));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_control.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_activity.lua"));
     REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");
@@ -361,6 +362,31 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     tick();
     CHECK(lastCommand() == ".bot idle 0_9 status");
     CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+    ack("9", "bot", 3, false);
+    s.receive(botChat("WIDLECAP\t1\t0_9\t3\tactivity_1"));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_a1 snapshot 3");
+    auto hex = [](const std::string& text) {
+        std::string out;
+        for (unsigned char c : text) { out += "0123456789abcdef"[c >> 4]; out += "0123456789abcdef"[c & 15]; }
+        return out.empty() ? std::string("-") : out;
+    };
+    const std::string body = "bot\tnon_combat\tquest_turnin\tworking\t33\t-1\tnone\t196\t3\t" +
+        hex("Eagan Peltskinner") + "\t" + hex("Wolves Across the Border") + "\t" + hex("Northshire Abbey") +
+        "\tnpc\t789\t" + hex("Dane Winslow") + "\t" + hex("rpg ai chat") + "\t" + hex("rpg ai chat") + "\t0\t1";
+    const auto fragments = (body.size() + 159) / 160;
+    for (size_t i = 0; i < fragments; ++i) {
+        s.receive(botChat("WIDLEACT\t1\t0_a1\t3\t" + std::to_string(i + 1) + "\t" +
+            std::to_string(fragments) + "\t" + body.substr(i * 160, 160)));
+        if (i + 1 < fragments)
+            CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+    }
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('Eagan Peltskinner',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText():find('Dane Winslow',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last successful action: rpg ai chat'"));
+    s.receive(botChat("rpg travel target\nTarget: train at Someone Else\nDistance 1y\nStatus: working"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
     CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
     CAPTURE(errors);
     CHECK(errors.empty());

@@ -1,9 +1,10 @@
 local Status = WoweeBotStatus
 local model = Status.new()
 local controller = WoweeBotControl.new()
+local activity = WoweeBotActivity.new()
 local driver = CreateFrame('Frame', 'WoweeBotController', UIParent)
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
-panel:SetSize(690, 210)
+panel:SetSize(690, 234)
 panel:SetPoint('BOTTOM', UIParent, 'BOTTOM', 0, 138)
 panel:SetFrameStrata('MEDIUM')
 panel:SetMovable(true)
@@ -43,6 +44,7 @@ action:SetTextColor(0.65, 0.7, 0.7)
 local control = label('Control', 'GameFontHighlightSmall', 16, -162, 655)
 control:SetTextColor(0.72, 0.8, 0.62)
 local modeLabel = label('Mode', 'GameFontHighlight', 16, -138, 500)
+local interaction = label('Interaction', 'GameFontHighlightSmall', 16, -186, 655)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
@@ -66,8 +68,13 @@ local function request()
     if not inWorld or not controller:isBot(now) or now - lastRequest < 2 then return end
     local player = UnitName('player')
     if not player or player == '' or player == 'Unknown' then return end
+    if activity.supported and activity.pending then return end
     lastRequest, nextPoll = now, now + 8
     model:request(now)
+    if activity.supported then
+        SendChatMessage(activity:request(controller.generation, now), 'SAY')
+        return
+    end
     SendAddonMessage('BOT', 'debug traveldetail', 'WHISPER', player)
     SendAddonMessage('BOT', 'debug action', 'WHISPER', player)
     -- Playerbots may send the human-readable where report to the whole party
@@ -109,6 +116,7 @@ local function draw()
     progress:SetText('')
     action:SetText('')
     control:SetText('')
+    interaction:SetText('')
     modeLabel:SetText(controller:label(now))
     if playButton then
         playButton:SetText(controller.failure and 'Retry control' or controller.intent and 'Switching...' or
@@ -140,7 +148,9 @@ local function draw()
     if not model:isFresh(now) then
         freshness:SetText(model.travelAt and ('Last update ' .. math.floor(now - model.travelAt) .. 's ago') or '')
         goal:SetText(model.unsupported and 'Bot status unavailable' or 'Waiting for bot status')
-        if model.unsupported then
+        if activity.failure then
+            details:SetText(activity.failure .. '. Retrying the activity query...')
+        elseif model.unsupported then
             details:SetText('This server does not expose Playerbots status queries.')
         elseif model.firstRequestAt and now - model.firstRequestAt > 4 then
             details:SetText('No current status received. Player AI may be off.')
@@ -153,9 +163,19 @@ local function draw()
     local questId, questTitle = model:currentQuest(now)
     goal:SetText(questTitle and ('Quest: ' .. questTitle) or ('Goal: ' .. (model.goal or 'No destination')))
     local parts = {model.status or (model.kind == 'idle' and 'Idle' or 'No travel status reported')}
+    if model.typed then
+        parts[1] = (model.aiState or 'unknown'):gsub('_', ' ') .. ' - ' .. parts[1]
+        if questTitle then parts[#parts + 1] = 'Destination: ' .. model.goal end
+    end
     if model.distance and model.kind ~= 'idle' then parts[#parts + 1] = model.distance .. ' yd' end
     if model.location then parts[#parts + 1] = Status.clean(model.location) end
     details:SetText(table.concat(parts, '  -  '))
+    if model.typed and model.interactionName then
+        interaction:SetText('Interaction target: ' .. model.interactionName ..
+            (model.interactionTask and (' - selected task: ' .. model.interactionTask) or ''))
+    elseif model.typed then
+        interaction:SetText('No NPC interaction selected')
+    end
     local objective = questProgress(questId)
     if objective == '' and model.kind and model.kind:find('quest', 1, true) and not questId then
         objective = grouped() and 'Quest name unavailable while grouped; showing the destination.' or
@@ -169,7 +189,7 @@ local function draw()
     end
     progress:SetText(objective)
     if model.actionAt and now - model.actionAt <= Status.STALE_AFTER then
-        action:SetText('Last action: ' .. model.action)
+        action:SetText((model.typed and 'Last successful action: ' or 'Last action: ') .. model.action)
     end
 end
 
@@ -182,7 +202,10 @@ local function button(text, width, x, callback, name)
     return b
 end
 button('Quest log', 78, -102, function() if ToggleQuestLog then ToggleQuestLog() end end)
-button('Refresh', 65, -32, function() model.disabled = nil; controller:refresh(); nextPoll = 0; draw() end)
+button('Refresh', 65, -32, function()
+    model.disabled = nil; activity.pending, activity.failure = nil, nil
+    controller:refresh(); nextPoll = 0; draw()
+end)
 button('x', 20, -9, function() panel:Hide() end)
 autoButton = button('Auto grind: On', 115, -185, function()
     settings.autoGrind = not automatic()
@@ -240,6 +263,7 @@ end)
 driver:SetScript('OnUpdate', function()
     local now = GetTime()
     if inWorld then
+        if activity:expire(now, controller.generation) and activity.supported then model.travelAt = nil end
         local desired, reason
         if automatic() and controller:isBot(now) and not grouped() then
             desired, reason = model:grindDecision(now, questState(model:currentQuest(now)))
@@ -266,9 +290,9 @@ driver:SetScript('OnEvent', function(self, event, ...)
         end
         if settings.enabled == false then panel:Hide() end
     elseif event == 'PLAYER_ENTERING_WORLD' then
-        model, controller, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), true, 0
+        model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
     elseif event == 'PLAYER_LEAVING_WORLD' then
-        model, controller, inWorld = Status.new(), WoweeBotControl.new(), false
+        model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
         local now, player = GetTime(), UnitName('player')
@@ -276,8 +300,19 @@ driver:SetScript('OnEvent', function(self, event, ...)
         local received = controller:receive(prefix, text, sender, player, now)
         if received and previousMode ~= controller.mode then
             model, nextPoll, lastRequest = Status.new(), 0, -100
+            activity.pending = nil
         end
-        if model:receive(prefix, text, sender, player, now) or received then draw() end
+        local supported = activity.supported
+        if activity:capability(prefix, text, sender, player, controller) and not supported then nextPoll = 0 end
+        local snapshot, activityReply = activity:receive(prefix, text, sender, player, controller.generation, now)
+        if activityReply then
+            if snapshot and controller:isBot(now) and snapshot.mode == 'bot' then
+                WoweeBotActivity.apply(model, snapshot, now)
+            else model.travelAt = nil end
+        end
+        -- Once typed activity is available, unsolicited legacy chat must not
+        -- overwrite it or supply grind intent from an unrelated old request.
+        if (not activity.supported and model:receive(prefix, text, sender, player, now)) or received or activityReply then draw() end
     elseif event == 'CHAT_MSG_SYSTEM' then
         local text = ...
         if text and text:find('Enable player ai', 1, true) then

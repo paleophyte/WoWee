@@ -75,6 +75,7 @@ function Control:receive(prefix, text, sender, player, now)
         not generation or generation < 1 or generation > 4294967295 or
         (self.generation and generation < self.generation) then return false end
     self.mode, self.generation, self.grind = mode, generation, grind == '1'
+    self.ackId = id
     self.confirmedAt, self.nextStatus, self.pending = now, now + 8, nil
     if result == 'error' then self.failure = 'Server rejected command: ' .. reason
     elseif self.intent == mode then self.intent = nil end
