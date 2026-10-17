@@ -173,6 +173,12 @@ function WoweeBotReportStatusProblem(key, message, resolution)
     if changed then save(); render() end
 end
 
+-- Called only after the controller validates the server capability, sender,
+-- acknowledgement ID, generation and freshness. No game actions run here.
+function WoweeBotReportFishingWarning(fact)
+    if online and inbox and inbox:fishingWarning(fact, now()) then save(); render() end
+end
+
 driver:SetScript('OnEvent', function(self, event, ...)
     if event == 'ADDON_LOADED' then
         if (...) ~= 'WoweeBotStatus' then return end

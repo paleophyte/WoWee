@@ -134,3 +134,31 @@ if WoweeBotNotesDriver then
     if not old.shown then WoweeBotNotesFrame:Hide() end
     print('Real Notes UI error-event and action scenarios passed')
 end
+
+local warningRoot = {}
+local wi = Inbox.new(warningRoot,'warning-realm','Jizzle')
+local fact = {at=1000,sequence=1,reason=1,untilAt=1300}
+assert(wi:fishingWarning(fact,1001))
+assert(wi:counts().note==1 and wi:counts().blocked==0)
+local first = wi:visible()[1]
+assert(first.title=='Fishing retry limit reached' and first.action=='botstatus')
+assert(first.text:find('cast action failed',1,true) and not first.text:find('missing reagent',1,true))
+assert(not wi:fishingWarning(fact,1002))
+assert(wi:dismiss(first.key))
+wi = Inbox.new(warningRoot,'warning-realm','Jizzle')
+assert(not wi:fishingWarning(fact,1500)) -- persisted dismissal and fact high-water mark
+for i=1,110 do wi:put('later:'..i,'note','Later','Later',1600+i) end
+assert(not wi:find(first.key) and not wi:fishingWarning(fact,1800)) -- trimmed fact doesn't reappear
+for reason=2,4 do
+    assert(wi:fishingWarning({at=2000+reason,sequence=reason,reason=reason,untilAt=2300+reason},2000+reason))
+end
+assert(wi:visible()[1].text:find('could not be equipped',1,true))
+assert(not wi:fishingWarning({at=3000,sequence=9,reason=5,untilAt=3300},3000))
+assert(not wi:fishingWarning({at=3000.5,sequence=9,reason=1,untilAt=3300.5},3000))
+assert(not wi:fishingWarning({at=3000,sequence=9,reason=1,untilAt=3301},3000))
+assert(not wi:fishingWarning({},3000))
+assert(wi:fishingWarning({at=4000,sequence=1,reason=2,untilAt=4300},4001)) -- new AI resets its sequence
+assert(not wi:fishingWarning({at=2004,sequence=4,reason=4,untilAt=2304},4002)) -- historical replay
+assert(Inbox.new(warningRoot,'other-realm','Jizzle'):fishingWarning(fact,1001))
+assert(Inbox.new(warningRoot,'warning-realm','Other'):fishingWarning(fact,1001))
+print('Durable fishing warning Notes scenarios passed')

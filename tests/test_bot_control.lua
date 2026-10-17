@@ -177,3 +177,35 @@ for cycle = 1, 5 do
     now = b.recoverAt
 end
 print('Read-only control recovery scenarios passed')
+
+-- Correlated server warning facts are read-only and accepted in manual mode.
+local w = Control.new('warn')
+assert(w:update(0) == '.bot idle warn_1 status')
+assert(w:receive('WIDLE','1\twarn_1\tok\tmanual\t7\t0\tnone','Jizzle','Jizzle',0))
+local warning = '1\twarn_1\t7\t1000\t1\t1\t1300'
+assert(not w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',1)) -- capability required
+assert(w:capability('WIDLECAP','1\twarn_1\t7\tactivity_1,warning_1','Jizzle','Jizzle'))
+local fact = assert(w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',1))
+assert(fact.at==1000 and fact.sequence==1 and fact.reason==1 and fact.untilAt==1300)
+assert(w.mode=='manual' and not w.intent and not w.pending)
+assert(not w:warning('WIDLEWARN',warning,'Other','Jizzle',1))
+assert(not w:warning('OTHER',warning,'Jizzle','Jizzle',1))
+assert(not w:warning('WIDLEWARN',warning:gsub('warn_1','warn_0'),'Jizzle','Jizzle',1))
+assert(not w:warning('WIDLEWARN',warning:gsub('\t7\t','\t6\t'),'Jizzle','Jizzle',1))
+for _, bad in ipairs({'1\twarn_1\t7\t1000\t1\t0\t1300','1\twarn_1\t7\t1000\t1\t5\t1300',
+    '1\twarn_1\t7\t1000\t0\t1\t1300','1\twarn_1\t7\t0\t1\t1\t300',
+    '1\twarn_1\t7\t1000\t1\t1\t1301','1\twarn_1\t7\t1000\t4294967296\t1\t1300',
+    warning..'\textra', warning..'\n', string.rep('x',181)}) do
+    assert(not w:warning('WIDLEWARN',bad,'Jizzle','Jizzle',1))
+end
+assert(not w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',26)) -- stale
+w:want('bot')
+assert(not w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',1))
+assert(w:update(1)=='.bot idle warn_2 control 7 bot')
+assert(not w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',1))
+assert(w:receive('WIDLE','1\twarn_2\tok\tbot\t8\t0\tnone','Jizzle','Jizzle',2))
+assert(not w:warning('WIDLEWARN',warning,'Jizzle','Jizzle',2))
+assert(w:capability('WIDLECAP','1\twarn_2\t8\tactivity_1','Jizzle','Jizzle'))
+assert(not w.warningSupported)
+assert(not w:warning('WIDLEWARN','1\twarn_2\t8\t1000\t1\t1\t1300','Jizzle','Jizzle',2))
+print('Correlated fishing warning scenarios passed')

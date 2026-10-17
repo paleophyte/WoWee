@@ -138,6 +138,32 @@ function Inbox:observeError(message, clock, now, generation)
         now, 'botstatus')
 end
 
+-- Server observations, separate from client red error-message heuristics.
+local fishingReasons = {'the fishing cast action failed',
+    'an accepted cast did not start a fishing channel',
+    'no fishing pole was found when the action executed',
+    'the fishing pole could not be equipped'}
+function Inbox:fishingWarning(fact, now)
+    if type(fact) ~= 'table' or type(now) ~= 'number' then return false end
+    for _, key in ipairs({'at', 'sequence', 'reason', 'untilAt'}) do
+        if type(fact[key]) ~= 'number' or fact[key] ~= math.floor(fact[key]) then return false end
+    end
+    local reason = fishingReasons[fact.reason]
+    if not reason or fact.at < 1 or fact.at > 4294966995 or fact.sequence < 1 or
+        fact.sequence > 4294967295 or fact.untilAt ~= fact.at + 300 then return false end
+    local last = self.data.lastFishingWarning
+    if type(last) == 'table' and type(last.at) == 'number' and type(last.sequence) == 'number' and
+        (fact.at < last.at or (fact.at == last.at and fact.sequence <= last.sequence)) then return false end
+    -- Persist the high-water mark too: retained status must not reappear after
+    -- a dismissed entry eventually leaves the bounded note history.
+    self.data.lastFishingWarning = {at = fact.at, sequence = fact.sequence}
+    return self:put('fishing-warning:' .. fact.at .. ':' .. fact.sequence, 'note',
+        'Fishing retry limit reached',
+        'The server paused fishing for five minutes after 3 failed attempts. Last recorded failure: ' ..
+        reason .. '. Other bot activities and manual control remain available. ' ..
+        'This is a record of that pause; it may already have ended.', now, 'botstatus')
+end
+
 function Inbox:visible()
     local result = {}
     for _, e in ipairs(self.data.entries) do if not e.dismissed then result[#result + 1] = e end end

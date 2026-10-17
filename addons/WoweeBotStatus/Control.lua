@@ -134,9 +134,26 @@ function Control:capability(prefix, text, sender, player)
         type(text) ~= 'string' or #text > 120 then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id or id ~= self.ackId or tonumber(generation) ~= self.generation then return false end
+    self.warningSupported = (',' .. features .. ','):find(',warning_1,', 1, true) ~= nil
     self.socialSupported = (',' .. features .. ','):find(',social_1,', 1, true) ~= nil
     if not self.socialSupported then self.socialAt, self.socialIntent, self.socialFailure = nil, nil, nil end
     return true
+end
+
+-- Read-only historical warning facts share the last acknowledged request/epoch.
+-- They may arrive in manual mode; they never request a control change.
+function Control:warning(prefix, text, sender, player, now)
+    if prefix ~= 'WIDLEWARN' or not self.warningSupported or not self:fresh(now) or
+        self.failure or self.intent or (self.pending and self.pending.verb == 'control') or
+        not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 180 then return end
+    local id, generation, at, sequence, reason, untilAt =
+        text:match('^1\t([%w_-]+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)$')
+    generation, at, sequence, reason, untilAt = tonumber(generation), tonumber(at),
+        tonumber(sequence), tonumber(reason), tonumber(untilAt)
+    if not id or id ~= self.ackId or generation ~= self.generation or not at or
+        at < 1 or at > 4294966995 or sequence < 1 or sequence > 4294967295 or
+        reason < 1 or reason > 4 or untilAt ~= at + 300 then return end
+    return {at = at, sequence = sequence, reason = reason, untilAt = untilAt}
 end
 
 function Control:socialFresh(now)

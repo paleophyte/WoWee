@@ -457,6 +457,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_activity.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_inbox.lua"));
     REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_warning_ui.lua"));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");
     lua->widgets().layout(1920.0f, 1080.0f);
