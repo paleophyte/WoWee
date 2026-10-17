@@ -298,27 +298,29 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
     return 1;
 }
 
-// ── The 1.12 buff API ───────────────────────────────────────────────────────
+// ── Legacy player-buff APIs ────────────────────────────────────────────────
 //
 // A vanilla interface does not call UnitBuff. It asks for a *slot* and then
 // asks that slot four more questions, which is a different shape: UnitBuff
 // answers a name and counts into a filtered list, and these answer an opaque
 // number the caller hands straight back to the rest of them.
 //
-// buffframe.lua walks slots upward until it is told there is nothing there,
-// and the terminator is -1 rather than nil. Unbound, GetPlayerBuff answered
-// nil through the missing-API fallback, so `if buffIndex < 0` compared nil
-// with a number on the first line of BuffButton_Update. That raised while the
-// file was being read, which loses the file whole: no buff has ever appeared
-// on a 1.12 interface, and BuffFrame.xml never built.
+// Vanilla indexes from zero and ends with -1; TBC indexes from one and ends
+// with zero. TBC BuffFrame treats every nonzero slot as present, so returning
+// vanilla's -1 draws all 32 empty buffs and 16 empty debuffs with 0 s timers.
+// Use the loaded interface version, which can differ from the server protocol.
 
 /// The player's aura in a slot, or nullptr for an empty or out-of-range one.
 ///
 /// The slot is the index into the player's own aura array rather than a
 /// position in a filtered list, so it stays meaningful after the caller has
 /// stopped filtering - which is the whole point of handing it back.
-static const game::AuraSlot* playerAuraAt(game::GameHandler* gh, int slot) {
+static const game::AuraSlot* playerAuraAt(lua_State* L, game::GameHandler* gh, int slot) {
     if (!gh || slot < 0) return nullptr;
+    if (interfaceVersion(L) >= 20000) {
+        if (slot == 0) return nullptr;
+        --slot;
+    }
     const auto& auras = gh->getPlayerAuras();
     if (static_cast<size_t>(slot) >= auras.size()) return nullptr;
     const game::AuraSlot& aura = auras[static_cast<size_t>(slot)];
@@ -343,10 +345,12 @@ static uint64_t auraNowMs() {
 
 // GetPlayerBuff(index, filter) -> slot, untilCancelled
 //
-// index counts from zero, which is how buffframe.lua asks.
+// Both the filtered input index and returned raw slot use the interface's base.
 static int lua_GetPlayerBuff(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const int wanted = static_cast<int>(luaL_optnumber(L, 1, 0));
+    const int base = interfaceVersion(L) >= 20000 ? 1 : 0;
+    const int index = static_cast<int>(luaL_optnumber(L, 1, base));
+    const int wanted = index >= base ? index - base : -1;
     const bool harmful = filterWantsHarmful(luaL_optstring(L, 2, "HELPFUL"));
     if (gh && wanted >= 0) {
         const auto& auras = gh->getPlayerAuras();
@@ -357,16 +361,15 @@ static int lua_GetPlayerBuff(lua_State* L) {
             const bool isDebuff = (aura.flags & 0x80) != 0;
             if (isDebuff != harmful) continue;
             if (seen++ != wanted) continue;
-            lua_pushnumber(L, static_cast<double>(i));
+            lua_pushnumber(L, static_cast<double>(i) + base);
             // A buff with no duration is one the player dismisses rather than
             // waits out, and the interface draws it without a timer.
             lua_pushnumber(L, aura.durationMs > 0 ? 0 : 1);
             return 2;
         }
     }
-    // -1, never nil. The caller compares this with a number before it does
-    // anything else, so nil here is an error rather than an empty slot.
-    lua_pushnumber(L, -1);
+    // Never nil: each interface checks its own numeric empty-slot sentinel.
+    lua_pushnumber(L, base - 1);
     lua_pushnil(L);
     return 2;
 }
@@ -374,7 +377,7 @@ static int lua_GetPlayerBuff(lua_State* L) {
 // GetPlayerBuffTexture(slot) -> texture
 static int lua_GetPlayerBuffTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    const auto* aura = playerAuraAt(L, gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     if (!aura) return luaReturnNil(L);
     const std::string icon = gh->getSpellIconPath(aura->spellId);
     if (icon.empty()) return luaReturnNil(L);
@@ -385,7 +388,7 @@ static int lua_GetPlayerBuffTexture(lua_State* L) {
 // GetPlayerBuffTimeLeft(slot) -> seconds
 static int lua_GetPlayerBuffTimeLeft(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    const auto* aura = playerAuraAt(L, gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     // Zero rather than nil: buffframe.lua divides and compares this, and a
     // permanent aura is honestly zero time left rather than an absent answer.
     if (!aura || aura->durationMs <= 0) { lua_pushnumber(L, 0); return 1; }
@@ -396,7 +399,7 @@ static int lua_GetPlayerBuffTimeLeft(lua_State* L) {
 // GetPlayerBuffApplications(slot) -> count
 static int lua_GetPlayerBuffApplications(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    const auto* aura = playerAuraAt(L, gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     lua_pushnumber(L, aura ? aura->charges : 0);
     return 1;
 }
@@ -404,7 +407,7 @@ static int lua_GetPlayerBuffApplications(lua_State* L) {
 // GetPlayerBuffDispelType(slot) -> "Magic" | "Curse" | "Disease" | "Poison"
 static int lua_GetPlayerBuffDispelType(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    const auto* aura = playerAuraAt(L, gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     if (!aura) return luaReturnNil(L);
     switch (gh->getSpellDispelType(aura->spellId)) {
         case 1:  lua_pushstring(L, "Magic");   return 1;
@@ -419,7 +422,7 @@ static int lua_GetPlayerBuffDispelType(lua_State* L) {
 // CancelPlayerBuff(slot)
 static int lua_CancelPlayerBuff(lua_State* L) {
     auto* gh = getGameHandler(L);
-    const auto* aura = playerAuraAt(gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
+    const auto* aura = playerAuraAt(L, gh, static_cast<int>(luaL_optnumber(L, 1, -1)));
     if (aura) gh->cancelAura(aura->spellId);
     return 0;
 }

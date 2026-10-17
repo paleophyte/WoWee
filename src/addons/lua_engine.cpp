@@ -2160,12 +2160,11 @@ int lua_Tooltip_SetSpellByID(lua_State* L) {
     return 1;
 }
 
-// Classic/TBC BuffFrame hands back the opaque zero-based slot returned by
-// GetPlayerBuff. UnitAura instead counts a one-based filtered list. Convert
-// that index here, then reuse the normal aura tooltip and its description.
+// BuffFrame hands back GetPlayerBuff's opaque slot: zero-based on vanilla,
+// one-based on TBC. UnitAura counts a one-based filtered list instead.
 int lua_Tooltip_SetPlayerBuff(lua_State* L) {
     auto* gh = wowee::addons::getGameHandler(L);
-    const double requested = luaL_optnumber(L, 2, -1);
+    const double requested = luaL_optnumber(L, 2, -1) - (interfaceVersion(L) >= 20000 ? 1 : 0);
     int index = 0;
     bool harmful = false;
     if (gh && std::isfinite(requested) && requested >= 0 && std::floor(requested) == requested) {

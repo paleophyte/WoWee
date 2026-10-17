@@ -5,8 +5,11 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_replay.hpp"
+#include "addons/addon_manager.hpp"
+#include "game/spell_handler.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 
 using replay::Session;
@@ -108,4 +111,63 @@ TEST_CASE("feeding a pet is effect 101, with a packed caster on TBC too", "[repl
         s.receive(p);
         CHECK(chatHas(s, "You feed your pet"));
     }
+}
+
+TEST_CASE("TBC buff slots hide empty effects and retain real aura identities", "[replay][buffframe]") {
+    Session s("tbc");
+    auto* spells = s.handler().getSpellHandler();
+    REQUIRE(spells != nullptr);
+    spells->resetPlayerAuras(24);
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    std::vector<std::string> errors;
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    REQUIRE(lua->executeString("__WoweeInterfaceVersion=20400"));
+    // TBC BuffFrame walks one-based indices and draws every nonzero result.
+    CHECK(lua->evaluateBoolean("(function() for i=1,32 do if GetPlayerBuff(i,'HELPFUL') ~= 0 then return false end end for i=1,16 do if GetPlayerBuff(i,'HARMFUL') ~= 0 then return false end end return true end)()"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuffTimeLeft(0) == 0 and GetPlayerBuffTexture(0) == nil"));
+
+    auto& helpful = spells->getPlayerAuraSlotRef(0);
+    helpful.spellId = 133;
+    helpful.charges = 2;
+    helpful.durationMs = helpful.maxDurationMs = 60000;
+    helpful.receivedAtMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    auto& harmful = spells->getPlayerAuraSlotRef(7);
+    harmful.spellId = 116;
+    harmful.flags = 0x80;
+    harmful.charges = 3;
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HELPFUL') == 1 and GetPlayerBuff(2,'HELPFUL') == 0"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HARMFUL') == 8 and GetPlayerBuff(2,'HARMFUL') == 0"));
+    CHECK(lua->evaluateBoolean("select(2,GetPlayerBuff(1,'HELPFUL')) == 0 and select(2,GetPlayerBuff(1,'HARMFUL')) == 1"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(0,'HELPFUL') == 0"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuffApplications(1) == 2 and GetPlayerBuffApplications(8) == 3 and GetPlayerBuffApplications(0) == 0"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuffTimeLeft(1) > 0 and GetPlayerBuffTimeLeft(1) <= 60"));
+    REQUIRE(lua->executeString("buffTip=CreateFrame('GameTooltip','BuffIndexTooltip',UIParent); buffTip:SetPlayerBuff(GetPlayerBuff(1,'HELPFUL'))"));
+    CHECK(lua->evaluateBoolean("buffTip.__spellId == 133"));
+    REQUIRE(lua->executeString("buffTip:SetPlayerBuff(GetPlayerBuff(1,'HARMFUL'))"));
+    CHECK(lua->evaluateBoolean("buffTip.__spellId == 116"));
+    REQUIRE(lua->executeString("buffTip:SetPlayerBuff(0); CancelPlayerBuff(0)"));
+    CHECK(lua->evaluateBoolean("buffTip.__spellId == nil"));
+    CHECK(s.sent().of(Opcode::CMSG_CANCEL_AURA).empty());
+    REQUIRE(lua->executeString("CancelPlayerBuff(1)"));
+    auto cancelled = s.sent().of(Opcode::CMSG_CANCEL_AURA);
+    REQUIRE(cancelled.size() == 1);
+    CHECK(cancelled.front().readUInt32() == 133);
+
+    // The same client still supports a vanilla interface's zero/-1 contract.
+    REQUIRE(lua->executeString("__WoweeInterfaceVersion=11200"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(0,'HELPFUL') == 0 and GetPlayerBuff(1,'HELPFUL') == -1"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(0,'HARMFUL') == 7 and GetPlayerBuff(1,'HARMFUL') == -1"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuffApplications(0) == 2 and GetPlayerBuffApplications(7) == 3"));
+    REQUIRE(lua->executeString("buffTip:SetPlayerBuff(GetPlayerBuff(0,'HELPFUL'))"));
+    CHECK(lua->evaluateBoolean("buffTip.__spellId == 133"));
+    helpful = {};
+    harmful = {};
+    REQUIRE(lua->executeString("__WoweeInterfaceVersion=20400"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HELPFUL') == 0 and GetPlayerBuff(1,'HARMFUL') == 0"));
+    CAPTURE(errors);
+    CHECK(errors.empty());
 }
