@@ -17,6 +17,7 @@ function Status.actionText(text)
     for attempt in text:gmatch('|A:([^|]+)') do
         if not attempt:match(' %- PREREQ$') then lastAttempt = attempt end
     end
+    if not lastAttempt and text:find('PUSH:', 1, true) then return 'Waiting for next action' end
     local summary = Status.clean(lastAttempt or text)
     if #summary > 100 then summary = summary:sub(1, 97) .. '...' end
     return summary

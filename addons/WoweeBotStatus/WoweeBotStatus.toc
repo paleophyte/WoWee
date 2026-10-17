@@ -1,9 +1,11 @@
 ## Interface: 30300
 ## Title: Wowee Bot Status
-## Notes: Shows Playerbot activity and manages quest grinding. Drag to move; /botstatus to show.
+## Notes: Playerbot control and activity. /botstatus opens; /botplay switches control.
 ## Author: wowee
 ## SavedVariablesPerCharacter: WoweeBotStatusSettings
 
 Status.lua
 Grind.lua
+Control.lua
 WoweeBotStatus.lua
+Bindings.xml

@@ -4,6 +4,7 @@ local Status = WoweeBotStatus
 assert(Status.actionText('|A:seal of blood - PREREQ|A:seal of blood - IMPOSSIBLE|' ..
     'PUSH:seal of blood - 4715.32 (alt)|no actions executed') == 'seal of blood - IMPOSSIBLE')
 assert(#Status.actionText(string.rep('x', 300)) == 100)
+assert(Status.actionText('|PUSH:travel - 199.000 (default)') == 'Waiting for next action')
 local state = Status.new()
 local travel = 'quest objective travel target\nTarget: kill Young Wolf (objective 1)' ..
     '\nDistance 45y\nLocation: Northshire Valley (45y)' ..

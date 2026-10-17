@@ -1,0 +1,5 @@
+<Bindings>
+    <Binding name="WOWEEBOTCONTROL" header="WOWEEBOTSTATUS">
+        WoweeBotToggleControl()
+    </Binding>
+</Bindings>

@@ -6,6 +6,9 @@
 #include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <cmath>
+extern "C" {
+#include <lua.h>
+}
 
 using replay::Session;
 using wowee::game::Opcode;
@@ -211,7 +214,32 @@ TEST_CASE("self Playerbot replies reach addons without appearing in chat",
     s.handler().setAddonEventCallback({});
 }
 
-TEST_CASE("bot activity addon displays the reported quest and expires stale status",
+TEST_CASE("Lua boolean evaluation returns the expression and preserves the stack",
+          "[replay][addon][playerbot]") {
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    auto* state = lua->getState();
+    const int base = lua_gettop(state);
+    lua_pushstring(state, "unrelated truthy stack value");
+    for (int i = 0; i < 3; ++i) {
+        CHECK(lua->evaluateBoolean("true"));
+        CHECK_FALSE(lua->evaluateBoolean("false"));
+        CHECK_FALSE(lua->evaluateBoolean("nil"));
+        CHECK(lua->evaluateBoolean("0")); // Lua treats zero as true.
+        CHECK_FALSE(lua->evaluateBoolean("1 == 2"));
+        CHECK(lua_gettop(state) == base + 1);
+        CHECK(std::string(lua_tostring(state, -1)) == "unrelated truthy stack value");
+    }
+    CHECK_FALSE(lua->evaluateBoolean("error('evaluation failure')"));
+    CHECK_FALSE(lua->evaluateBoolean("not valid syntax !"));
+    CHECK(lua_gettop(state) == base + 1);
+    lua_settop(state, base);
+}
+
+TEST_CASE("bot control is acknowledged and runs independently of the activity panel",
           "[replay][addon][playerbot]") {
     Session s("tbc");
     addPlayer(s);
@@ -226,16 +254,14 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    REQUIRE(lua->executeFile(root + "Status.lua"));
-    REQUIRE(lua->executeFile(root + "Grind.lua"));
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua"})
+        REQUIRE(lua->executeFile(root + file));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_control.lua"));
     REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");
     lua->widgets().layout(1920.0f, 1080.0f);
-    lua->dispatchOnUpdate(0.25f);
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == 4);
-    CHECK(botCommandCount(s, "#a nc ?") == 1);
     s.handler().setAddonEventCallback([lua](const std::string& event, const auto& args) {
         lua->fireEvent(event, args);
     });
@@ -243,27 +269,72 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
         wowee::game::GameHandler& handler;
         ~ClearCallback() { handler.setAddonEventCallback({}); }
     } cleanup{s.handler()};
-    s.receive(botChat("quest objective travel target\nTarget: kill Young Wolf (objective 1)\nDistance 45y\nLocation: Northshire Valley (45y)\nStatus: traveling [for 120s]"));
-    s.receive(botChat("move to travel target"));
-    s.receive(botChat("Traveling 45y to Northshire Valley for |cffffff00|Hquest:33:2|h[Wolves Across the Border]|h|r to kill Young Wolf (objective 1)", true));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('45 yd',1,true) ~= nil"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('120',1,true) == nil"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last action: move to travel target'"));
-
-    // Match the reported quest ID to the live quest log, including completion.
+    auto tick = [&] { lua->dispatchOnUpdate(0.25f); };
+    auto ack = [&](const std::string& id, const std::string& mode, int generation, bool grind) {
+        s.receive(botChat("WIDLE\t1\t0_" + id + "\tok\t" + mode + "\t" +
+            std::to_string(generation) + "\t" + (grind ? "1" : "0") + "\tnone"));
+    };
+    auto count = [&] { return s.sent().of(Opcode::CMSG_MESSAGECHAT).size(); };
+    auto lastCommand = [&] {
+        auto packets = s.sent().of(Opcode::CMSG_MESSAGECHAT);
+        REQUIRE_FALSE(packets.empty());
+        auto p = packets.back();
+        p.readUInt32(); p.readUInt32();
+        return p.readString();
+    };
+    tick();
+    CHECK(count() == 1);
+    CHECK(lastCommand() == ".bot idle 0_1 status");
+    CHECK(botCommandCount(s, "#a nc ?") == 0); // no legacy automation before confirmation
+    ack("1", "bot", 1, false);
+    tick();
+    CHECK(count() == 4); // three private status queries, no strategy mutation
     s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
         {{wowee::game::UF::PLAYER_QUEST_LOG_START, 33}}).packet(true));
-    // On the way to a quest objective, prevent incidental grinding. At the
-    // objective, enable it and await server confirmation rather than guessing.
-    s.receive(botChat("Non Combat Strategies: grind, travel", true));
-    CHECK(botCommandCount(s, "#a nc -grind,?") == 1);
-    s.receive(botChat("Non Combat Strategies: travel", true));
     s.receive(botChat("questobjective travel target\nTarget: kill Young Wolf (objective 1)\nDistance 1y\nStatus: working"));
-    CHECK(botCommandCount(s, "#a nc +grind,?") == 1);
-    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('waiting for server',1,true) ~= nil"));
-    s.receive(botChat("Non Combat Strategies: grind, travel", true));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('on (confirmed)',1,true) ~= nil"));
+    s.receive(botChat("Traveling 1y for |Hquest:33:2|h[Wolves Across the Border]|h to kill Young Wolf (objective 1)", true));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_2 grind 1 on");
+    ack("2", "bot", 1, true);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+
+    REQUIRE(lua->executeString("WoweeBotStatusPlay:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Switching control...'"));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_3 control 1 manual");
+    const auto pendingCount = count();
+    tick();
+    CHECK(count() == pendingCount); // no competing grind/status actions during handoff
+    ack("3", "manual", 2, true);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'I am playing (server confirmed)'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Your character is under your control'"));
+    REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide(); testNow=8"));
+    lua->widgets().layout(1920.0f, 1080.0f);
+    tick();
+    CHECK(count() == pendingCount + 1); // hidden panel still checks server control
+    CHECK(lastCommand() == ".bot idle 0_4 status");
+    CHECK(lua->evaluateBoolean("WoweeBotLauncher:IsShown()"));
+
+    CHECK(lua->dispatchSlashCommand("/botplay", "bot"));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_5 control 2 bot");
+    ack("4", "bot", 1, true); // stale, superseded request must not restore control
+    CHECK_FALSE(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Bot is playing (server confirmed)'"));
+    ack("5", "bot", 3, false);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Bot is playing (server confirmed)'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+    const auto beforeHidden = count();
+    tick();
+    CHECK(count() == beforeHidden + 3); // private status continues while hidden
+    CHECK(lua->dispatchSlashCommand("/botstatus", ""));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusFrame:IsShown()"));
+
+    // Quest completion must still disable grinding through the guarded bridge.
+    s.receive(botChat("questobjective travel target\nTarget: kill Young Wolf (objective 1)\nDistance 1y\nStatus: working"));
+    s.receive(botChat("Traveling 1y for |Hquest:33:2|h[Wolves Across the Border]|h to kill Young Wolf (objective 1)", true));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_6 grind 3 on");
+    ack("6", "bot", 3, true);
     Packet complete(wowee::game::wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
     complete.writeUInt32(1);
     complete.writeUInt8(0); // TBC hasTransport
@@ -275,45 +346,22 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
         complete.writeUInt32(block == stateField / 32 ? 1u << (stateField % 32) : 0u);
     complete.writeUInt32(1); // QUEST_STATE_COMPLETE
     s.receive(complete);
+    tick();
     CHECK(lua->evaluateBoolean("WoweeBotStatusProgress:GetText() == 'Ready to turn in'"));
-    CHECK(botCommandCount(s, "#a nc -grind,?") == 2);
-    s.receive(botChat("Non Combat Strategies: travel", true));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('off (confirmed)',1,true) ~= nil"));
+    CHECK(lastCommand() == ".bot idle 0_7 grind 3 off");
+    ack("7", "bot", 3, false);
 
-    s.receive(botChat("rpg travel target\nTarget: sell items to Brother Danil\nDistance 8y\nStatus: working [for 30s]"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Goal: sell items to Brother Danil'"));
-    REQUIRE(lua->executeString("testNow=30"));
-    lua->dispatchOnUpdate(0.25f);
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == ''"));
-    const auto beforeGroup = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
-    REQUIRE(lua->executeString("GetNumPartyMembers=function() return 1 end; testNow=38"));
-    lua->dispatchOnUpdate(0.25f);
-    // Private raw queries continue, while where must not produce party chat.
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == beforeGroup + 3);
+    const auto beforeGroup = count();
+    REQUIRE(lua->executeString("GetNumPartyMembers=function() return 1 end; testNow=16"));
+    tick();
+    CHECK(count() == beforeGroup + 3); // control status + private queries; no party where report
+    ack("8", "bot", 3, false);
     CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('paused while grouped',1,true) ~= nil"));
-    // The manual switch stops strategy commands and strategy polling.
-    REQUIRE(lua->executeString("WoweeBotStatusAutoGrind:GetScript('OnClick')()"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusSettings.autoGrind == false"));
-    const auto manualCount = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
-    REQUIRE(lua->executeString("testNow=46"));
-    lua->dispatchOnUpdate(0.25f);
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == manualCount + 2);
-    REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide()"));
-    lua->widgets().layout(1920.0f, 1080.0f);
-    const auto count = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
-    REQUIRE(lua->executeString("testNow=60"));
-    lua->dispatchOnUpdate(0.25f);
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == count);
-    CHECK(lua->dispatchSlashCommand("/botstatus", ""));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusFrame:IsShown()"));
-    lua->fireEvent("CHAT_MSG_SYSTEM", {"Disable player ai"});
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Player AI disabled'"));
-    const auto disabledCount = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
-    REQUIRE(lua->executeString("testNow=100"));
-    lua->widgets().layout(1920.0f, 1080.0f);
-    lua->dispatchOnUpdate(0.25f);
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == disabledCount);
+    REQUIRE(lua->executeString("testNow=50"));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_9 status");
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+    CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
     CAPTURE(errors);
     CHECK(errors.empty());
 }
