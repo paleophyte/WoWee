@@ -17,12 +17,17 @@ local function newTrainingPlan()
     if type(module)=='table' and type(module.new)=='function' then return module.new() end
 end
 local trainingPlan = newTrainingPlan()
+local function newTravel()
+    local module=rawget(_G,'WoweeBotTravel')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local travel = newTravel()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
 local driver = CreateFrame('Frame', 'WoweeBotController', UIParent)
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
-panel:SetSize(690, 234)
+panel:SetSize(690, 258)
 panel:SetPoint('BOTTOM', UIParent, 'BOTTOM', 0, 138)
 panel:SetFrameStrata('MEDIUM')
 panel:SetMovable(true)
@@ -59,10 +64,12 @@ local details = label('Details', 'GameFontHighlight', 16, -88, 655)
 local progress = label('Progress', 'GameFontHighlightSmall', 16, -113, 655)
 local action = label('Action', 'GameFontHighlightSmall', 16, -138, 655)
 action:SetTextColor(0.65, 0.7, 0.7)
-local control = label('Control', 'GameFontHighlightSmall', 16, -186, 655)
+local control = label('Control', 'GameFontHighlightSmall', 16, -210, 655)
 control:SetTextColor(0.72, 0.8, 0.62)
-local modeLabel = label('Mode', 'GameFontHighlight', 16, -162, 500)
+local modeLabel = label('Mode', 'GameFontHighlight', 16, -186, 500)
 local interaction = label('Interaction', 'GameFontNormalLarge', 16, -38, 655)
+local travelDetail = label('Travel', 'GameFontHighlightSmall', 16, -162, 655)
+travelDetail:SetTextColor(0.9,0.76,0.4)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
@@ -102,6 +109,7 @@ local function request()
         if history then history:expect(activity.pending.id,controller.generation,now) end
         if training then training:expect(activity.pending.id,controller.generation,now) end
         if trainingPlan then trainingPlan:expect(activity.pending.id,controller.generation,now) end
+        if travel then travel:expect(activity.pending.id,controller.generation,now) end
         SendChatMessage(command, 'SAY')
         return
     end
@@ -146,6 +154,7 @@ local function draw()
     if drawPolicy then drawPolicy() end
     progress:SetText('')
     action:SetText('')
+    travelDetail:SetText('')
     control:SetText('')
     interaction:SetText('')
     modeLabel:SetText(controller:label(now))
@@ -199,6 +208,7 @@ local function draw()
         end
         return
     end
+    if travel and controller:isBot(now) then travelDetail:SetText(travel:summary(now) or '') end
     freshness:SetText('Updated ' .. math.floor(now - model.travelAt) .. 's ago')
     local questId, questTitle = model:currentQuest(now)
     goal:SetText(questTitle and ((model.typed and 'Quest plan: ' or 'Quest: ') .. questTitle) or
@@ -422,6 +432,7 @@ driver:SetScript('OnUpdate', function()
     if inWorld then
         if training then training:expire(now,controller.generation) end
         if trainingPlan then trainingPlan:expire(now,controller.generation) end
+        if travel then travel:expire(now,controller.generation) end
         if history then
             local pending=history.pending
             history:expire(now,controller.generation)
@@ -462,12 +473,13 @@ driver:SetScript('OnEvent', function(self, event, ...)
     elseif event == 'PLAYER_ENTERING_WORLD' then
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
-        training=newTraining();trainingPlan=newTrainingPlan()
+        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
         if training then training.pending=nil end
         if trainingPlan then trainingPlan.pending=nil end
+        if travel then travel.pending=nil end
         notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
@@ -490,11 +502,19 @@ driver:SetScript('OnEvent', function(self, event, ...)
             if history then history.pending,history.failure=nil,nil end
             if training then training.pending,training.failure=nil,nil end
             if trainingPlan then trainingPlan.pending,trainingPlan.failure=nil,nil end
+            if travel then travel.pending,travel.snapshot,travel.failure=nil,nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if travel then
+            travel:capability(prefix,text,sender,player,controller)
+            if travel:receive(prefix,text,sender,player,controller.generation,now) and
+                not travel.failure and travel.snapshot and travel.snapshot.warning and WoweeBotReportTravelWarning then
+                WoweeBotReportTravelWarning(travel.snapshot.warning)
+            end
+        end
         if trainingPlan then
             trainingPlan:capability(prefix,text,sender,player,controller)
             if trainingPlan:receive(prefix,text,sender,player,controller.generation,now) and

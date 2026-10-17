@@ -303,6 +303,42 @@ function Inbox:collectionWarning(fact, now)
         'This records a past backoff; it may already have ended.',now,'botstatus')
 end
 
+
+function Inbox:travelWarning(fact, now)
+    if type(fact)~='table' or type(now)~='number' then return false end
+    for _,key in ipairs({'at','sequence','kind','reason','seconds','untilAt'}) do
+        if type(fact[key])~='number' or fact[key]~=math.floor(fact[key]) then return false end
+    end
+    if fact.at<1 or fact.at>4294967175 or fact.sequence<1 or fact.sequence>4294967295 or
+        fact.reason<0 or fact.reason>11 or fact.seconds<0 or fact.seconds>604800 or
+        type(fact.goal)~='string' or #fact.goal>40 or fact.goal:find('[%c]') then return false end
+    local reason
+    if fact.kind==1 then
+        if fact.reason~=0 or fact.seconds<90 or fact.untilAt~=fact.at+120 then return false end
+    elseif fact.kind==2 then
+        reason=WoweeBotTravel and WoweeBotTravel.waitNames[fact.reason]
+        if not reason or fact.seconds<120 or fact.untilAt~=0 then return false end
+    else return false end
+    local last=self.data.lastTravelWarning
+    if type(last)=='table' and type(last.at)=='number' and type(last.sequence)=='number' and
+        (fact.at<last.at or (fact.at==last.at and fact.sequence<=last.sequence)) then return false end
+    self.data.lastTravelWarning={at=fact.at,sequence=fact.sequence}
+    local goal=fact.goal~='' and fact.goal or 'the selected destination'
+    local title,text
+    if fact.kind==1 then
+        title='Travel paused: '..goal
+        text='The server observed at least '..fact.seconds..'s without 3 yards of displacement, including a route rebuild. '..
+            'It paused travel attempts for two minutes and kept the selected activity. '..
+            'Combat, death recovery, and manual control remain available. This records a past pause; it may already have ended.'
+    else
+        title='Travel waiting for '..reason
+        text='While heading to '..goal..', the server observed at least '..fact.seconds..'s without 3 yards of displacement. '..
+            'At that time it was waiting for '..reason..'. The travel safeguard did not interrupt that activity. '..
+            'This is an observation, not proof of a missing item or a broken route. Open Bot activity for current status.'
+    end
+    return self:put('travel-warning:'..fact.at..':'..fact.sequence,'note',title,text,now,'botstatus')
+end
+
 function Inbox:visible()
     local result = {}
     for _, e in ipairs(self.data.entries) do if not e.dismissed then result[#result + 1] = e end end

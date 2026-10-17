@@ -39,3 +39,14 @@ python3 tools/update_bot_addon.py --target build/bin/addons/WoweeBotStatus
 ```
 
 Restart WoWee or reload its interface. The helper copies only Lua/XML/TOC code and preserves character saved variables and other addons. Adjust the target if you installed Bot Status under your game-data `Interface/AddOns` folder: WoWee finds that copy before bundled copies, and its log reports which path was registered. Rebuilding only the `wowee` target does not run the bundled-addon copy target.
+
+
+## Travel progress and waiting
+
+On servers advertising nav_1, the existing snapshot query also reports physical travel progress. The panel shows a route rebuild, a timed travel pause, or an observed wait reason. Quest progress and the selected travel plan remain visible. Stale/missing travel replies are labeled unavailable rather than presented as current.
+
+The server independently samples actual map/instance/XYZ. Destination changes and successful action returns do not erase its no-movement budget. It rebuilds once after45 observed eligible seconds without3yd displacement, then pauses travel attempts for two minutes after45 more eligible seconds without progress. It keeps the selected activity; combat, death recovery and Manual control continue. Actual movement releases a pause. Manual takeover clears current tracking while retaining the historical Note.
+
+Combat, casts/channels, flights, transport/vehicle handoffs, party waits, loot, death, teleport delays, immobilization, trade and movement policy have explicit explanations. The safeguard does not interrupt their owning action. A long observed stationary wait can create an informational Note, without guessing a missing item or a bad route. Navigation-pause Notes also describe a past event: the pause may already have ended. Dismissed facts do not reappear on later snapshots or relog, and unrelated later facts remain visible.
+
+This is an addon-only update if your client already has the Notes/realm native support. Pull the branch, run the updater shown above, and restart/reload the interface. No native rebuild is required for these new controls. The original manual/bot controller remains authoritative; an unconfirmed control change never displays automation as stopped. Explicit named go-order preservation across Manual→Bot resume is still a separate known server follow-up.
