@@ -94,15 +94,22 @@ controller = Grind.new()
 controller:receive('BOT', 'Non Combat Strategies: travel', 'Jizzle', 'Jizzle', 0)
 assert(controller:update(state, incomplete, 26, false) == nil)
 
--- Loot from creatures needs combat; collecting from objects does not.
+-- Legacy display links lose the signed entry type. Neither apparent creature
+-- loot nor container loot may enable grind without typed source information.
 local loot = 'questobjective travel target\nTarget: loot |Hitem:750|h[Tough Wolf Meat]|h from ' ..
     '|Hentry:69:|h[Timber Wolf]|h (objective 1)\nDistance 1y\nStatus: working'
 state = Status.new()
 state:receive('', loot, 'Jizzle', 'Jizzle', 0)
 state:receive('BOT', report, 'Jizzle', 'Jizzle', 0)
-assert(state:grindDecision(0, incomplete) == true)
+local desired, reason = state:grindDecision(0, incomplete)
+assert(desired == false and reason == 'loot source needs typed status')
 state:receive('', loot:gsub('entry:69:', 'entry:-69:'), 'Jizzle', 'Jizzle', 0)
 assert(state:grindDecision(0, incomplete) == false)
+local harvest = 'questobjective travel target\nTarget: loot [Milly\'s Harvest] from ' ..
+    '|Hentry:161557:|h[Milly\'s Harvest]|h (objective 1)\nDistance 4y\nStatus: working'
+state:receive('', harvest, 'Jizzle', 'Jizzle', 0)
+state:receive('BOT', 'Traveling 4y for |Hquest:3904:4|h[Milly\'s Harvest]|h to collect harvest', 'Jizzle', 'Jizzle', 0)
+assert(state.objectiveEntry == 161557 and state:grindDecision(0, incomplete) == false)
 state:receive('', 'trainer travel target\nTarget: train a skill\nStatus: working', 'Jizzle', 'Jizzle', 1)
 assert(state:grindDecision(1, nil) == false)
 

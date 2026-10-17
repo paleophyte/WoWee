@@ -130,9 +130,11 @@ function Status:grindDecision(now, quest)
             return self.status == 'working', self.status == 'working' and 'quest objective' or 'travelling to objective'
         end
         local kill = self.goal and self.goal:match('^kill ')
-        local mobLoot = self.goal and self.goal:match('^loot ') and
-            self.objectiveEntry and self.objectiveEntry > 0
-        if not kill and not mobLoot then return false, 'non-combat objective' end
+        -- Legacy entry links use abs(entry), including for game objects. A
+        -- positive display link cannot establish that loot comes from a mob.
+        -- Only typed creature_loot can enable grinding for a loot objective.
+        if self.goal and self.goal:match('^loot ') then return false, 'loot source needs typed status' end
+        if not kill then return false, 'non-combat objective' end
         if not self.status or not self.status:match('^working') then
             return false, 'travelling to objective'
         end
