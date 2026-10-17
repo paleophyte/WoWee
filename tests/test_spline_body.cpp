@@ -59,6 +59,24 @@ constexpr uint32_t kParabolic = SplineFlag::PARABOLIC_MM;             // 0x00000
 
 }  // namespace
 
+TEST_CASE("TBC smooth paths use Flying and have no later expansion payload blocks", "[splinebody][tbc]") {
+    for (uint32_t flags : {0x200u, 0x200u | 0x400000u | 0x800u}) {
+        Writer w;
+        w.u32(4200); w.u32(2);
+        w.vec3(12,20,30); w.vec3(15,25,35);
+        wowee::network::Packet packet(0, w.bytes);
+        SplineBlockData out;
+        REQUIRE(parseMonsterMoveSplineBody(packet, out, flags, glm::vec3(10,20,30), true));
+        CHECK(out.duration == 4200);
+        CHECK_FALSE(out.hasAnimation);
+        CHECK_FALSE(out.hasParabolic);
+        REQUIRE(out.waypoints.size() == 1);
+        CHECK(out.waypoints.front().x == 12);
+        CHECK(out.destination == glm::vec3(15,25,35));
+        CHECK(packet.getRemainingSize() == 0);
+    }
+}
+
 TEST_CASE("the WotLK head is animation, duration, parabolic", "[splinebody]") {
     Writer w;
     w.u8(7);            // animation id

@@ -4,6 +4,7 @@
 #include "game/update_field_table.hpp"
 
 #include <cstdint>
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <array>
@@ -120,11 +121,14 @@ public:
         orientation = o;
         isMoving_ = false; // Instant position set cancels interpolation
         usePathMode_ = false;
+        followPathFacing_ = false;
         activeSpline_.reset();
     }
 
-    // Multi-segment path movement (Catmull-Rom spline interpolation)
-    void startMoveAlongPath(const std::vector<std::array<float, 3>>& path, float destO, float totalDuration) {
+    // Multi-segment path movement. Existing callers keep fixed facing and a
+    // smooth curve; self-player TBC splines opt into server path/facing rules.
+    void startMoveAlongPath(const std::vector<std::array<float, 3>>& path, float destO, float totalDuration,
+                            bool facePath = false, bool smoothPath = true) {
         if (path.empty()) return;
         if (path.size() == 1 || totalDuration <= 0.0f) {
             startMoveTo(path.back()[0], path.back()[1], path.back()[2], destO, totalDuration);
@@ -147,7 +151,7 @@ public:
             return;
         }
         // Build SplineKeys with distance-proportional time
-        uint32_t durationMs = static_cast<uint32_t>(totalDuration * 1000.0f);
+        uint32_t durationMs = std::max(1u, static_cast<uint32_t>(totalDuration * 1000.0f));
         const float invTotalDist = static_cast<float>(durationMs) / totalDist;
         std::vector<math::SplineKey> keys(path.size());
         for (size_t i = 0; i < path.size(); i++) {
@@ -167,6 +171,9 @@ public:
         orientation = destO;
         isMoving_ = true;
         usePathMode_ = true;
+        followPathFacing_ = facePath;
+        smoothPath_ = smoothPath;
+        if (followPathFacing_) facePathTangent(evaluatePath(0).tangent);
         // Velocity for dead-reckoning after path completes
         float fromX = isMoving_ ? moveEndX_ : x;
         float fromY = isMoving_ ? moveEndY_ : y;
@@ -182,6 +189,7 @@ public:
     // Movement interpolation (syncs entity position with renderer during movement)
     void startMoveTo(float destX, float destY, float destZ, float destO, float durationSec) {
         usePathMode_ = false;
+        followPathFacing_ = false;
         activeSpline_.reset();
         if (durationSec <= 0.0f) {
             setPosition(destX, destY, destZ, destO);
@@ -240,13 +248,14 @@ public:
         moveElapsed_ += deltaTime;
         if (moveElapsed_ < moveDuration_) {
             if (usePathMode_ && activeSpline_) {
-                // Catmull-Rom spline interpolation
                 uint32_t pathTimeMs = static_cast<uint32_t>(moveElapsed_ * 1000.0f);
                 if (pathTimeMs >= splineDurationMs_) pathTimeMs = splineDurationMs_ - 1;
-                glm::vec3 pos = activeSpline_->evaluatePosition(pathTimeMs);
+                const auto sample = evaluatePath(pathTimeMs);
+                const auto& pos = sample.position;
                 x = pos.x;
                 y = pos.y;
                 z = pos.z;
+                if (followPathFacing_) facePathTangent(sample.tangent);
             } else {
                 // Single-segment linear interpolation
                 float t = moveElapsed_ / moveDuration_;
@@ -255,6 +264,11 @@ public:
                 z = moveStartZ_ + (moveEndZ_ - moveStartZ_) * t;
             }
         } else {
+            // A frame may cross the endpoint without sampling the last segment.
+            if (followPathFacing_ && activeSpline_) {
+                facePathTangent(evaluatePath(splineDurationMs_).tangent);
+                followPathFacing_ = false;
+            }
             // Past the interpolation window: dead-reckon at the smoothed velocity
             // rather than freezing in place. Cap to one extra interval so we don't
             // drift endlessly if the entity stops sending packets.
@@ -329,6 +343,8 @@ protected:
     // Movement interpolation state
     bool isMoving_ = false;
     bool usePathMode_ = false;
+    bool followPathFacing_ = false;
+    bool smoothPath_ = true;
     float moveStartX_ = 0, moveStartY_ = 0, moveStartZ_ = 0;
     float moveEndX_ = 0, moveEndY_ = 0, moveEndZ_ = 0;
     float moveDuration_ = 0;
@@ -337,6 +353,28 @@ protected:
     // CatmullRom spline for multi-segment path movement (replaces linear pathPoints_/pathSegDists_)
     std::optional<math::CatmullRomSpline> activeSpline_;
     uint32_t splineDurationMs_ = 0;
+
+    void facePathTangent(const glm::vec3& tangent) {
+        if (tangent.x * tangent.x + tangent.y * tangent.y > 1e-8f)
+            orientation = std::atan2(-tangent.y, tangent.x);
+    }
+
+    math::SplineEvalResult evaluatePath(uint32_t timeMs) const {
+        if (smoothPath_) {
+            if (followPathFacing_) return activeSpline_->evaluate(timeMs);
+            return {activeSpline_->evaluatePosition(timeMs), glm::vec3(0)};
+        }
+        const auto& keys = activeSpline_->keys();
+        auto next = std::upper_bound(keys.begin(), keys.end(), timeMs,
+            [](uint32_t time, const math::SplineKey& key) { return time < key.timeMs; });
+        if (next == keys.begin()) ++next;
+        if (next == keys.end()) next = keys.end() - 1;
+        const auto& previous = *(next - 1);
+        const auto tangent = next->position - previous.position;
+        const auto duration = std::max(1u, next->timeMs - previous.timeMs);
+        const float t = std::clamp(static_cast<float>(timeMs - previous.timeMs) / duration, 0.0f, 1.0f);
+        return {previous.position + tangent * t, tangent};
+    }
 };
 
 /**

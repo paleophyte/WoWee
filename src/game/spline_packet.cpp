@@ -50,7 +50,7 @@ namespace {
 /// complete body, not a failure: the server sends one for a spline that just
 /// turns a creature on the spot.
 bool readSplineBodyHead(network::Packet& packet, SplineBlockData& out,
-                        uint32_t splineFlags, uint32_t animationBit,
+                        uint32_t splineFlags, uint32_t animationBit, uint32_t parabolicBit,
                         uint32_t& outPointCount) {
     out.splineFlags = splineFlags;
     outPointCount = 0;
@@ -67,7 +67,7 @@ bool readSplineBodyHead(network::Packet& packet, SplineBlockData& out,
     out.duration = packet.readUInt32();
 
     // Parabolic: float vertAccel + uint32 startTime
-    if (splineFlags & SplineFlag::PARABOLIC_MM) {
+    if (splineFlags & parabolicBit) {
         if (!packet.hasRemaining(8)) return false;
         out.hasParabolic = true;
         out.verticalAcceleration = packet.readFloat();
@@ -94,11 +94,12 @@ bool parseMonsterMoveSplineBody(
     SplineFlagSet flagSet)
 {
     const bool wotlk = (flagSet == SplineFlagSet::Wotlk);
-    const uint32_t animationBit = wotlk ? SplineFlagWotlk::ANIMATION
-                                        : SplineFlag::ANIMATION;
+    const uint32_t animationBit = useTbcUncompressedMask ? 0 :
+        (wotlk ? SplineFlagWotlk::ANIMATION : SplineFlag::ANIMATION);
 
     uint32_t pointCount = 0;
-    if (!readSplineBodyHead(packet, out, splineFlags, animationBit, pointCount)) return false;
+    if (!readSplineBodyHead(packet, out, splineFlags, animationBit,
+                            useTbcUncompressedMask ? 0 : SplineFlag::PARABOLIC_MM, pointCount)) return false;
     if (pointCount == 0) return true;
 
     // Determine compressed vs uncompressed
@@ -161,11 +162,11 @@ bool parseMonsterMoveFacing(network::Packet& packet, MonsterMoveData& data, bool
     }
 
     if (data.moveType == 2) {
-        // FacingSpot - a point to look at, which nothing here needs; read past.
+        // FacingSpot is the final look-at point, not a path waypoint.
         if (!packet.hasRemaining(12)) return false;
-        packet.readFloat();
-        packet.readFloat();
-        packet.readFloat();
+        data.facingX = packet.readFloat();
+        data.facingY = packet.readFloat();
+        data.facingZ = packet.readFloat();
     } else if (data.moveType == 3) {
         // FacingTarget
         if (!packet.hasRemaining(8)) return false;
@@ -185,7 +186,8 @@ bool parseMonsterMoveSplineBodyVanilla(
     const glm::vec3& startPos)
 {
     uint32_t pointCount = 0;
-    if (!readSplineBodyHead(packet, out, splineFlags, SplineFlag::ANIMATION, pointCount)) {
+    if (!readSplineBodyHead(packet, out, splineFlags, SplineFlag::ANIMATION,
+                            SplineFlag::PARABOLIC_MM, pointCount)) {
         return false;
     }
     if (pointCount == 0) return true;

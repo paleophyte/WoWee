@@ -66,8 +66,8 @@ namespace SplineFlag {
 
     // Mask: if any of these are set, waypoints are uncompressed
     constexpr uint32_t UNCOMPRESSED_MASK = CATMULLROM | CYCLIC | ENTER_CYCLE;
-    // TBC-era alternative for uncompressed check
-    constexpr uint32_t UNCOMPRESSED_MASK_TBC = CATMULLROM | 0x00002000;
+    // CMaNGOS TBC MoveSplineFlag::Flying / Mask_CatmullRom.
+    constexpr uint32_t UNCOMPRESSED_MASK_TBC = 0x00000200;
 } // namespace SplineFlag
 
 // WotLK moved every one of these down a bit.
@@ -114,7 +114,8 @@ namespace SplineFlagWotlk {
 /// Handles: Animation, duration, Parabolic, pointCount, compressed/uncompressed waypoints.
 /// `startPos` is the creature's current position (needed for packed-delta midpoint calculation).
 /// `splineFlags` is the already-read spline flags value.
-/// `useTbcUncompressedMask`: if true, use 0x00080000|0x00002000 for uncompressed check (TBC format).
+/// `useTbcUncompressedMask`: TBC body has duration directly after flags and
+/// uses Flying (0x200) for uncompressed smooth paths, without later animation/parabolic blocks.
 /// Which generation of spline flags the bytes were written with. WotLK moved
 /// every value from Final_Point up by one bit position, and two of the
 /// decisions this parser makes read those bits: whether an animation block

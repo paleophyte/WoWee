@@ -500,6 +500,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
         if (!manualStart || !serverMovementAllowed_) return;
         syncServerDrivenMovement();
         serverDrivenMovement_ = false;
+        serverDrivenFinalFacingType_ = 0;
         // Discard the old spline so its next interpolation tick cannot undo input.
         if (auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid()))
             player->setPosition(movementInfo.x, movementInfo.y, movementInfo.z,
@@ -919,6 +920,7 @@ void MovementHandler::sanitizeMovementForTaxi() {
 
 void MovementHandler::forceClearTaxiAndMovementState() {
     serverDrivenMovement_ = false;
+    serverDrivenFinalFacingType_ = 0;
     taxiActivatePending_ = false;
     taxiActivateTimer_ = 0.0f;
     taxiClientActive_ = false;
@@ -1658,6 +1660,16 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         return;
     }
 
+    const bool ownTbcSpline = data.guid == owner_.getPlayerGuid() && isActiveExpansion("tbc") &&
+        !onTaxiFlight_ && !taxiMountActive_ && !taxiActivatePending_ && !owner_.isOnTransport();
+    if (ownTbcSpline) {
+        serverDrivenFinalFacingType_ = data.moveType;
+        serverDrivenFinalAngle_ = core::coords::serverToCanonicalYaw(data.facingAngle);
+        serverDrivenFinalPoint_ = core::coords::serverToCanonical(
+            glm::vec3(data.facingX, data.facingY, data.facingZ));
+        serverDrivenFinalTarget_ = data.facingTarget;
+    }
+
     if (data.guid == owner_.getPlayerGuid() && data.hasDest && !onTaxiFlight_ &&
         !taxiMountActive_ && !taxiActivatePending_ && !owner_.isOnTransport()) {
         serverDrivenMovement_ = true;
@@ -1711,7 +1723,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
             }
         }
 
-        if (data.moveType != 3) {
+        if (!ownTbcSpline && data.moveType != 3) {
             glm::vec3 startCanonical = core::coords::serverToCanonical(
                 glm::vec3(data.x, data.y, data.z));
             float travelDx = destCanonical.x - startCanonical.x;
@@ -1729,7 +1741,7 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
         }
 
         // Build full path: start → waypoints → destination (all in canonical coords)
-        if (!data.waypoints.empty()) {
+        if (!data.waypoints.empty() || ownTbcSpline) {
             glm::vec3 startCanonical = core::coords::serverToCanonical(
                 glm::vec3(data.x, data.y, data.z));
             std::vector<std::array<float, 3>> path;
@@ -1743,7 +1755,10 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
                 path.push_back({wpCanonical.x, wpCanonical.y, wpCanonical.z});
             }
             path.push_back({destCanonical.x, destCanonical.y, destCanonical.z});
-            entity->startMoveAlongPath(path, orientation, data.duration / 1000.0f);
+            // TBC ground paths are linear; smooth/flying paths use Catmull-Rom.
+            // Final facing is applied on arrival, not throughout the trip.
+            const bool smooth = !ownTbcSpline || (data.splineFlags & SplineFlag::UNCOMPRESSED_MASK_TBC) != 0;
+            entity->startMoveAlongPath(path, orientation, data.duration / 1000.0f, ownTbcSpline, smooth);
         } else {
             entity->startMoveTo(destCanonical.x, destCanonical.y, destCanonical.z,
                                 orientation, data.duration / 1000.0f);
@@ -1764,6 +1779,13 @@ void MovementHandler::handleMonsterMove(network::Packet& packet) {
             owner_.creatureMoveCallbackRef()(data.guid,
                 posCanonical.x, posCanonical.y, posCanonical.z, 0);
         }
+    } else if (data.moveType == 2) {
+        const auto position = core::coords::serverToCanonical(glm::vec3(data.x, data.y, data.z));
+        const auto point = core::coords::serverToCanonical(glm::vec3(data.facingX, data.facingY, data.facingZ));
+        const auto direction = point - position;
+        const float orientation = direction.x * direction.x + direction.y * direction.y > 1e-8f
+            ? std::atan2(-direction.y, direction.x) : entity->getOrientation();
+        entity->setPosition(position.x, position.y, position.z, orientation);
     } else if (data.moveType == 4) {
         float orientation = core::coords::serverToCanonicalYaw(data.facingAngle);
         glm::vec3 posCanonical = core::coords::serverToCanonical(
@@ -1795,11 +1817,13 @@ void MovementHandler::syncServerDrivenMovement() {
     if (!serverDrivenMovement_) return;
     if (onTaxiFlight_ || taxiMountActive_ || taxiActivatePending_ || owner_.isOnTransport()) {
         serverDrivenMovement_ = false;
+        serverDrivenFinalFacingType_ = 0;
         return;
     }
     auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
     if (!player) {
         serverDrivenMovement_ = false;
+        serverDrivenFinalFacingType_ = 0;
         return;
     }
     // Entity's dead reckoning is useful for remote units, but our own character
@@ -1808,6 +1832,23 @@ void MovementHandler::syncServerDrivenMovement() {
     movementInfo.x = moving ? player->getX() : player->getLatestX();
     movementInfo.y = moving ? player->getY() : player->getLatestY();
     movementInfo.z = moving ? player->getZ() : player->getLatestZ();
+    if (!moving && (serverDrivenFinalFacingType_ == 2 || serverDrivenFinalFacingType_ == 3 ||
+                    serverDrivenFinalFacingType_ == 4)) {
+        if (serverDrivenFinalFacingType_ == 4) {
+            player->setOrientation(serverDrivenFinalAngle_);
+        } else {
+            glm::vec3 point = serverDrivenFinalPoint_;
+            auto target = owner_.getEntityManager().getEntity(serverDrivenFinalTarget_);
+            const bool knownPoint = serverDrivenFinalFacingType_ == 2 || target != nullptr;
+            if (serverDrivenFinalFacingType_ == 3 && target)
+                point = {target->getX(), target->getY(), target->getZ()};
+            const float dx = point.x - movementInfo.x;
+            const float dy = point.y - movementInfo.y;
+            if (knownPoint && dx * dx + dy * dy > 1e-8f)
+                player->setOrientation(std::atan2(-dy, dx));
+        }
+        serverDrivenFinalFacingType_ = 0;
+    }
     movementInfo.orientation = player->getOrientation();
 }
 
@@ -2262,6 +2303,7 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     movementInfo.flags2 = 0;
     serverMovementAllowed_ = true;
     serverDrivenMovement_ = false;
+    serverDrivenFinalFacingType_ = 0;
     owner_.resurrectPendingRef() = false;
     owner_.resurrectRequestPendingRef() = false;
     onTaxiFlight_ = false;

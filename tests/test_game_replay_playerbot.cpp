@@ -37,6 +37,36 @@ Packet tbcSpline(uint64_t guid, bool stop = false, bool corner = false) {
     return p;
 }
 
+Packet tbcReturningSpline(uint8_t facingType = 0, uint64_t target = 0, bool smooth = false) {
+    Packet p(wowee::game::wireOpcode(Opcode::SMSG_MONSTER_MOVE));
+    p.writePackedGuid(Session::kPlayerGuid);
+    p.writeFloat(100); p.writeFloat(200); p.writeFloat(30);
+    p.writeUInt32(2);
+    p.writeUInt8(facingType);
+    if (facingType == 4) p.writeFloat(wowee::core::coords::PI);
+    if (facingType == 3) p.writeUInt64(target);
+    if (facingType == 2) {
+        p.writeFloat(110); p.writeFloat(190); p.writeFloat(30);
+    }
+    p.writeUInt32(smooth ? 0x300 : 0x100); // TBC Flying enables smooth/uncompressed paths
+    p.writeUInt32(5000);
+    p.writeUInt32(4);
+    if (!smooth) { p.writeFloat(110); p.writeFloat(200); p.writeFloat(30); }
+    // Three intermediate points relative to midpoint (105,200,30).
+    for (const auto& point : std::vector<glm::vec2>{{90,200}, {90,210}, {110,210}}) {
+        if (smooth) {
+            p.writeFloat(point.x); p.writeFloat(point.y); p.writeFloat(30);
+            continue;
+        }
+        const auto dx = static_cast<int32_t>((105 - point.x) * 4);
+        const auto dy = static_cast<int32_t>((200 - point.y) * 4);
+        p.writeUInt32((static_cast<uint32_t>(dx) & 0x7ff) |
+                      ((static_cast<uint32_t>(dy) & 0x7ff) << 11));
+    }
+    if (smooth) { p.writeFloat(110); p.writeFloat(200); p.writeFloat(30); }
+    return p;
+}
+
 
 void addPlayer(Session& s) {
     s.handler().getEntityManager().addEntity(Session::kPlayerGuid,
@@ -83,6 +113,77 @@ TEST_CASE("own TBC splines follow intermediate path corners",
     const auto corner = wowee::core::coords::serverToCanonical(glm::vec3(105, 205, 30));
     CHECK(std::abs(s.handler().getMovementInfo().x - corner.x) < 0.01f);
     CHECK(std::abs(s.handler().getMovementInfo().y - corner.y) < 0.01f);
+}
+
+TEST_CASE("own TBC returning paths face each segment and apply final facing only at arrival",
+          "[replay][movement][playerbot][spline-facing]") {
+    for (uint8_t facingType : {0, 2, 3, 4}) {
+        CAPTURE(facingType);
+        Session s("tbc");
+        addPlayer(s);
+        constexpr uint64_t targetGuid = 0xf130000001000003ull;
+        auto target = std::make_shared<wowee::game::Unit>(targetGuid);
+        const auto targetPosition = wowee::core::coords::serverToCanonical(glm::vec3(120,200,30));
+        target->setPosition(targetPosition.x, targetPosition.y, targetPosition.z, 0);
+        s.handler().getEntityManager().addEntity(targetGuid, target);
+        s.receive(tbcReturningSpline(facingType, targetGuid));
+        auto checkSample = [&](float dt, glm::vec3 serverPosition, glm::vec3 serverDirection) {
+            s.handler().update(dt);
+            const auto& move = s.handler().getMovementInfo();
+            const auto pos = wowee::core::coords::serverToCanonical(serverPosition);
+            CHECK(move.x == Catch::Approx(pos.x).margin(0.02f));
+            CHECK(move.y == Catch::Approx(pos.y).margin(0.02f));
+            const auto direction = wowee::core::coords::serverToCanonical(serverDirection);
+            CHECK(std::cos(move.orientation) * direction.x - std::sin(move.orientation) * direction.y
+                  == Catch::Approx(1).margin(0.001f));
+            const auto renderDirection = wowee::core::coords::canonicalToRender(direction);
+            const float yaw = wowee::core::coords::canonicalToCharacterYawDeg(move.orientation) *
+                              wowee::core::coords::PI / 180;
+            CHECK(std::cos(yaw) * renderDirection.x + std::sin(yaw) * renderDirection.y
+                  == Catch::Approx(1).margin(0.001f));
+        };
+        checkSample(0.5f, {95,200,30}, {-1,0,0});
+        checkSample(1.0f, {90,205,30}, {0,1,0});
+        checkSample(1.5f, {100,210,30}, {1,0,0});
+        checkSample(1.5f, {110,205,30}, {0,-1,0});
+        s.handler().update(1.0f); // cross arrival in one frame
+        const auto& end = s.handler().getMovementInfo();
+        CHECK_FALSE(s.handler().getMovementHandler()->isServerDrivenMoving());
+        CHECK(end.x == Catch::Approx(200));
+        CHECK(end.y == Catch::Approx(110));
+        const float expectedServerAngle = facingType == 4 ? wowee::core::coords::PI :
+            facingType == 3 ? 0.0f : -wowee::core::coords::PI * 0.5f;
+        CHECK(std::cos(wowee::core::coords::canonicalToServerYaw(end.orientation) - expectedServerAngle)
+              == Catch::Approx(1).margin(0.001f));
+        const auto orientation = end.orientation;
+        s.handler().update(2.0f);
+        CHECK(s.handler().getMovementInfo().orientation == Catch::Approx(orientation));
+        CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).empty());
+    }
+}
+
+TEST_CASE("TBC smooth self paths face their curve and manual takeover discards final facing",
+          "[replay][movement][playerbot][spline-facing]") {
+    Session s("tbc");
+    addPlayer(s);
+    s.receive(tbcReturningSpline(4, 0, true));
+    s.handler().update(0.25f);
+    for (int sample = 0; sample < 30; ++sample) {
+        const auto before = s.handler().getMovementInfo();
+        s.handler().update(0.01f);
+        const auto after = s.handler().getMovementInfo();
+        const float dx = after.x - before.x, dy = after.y - before.y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        REQUIRE(distance > 0);
+        CHECK((std::cos(after.orientation) * dx - std::sin(after.orientation) * dy) / distance > 0.995f);
+        s.handler().update(0.13f);
+    }
+    s.handler().sendMovement(Opcode::MSG_MOVE_START_FORWARD);
+    REQUIRE_FALSE(s.handler().getMovementHandler()->hasServerDrivenMovement());
+    const auto manual = s.handler().getMovementInfo();
+    s.handler().update(8);
+    CHECK(s.handler().getMovementInfo().orientation == Catch::Approx(manual.orientation));
+    CHECK(s.sent().of(Opcode::MSG_MOVE_START_FORWARD).size() == 1);
 }
 
 

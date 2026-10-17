@@ -277,6 +277,10 @@ private:
     uint32_t lastMovementTimestampMs_ = 0;
     bool serverMovementAllowed_ = true;
     bool serverDrivenMovement_ = false;
+    uint8_t serverDrivenFinalFacingType_ = 0;
+    float serverDrivenFinalAngle_ = 0;
+    glm::vec3 serverDrivenFinalPoint_{0};
+    uint64_t serverDrivenFinalTarget_ = 0;
     uint32_t monsterMovePacketsThisTick_ = 0;
     uint32_t monsterMovePacketsDroppedThisTick_ = 0;
 
