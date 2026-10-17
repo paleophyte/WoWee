@@ -125,6 +125,17 @@ do
     assert(WoweeBotNotesOpen:GetText()=='Open Bot activity')
     WoweeBotNotesOpen:GetScript('OnClick')();assert(opened==1)
     reply('WIDLECOL',body);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  1 notes')
+    reply('WIDLECAP','1\t'..id..'\t9\tactivity_1,collection_1,collection_stop_1')
+    -- Actual0012 native fixture fact; only request ID/generation adapted.
+    local missing='1\t'..id..'\t9\t1792246892\t1\t5545\t13872\t7\t8\t5\t1792247012\t412042756e646c65206f662054726f75626c65'
+    reply('WIDLESTOP',missing)
+    assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  2 notes')
+    WoweeBotNotesBack:GetScript('OnClick')()
+    WoweeBotNotesRow1:GetScript('OnClick')()
+    assert(WoweeBotNotesDetail:GetText():find('three fresh checks',1,true))
+    assert(WoweeBotNotesDetail:GetText():find('7/8',1,true))
+    WoweeBotNotesOpen:GetScript('OnClick')();assert(opened==2)
+    reply('WIDLESTOP',missing);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  2 notes')
     assert(#sent==1) -- historical facts, including in Manual, never send a command
     event(WoweeBotController,'PLAYER_LEAVING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_LEAVING_WORLD')
     GetTime,GetServerTime,UnitName,SendChatMessage=old.clock,old.wall,old.unit,old.send

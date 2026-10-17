@@ -168,25 +168,37 @@ local collectionReasons = {
     'The containers could not be looted; the server did not identify why.',
     'The server still reported full bags after trying to make room.',
     "The quest item or its container was on the bot's skip-loot list.",
-    'The last checked container was in use or not ready.'}
+    'The last checked container was in use or not ready.',
+    'No spawned quest container was found nearby in three fresh checks at a collection stop.'}
 function Inbox:collectionWarning(fact, now)
     if type(fact) ~= 'table' or type(now) ~= 'number' then return false end
     for _, key in ipairs({'at','sequence','quest','item','current','required','reason','untilAt'}) do
         if type(fact[key]) ~= 'number' or fact[key] ~= math.floor(fact[key]) then return false end
     end
     local reason=collectionReasons[fact.reason]
-    if not reason or fact.at < 1 or fact.at > 4294967175 or fact.sequence < 1 or fact.sequence > 4294967295 or
+    local emptyStop = fact.source == 'empty_stop'
+    if not reason or (emptyStop and fact.reason ~= 5) or (not emptyStop and fact.reason == 5) or
+        fact.at < 1 or fact.at > 4294967175 or fact.sequence < 1 or fact.sequence > 4294967295 or
         fact.quest < 1 or fact.quest > 4294967295 or fact.item < 1 or fact.item > 4294967295 or
         fact.current < 0 or fact.required < 1 or fact.required > 65535 or fact.current >= fact.required or
         fact.untilAt ~= fact.at + 120 or (fact.title ~= nil and
         (type(fact.title) ~= 'string' or #fact.title > 40 or fact.title:find('[%c]'))) then return false end
-    local last=self.data.lastCollectionWarning
+    local watermark = emptyStop and 'lastCollectionStopWarning' or 'lastCollectionWarning'
+    local last=self.data[watermark]
     if type(last)=='table' and type(last.at)=='number' and type(last.sequence)=='number' and
         (fact.at < last.at or (fact.at==last.at and fact.sequence<=last.sequence)) then return false end
-    self.data.lastCollectionWarning={at=fact.at,sequence=fact.sequence}
+    self.data[watermark]={at=fact.at,sequence=fact.sequence}
     local title=fact.title and fact.title~='' and fact.title or ('Quest #'..fact.quest)
     local item=type(GetItemInfo)=='function' and GetItemInfo(fact.item)
     item=item or ('item #'..fact.item)
+    if emptyStop then
+        return self:put('collection-stop-warning:'..fact.at..':'..fact.sequence,'note',
+            'No quest containers nearby: '..title,
+            reason..' The server skipped that stop for two minutes so the planner could choose another. '..
+            'At that time, '..item..' was '..fact.current..'/'..fact.required..'. The selected quest was kept. '..
+            'This does not establish why the containers were absent, or their availability elsewhere. '..
+            'This records a past pause; it may already have ended.',now,'botstatus')
+    end
     return self:put('collection-warning:'..fact.at..':'..fact.sequence,'note',
         'Could not collect: '..title,
         'The server skipped the checked containers for two minutes after 3 rejected loot checks. '..reason..

@@ -194,3 +194,25 @@ assert(not ci:collectionWarning(cf,4002))
 assert(Inbox.new(collectionRoot,'other-realm','Jizzle'):collectionWarning(cf,1001))
 assert(Inbox.new(collectionRoot,'collection-realm','Other'):collectionWarning(cf,1001))
 print('Durable collection failure Notes scenarios passed')
+
+local stopRoot={}
+local si=Inbox.new(stopRoot,'stop-realm','Jizzle')
+local sf={at=1000,sequence=1,quest=5545,item=13872,current=6,required=8,reason=5,
+    source='empty_stop',untilAt=1120,title='A Bundle of Trouble'}
+assert(si:collectionWarning(sf,1001))
+local se=si:visible()[1]
+assert(se.title=='No quest containers nearby: A Bundle of Trouble')
+assert(se.text:find('three fresh checks',1,true) and se.text:find('skipped that stop',1,true))
+assert(se.text:find('6/8',1,true) and se.text:find('does not establish why',1,true))
+assert(not se.text:find('rejected loot checks',1,true) and se.action=='botstatus')
+assert(si:collectionWarning(cf,1001)) -- independent channel, same timestamp/sequence
+assert(si:counts().note==2 and si:counts().blocked==0)
+assert(not si:collectionWarning(sf,1002));assert(si:dismiss(se.key))
+si=Inbox.new(stopRoot,'stop-realm','Jizzle');assert(not si:collectionWarning(sf,1300))
+for i=1,110 do si:put('stop-later:'..i,'note','Later','Later',1500+i) end
+assert(not si:find(se.key) and not si:collectionWarning(sf,1700))
+local bad={at=2000,sequence=2,quest=5545,item=13872,current=6,required=8,reason=3,source='empty_stop',untilAt=2120}
+assert(not si:collectionWarning(bad,2001))
+assert(Inbox.new(stopRoot,'other-realm','Jizzle'):collectionWarning(sf,1001))
+assert(Inbox.new(stopRoot,'stop-realm','Other'):collectionWarning(sf,1001))
+print('Durable independently scoped empty-stop Notes scenarios passed')

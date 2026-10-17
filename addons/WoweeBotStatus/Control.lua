@@ -149,6 +149,7 @@ function Control:capability(prefix, text, sender, player)
     if not id or id ~= self.ackId or tonumber(generation) ~= self.generation then return false end
     self.warningSupported = (',' .. features .. ','):find(',warning_1,', 1, true) ~= nil
     self.collectionSupported = (',' .. features .. ','):find(',collection_1,', 1, true) ~= nil
+    self.collectionStopSupported = (',' .. features .. ','):find(',collection_stop_1,', 1, true) ~= nil
     self.fishingSupported = (',' .. features .. ','):find(',fishing_1,', 1, true) ~= nil
     if not self.fishingSupported then self.fishingAt, self.fishingIntent, self.fishingFailure = nil, nil, nil end
     self.socialSupported = (',' .. features .. ','):find(',social_1,', 1, true) ~= nil
@@ -173,7 +174,8 @@ function Control:warning(prefix, text, sender, player, now)
 end
 
 function Control:collectionWarning(prefix, text, sender, player, now)
-    if prefix ~= 'WIDLECOL' or not self.collectionSupported or not self:fresh(now) or
+    local emptyStop = prefix == 'WIDLESTOP' and self.collectionStopSupported
+    if not (emptyStop or (prefix == 'WIDLECOL' and self.collectionSupported)) or not self:fresh(now) or
         self.failure or self.intent or (self.pending and self.pending.verb == 'control') or
         not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 240 then return end
     local id, generation, at, sequence, quest, item, current, required, reason, untilAt, title =
@@ -185,7 +187,7 @@ function Control:collectionWarning(prefix, text, sender, player, now)
         at < 1 or at > 4294967175 or sequence < 1 or sequence > 4294967295 or
         quest < 1 or quest > 4294967295 or item < 1 or item > 4294967295 or
         current < 0 or required < 1 or required > 65535 or current >= required or
-        reason < 1 or reason > 4 or untilAt ~= at + 120 then return end
+        (emptyStop and reason ~= 5) or (not emptyStop and (reason < 1 or reason > 4)) or untilAt ~= at + 120 then return end
     if title == '-' then title = nil
     else
         if #title > 80 or #title % 2 ~= 0 or title:find('[^%x]') then return end
@@ -193,7 +195,7 @@ function Control:collectionWarning(prefix, text, sender, player, now)
         if title:find('[%c]') then return end
     end
     return {at=at,sequence=sequence,quest=quest,item=item,current=current,required=required,
-        reason=reason,untilAt=untilAt,title=title}
+        reason=reason,untilAt=untilAt,title=title,source=emptyStop and 'empty_stop' or 'loot'}
 end
 
 function Control:socialFresh(now)
