@@ -1,7 +1,8 @@
 local Status = WoweeBotStatus
 local model = Status.new()
+local grind = WoweeBotGrind.new()
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
-panel:SetSize(590, 142)
+panel:SetSize(590, 166)
 panel:SetPoint('BOTTOM', UIParent, 'BOTTOM', 0, 138)
 panel:SetFrameStrata('MEDIUM')
 panel:SetMovable(true)
@@ -30,7 +31,7 @@ end
 local title = label('Title', 'GameFontNormal', 16, -13, 180)
 title:SetText('BOT ACTIVITY')
 title:SetTextColor(0.86, 0.72, 0.35)
-local freshness = label('Freshness', 'GameFontHighlightSmall', 190, -15, 190)
+local freshness = label('Freshness', 'GameFontHighlightSmall', 170, -15, 110)
 freshness:SetTextColor(0.65, 0.68, 0.63)
 local goal = label('Goal', 'GameFontNormalLarge', 16, -38, 555)
 goal:SetTextColor(1, 0.84, 0.25)
@@ -38,9 +39,16 @@ local details = label('Details', 'GameFontHighlight', 16, -64, 555)
 local progress = label('Progress', 'GameFontHighlightSmall', 16, -88, 555)
 local action = label('Action', 'GameFontHighlightSmall', 16, -113, 555)
 action:SetTextColor(0.65, 0.7, 0.7)
+local control = label('Control', 'GameFontHighlightSmall', 16, -137, 555)
+control:SetTextColor(0.72, 0.8, 0.62)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
+local autoButton
+
+local function automatic()
+    return settings and settings.autoGrind ~= false
+end
 
 local function grouped()
     return GetNumPartyMembers() > 0 or GetNumRaidMembers() > 0
@@ -59,10 +67,21 @@ local function request()
     model:request(now)
     SendAddonMessage('BOT', 'debug traveldetail', 'WHISPER', player)
     SendAddonMessage('BOT', 'debug action', 'WHISPER', player)
+    if automatic() then SendAddonMessage('BOT', '#a nc ?', 'WHISPER', player) end
     -- Playerbots may send the human-readable where report to the whole party
     -- even when the request is a private addon whisper. Never poll it in a
     -- group; the two raw debug queries above are always sent only to us.
     if not grouped() then SendAddonMessage('BOT', '#a where', 'WHISPER', player) end
+end
+
+local function questState(id)
+    if not id then return end
+    for i = 1, GetNumQuestLogEntries() do
+        local _, _, _, _, header, _, complete, _, questId = GetQuestLogTitle(i)
+        if not header and questId == id then
+            return {complete = complete == 1, failed = complete == -1}
+        end
+    end
 end
 
 local function questProgress(id)
@@ -87,11 +106,24 @@ local function draw()
     local now = GetTime()
     progress:SetText('')
     action:SetText('')
+    control:SetText('')
+    if autoButton then autoButton:SetText(automatic() and 'Auto grind: On' or 'Auto grind: Off') end
     if model.disabled then
         freshness:SetText('Player AI is off')
         goal:SetText('Player AI disabled')
         details:SetText('Enable player AI to see its current activity.')
         return
+    end
+    if automatic() and inWorld and panel:IsShown() then
+        local command = grind:update(model, questState(model:currentQuest(now)), now, grouped())
+        if command then
+            SendAddonMessage('BOT', command, 'WHISPER', UnitName('player'))
+        end
+        control:SetText(grind:label(now))
+    elseif not automatic() then
+        control:SetText('Grind: manual control (auto grind is off)')
+    else
+        control:SetText('Auto grind paused')
     end
     if not model:isFresh(now) then
         freshness:SetText(model.travelAt and ('Last update ' .. math.floor(now - model.travelAt) .. 's ago') or '')
@@ -125,8 +157,8 @@ local function draw()
     end
 end
 
-local function button(text, width, x, callback)
-    local b = CreateFrame('Button', nil, panel, 'UIPanelButtonTemplate')
+local function button(text, width, x, callback, name)
+    local b = CreateFrame('Button', name, panel, 'UIPanelButtonTemplate')
     b:SetSize(width, 21)
     b:SetPoint('TOPRIGHT', panel, 'TOPRIGHT', x, -9)
     b:SetText(text)
@@ -134,8 +166,13 @@ local function button(text, width, x, callback)
     return b
 end
 button('Quest log', 78, -102, function() if ToggleQuestLog then ToggleQuestLog() end end)
-button('Refresh', 65, -32, function() model.disabled = nil; request(); draw() end)
+button('Refresh', 65, -32, function() model.disabled = nil; grind:retry(); request(); draw() end)
 button('x', 20, -9, function() panel:Hide() end)
+autoButton = button('Auto grind: On', 115, -185, function()
+    settings.autoGrind = not automatic()
+    grind = WoweeBotGrind.new()
+    save(); nextPoll = 0; draw()
+end, 'WoweeBotStatusAutoGrind')
 
 panel:SetScript('OnDragStart', function(self) self:StartMoving() end)
 panel:SetScript('OnDragStop', function(self)
@@ -164,6 +201,7 @@ panel:SetScript('OnEvent', function(self, event, ...)
         if name ~= 'WoweeBotStatus' then return end
         if type(WoweeBotStatusSettings) ~= 'table' then WoweeBotStatusSettings = {} end
         settings = WoweeBotStatusSettings
+        if settings.autoGrind == nil then settings.autoGrind = true end
         local p = settings.position
         if type(p) == 'table' and type(p[1]) == 'string' and type(p[2]) == 'string' and
             type(p[3]) == 'number' and type(p[4]) == 'number' then
@@ -171,18 +209,20 @@ panel:SetScript('OnEvent', function(self, event, ...)
         end
         if settings.enabled == false then self:Hide() end
     elseif event == 'PLAYER_ENTERING_WORLD' then
-        model, inWorld, nextPoll = Status.new(), true, 0
+        model, grind, inWorld, nextPoll = Status.new(), WoweeBotGrind.new(), true, 0
     elseif event == 'PLAYER_LEAVING_WORLD' then
-        model, inWorld = Status.new(), false
+        model, grind, inWorld = Status.new(), WoweeBotGrind.new(), false
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
-        if model:receive(prefix, text, sender, UnitName('player'), GetTime()) then draw() end
+        local now, player = GetTime(), UnitName('player')
+        local received = grind:receive(prefix, text, sender, player, now)
+        if model:receive(prefix, text, sender, player, now) or received then draw() end
     elseif event == 'CHAT_MSG_SYSTEM' then
         local text = ...
         if text and text:find('Enable player ai', 1, true) then
-            model, nextPoll = Status.new(), 0
+            model, grind, nextPoll = Status.new(), WoweeBotGrind.new(), 0
         elseif text and text:find('Disable player ai', 1, true) then
-            model = Status.new(); model.disabled = true
+            model, grind = Status.new(), WoweeBotGrind.new(); model.disabled = true
         end
     end
     draw()

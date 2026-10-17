@@ -52,6 +52,19 @@ Packet botChat(const std::string& text, bool prefixed = false) {
     return p;
 }
 
+size_t botCommandCount(Session& session, const std::string& command) {
+    size_t count = 0;
+    for (auto packet : session.sent().of(Opcode::CMSG_MESSAGECHAT)) {
+        const auto type = packet.readUInt32();
+        const auto language = packet.readUInt32();
+        if (type != static_cast<uint32_t>(wowee::game::ChatType::WHISPER) ||
+            language != static_cast<uint32_t>(wowee::game::ChatLanguage::ADDON)) continue;
+        const auto target = packet.readString();
+        if (target == "Jizzle" && packet.readString() == "BOT\t" + command) ++count;
+    }
+    return count;
+}
+
 } // namespace
 
 TEST_CASE("own TBC splines follow intermediate path corners",
@@ -214,13 +227,15 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
     REQUIRE(lua->executeFile(root + "Status.lua"));
+    REQUIRE(lua->executeFile(root + "Grind.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
     REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");
     lua->widgets().layout(1920.0f, 1080.0f);
     lua->dispatchOnUpdate(0.25f);
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == 3);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == 4);
+    CHECK(botCommandCount(s, "#a nc ?") == 1);
     s.handler().setAddonEventCallback([lua](const std::string& event, const auto& args) {
         lua->fireEvent(event, args);
     });
@@ -239,6 +254,16 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
     // Match the reported quest ID to the live quest log, including completion.
     s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
         {{wowee::game::UF::PLAYER_QUEST_LOG_START, 33}}).packet(true));
+    // On the way to a quest objective, prevent incidental grinding. At the
+    // objective, enable it and await server confirmation rather than guessing.
+    s.receive(botChat("Non Combat Strategies: grind, travel", true));
+    CHECK(botCommandCount(s, "#a nc -grind,?") == 1);
+    s.receive(botChat("Non Combat Strategies: travel", true));
+    s.receive(botChat("questobjective travel target\nTarget: kill Young Wolf (objective 1)\nDistance 1y\nStatus: working"));
+    CHECK(botCommandCount(s, "#a nc +grind,?") == 1);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('waiting for server',1,true) ~= nil"));
+    s.receive(botChat("Non Combat Strategies: grind, travel", true));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('on (confirmed)',1,true) ~= nil"));
     Packet complete(wowee::game::wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
     complete.writeUInt32(1);
     complete.writeUInt8(0); // TBC hasTransport
@@ -251,6 +276,9 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
     complete.writeUInt32(1); // QUEST_STATE_COMPLETE
     s.receive(complete);
     CHECK(lua->evaluateBoolean("WoweeBotStatusProgress:GetText() == 'Ready to turn in'"));
+    CHECK(botCommandCount(s, "#a nc -grind,?") == 2);
+    s.receive(botChat("Non Combat Strategies: travel", true));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('off (confirmed)',1,true) ~= nil"));
 
     s.receive(botChat("rpg travel target\nTarget: sell items to Brother Danil\nDistance 8y\nStatus: working [for 30s]"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Goal: sell items to Brother Danil'"));
@@ -262,7 +290,15 @@ TEST_CASE("bot activity addon displays the reported quest and expires stale stat
     REQUIRE(lua->executeString("GetNumPartyMembers=function() return 1 end; testNow=38"));
     lua->dispatchOnUpdate(0.25f);
     // Private raw queries continue, while where must not produce party chat.
-    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == beforeGroup + 2);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == beforeGroup + 3);
+    CHECK(lua->evaluateBoolean("WoweeBotStatusControl:GetText():find('paused while grouped',1,true) ~= nil"));
+    // The manual switch stops strategy commands and strategy polling.
+    REQUIRE(lua->executeString("WoweeBotStatusAutoGrind:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusSettings.autoGrind == false"));
+    const auto manualCount = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();
+    REQUIRE(lua->executeString("testNow=46"));
+    lua->dispatchOnUpdate(0.25f);
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).size() == manualCount + 2);
     REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide()"));
     lua->widgets().layout(1920.0f, 1080.0f);
     const auto count = s.sent().of(Opcode::CMSG_MESSAGECHAT).size();

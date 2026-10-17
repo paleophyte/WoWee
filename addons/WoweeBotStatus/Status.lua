@@ -12,7 +12,17 @@ function Status.clean(text)
     return (text:gsub('|c%x%x%x%x%x%x%x%x', ''):gsub('|r', ''))
 end
 
-local function samePlayer(a, b)
+function Status.actionText(text)
+    local lastAttempt
+    for attempt in text:gmatch('|A:([^|]+)') do
+        if not attempt:match(' %- PREREQ$') then lastAttempt = attempt end
+    end
+    local summary = Status.clean(lastAttempt or text)
+    if #summary > 100 then summary = summary:sub(1, 97) .. '...' end
+    return summary
+end
+
+function Status.samePlayer(a, b)
     return type(a) == 'string' and type(b) == 'string' and a ~= '' and b ~= '' and
         a:match('^[^-]+') ~= nil and b:match('^[^-]+') ~= nil and
         a:match('^[^-]+'):lower() == b:match('^[^-]+'):lower()
@@ -29,7 +39,7 @@ function Status:request(now)
 end
 
 function Status:receive(prefix, text, sender, player, now)
-    if not samePlayer(sender, player) or type(text) ~= 'string' then return false end
+    if not Status.samePlayer(sender, player) or type(text) ~= 'string' then return false end
     if prefix == 'BOT' then
         local plain = Status.clean(text)
         local intent = plain:match('^Traveling') or plain:match('^Currently') or
@@ -60,6 +70,8 @@ function Status:receive(prefix, text, sender, player, now)
         local kind = text:match('^([^\n]+) travel target')
         local goal = text:match('\nTarget: ([^\n]+)')
         if not kind or not goal then return false end
+        kind = kind:gsub('%s+', '')
+        self.objectiveEntry = tonumber(goal:match('|Hentry:([%-]?%d+):'))
         goal = Status.clean(goal)
         -- Switching to maintenance or another NPC must not leave a former
         -- quest displayed as if the bot were still pursuing it.
@@ -84,7 +96,7 @@ function Status:receive(prefix, text, sender, player, now)
     -- arrival order cannot turn a travel report into a last-action label.
     if self.actionDeadline and now <= self.actionDeadline and
         not text:find('\n', 1, true) and text ~= '' then
-        self.action, self.actionAt = Status.clean(text), now
+        self.action, self.actionAt = Status.actionText(text), now
         self.actionDeadline = nil
         return true
     end
@@ -99,4 +111,25 @@ function Status:currentQuest(now)
     if self:isFresh(now) and self.questAt and now - self.questAt <= self.STALE_AFTER then
         return self.questId, self.questTitle
     end
+end
+
+-- Quest identity must come from the bot, and completion from that exact live
+-- quest-log entry. A ready travel target alone does not mean a finished quest.
+function Status:grindDecision(now, quest)
+    if not self:isFresh(now) then return nil, 'waiting for bot status' end
+    if self.kind and self.kind:gsub('%s+', '') == 'questobjective' then
+        local id = self:currentQuest(now)
+        if not id or not quest then return nil, 'waiting for quest details' end
+        if quest.complete then return false, 'quest ready to turn in' end
+        if quest.failed then return false, 'quest failed' end
+        local kill = self.goal and self.goal:match('^kill ')
+        local mobLoot = self.goal and self.goal:match('^loot ') and
+            self.objectiveEntry and self.objectiveEntry > 0
+        if not kill and not mobLoot then return false, 'non-combat objective' end
+        if not self.status or not self.status:match('^working') then
+            return false, 'travelling to objective'
+        end
+        return true, 'quest objective'
+    end
+    return false, 'travel or errands'
 end
