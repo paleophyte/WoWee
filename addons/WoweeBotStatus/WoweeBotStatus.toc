@@ -8,6 +8,8 @@ Status.lua
 Grind.lua
 Control.lua
 Activity.lua
+History.lua
+HistoryUI.lua
 Inbox.lua
 NotesUI.lua
 WoweeBotStatus.lua

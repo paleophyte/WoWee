@@ -144,7 +144,7 @@ end
 
 function Control:capability(prefix, text, sender, player)
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
-        type(text) ~= 'string' or #text > 120 then return false end
+        type(text) ~= 'string' or #text > 160 then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id or id ~= self.ackId or tonumber(generation) ~= self.generation then return false end
     self.warningSupported = (',' .. features .. ','):find(',warning_1,', 1, true) ~= nil

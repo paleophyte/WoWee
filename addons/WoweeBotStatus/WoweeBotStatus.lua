@@ -2,6 +2,11 @@ local Status = WoweeBotStatus
 local model = Status.new()
 local controller = WoweeBotControl.new()
 local activity = WoweeBotActivity.new()
+local function newHistory()
+    local module=rawget(_G,'WoweeBotHistory')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local history = newHistory()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
@@ -52,6 +57,10 @@ local interaction = label('Interaction', 'GameFontNormalLarge', 16, -38, 655)
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
 local lastDriverTick
+local function notifyHistory()
+    local changed=rawget(_G,'WoweeBotHistoryChanged')
+    if type(changed)=='function' then changed(history,inWorld) end
+end
 local autoButton, playButton, drawPolicy
 local grindReason = ''
 
@@ -76,7 +85,9 @@ local function request()
     lastRequest, nextPoll = now, now + 8
     model:request(now)
     if activity.supported then
-        SendChatMessage(activity:request(controller.generation, now), 'SAY')
+        local command=activity:request(controller.generation, now)
+        if history then history:expect(activity.pending.id,controller.generation,now) end
+        SendChatMessage(command, 'SAY')
         return
     end
     SendAddonMessage('BOT', 'debug traveldetail', 'WHISPER', player)
@@ -394,6 +405,11 @@ driver:SetScript('OnUpdate', function()
     local now = GetTime()
     lastDriverTick = now
     if inWorld then
+        if history then
+            local pending=history.pending
+            history:expire(now,controller.generation)
+            if pending and not history.pending then notifyHistory() end
+        end
         if activity:expire(now, controller.generation) and activity.supported then model.travelAt = nil end
         local desired, reason
         if automatic() and controller:isBot(now) and not grouped() then
@@ -428,8 +444,11 @@ driver:SetScript('OnEvent', function(self, event, ...)
         if settings.enabled == false then panel:Hide() end
     elseif event == 'PLAYER_ENTERING_WORLD' then
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
+        history=newHistory();notifyHistory()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
+        if history then history.pending=nil end
+        notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
         local now, player = GetTime(), UnitName('player')
@@ -448,11 +467,17 @@ driver:SetScript('OnEvent', function(self, event, ...)
             WoweeBotReportStatusProblem('fishing', nil, 'Fishing preference confirmed by the server.')
         end
         if received and previousMode ~= controller.mode then
+            if history then history.pending,history.failure=nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if history then
+            history:capability(prefix,text,sender,player,controller)
+            history:receive(prefix,text,sender,player,controller.generation,now)
+            notifyHistory()
+        end
         local warning = controller:warning(prefix, text, sender, player, now)
         if warning and WoweeBotReportFishingWarning then WoweeBotReportFishingWarning(warning) end
         local collection = controller:collectionWarning(prefix, text, sender, player, now)
