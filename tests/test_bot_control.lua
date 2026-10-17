@@ -45,9 +45,10 @@ assert(not c:isBot(36))
 assert(c.failure:find('stale_generation', 1, true))
 assert(not c:update(40)) -- errors never trigger an unbounded command loop
 c:refresh()
-assert(c:update(40) == '.bot idle test_7 control 5 bot')
-assert(c:update(43) == '.bot idle test_7 control 5 bot')
-assert(c:update(46) == '.bot idle test_7 control 5 bot')
+assert(not c.intent) -- Refresh is read-only even after a rejected mutation
+assert(c:update(40) == '.bot idle test_7 status')
+assert(c:update(43) == '.bot idle test_7 status')
+assert(c:update(46) == '.bot idle test_7 status')
 assert(not c:update(49))
 assert(c.failure)
 assert(not ack('test_7', 'bot', 6, 0, 50)) -- timed-out reply cannot resume automation
@@ -118,3 +119,61 @@ assert(p:receive('WIDLE','1\tpolicy_13\tok\tmanual\t4\t0\tnone','Jizzle','Jizzle
 assert(p:capability('WIDLECAP','1\tpolicy_13\t4\tactivity_1','Jizzle','Jizzle'))
 assert(not p.socialSupported and not p:update(52)) -- unsupported realms get no policy commands
 print('Social policy protocol scenarios passed')
+
+-- Recovery observes the server and never revives a timed-out change of control.
+local r = Control.new('recover')
+assert(r:update(0) == '.bot idle recover_1 status')
+assert(r:receive('WIDLE','1\trecover_1\tok\tmanual\t1\t0\tnone','Jizzle','Jizzle',0))
+r:want('bot')
+assert(r:update(1) == '.bot idle recover_2 control 1 bot')
+assert(r:update(4) == '.bot idle recover_2 control 1 bot')
+assert(r:update(7) == '.bot idle recover_2 control 1 bot')
+assert(not r:update(10))
+assert(r.failure and not r.intent and not r.pending and r.recoverAt == 40)
+assert(not r:update(39))
+assert(r:update(40) == '.bot idle recover_3 status')
+assert(not r:receive('WIDLE','1\trecover_2\tok\tbot\t2\t0\tnone','Jizzle','Jizzle',40))
+assert(not r:isBot(40))
+assert(r:update(43) == '.bot idle recover_3 status')
+assert(r:update(46) == '.bot idle recover_3 status')
+assert(not r:update(49))
+assert(r.recoverAt == 109) -- repeated loss backs off rather than querying every frame
+assert(not r:update(108))
+assert(r:update(109) == '.bot idle recover_4 status')
+assert(r:receive('WIDLE','1\trecover_4\tok\tmanual\t2\t0\tnone','Jizzle','Jizzle',110))
+assert(not r.failure and not r.intent and not r:isBot(110) and not r:update(110))
+assert(r.recoveryDelay == nil and r.recoverAt == nil)
+assert(table.concat(r:diagnostic(110),'\n'):find('recover_4 status',1,true))
+assert(r.lastRejected and r.acceptedAt == 110)
+
+-- Losing an ordinary observation recovers bot visibility, not a gameplay mutation.
+assert(r:update(118) == '.bot idle recover_5 status')
+assert(r:update(121) == '.bot idle recover_5 status')
+assert(r:update(124) == '.bot idle recover_5 status')
+assert(not r:update(127))
+assert(r:update(157) == '.bot idle recover_6 status')
+assert(r:receive('WIDLE','1\trecover_6\tok\tbot\t3\t0\tnone','Jizzle','Jizzle',157))
+assert(r:isBot(157) and not r:update(157))
+
+-- Explicit Refresh abandons an in-flight intent even before it times out.
+r:want('manual')
+assert(r:update(158) == '.bot idle recover_7 control 3 manual')
+r:refresh()
+assert(not r.intent and r:update(158) == '.bot idle recover_8 status')
+assert(not r:receive('WIDLE','1\trecover_7\tok\tmanual\t4\t0\tnone','Jizzle','Jizzle',158))
+assert(r:receive('WIDLE','1\trecover_8\tok\tmanual\t4\t0\tnone','Jizzle','Jizzle',159))
+assert(not r:update(159) and not r:isBot(159))
+assert(not r:receive('WIDLE','1\trecover_8\tok\tmanual\t4\t0\tnone','Jizzle','Jizzle',159))
+assert(r.lastRejected == 'no pending control request')
+local b = Control.new('backoff')
+local now = 0
+for cycle = 1, 5 do
+    assert(b:update(now) == '.bot idle backoff_' .. cycle .. ' status')
+    assert(b:update(now+3) == '.bot idle backoff_' .. cycle .. ' status')
+    assert(b:update(now+6) == '.bot idle backoff_' .. cycle .. ' status')
+    assert(not b:update(now+9))
+    assert(b.recoveryDelay == math.min(15*2^cycle,120))
+    assert(not b:update(b.recoverAt-1))
+    now = b.recoverAt
+end
+print('Read-only control recovery scenarios passed')

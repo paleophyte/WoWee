@@ -26,9 +26,14 @@ function Activity:capability(prefix, text, sender, player, control)
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
         type(text) ~= 'string' or #text > 120 then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
-    if not id or id ~= control.ackId or tonumber(generation) ~= control.generation then return false end
-    if not (',' .. features .. ','):find(',activity_1,', 1, true) then return false end
+    if not id then self.capabilityRejected = 'invalid capability fields'; return false end
+    if id ~= control.ackId then self.capabilityRejected = 'capability request does not match accepted control reply'; return false end
+    if tonumber(generation) ~= control.generation then self.capabilityRejected = 'capability generation mismatch'; return false end
+    if not (',' .. features .. ','):find(',activity_1,', 1, true) then
+        self.capabilityRejected = 'activity_1 not advertised'; return false
+    end
     self.supported = true
+    self.capabilityRequest, self.capabilityGeneration = id, tonumber(generation)
     return true
 end
 
@@ -36,8 +41,27 @@ function Activity:request(generation, now)
     self.sequence = self.sequence + 1
     local id = self.nonce .. '_a' .. self.sequence
     self.pending = {id = id, generation = generation, sentAt = now, parts = {}}
+    self.lastRequest, self.requestedAt = id .. ' generation ' .. generation, now
     self.failure = nil
     return '.bot idle ' .. id .. ' snapshot ' .. generation
+end
+
+function Activity:reject(reason, now)
+    self.lastRejected, self.rejectedAt = reason, now
+end
+
+function Activity:diagnostic(now)
+    local p, count = self.pending, 0
+    if p then for _ in pairs(p.parts) do count = count + 1 end end
+    return {'Activity capability: ' .. (self.supported and ('typed, ' .. (self.capabilityRequest or '?') ..
+        ', generation ' .. (self.capabilityGeneration or '?')) or 'legacy / not advertised'),
+        'Snapshot pending: ' .. (p and (p.id .. ', generation ' .. p.generation .. ', fragments ' .. count .. '/' ..
+            (p.count or '?') .. ', age ' .. math.max(0, math.floor(now - p.sentAt)) .. 's') or 'none'),
+        'Last snapshot request: ' .. (self.lastRequest or 'none'),
+        'Last complete snapshot: ' .. (self.completedAt and (math.max(0, math.floor(now - self.completedAt)) .. 's ago') or 'never'),
+        'Snapshot failure: ' .. (self.failure or 'none'),
+        'Capability last rejected: ' .. (self.capabilityRejected or 'none'),
+        'Snapshot last rejected: ' .. (self.lastRejected or 'none')}
 end
 
 function Activity:expire(now, generation)
@@ -79,8 +103,12 @@ end
 
 function Activity:receive(prefix, text, sender, player, generation, now)
     local p = self.pending
-    if prefix ~= 'WIDLEACT' or not p or not WoweeBotStatus.samePlayer(sender, player) or
-        type(text) ~= 'string' or #text > 240 or now - p.sentAt > 4 or generation ~= p.generation then return end
+    if prefix ~= 'WIDLEACT' then return end
+    if not WoweeBotStatus.samePlayer(sender, player) then return self:reject('snapshot sender mismatch', now) end
+    if not p then return self:reject('no pending snapshot request', now) end
+    if type(text) ~= 'string' or #text > 240 or now - p.sentAt > 4 or generation ~= p.generation then
+        return self:reject('snapshot length, age or controller generation mismatch', now)
+    end
     local id, epoch, reason = text:match('^1\t([%w_-]+)\t(%d+)\terror\t([%w_]+)$')
     if id == p.id and tonumber(epoch) and tonumber(epoch) >= generation then
         self.pending, self.failure = nil, 'Activity unavailable: ' .. reason
@@ -89,8 +117,9 @@ function Activity:receive(prefix, text, sender, player, generation, now)
     local part, count, chunk
     id, epoch, part, count, chunk = text:match('^1\t([%w_-]+)\t(%d+)\t(%d+)\t(%d+)\t(.*)$')
     part, count = integer(part, 1, 12), integer(count, 1, 12)
-    if id ~= p.id or tonumber(epoch) ~= generation or not part or not count or part > count or
-        not chunk or #chunk > 160 then return end
+    if id ~= p.id then return self:reject('snapshot request mismatch', now) end
+    if tonumber(epoch) ~= generation then return self:reject('snapshot generation mismatch', now) end
+    if not part or not count or part > count or not chunk or #chunk > 160 then return self:reject('invalid snapshot fragment', now) end
     if (p.count and p.count ~= count) or (p.parts[part] and p.parts[part] ~= chunk) then
         self.pending, self.failure = nil, 'Conflicting activity fragments'
         return nil, true
@@ -101,6 +130,7 @@ function Activity:receive(prefix, text, sender, player, generation, now)
     self.pending = nil
     if not snapshot then self.failure = 'Invalid activity reply'; return nil, true end
     self.failure = nil
+    self.completedAt = now
     return snapshot, true
 end
 

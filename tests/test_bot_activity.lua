@@ -31,6 +31,7 @@ for i=total,1,-1 do -- reversed delivery still commits only the complete snapsho
     if i > 1 then assert(not result) end
 end
 assert(result and result.questTitle == 'Quest: café' and result.interactionName == 'Dane Winslow')
+assert(c.completedAt == 1 and table.concat(c:diagnostic(2),'\n'):find('1s ago',1,true))
 assert(not c.pending and not receive(packet('test_a1',2,1,total,body:sub(1,160))))
 local model = WoweeBotStatus.new()
 Activity.apply(model,result,1)
@@ -55,4 +56,5 @@ c:request(2,10); assert(c:expire(10,3))
 c:request(2,11)
 local _, changed = receive('1\ttest_a5\t3\terror\tstale_generation',12)
 assert(changed and c.failure:find('stale_generation',1,true))
+assert(c.lastRejected and #table.concat(c:diagnostic(12),'\n') < 1000)
 print('Typed activity snapshot scenarios passed')

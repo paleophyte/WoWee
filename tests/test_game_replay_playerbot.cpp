@@ -389,6 +389,74 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last successful action: rpg ai chat'"));
     s.receive(botChat("rpg travel target\nTarget: train at Someone Else\nDistance 1y\nStatus: working"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+
+    // Exercise the reported trigger repeatedly: typed Bot -> manual -> Bot,
+    // with new snapshot IDs/generations and late fragments from the old mode.
+    auto snapshot = [&](int id, int generation, const std::string& title) {
+        std::string current = body;
+        const auto oldTitle = hex("Wolves Across the Border");
+        current.replace(current.find(oldTitle), oldTitle.size(), hex(title));
+        const auto parts = (current.size() + 159) / 160;
+        for (size_t i = 0; i < parts; ++i)
+            s.receive(botChat("WIDLEACT\t1\t0_a" + std::to_string(id) + "\t" + std::to_string(generation) + "\t" +
+                std::to_string(i + 1) + "\t" + std::to_string(parts) + "\t" + current.substr(i * 160, 160)));
+    };
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        REQUIRE(lua->executeString("testNow=" + std::to_string(51 + cycle * 2)));
+        CHECK(lua->dispatchSlashCommand("/botplay", "manual"));
+        tick();
+        const int requestId = 10 + cycle * 2;
+        const int generation = 3 + cycle * 2;
+        CHECK(lastCommand() == ".bot idle 0_" + std::to_string(requestId) + " control " + std::to_string(generation) + " manual");
+        ack(std::to_string(requestId), "manual", generation + 1, false);
+        CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'I am playing (server confirmed)'"));
+        REQUIRE(lua->executeString("testNow=" + std::to_string(52 + cycle * 2)));
+        CHECK(lua->dispatchSlashCommand("/botplay", "bot"));
+        tick();
+        CHECK(lastCommand() == ".bot idle 0_" + std::to_string(requestId + 1) + " control " + std::to_string(generation + 1) + " bot");
+        ack(std::to_string(requestId + 1), "bot", generation + 2, false);
+        s.receive(botChat("WIDLECAP\t1\t0_" + std::to_string(requestId + 1) + "\t" + std::to_string(generation + 2) + "\tactivity_1"));
+        tick();
+        CHECK(lastCommand() == ".bot idle 0_a" + std::to_string(cycle + 2) + " snapshot " + std::to_string(generation + 2));
+        snapshot(cycle + 1, generation, "Obsolete snapshot");
+        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
+        snapshot(cycle + 2, generation + 2, "Replay cycle " + std::to_string(cycle + 1));
+        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Replay cycle " + std::to_string(cycle + 1) + "'"));
+    }
+    // Lose all replies for one status request. Recover via observation only,
+    // even while the panel is closed; the independent server may still play.
+    REQUIRE(lua->executeString("testNow=64")); tick();
+    CHECK(lastCommand() == ".bot idle 0_a5 snapshot 9");
+    REQUIRE(lua->executeString("testNow=67")); tick();
+    CHECK(lastCommand() == ".bot idle 0_16 status");
+    REQUIRE(lua->executeString("testNow=70")); tick();
+    CHECK(lastCommand() == ".bot idle 0_16 status");
+    REQUIRE(lua->executeString("testNow=73")); tick();
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText():find('No server confirmation',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('Last confirmed: Bot, 17s ago.',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusPlay:GetText() == 'Refresh status'"));
+    REQUIRE(lua->executeString("WoweeBotStatusFrame:Hide(); testNow=103"));
+    lua->widgets().layout(1920.0f, 1080.0f);
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_17 status");
+    ack("16", "manual", 10, false); // late old request cannot confirm control
+    CHECK_FALSE(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'I am playing (server confirmed)'"));
+    ack("17", "bot", 9, false);
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_a6 snapshot 9");
+    snapshot(6, 9, "Recovered without relog");
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Recovered without relog'"));
+    const auto beforeDebug = count();
+    CHECK(lua->dispatchSlashCommand("/botstatus", "debug"));
+    CHECK(count() == beforeDebug); // diagnostics are local, including while hidden
+    CHECK(lua->dispatchSlashCommand("/botstatus", "refresh"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText() == 'Control unconfirmed; addon automation paused'"));
+    tick();
+    CHECK(lastCommand() == ".bot idle 0_18 status");
+    ack("18", "manual", 10, false);
+    const auto afterRefresh = count();
+    tick();
+    CHECK(count() == afterRefresh); // read-only refresh preserves server manual mode
     CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
     CAPTURE(errors);
     CHECK(errors.empty());

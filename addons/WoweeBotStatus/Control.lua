@@ -24,11 +24,27 @@ function Control:want(mode)
     self.intent, self.failure, self.pending = mode, nil, nil
     self.desiredGrind = nil
     self.socialIntent, self.socialAt = nil, nil
+    self.recoverAt, self.recoveryDelay = nil, nil
 end
 
 function Control:refresh()
     self.failure, self.pending, self.nextStatus = nil, nil, 0
+    self.confirmedAt = nil
+    -- Refresh only observes. It must not replay an old, unconfirmed mutation.
+    self.intent, self.desiredGrind, self.recoverAt, self.recoveryDelay = nil, nil, nil, nil
     self:refreshSocial()
+end
+
+function Control:fail(message, now)
+    self.failure, self.pending = message, nil
+    self.intent, self.desiredGrind, self.socialIntent = nil, nil, nil
+    self.recoveryDelay = math.min((self.recoveryDelay or 15) * 2, 120)
+    self.recoverAt = now + self.recoveryDelay
+end
+
+function Control:reject(reason, now)
+    self.lastRejected, self.rejectedAt = reason, now
+    return false
 end
 
 function Control:planGrind(desired)
@@ -41,6 +57,7 @@ function Control:start(verb, now, desired)
     local command = '.bot idle ' .. id .. ' ' .. verb
     if verb ~= 'status' then command = command .. ' ' .. self.generation .. ' ' .. desired end
     self.pending = {id = id, verb = verb, command = command, desired = desired, attempts = 1, sentAt = now}
+    self.lastSent, self.sentAt = command, now
     return command
 end
 
@@ -54,13 +71,17 @@ function Control:update(now)
                 self.socialFailure, self.nextSocial = 'No policy confirmation', now + 30
                 return
             end
-            self.pending, self.failure = nil, 'No confirmation; Refresh to retry'
+            self:fail('No server confirmation; retrying status', now)
             return
         end
         p.attempts, p.sentAt = p.attempts + 1, now
+        self.lastSent, self.sentAt = p.command .. ' (retry ' .. p.attempts .. ')', now
         return p.command -- retry the same request, never a blind toggle
     end
-    if self.failure then return end
+    if self.failure then
+        if self.recoverAt and now >= self.recoverAt then return self:start('status', now) end
+        return
+    end
     if self.intent and self:fresh(now) then
         if self.mode ~= self.intent then return self:start('control', now, self.intent) end
         self.intent = nil
@@ -79,21 +100,32 @@ end
 
 function Control:receive(prefix, text, sender, player, now)
     if prefix == 'WIDLEPOL' then return self:receiveSocial(text, sender, player, now) end
-    if prefix ~= 'WIDLE' or not WoweeBotStatus.samePlayer(sender, player) or
-        type(text) ~= 'string' or #text > 240 then return false end
+    if prefix ~= 'WIDLE' then return false end
+    if not WoweeBotStatus.samePlayer(sender, player) then return self:reject('control sender mismatch', now) end
+    if type(text) ~= 'string' or #text > 240 then return self:reject('invalid control length', now) end
     local version, id, result, mode, generation, grind, reason =
         text:match('^(%d+)\t([%w_-]+)\t(%a+)\t(%a+)\t(%d+)\t([01])\t([%w_]+)$')
     generation = tonumber(generation)
-    if version ~= '1' or not self.pending or self.pending.verb == 'social' or id ~= self.pending.id or
+    if version ~= '1' or not id or #id > 32 or
         (result ~= 'ok' and result ~= 'error') or (mode ~= 'manual' and mode ~= 'bot') or
-        not generation or generation < 1 or generation > 4294967295 or
-        (self.generation and generation < self.generation) then return false end
+        not generation or generation < 1 or generation > 4294967295 then return self:reject('invalid control fields', now) end
+    if not self.pending then return self:reject('no pending control request', now) end
+    if self.pending.verb == 'social' then return self:reject('control reply while awaiting policy', now) end
+    if id ~= self.pending.id then return self:reject('control request ' .. id .. ', expected ' .. self.pending.id, now) end
+    if self.generation and generation < self.generation then
+        return self:reject('control generation ' .. generation .. ', expected at least ' .. self.generation, now)
+    end
     if self.generation ~= generation then self:refreshSocial() end
     self.mode, self.generation, self.grind = mode, generation, grind == '1'
     self.ackId = id
     self.confirmedAt, self.nextStatus, self.pending = now, now + 8, nil
-    if result == 'error' then self.failure = 'Server rejected command: ' .. reason
-    elseif self.intent == mode then self.intent = nil end
+    self.observedAt = now
+    self.lastAccepted, self.acceptedAt = id .. ' ' .. result .. ' ' .. mode .. ' generation ' .. generation, now
+    if result == 'error' then self:fail('Server rejected command: ' .. reason, now)
+    else
+        self.failure, self.recoverAt, self.recoveryDelay = nil, nil, nil
+        if self.intent == mode then self.intent = nil end
+    end
     return true
 end
 
@@ -153,6 +185,17 @@ end
 function Control:label(now)
     if self.failure then return self.failure end
     if self.intent or (self.pending and self.pending.verb == 'control') then return 'Switching control...' end
-    if not self:fresh(now) then return 'Control unconfirmed; automation paused' end
+    if not self:fresh(now) then return 'Control unconfirmed; addon automation paused' end
     return self.mode == 'manual' and 'I am playing (server confirmed)' or 'Bot is playing (server confirmed)'
+end
+
+function Control:diagnostic(now)
+    local function age(at) return at and (math.max(0, math.floor(now - at)) .. 's ago') or 'never' end
+    return {'Control: ' .. self:label(now),
+        'Last confirmed: ' .. (self.mode or 'unknown') .. ', generation ' .. (self.generation or '?') .. ', ' .. age(self.observedAt),
+        'Pending: ' .. (self.pending and (self.pending.id .. ' ' .. self.pending.verb .. ' attempt ' .. self.pending.attempts) or 'none'),
+        'Last sent: ' .. (self.lastSent or 'none') .. ', ' .. age(self.sentAt),
+        'Last accepted: ' .. (self.lastAccepted or 'none') .. ', ' .. age(self.acceptedAt),
+        'Last rejected: ' .. (self.lastRejected or 'none') .. ', ' .. age(self.rejectedAt),
+        'Read-only recovery: ' .. (self.recoverAt and (math.max(0, math.ceil(self.recoverAt - now)) .. 's') or 'not waiting')}
 end

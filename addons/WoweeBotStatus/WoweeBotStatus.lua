@@ -48,6 +48,7 @@ local interaction = label('Interaction', 'GameFontHighlightSmall', 16, -186, 655
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
+local lastDriverTick
 local autoButton, playButton, drawPolicy
 local grindReason = ''
 
@@ -120,15 +121,24 @@ local function draw()
     interaction:SetText('')
     modeLabel:SetText(controller:label(now))
     if playButton then
-        playButton:SetText(controller.failure and 'Retry control' or controller.intent and 'Switching...' or
+        playButton:SetText(controller.failure and 'Refresh status' or controller.intent and 'Switching...' or
             (controller.mode == 'bot' and 'Let me play' or 'Bot, you play'))
     end
     if autoButton then autoButton:SetText(automatic() and 'Auto grind: On' or 'Auto grind: Off') end
-    if controller:fresh(now) and controller.mode == 'manual' then
+    if controller:fresh(now) and not controller.failure and controller.mode == 'manual' then
         freshness:SetText('Manual control')
         goal:SetText('Your character is under your control')
         details:SetText('Bot actions are paused. Play normally, then resume when ready.')
         control:SetText('Auto grind paused until bot control is confirmed')
+        return
+    end
+    if not controller:fresh(now) or controller.failure then
+        freshness:SetText('Control status unavailable')
+        goal:SetText('Waiting for bot status')
+        local observed = controller.observedAt and ('Last confirmed: ' .. (controller.mode == 'bot' and 'Bot' or 'Manual') ..
+            ', ' .. math.max(0, math.floor(now - controller.observedAt)) .. 's ago.') or 'No server confirmation received yet.'
+        details:SetText(observed .. ' The server may still be playing.')
+        control:SetText('Addon automation paused; querying status. Refresh queries without changing control.')
         return
     end
     if model.disabled then
@@ -154,7 +164,7 @@ local function draw()
         elseif model.unsupported then
             details:SetText('This server does not expose Playerbots status queries.')
         elseif model.firstRequestAt and now - model.firstRequestAt > 4 then
-            details:SetText('No current status received. Player AI may be off.')
+            details:SetText('No current activity received. Querying again; server AI may still be playing.')
         else
             details:SetText('Asking your Playerbot what it is doing...')
         end
@@ -203,10 +213,11 @@ local function button(text, width, x, callback, name)
     return b
 end
 button('Quest log', 78, -102, function() if ToggleQuestLog then ToggleQuestLog() end end)
-button('Refresh', 65, -32, function()
+local function refreshStatus()
     model.disabled = nil; activity.pending, activity.failure = nil, nil
     controller:refresh(); nextPoll = 0; draw()
-end)
+end
+button('Refresh', 65, -32, refreshStatus, 'WoweeBotStatusRefresh')
 button('x', 20, -9, function() panel:Hide() end)
 autoButton = button('Auto grind: On', 115, -185, function()
     settings.autoGrind = not automatic()
@@ -335,6 +346,7 @@ panel:SetScript('OnShow', function()
 end)
 driver:SetScript('OnUpdate', function()
     local now = GetTime()
+    lastDriverTick = now
     if inWorld then
         if activity:expire(now, controller.generation) and activity.supported then model.travelAt = nil end
         local desired, reason
@@ -415,9 +427,19 @@ end)
 for _, event in ipairs({'ADDON_LOADED', 'PLAYER_ENTERING_WORLD', 'PLAYER_LEAVING_WORLD',
     'CHAT_MSG_ADDON', 'CHAT_MSG_SYSTEM', 'QUEST_LOG_UPDATE'}) do driver:RegisterEvent(event) end
 
+local function diagnostic()
+    local now = GetTime()
+    local lines = controller:diagnostic(now)
+    for _, line in ipairs(activity:diagnostic(now)) do lines[#lines + 1] = line end
+    lines[#lines + 1] = 'Controller callback: ' .. (lastDriverTick and (math.max(0, math.floor(now - lastDriverTick)) .. 's ago') or 'not run') ..
+        '; in world: ' .. tostring(inWorld) .. '; panel shown: ' .. tostring(panel:IsShown()) .. '; grouped: ' .. tostring(grouped())
+    for _, line in ipairs(lines) do print('Bot status: ' .. line) end
+end
 SLASH_WOWEEBOTSTATUS1 = '/botstatus'
 SlashCmdList.WOWEEBOTSTATUS = function(command)
     if command and command:lower() == 'hide' then panel:Hide(); return end
+    if command and command:lower() == 'debug' then diagnostic(); return end
+    if command and command:lower() == 'refresh' then refreshStatus(); return end
     panel:Show(); model.disabled = nil; request(); draw()
 end
 SLASH_WOWEEBOTPLAY1 = '/botplay'
