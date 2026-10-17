@@ -698,12 +698,13 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
         if (i + 1 < fragments)
             CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
     }
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Wolves Across the Border'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('Eagan Peltskinner',1,true) ~= nil"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText():find('Dane Winslow',1,true) ~= nil"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last successful action: rpg ai chat'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText() == 'Selected task: Talk to an NPC - Dane Winslow'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last reported action: Talk to an NPC'"));
     s.receive(botChat("rpg travel target\nTarget: train at Someone Else\nDistance 1y\nStatus: working"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Wolves Across the Border'"));
 
     // Exercise the reported trigger repeatedly: typed Bot -> manual -> Bot,
     // with new snapshot IDs/generations and late fragments from the old mode.
@@ -740,9 +741,9 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
         snapshot(cycle + 1, generation, "Obsolete snapshot");
         CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
         snapshot(cycle + 2, generation + 2, "Replay cycle " + std::to_string(cycle + 1), cycle != 1);
-        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Replay cycle " + std::to_string(cycle + 1) + "'"));
+        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Replay cycle " + std::to_string(cycle + 1) + "'"));
         CHECK(lua->evaluateBoolean(cycle != 1 ? "WoweeBotStatusAction:GetText() == ''" :
-            "WoweeBotStatusAction:GetText() == 'Last successful action: rpg ai chat'"));
+            "WoweeBotStatusAction:GetText() == 'Last reported action: Talk to an NPC'"));
         // The reported empty executed-action field used to throw in draw(),
         // then five consecutive native callbacks removed the entire driver.
         REQUIRE(lua->executeString("testNow=" + std::to_string(52.4 + cycle * 2)));
@@ -778,7 +779,8 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     for (size_t i = 0; i < trainingParts; ++i)
         s.receive(botChat("WIDLEACT\t1\t0_a6\t9\t" + std::to_string(i + 1) + "\t" +
             std::to_string(trainingParts) + "\t" + training.substr(i * 160, 160)));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Goal: Train at Brother Wilhelm'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Travel plan: Train at Brother Wilhelm'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText() == 'Now: Traveling along the travel plan'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == ''"));
     for (int frame = 0; frame < 8; ++frame) tick();
     CHECK(lua->evaluateBoolean("type(WoweeBotController:GetScript('OnUpdate')) == 'function'"));
@@ -794,6 +796,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     tick();
     CHECK(count() == afterRefresh); // read-only refresh preserves server manual mode
     CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_activity_ui.lua"));
     CAPTURE(errors);
     CHECK(errors.empty());
 }

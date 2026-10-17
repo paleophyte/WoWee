@@ -134,7 +134,41 @@ function Activity:receive(prefix, text, sender, player, generation, now)
     return snapshot, true
 end
 
-local goalVerbs = {trainer='Train at ', vendor='Sell items to ', repair='Repair at ', social='Social visit: '}
+-- A vendor destination permits several kinds of shopping, not just selling.
+local goalVerbs = {trainer='Train at ', vendor='Visit vendor: ', repair='Repair at ', social='Social visit: '}
+local taskNames = {
+    ['rpg buy']='Buy items', ['rpg sell']='Sell items', ['rpg repair']='Repair gear',
+    ['rpg train']='Train skills', ['rpg start quest']='Accept quests', ['rpg end quest']='Turn in quests',
+    ['rpg get mail']='Collect mail', ['rpg ah sell']='Post auctions', ['rpg ah buy']='Buy at auction',
+    ['rpg discover']='Learn a flight path', ['rpg taxi']='Take a flight',
+    ['rpg ai chat']='Talk to an NPC', ['rpg emote']='Emote', ['rpg craft']='Craft items',
+    ['rpg bank deposit']='Deposit at bank', ['rpg bank withdraw']='Withdraw from bank',
+    ['move to rpg target']='Approach interaction target', ['choose rpg target']='Choose an interaction target',
+    ['travel']='Travel', ['loot']='Loot', ['equip upgrades']='Equip upgrades',
+}
+
+function Activity.actionName(name)
+    if type(name) ~= 'string' or name == '' then return end
+    return taskNames[name] or name
+end
+
+function Activity.currentWork(model)
+    if model.aiState == 'combat' then return 'Now: In combat' end
+    if model.aiState == 'dead' then return 'Now: Dead' end
+    if model.aiState == 'reaction' then return 'Now: Reacting to an event' end
+    if model.interactionName then
+        -- Selection is intent, not proof a purchase, lesson or turn-in happened.
+        if model.interactionTask and model.interactionTask ~= 'rpg' then
+            return 'Selected task: ' .. Activity.actionName(model.interactionTask) .. ' - ' .. model.interactionName
+        end
+        return 'Selected target: ' .. model.interactionName .. ' (task not reported)'
+    end
+    if model.status == 'traveling' then return 'Now: Traveling along the travel plan' end
+    if model.status == 'working' then return 'Travel planner: At destination; current task not reported' end
+    if model.status == 'cooldown' then return 'Now: Waiting before choosing the next activity' end
+    return 'Now: No specific task reported'
+end
+
 function Activity.apply(model, s, now)
     model.typed, model.aiState, model.objectiveType = true, s.state, s.objectiveType
     model.kind = s.kind == 'quest_objective' and 'questobjective' or s.kind

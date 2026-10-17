@@ -38,16 +38,16 @@ title:SetText('BOT ACTIVITY')
 title:SetTextColor(0.86, 0.72, 0.35)
 local freshness = label('Freshness', 'GameFontHighlightSmall', 175, -15, 170)
 freshness:SetTextColor(0.65, 0.68, 0.63)
-local goal = label('Goal', 'GameFontNormalLarge', 16, -38, 655)
+local goal = label('Goal', 'GameFontNormal', 16, -64, 655)
 goal:SetTextColor(1, 0.84, 0.25)
-local details = label('Details', 'GameFontHighlight', 16, -64, 655)
-local progress = label('Progress', 'GameFontHighlightSmall', 16, -88, 655)
-local action = label('Action', 'GameFontHighlightSmall', 16, -113, 655)
+local details = label('Details', 'GameFontHighlight', 16, -88, 655)
+local progress = label('Progress', 'GameFontHighlightSmall', 16, -113, 655)
+local action = label('Action', 'GameFontHighlightSmall', 16, -138, 655)
 action:SetTextColor(0.65, 0.7, 0.7)
-local control = label('Control', 'GameFontHighlightSmall', 16, -162, 655)
+local control = label('Control', 'GameFontHighlightSmall', 16, -186, 655)
 control:SetTextColor(0.72, 0.8, 0.62)
-local modeLabel = label('Mode', 'GameFontHighlight', 16, -138, 500)
-local interaction = label('Interaction', 'GameFontHighlightSmall', 16, -186, 655)
+local modeLabel = label('Mode', 'GameFontHighlight', 16, -162, 500)
+local interaction = label('Interaction', 'GameFontNormalLarge', 16, -38, 655)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
@@ -175,7 +175,8 @@ local function draw()
     end
     freshness:SetText('Updated ' .. math.floor(now - model.travelAt) .. 's ago')
     local questId, questTitle = model:currentQuest(now)
-    goal:SetText(questTitle and ('Quest: ' .. questTitle) or ('Goal: ' .. (model.goal or 'No destination')))
+    goal:SetText(questTitle and ((model.typed and 'Quest plan: ' or 'Quest: ') .. questTitle) or
+        ((model.typed and 'Travel plan: ' or 'Goal: ') .. (model.goal or 'No destination')))
     local parts = {model.status or (model.kind == 'idle' and 'Idle' or 'No travel status reported')}
     if model.typed then
         parts[1] = (model.aiState or 'unknown'):gsub('_', ' ') .. ' - ' .. parts[1]
@@ -184,12 +185,7 @@ local function draw()
     if model.distance and model.kind ~= 'idle' then parts[#parts + 1] = model.distance .. ' yd' end
     if model.location then parts[#parts + 1] = Status.clean(model.location) end
     details:SetText(table.concat(parts, '  -  '))
-    if model.typed and model.interactionName then
-        interaction:SetText('Interaction target: ' .. model.interactionName ..
-            (model.interactionTask and (' - selected task: ' .. model.interactionTask) or ''))
-    elseif model.typed then
-        interaction:SetText('No NPC interaction selected')
-    end
+    if model.typed then interaction:SetText(WoweeBotActivity.currentWork(model)) end
     local objective = questProgress(questId)
     if objective == '' and model.kind and model.kind:find('quest', 1, true) and not questId then
         objective = grouped() and 'Quest name unavailable while grouped; showing the destination.' or
@@ -204,7 +200,8 @@ local function draw()
     progress:SetText(objective)
     if type(model.action) == 'string' and model.action ~= '' and model.actionAt and
         now - model.actionAt <= Status.STALE_AFTER then
-        action:SetText((model.typed and 'Last successful action: ' or 'Last action: ') .. model.action)
+        action:SetText((model.typed and 'Last reported action: ' or 'Last action: ') ..
+            (model.typed and WoweeBotActivity.actionName(model.action) or model.action))
     end
 end
 

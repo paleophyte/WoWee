@@ -64,4 +64,29 @@ local emptyAction = Activity.decode(table.concat(fields, '\t'))
 assert(emptyAction and emptyAction.executed == '')
 Activity.apply(model, emptyAction, 42)
 assert(model.action == nil and model.actionAt == nil)
+-- A retained training destination must not masquerade as the selected local
+-- task. Changing that task must leave the planner/objective data untouched.
+model.aiState, model.goal, model.kind, model.status = 'non_combat', 'Train at Lee Brown', 'trainer', 'traveling'
+model.interactionName, model.interactionTask = 'Vendor', 'rpg buy'
+assert(Activity.currentWork(model) == 'Selected task: Buy items - Vendor')
+assert(model.goal == 'Train at Lee Brown' and model.kind == 'trainer')
+model.interactionName, model.interactionTask = 'Quest giver', 'rpg end quest'
+assert(Activity.currentWork(model) == 'Selected task: Turn in quests - Quest giver')
+model.interactionName, model.interactionTask = 'Warlock trainer', 'rpg train'
+assert(Activity.currentWork(model) == 'Selected task: Train skills - Warlock trainer')
+model.interactionTask = 'rpg'
+assert(Activity.currentWork(model):find('task not reported', 1, true))
+model.interactionTask = nil
+assert(Activity.currentWork(model):find('task not reported', 1, true))
+model.aiState = 'combat'
+assert(Activity.currentWork(model) == 'Now: In combat')
+model.aiState = 'dead'
+assert(Activity.currentWork(model) == 'Now: Dead')
+model.aiState, model.interactionName = 'non_combat', nil
+assert(Activity.currentWork(model) == 'Now: Traveling along the travel plan')
+model.status = 'cooldown'
+assert(Activity.currentWork(model) == 'Now: Waiting before choosing the next activity')
+assert(Activity.actionName('rpg buy') == 'Buy items')
+assert(Activity.actionName('new unknown action') == 'new unknown action')
+assert(Activity.actionName(nil) == nil and Activity.actionName('') == nil)
 print('Typed activity snapshot scenarios passed')
