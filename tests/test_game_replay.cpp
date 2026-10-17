@@ -3,12 +3,14 @@
 
 #include "game_replay.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/addon_manager.hpp"
 #include "game/entity.hpp"
 #include "game/game_utils.hpp"
 #include "game/packed_time.hpp"
 
 #include <algorithm>
 #include <memory>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +29,35 @@ namespace {
 std::shared_ptr<wowee::game::Unit> playerUnit(Session& s) {
     return std::dynamic_pointer_cast<wowee::game::Unit>(
         s.handler().getEntityManager().getEntity(Session::kPlayerGuid));
+}
+
+// A field-only unit block: no movement flags carry a position or spline.
+// Pre-WotLK has a transport byte in the packet and eight-bit create flags;
+// WotLK uses sixteen-bit flags. The values mask has the same wire shape.
+wowee::network::Packet unitFields(const std::map<uint16_t, uint32_t>& fields,
+                                 bool create, bool preWotlk) {
+    using namespace wowee::game;
+    wowee::network::Packet packet(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+    packet.writeUInt32(1);
+    if (preWotlk) packet.writeUInt8(0);
+    packet.writeUInt8(static_cast<uint8_t>(create ? UpdateType::CREATE_OBJECT2 : UpdateType::VALUES));
+    packet.writePackedGuid(Session::kPlayerGuid);
+    if (create) {
+        packet.writeUInt8(static_cast<uint8_t>(ObjectType::PLAYER));
+        if (preWotlk) packet.writeUInt8(1); // UPDATEFLAG_SELF
+        else packet.writeUInt16(1);
+    }
+    const auto blocks = static_cast<uint8_t>(fields.rbegin()->first / 32 + 1);
+    packet.writeUInt8(blocks);
+    for (uint8_t block = 0; block < blocks; ++block) {
+        uint32_t mask = 0;
+        for (const auto& [index, value] : fields) {
+            if (index / 32 == block) mask |= 1u << (index % 32);
+        }
+        packet.writeUInt32(mask);
+    }
+    for (const auto& [index, value] : fields) packet.writeUInt32(value);
+    return packet;
 }
 
 constexpr uint32_t kAutoShot = 75;
@@ -85,6 +116,80 @@ TEST_CASE("the player's create block makes the player's unit", "[replay]") {
     CHECK(unit->getHealth() == 181);
     CHECK(unit->getMaxHealth() == 181);
     CHECK(unit->getLevel() == 9);
+}
+
+TEST_CASE("unit power arrays respect each expansion's field boundaries", "[replay][power-layout]") {
+    struct Profile { const char* name; uint8_t powers; bool preWotlk; };
+    for (const auto profile : {Profile{"classic",5,true}, Profile{"tbc",5,true},
+                               Profile{"turtle",5,true}, Profile{"wotlk",7,false}}) {
+        DYNAMIC_SECTION(profile.name) {
+            Session s(profile.name);
+            using wowee::game::fieldIndex;
+            const auto power = fieldIndex(UF::UNIT_FIELD_POWER1);
+            const auto maximum = fieldIndex(UF::UNIT_FIELD_MAXPOWER1);
+            REQUIRE(power + profile.powers == fieldIndex(UF::UNIT_FIELD_MAXHEALTH));
+            std::map<uint16_t,uint32_t> fields{
+                {fieldIndex(UF::UNIT_FIELD_HEALTH),180},
+                {fieldIndex(UF::UNIT_FIELD_MAXHEALTH),300},
+                {fieldIndex(UF::UNIT_FIELD_LEVEL),9},
+                {fieldIndex(UF::UNIT_FIELD_FACTIONTEMPLATE),12},
+                {fieldIndex(UF::UNIT_FIELD_BYTES_0),1 | (2 << 8)}}; // human paladin, mana
+            for (uint8_t type=0; type<profile.powers; ++type) {
+                fields[power+type]=80+type;
+                fields[maximum+type]=280+type;
+            }
+            std::vector<std::string> events;
+            s.handler().setAddonEventCallback([&](const auto& event, const auto&) { events.push_back(event); });
+            s.receive(unitFields(fields,true,profile.preWotlk));
+            auto unit=playerUnit(s);
+            REQUIRE(unit);
+            CHECK(unit->getHealth()==180);
+            CHECK(unit->getMaxHealth()==300);
+            CHECK(unit->getLevel()==9);
+            CHECK(unit->getFactionTemplate()==12);
+            for (uint8_t type=0; type<7; ++type) {
+                CAPTURE(type);
+                CHECK(unit->getPowerByType(type)==(type<profile.powers ? 80+type : 0));
+                CHECK(unit->getMaxPowerByType(type)==(type<profile.powers ? 280+type : 0));
+            }
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MAXMANA")!=events.end());
+            wowee::addons::AddonManager manager;
+            REQUIRE(manager.initialize(&s.handler()));
+            auto* lua=manager.getLuaEngine();
+            REQUIRE(lua);
+            CHECK(lua->evaluateBoolean("UnitMana('player') == 80 and UnitManaMax('player') == 280"));
+
+            // A maximum-only update must not land in a non-existent sixth
+            // or seventh current-power slot on Classic/TBC.
+            events.clear();
+            std::map<uint16_t,uint32_t> maxima;
+            for (uint8_t type=0; type<profile.powers; ++type) maxima[maximum+type]=400+type;
+            s.receive(unitFields(maxima,false,profile.preWotlk));
+            for (uint8_t type=0; type<7; ++type) {
+                CAPTURE(type);
+                CHECK(unit->getPowerByType(type)==(type<profile.powers ? 80+type : 0));
+                CHECK(unit->getMaxPowerByType(type)==(type<profile.powers ? 400+type : 0));
+            }
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MAXMANA")!=events.end());
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MAXRAGE")!=events.end());
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MANA")==events.end());
+            CHECK(lua->evaluateBoolean("UnitManaMax('player') == 400"));
+            events.clear();
+            std::map<uint16_t,uint32_t> currents;
+            for (uint8_t type=0; type<profile.powers; ++type) currents[power+type]=40+type;
+            s.receive(unitFields(currents,false,profile.preWotlk));
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MANA")!=events.end());
+            CHECK(std::find(events.begin(),events.end(),"UNIT_RAGE")!=events.end());
+            CHECK(std::find(events.begin(),events.end(),"UNIT_MAXMANA")==events.end());
+            CHECK(lua->evaluateBoolean("UnitMana('player') == 40 and UnitManaMax('player') == 400"));
+            s.receive(unitFields({{power,0}},false,profile.preWotlk));
+            CHECK(lua->evaluateBoolean("UnitMana('player') == 0 and UnitManaMax('player') == 400"));
+            CHECK(unit->getHealth()==180);
+            CHECK(unit->getMaxHealth()==300);
+            CHECK(unit->getLevel()==9);
+            CHECK(unit->getFactionTemplate()==12);
+        }
+    }
 }
 
 TEST_CASE("a values block changes only the fields it carries", "[replay]") {

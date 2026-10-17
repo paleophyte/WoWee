@@ -664,6 +664,15 @@ namespace {
 float bitsToFloat(uint32_t raw) {
     return std::bit_cast<float>(raw);
 }
+
+// Current powers end immediately before max health. Classic/TBC have five
+// entries and WotLK has seven; the maximum-power array has the same width.
+// Using seven unconditionally consumes TBC max mana as current power type 6.
+uint16_t unitPowerFieldCount(uint16_t powerBase, uint16_t maxHealth) {
+    if (powerBase == 0xFFFF || maxHealth == 0xFFFF || maxHealth <= powerBase)
+        return 0;
+    return std::min<uint16_t>(maxHealth - powerBase, 7);
+}
 }  // namespace
 
 // Resolve cached field indices once per handler call.
@@ -863,6 +872,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                                                  std::shared_ptr<Unit>& unit,
                                                  const UnitFieldIndices& ufi) {
     bool unitInitiallyDead = false;
+    const auto powerCount = unitPowerFieldCount(ufi.powerBase, ufi.maxHealth);
     for (const auto& [key, val] : block.fields) {
         // Check all specific fields BEFORE power/maxpower range checks.
         // In Classic, power indices (23-27) are adjacent to maxHealth (28),
@@ -953,7 +963,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             }
         }
         // Power/maxpower range checks AFTER all specific fields
-        else if (key >= ufi.powerBase && key < ufi.powerBase + 7) {
+        else if (key >= ufi.powerBase && key < ufi.powerBase + powerCount) {
             const auto powerType = static_cast<uint8_t>(key - ufi.powerBase);
             unit->setPowerByType(powerType, val);
             // Named per power rather than one event: FrameXML registers only
@@ -964,7 +974,7 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
                 "UNIT_HAPPINESS", "UNIT_RUNIC_POWER", "UNIT_RUNIC_POWER"
             };
             if (powerType < 7) emitForUnit(kPowerEvents[powerType]);
-        } else if (key >= ufi.maxPowerBase && key < ufi.maxPowerBase + 7) {
+        } else if (key >= ufi.maxPowerBase && key < ufi.maxPowerBase + powerCount) {
             unit->setMaxPowerByType(static_cast<uint8_t>(key - ufi.maxPowerBase), val);
             // The maximum a bar is scaled against, which FrameXML redraws on.
             static const char* kMaxPowerEvents[7] = {
@@ -1029,6 +1039,8 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         const UpdateBlock& block, const std::shared_ptr<Entity>& entity,
         std::shared_ptr<Unit>& unit, const UnitFieldIndices& ufi) {
     UnitFieldUpdateResult result;
+    const auto powerCount = unitPowerFieldCount(ufi.powerBase, ufi.maxHealth);
+    uint8_t changedPowerTypes = 0, changedMaxPowerTypes = 0;
     result.oldDisplayId = unit->getDisplayId();
     uint32_t oldHealth = unit->getHealth();
     bool petExperienceChanged = false;
@@ -1302,14 +1314,16 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
         }
         // Power/maxpower range checks AFTER all specific fields
-        else if (key >= ufi.powerBase && key < ufi.powerBase + 7) {
+        else if (key >= ufi.powerBase && key < ufi.powerBase + powerCount) {
             unit->setPowerByType(static_cast<uint8_t>(key - ufi.powerBase), val);
             result.powerChanged = true;
             result.powerTypeChanged = static_cast<int>(key - ufi.powerBase);
-        } else if (key >= ufi.maxPowerBase && key < ufi.maxPowerBase + 7) {
+            changedPowerTypes |= static_cast<uint8_t>(1u << result.powerTypeChanged);
+        } else if (key >= ufi.maxPowerBase && key < ufi.maxPowerBase + powerCount) {
             unit->setMaxPowerByType(static_cast<uint8_t>(key - ufi.maxPowerBase), val);
             result.powerChanged = true;
             result.maxPowerTypeChanged = static_cast<int>(key - ufi.maxPowerBase);
+            changedMaxPowerTypes |= static_cast<uint8_t>(1u << result.maxPowerTypeChanged);
         }
     }
 
@@ -1337,10 +1351,14 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     "UNIT_MAXMANA", "UNIT_MAXRAGE", "UNIT_MAXFOCUS", "UNIT_MAXENERGY",
                     "UNIT_MAXHAPPINESS", "UNIT_MAXRUNIC_POWER", "UNIT_MAXRUNIC_POWER"
                 };
-                if (result.powerTypeChanged >= 0 && result.powerTypeChanged < 7)
-                    pendingEvents_.emit(kPowerEvents[result.powerTypeChanged], {unitId});
-                if (result.maxPowerTypeChanged >= 0 && result.maxPowerTypeChanged < 7)
-                    pendingEvents_.emit(kMaxPowerEvents[result.maxPowerTypeChanged], {unitId});
+                // A block may change several resources. Keep every affected
+                // legacy bar informed, after all its fields have been applied.
+                for (uint8_t type = 0; type < powerCount; ++type) {
+                    if (changedPowerTypes & (1u << type))
+                        pendingEvents_.emit(kPowerEvents[type], {unitId});
+                    if (changedMaxPowerTypes & (1u << type))
+                        pendingEvents_.emit(kMaxPowerEvents[type], {unitId});
+                }
                 pendingEvents_.emit("UNIT_POWER", {unitId});
                 // When player power changes, action bar usability may change
                 if (block.guid == owner_.getPlayerGuid()) {
