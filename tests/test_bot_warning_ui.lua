@@ -88,3 +88,48 @@ do
     WoweeBotPoliciesFrame:Hide()
     print('Real Fishing policy UI and manual-control independence scenarios passed')
 end
+
+-- Real controller event -> correlated collection fact -> real Notes buttons.
+do
+    local old={clock=GetTime,wall=GetServerTime,unit=UnitName,send=SendChatMessage,
+        identity=GetWoweeRealmIdentity,realm=GetRealmName,data=WoweeBotNotesData,
+        points=UnitCharacterPoints,shown=WoweeBotNotesFrame:IsShown(),open=SlashCmdList.WOWEEBOTSTATUS}
+    local sent,opened={},0
+    GetTime=function() return 0 end
+    GetServerTime=function() return 1792233376 end
+    UnitName=function(unit) if unit=='player' then return 'Idlelablogs' end return old.unit(unit) end
+    GetWoweeRealmIdentity=function() return 'collection-warning-ui-test' end
+    GetRealmName=function() return 'Collection UI Test' end
+    WoweeBotNotesData={};UnitCharacterPoints=function() return 0 end
+    SendChatMessage=function(command) sent[#sent+1]=command end
+    SlashCmdList.WOWEEBOTSTATUS=function() opened=opened+1 end
+    local event=WoweeBotController:GetScript('OnEvent')
+    local notes=WoweeBotNotesDriver:GetScript('OnEvent')
+    event(WoweeBotController,'PLAYER_ENTERING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_ENTERING_WORLD')
+    WoweeBotController:GetScript('OnUpdate')()
+    local id=assert(sent[1]:match('^%.bot idle ([%w_-]+) status$'))
+    local function reply(prefix,body,sender) event(WoweeBotController,'CHAT_MSG_ADDON',prefix,body,'WHISPER',sender or 'Idlelablogs') end
+    reply('WIDLE','1\t'..id..'\tok\tmanual\t9\t0\tnone')
+    reply('WIDLECAP','1\t'..id..'\t9\tactivity_1,collection_1')
+    SlashCmdList.WOWEEBOTNOTES('')
+    -- Actual 0011 server capture: Idlelablogs, elapsed 310.935s, lab_122/gen2.
+    -- Only the correlation ID/generation change to match this isolated controller.
+    local captured='1\tlab_122\t2\t1792233374\t1\t5545\t13872\t0\t8\t3\t1792233494\t412042756e646c65206f662054726f75626c65'
+    local body=assert(captured:gsub('1\tlab_122\t2\t','1\t'..id..'\t9\t',1))
+    reply('WIDLECOL',body,'Other');assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  0 notes')
+    reply('WIDLECOL',body)
+    assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  1 notes')
+    WoweeBotNotesRow1:GetScript('OnClick')()
+    assert(WoweeBotNotesDetail:GetText():find('skip-loot list',1,true))
+    assert(WoweeBotNotesDetail:GetText():find('0/8',1,true))
+    assert(WoweeBotNotesOpen:GetText()=='Open Bot activity')
+    WoweeBotNotesOpen:GetScript('OnClick')();assert(opened==1)
+    reply('WIDLECOL',body);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  1 notes')
+    assert(#sent==1) -- historical facts, including in Manual, never send a command
+    event(WoweeBotController,'PLAYER_LEAVING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_LEAVING_WORLD')
+    GetTime,GetServerTime,UnitName,SendChatMessage=old.clock,old.wall,old.unit,old.send
+    GetWoweeRealmIdentity,GetRealmName,WoweeBotNotesData=old.identity,old.realm,old.data
+    UnitCharacterPoints,SlashCmdList.WOWEEBOTSTATUS=old.points,old.open
+    if not old.shown then WoweeBotNotesFrame:Hide() end
+    print('Real controller-to-Notes collection failure scenarios passed')
+end

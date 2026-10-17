@@ -164,6 +164,36 @@ function Inbox:fishingWarning(fact, now)
         'This is a record of that pause; it may already have ended.', now, 'botstatus')
 end
 
+local collectionReasons = {
+    'The containers could not be looted; the server did not identify why.',
+    'The server still reported full bags after trying to make room.',
+    "The quest item or its container was on the bot's skip-loot list.",
+    'The last checked container was in use or not ready.'}
+function Inbox:collectionWarning(fact, now)
+    if type(fact) ~= 'table' or type(now) ~= 'number' then return false end
+    for _, key in ipairs({'at','sequence','quest','item','current','required','reason','untilAt'}) do
+        if type(fact[key]) ~= 'number' or fact[key] ~= math.floor(fact[key]) then return false end
+    end
+    local reason=collectionReasons[fact.reason]
+    if not reason or fact.at < 1 or fact.at > 4294967175 or fact.sequence < 1 or fact.sequence > 4294967295 or
+        fact.quest < 1 or fact.quest > 4294967295 or fact.item < 1 or fact.item > 4294967295 or
+        fact.current < 0 or fact.required < 1 or fact.required > 65535 or fact.current >= fact.required or
+        fact.untilAt ~= fact.at + 120 or (fact.title ~= nil and
+        (type(fact.title) ~= 'string' or #fact.title > 40 or fact.title:find('[%c]'))) then return false end
+    local last=self.data.lastCollectionWarning
+    if type(last)=='table' and type(last.at)=='number' and type(last.sequence)=='number' and
+        (fact.at < last.at or (fact.at==last.at and fact.sequence<=last.sequence)) then return false end
+    self.data.lastCollectionWarning={at=fact.at,sequence=fact.sequence}
+    local title=fact.title and fact.title~='' and fact.title or ('Quest #'..fact.quest)
+    local item=type(GetItemInfo)=='function' and GetItemInfo(fact.item)
+    item=item or ('item #'..fact.item)
+    return self:put('collection-warning:'..fact.at..':'..fact.sequence,'note',
+        'Could not collect: '..title,
+        'The server skipped the checked containers for two minutes after 3 rejected loot checks. '..reason..
+        ' At that time, '..item..' was '..fact.current..'/'..fact.required..'. The selected quest was kept. '..
+        'This records a past backoff; it may already have ended.',now,'botstatus')
+end
+
 function Inbox:visible()
     local result = {}
     for _, e in ipairs(self.data.entries) do if not e.dismissed then result[#result + 1] = e end end

@@ -162,3 +162,35 @@ assert(not wi:fishingWarning({at=2004,sequence=4,reason=4,untilAt=2304},4002)) -
 assert(Inbox.new(warningRoot,'other-realm','Jizzle'):fishingWarning(fact,1001))
 assert(Inbox.new(warningRoot,'warning-realm','Other'):fishingWarning(fact,1001))
 print('Durable fishing warning Notes scenarios passed')
+
+local collectionRoot={}
+local ci=Inbox.new(collectionRoot,'collection-realm','Jizzle')
+local cf={at=1000,sequence=1,quest=5545,item=13872,current=4,required=8,reason=1,untilAt=1120,title='A Bundle of Trouble'}
+assert(ci:collectionWarning(cf,1001))
+local entry=ci:visible()[1]
+assert(entry.title=='Could not collect: A Bundle of Trouble' and entry.action=='botstatus')
+assert(entry.text:find('4/8',1,true) and entry.text:find('did not identify why',1,true))
+assert(entry.text:find('past backoff',1,true) and not entry.text:find('respawn',1,true))
+assert(ci:counts().note==1 and ci:counts().blocked==0)
+assert(not ci:collectionWarning(cf,1002));assert(ci:dismiss(entry.key))
+ci=Inbox.new(collectionRoot,'collection-realm','Jizzle')
+assert(not ci:collectionWarning(cf,1500))
+for i=1,110 do ci:put('later:'..i,'note','Later','Later',1600+i) end
+assert(not ci:find(entry.key) and not ci:collectionWarning(cf,1800))
+for reason=2,4 do
+    assert(ci:collectionWarning({at=2000+reason,sequence=reason,quest=5545,item=13872,current=4,required=8,
+        reason=reason,untilAt=2120+reason},2000+reason))
+end
+assert(ci:visible()[1].text:find('in use or not ready',1,true))
+local invalid={
+ {at=3000,sequence=9,quest=5545,item=13872,current=8,required=8,reason=1,untilAt=3120},
+ {at=3000,sequence=9,quest=5545,item=13872,current=4,required=8,reason=5,untilAt=3120},
+ {at=3000,sequence=9,quest=5545,item=13872,current=4,required=8,reason=1,untilAt=3121},
+ {at=3000,sequence=9,quest=5545,item=13872,current=4,required=8,reason=1,untilAt=3120,title='bad\ntitle'},
+ {at=3000.5,sequence=9,quest=5545,item=13872,current=4,required=8,reason=1,untilAt=3120.5}, {}}
+for _,fact in ipairs(invalid) do assert(not ci:collectionWarning(fact,3000)) end
+assert(ci:collectionWarning({at=4000,sequence=1,quest=5545,item=13872,current=5,required=8,reason=2,untilAt=4120},4001))
+assert(not ci:collectionWarning(cf,4002))
+assert(Inbox.new(collectionRoot,'other-realm','Jizzle'):collectionWarning(cf,1001))
+assert(Inbox.new(collectionRoot,'collection-realm','Other'):collectionWarning(cf,1001))
+print('Durable collection failure Notes scenarios passed')

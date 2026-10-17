@@ -148,6 +148,7 @@ function Control:capability(prefix, text, sender, player)
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id or id ~= self.ackId or tonumber(generation) ~= self.generation then return false end
     self.warningSupported = (',' .. features .. ','):find(',warning_1,', 1, true) ~= nil
+    self.collectionSupported = (',' .. features .. ','):find(',collection_1,', 1, true) ~= nil
     self.fishingSupported = (',' .. features .. ','):find(',fishing_1,', 1, true) ~= nil
     if not self.fishingSupported then self.fishingAt, self.fishingIntent, self.fishingFailure = nil, nil, nil end
     self.socialSupported = (',' .. features .. ','):find(',social_1,', 1, true) ~= nil
@@ -169,6 +170,30 @@ function Control:warning(prefix, text, sender, player, now)
         at < 1 or at > 4294966995 or sequence < 1 or sequence > 4294967295 or
         reason < 1 or reason > 4 or untilAt ~= at + 300 then return end
     return {at = at, sequence = sequence, reason = reason, untilAt = untilAt}
+end
+
+function Control:collectionWarning(prefix, text, sender, player, now)
+    if prefix ~= 'WIDLECOL' or not self.collectionSupported or not self:fresh(now) or
+        self.failure or self.intent or (self.pending and self.pending.verb == 'control') or
+        not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 240 then return end
+    local id, generation, at, sequence, quest, item, current, required, reason, untilAt, title =
+        text:match('^1\t([%w_-]+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t([%x%-]+)$')
+    generation, at, sequence, quest, item, current, required, reason, untilAt = tonumber(generation),
+        tonumber(at), tonumber(sequence), tonumber(quest), tonumber(item), tonumber(current),
+        tonumber(required), tonumber(reason), tonumber(untilAt)
+    if not id or id ~= self.ackId or generation ~= self.generation or
+        at < 1 or at > 4294967175 or sequence < 1 or sequence > 4294967295 or
+        quest < 1 or quest > 4294967295 or item < 1 or item > 4294967295 or
+        current < 0 or required < 1 or required > 65535 or current >= required or
+        reason < 1 or reason > 4 or untilAt ~= at + 120 then return end
+    if title == '-' then title = nil
+    else
+        if #title > 80 or #title % 2 ~= 0 or title:find('[^%x]') then return end
+        title = title:gsub('..', function(pair) return string.char(tonumber(pair, 16)) end)
+        if title:find('[%c]') then return end
+    end
+    return {at=at,sequence=sequence,quest=quest,item=item,current=current,required=required,
+        reason=reason,untilAt=untilAt,title=title}
 end
 
 function Control:socialFresh(now)

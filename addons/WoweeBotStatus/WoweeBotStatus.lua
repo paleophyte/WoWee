@@ -457,6 +457,8 @@ driver:SetScript('OnEvent', function(self, event, ...)
         controller:capability(prefix, text, sender, player)
         local warning = controller:warning(prefix, text, sender, player, now)
         if warning and WoweeBotReportFishingWarning then WoweeBotReportFishingWarning(warning) end
+        local collection = controller:collectionWarning(prefix, text, sender, player, now)
+        if collection and WoweeBotReportCollectionWarning then WoweeBotReportCollectionWarning(collection) end
         if activity:capability(prefix, text, sender, player, controller) and not supported then nextPoll = 0 end
         local snapshot, activityReply = activity:receive(prefix, text, sender, player, controller.generation, now)
         if activityReply then

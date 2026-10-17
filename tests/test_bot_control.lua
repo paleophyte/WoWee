@@ -257,3 +257,37 @@ assert(f:capability('WIDLECAP','1\tfish_9\t8\tactivity_1,social_1','Jizzle','Jiz
 assert(not f.fishingSupported and not f.fishingIntent and not f.fishingAt and not f.fishingFailure)
 assert(not fishReply('fish_9',1,16,nil,nil,8))
 print('Independent Fishing policy protocol scenarios passed')
+
+-- Correlated, historical container failures cannot acquire control.
+local col=Control.new('collection')
+assert(col:update(0)=='.bot idle collection_1 status')
+assert(col:receive('WIDLE','1\tcollection_1\tok\tmanual\t9\t0\tnone','Jizzle','Jizzle',0))
+assert(col:capability('WIDLECAP','1\tcollection_1\t9\tactivity_1,collection_1','Jizzle','Jizzle'))
+local title='412042756e646c65206f662054726f75626c65'
+local cw='1\tcollection_1\t9\t1000\t1\t5545\t13872\t4\t8\t3\t1120\t'..title
+local cf=assert(col:collectionWarning('WIDLECOL',cw,'Jizzle','Jizzle',1))
+assert(cf.quest==5545 and cf.item==13872 and cf.current==4 and cf.required==8)
+assert(cf.title=='A Bundle of Trouble' and cf.reason==3 and cf.untilAt==1120)
+assert(col.mode=='manual' and not col.pending and not col.intent)
+assert(not col:collectionWarning('WIDLECOL',cw,'Other','Jizzle',1))
+assert(not col:collectionWarning('OTHER',cw,'Jizzle','Jizzle',1))
+for _,bad in ipairs({cw:gsub('collection_1','old'),cw:gsub('\t9\t','\t8\t'),
+    cw:gsub('\t1000\t','\t0\t'),cw:gsub('\t1\t5545','\t0\t5545'),
+    cw:gsub('\t5545\t','\t0\t'),cw:gsub('\t13872\t','\t4294967296\t'),
+    cw:gsub('\t4\t8\t','\t8\t8\t'),cw:gsub('\t4\t8\t','\t4\t65536\t'),
+    cw:gsub('\t3\t1120','\t5\t1120'),cw:gsub('\t1120\t','\t1121\t'),
+    cw:gsub(title,'0a'),cw:gsub(title,'abc'),cw:gsub(title,'----'),
+    cw:gsub(title,string.rep('61',41)),cw..'\textra',cw..'\n',string.rep('x',241)}) do
+    assert(not col:collectionWarning('WIDLECOL',bad,'Jizzle','Jizzle',1))
+end
+assert(col:collectionWarning('WIDLECOL',cw:gsub(title,'-'),'Jizzle','Jizzle',1).title==nil)
+assert(not col:collectionWarning('WIDLECOL',cw,'Jizzle','Jizzle',26))
+col:want('bot');assert(not col:collectionWarning('WIDLECOL',cw,'Jizzle','Jizzle',1))
+assert(col:update(1)=='.bot idle collection_2 control 9 bot')
+assert(not col:collectionWarning('WIDLECOL',cw,'Jizzle','Jizzle',1))
+assert(col:receive('WIDLE','1\tcollection_2\tok\tbot\t10\t0\tnone','Jizzle','Jizzle',2))
+assert(not col:collectionWarning('WIDLECOL',cw,'Jizzle','Jizzle',2))
+assert(col:capability('WIDLECAP','1\tcollection_2\t10\tactivity_1','Jizzle','Jizzle'))
+assert(not col.collectionSupported)
+assert(not col:collectionWarning('WIDLECOL',cw:gsub('collection_1','collection_2'):gsub('\t9\t','\t10\t'),'Jizzle','Jizzle',2))
+print('Correlated collection failure protocol scenarios passed')
