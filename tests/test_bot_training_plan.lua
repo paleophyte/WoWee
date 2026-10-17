@@ -40,6 +40,7 @@ do
     assert(entry.kind=='note' and entry.title:find('deferred',1,true))
     assert(entry.text:find('before trainer discounts',1,true))
     assert(entry.text:find('Missing for this combined gate: 0g 1s 0c',1,true))
+    assert(entry.text:find('nearby or quest-related NPC interactions',1,true))
     assert(not entry.text:find('Discounted price:',1,true))
     entry.dismissed=true
     assert(not inbox:trainingPlan(plan.snapshot,101) and entry.dismissed)

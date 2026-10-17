@@ -106,7 +106,7 @@ function Inbox:trainingPlan(snapshot, now)
                             ' decision that differs from the current funds check. Its normal budget refresh is pending.'
                     elseif row.state=='deferred' then
                         text=text .. '\nMissing for this combined gate: ' .. coins(row.required-row.money) ..
-                            '. The planner skipped this trip; other activities can continue.'
+                            '. This budget gate declined training travel. Other work, including nearby or quest-related NPC interactions, can continue.'
                     elseif row.cheat==1 then text=text .. '\nThe server gold-cheat policy bypassed this budget gate.'
                     else text=text .. '\nThe budget gate permits a trip. A destination or purchase has not been confirmed.' end
                     text=text .. '\nThis is a combined planning check, not a discounted price or shortfall for a specific lesson.'
