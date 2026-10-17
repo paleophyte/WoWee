@@ -2,11 +2,13 @@
 ## Title: Wowee Bot Status
 ## Notes: Playerbot control and activity. /botstatus opens; /botplay switches control.
 ## Author: wowee
-## SavedVariablesPerCharacter: WoweeBotStatusSettings
+## SavedVariablesPerCharacter: WoweeBotStatusSettings, WoweeBotNotesData
 
 Status.lua
 Grind.lua
 Control.lua
 Activity.lua
+Inbox.lua
+NotesUI.lua
 WoweeBotStatus.lua
 Bindings.xml

@@ -273,6 +273,10 @@ driver:SetScript('OnUpdate', function()
         local command = controller:update(now)
         if command then SendChatMessage(command, 'SAY') end
         if not model.disabled and now >= nextPoll then request() end
+        if WoweeBotReportStatusProblem then
+            if controller.failure then WoweeBotReportStatusProblem('control', controller.failure) end
+            if controller:isBot(now) and activity.failure then WoweeBotReportStatusProblem('activity', activity.failure) end
+        end
     end
     if now >= nextDraw then draw(); nextDraw = now + 0.25 end
 end)
@@ -298,6 +302,12 @@ driver:SetScript('OnEvent', function(self, event, ...)
         local now, player = GetTime(), UnitName('player')
         local previousMode = controller.mode
         local received = controller:receive(prefix, text, sender, player, now)
+        if received and WoweeBotReportStatusProblem and not controller.failure then
+            WoweeBotReportStatusProblem('control', nil)
+            if controller.mode == 'manual' then
+                WoweeBotReportStatusProblem('activity', nil, 'Activity queries are paused while you play manually.')
+            end
+        end
         if received and previousMode ~= controller.mode then
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
@@ -308,6 +318,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
         if activityReply then
             if snapshot and controller:isBot(now) and snapshot.mode == 'bot' then
                 WoweeBotActivity.apply(model, snapshot, now)
+                if WoweeBotReportStatusProblem then WoweeBotReportStatusProblem('activity', nil) end
             else model.travelAt = nil end
         end
         -- Once typed activity is available, unsolicited legacy chat must not

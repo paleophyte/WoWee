@@ -145,6 +145,8 @@ bool GameHandler::connect(const std::string& host,
     this->accountName = accountName;
     this->build = build;
     this->realmId_ = realmId;
+    realmName_.clear();
+    realmIdentity_.clear();
 
     // The session key is the shared secret the world handshake proves knowledge
     // of and the header cipher is keyed from: anyone holding these 40 bytes can

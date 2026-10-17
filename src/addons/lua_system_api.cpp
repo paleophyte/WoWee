@@ -6863,14 +6863,22 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"GetRealmName", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            if (gh) {
-                const auto* ac = gh->getActiveCharacter();
-                lua_pushstring(L, ac ? "WoWee" : "Unknown");
-            } else lua_pushstring(L, "Unknown");
+            lua_pushstring(L, gh && !gh->getRealmName().empty() ? gh->getRealmName().c_str() : "Unknown");
             return 1;
         }},
                 {"GetNormalizedRealmName", [](lua_State* L) -> int {
-            lua_pushstring(L, "WoWee");
+            auto* gh = getGameHandler(L);
+            std::string name = gh ? gh->getRealmName() : "";
+            name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) {
+                return std::isspace(c) || c == '-';
+            }), name.end());
+            lua_pushstring(L, name.c_str());
+            return 1;
+        }},
+                {"GetWoweeRealmIdentity", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            if (gh && !gh->getRealmIdentity().empty()) lua_pushstring(L, gh->getRealmIdentity().c_str());
+            else lua_pushnil(L);
             return 1;
         }},
                 // ShowHelm(show) and ShowCloak(show) are setters, and these

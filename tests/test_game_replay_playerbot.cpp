@@ -6,6 +6,7 @@
 #include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <cmath>
+#include <filesystem>
 extern "C" {
 #include <lua.h>
 }
@@ -254,11 +255,12 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "Inbox.lua", "NotesUI.lua"})
         REQUIRE(lua->executeFile(root + file));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_control.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_activity.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_inbox.lua"));
     REQUIRE(lua->executeFile(root + "WoweeBotStatus.lua"));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");
@@ -388,6 +390,84 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     s.receive(botChat("rpg travel target\nTarget: train at Someone Else\nDistance 1y\nStatus: working"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Wolves Across the Border'"));
     CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
+    CAPTURE(errors);
+    CHECK(errors.empty());
+}
+TEST_CASE("bot notes use real realm identity and actual learned-spell events",
+          "[replay][addon][playerbot]") {
+    Session s("tbc");
+    addPlayer(s);
+    std::dynamic_pointer_cast<wowee::game::Player>(
+        s.handler().getEntityManager().getEntity(Session::kPlayerGuid))->setName("Jizzle");
+    std::vector<std::string> errors;
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    CHECK(lua->evaluateBoolean("GetWoweeRealmIdentity() == nil and GetRealmName() == 'Unknown'"));
+    s.handler().setRealmIdentity("TBC - Home", "realm.example:8085", 1);
+    CHECK(lua->evaluateBoolean("GetRealmName() == 'TBC - Home' and GetNormalizedRealmName() == 'TBCHome'"));
+    REQUIRE(lua->executeString("firstRealm=GetWoweeRealmIdentity(); testNow=0; testPoints=0; saved=0; GetTime=function() return testNow end; GetServerTime=function() return 1000+testNow end; UnitCharacterPoints=function() return testPoints end; WoweeSaveVariables=function() saved=saved+1 end; GetSpellInfo=function(id) if id==133 then return 'Fireball','Rank 1' elseif id==116 then return 'Frostbolt','Rank 1' end end"));
+    const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
+    REQUIRE(lua->executeFile(root + "Inbox.lua"));
+    REQUIRE(lua->executeFile(root + "NotesUI.lua"));
+    lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    CHECK(lua->dispatchSlashCommand("/botnotes", ""));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  0 notes'"));
+    lua->fireEvent("SPELLS_CHANGED"); // initial spellbook loading must not look like training
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  0 notes'"));
+    s.handler().setAddonEventCallback([lua](const std::string& event, const auto& args) {
+        lua->fireEvent(event, args);
+    });
+    struct ClearCallback {
+        wowee::game::GameHandler& handler;
+        ~ClearCallback() { handler.setAddonEventCallback({}); }
+    } cleanup{s.handler()};
+    for (uint32_t id : {133u, 116u, 116u}) {
+        Packet learned(wowee::game::wireOpcode(Opcode::SMSG_LEARNED_SPELL));
+        learned.writeUInt32(id);
+        s.receive(learned);
+    }
+    CHECK(lua->evaluateBoolean("WoweeBotNotesLauncher:GetText() == 'Notes (1)'"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesRow1.title:GetText() == '* New abilities x2'"));
+    REQUIRE(lua->executeString("WoweeBotNotesRow1:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesDetail:GetText():find('Frostbolt (Rank 1)',1,true) ~= nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesLauncher:GetText() == 'Notes'"));
+    REQUIRE(lua->executeString("WoweeBotNotesBack:GetScript('OnClick')(); testPoints=2"));
+    lua->fireEvent("CHARACTER_POINTS_CHANGED");
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  2 notes'"));
+    REQUIRE(lua->executeString("WoweeBotReportStatusProblem('control','No server confirmation'); WoweeBotNotesClear:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  1 blocked  |  0 notes'"));
+    lua->fireEvent("PLAYER_LEAVING_WORLD");
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  1 blocked  |  0 notes'"));
+    REQUIRE(lua->executeString("WoweeBotReportStatusProblem('control',nil)"));
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  1 notes'"));
+    const auto savedPath = std::filesystem::temp_directory_path() /
+        ("wowee-inbox-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".lua");
+    struct RemoveSavedFile {
+        std::filesystem::path path;
+        ~RemoveSavedFile() { std::error_code ec; std::filesystem::remove(path, ec); }
+    } removeSaved{savedPath};
+    REQUIRE(lua->saveSavedVariables(savedPath.string(), {"WoweeBotNotesData"}));
+    REQUIRE(lua->executeString("WoweeBotNotesData=nil"));
+    REQUIRE(lua->loadSavedVariables(savedPath.string()));
+    lua->fireEvent("PLAYER_LEAVING_WORLD");
+    // Identical realm names/IDs at different endpoints must not share an inbox.
+    s.handler().setRealmIdentity("TBC - Home", "realm.example:8086", 1);
+    CHECK(lua->evaluateBoolean("GetWoweeRealmIdentity() ~= firstRealm"));
+    REQUIRE(lua->executeString("testPoints=0"));
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  0 notes'"));
+    lua->fireEvent("PLAYER_LEAVING_WORLD");
+    s.handler().setRealmIdentity("TBC - Home", "realm.example:8085", 1);
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    CHECK(lua->evaluateBoolean("WoweeBotNotesSummary:GetText() == '0 choices  |  0 blocked  |  1 notes'"));
+    CHECK(lua->evaluateBoolean("saved > 0"));
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).empty()); // reading notes never enables AI
+    lua->widgets().layout(1920.0f, 1080.0f);
     CAPTURE(errors);
     CHECK(errors.empty());
 }

@@ -108,6 +108,7 @@ void UIScreenCallbackHandler::setupCallbacks() {
             LOG_INFO("Using realm-reported build: ", clientBuild);
         }
         if (gameHandler_.connect(host, port, sessionKey, accountName, clientBuild, realmId)) {
+            gameHandler_.setRealmIdentity(realmName, realmAddress, realmId);
             LOG_INFO("Connected to world server, transitioning to character selection");
             setState_(AppState::CHARACTER_SELECTION);
         } else {
