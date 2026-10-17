@@ -66,7 +66,8 @@ end)
 local open = button(frame, 'WoweeBotNotesOpen', 'Open', 108, -473, 130, function()
     if not selected or not online then return end
     if selected.action == 'talents' and ToggleTalentFrame then ToggleTalentFrame()
-    elseif selected.action == 'spellbook' and ToggleSpellBook then ToggleSpellBook(BOOKTYPE_SPELL or 'spell') end
+    elseif selected.action == 'spellbook' and ToggleSpellBook then ToggleSpellBook(BOOKTYPE_SPELL or 'spell')
+    elseif selected.action == 'botstatus' and SlashCmdList.WOWEEBOTSTATUS then SlashCmdList.WOWEEBOTSTATUS('') end
 end)
 local prev = button(frame, nil, '< Previous', 330, -473, 100, function()
     if selected then detailPage = math.max(1, detailPage - 1) else page = math.max(1, page - 1) end
@@ -121,7 +122,8 @@ render = function()
             detail:SetText(table.concat(lines, '\n'))
         else detail:SetText(selected.text) end
         if selected.action then
-            open:SetText(selected.action == 'talents' and 'Open Talents' or 'Open Spellbook')
+            open:SetText(selected.action == 'talents' and 'Open Talents' or
+                selected.action == 'botstatus' and 'Open Bot activity' or 'Open Spellbook')
             shown(open, online)
         end
         footer:SetText(age(selected.created) .. '  |  Page ' .. detailPage .. ' / ' .. pages)
@@ -180,6 +182,11 @@ driver:SetScript('OnEvent', function(self, event, ...)
         online = true; initialize()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         save(); online, inbox, selected, persistent = false, nil, nil, false
+    elseif event == 'UI_ERROR_MESSAGE' and online and inbox then
+        local message, second = ...
+        if type(message) ~= 'string' then message = second end
+        local generation = WoweeBotConfirmedControlGeneration and WoweeBotConfirmedControlGeneration()
+        if inbox:observeError(message, GetTime(), now(), generation) then save() end
     elseif event == 'LEARNED_SPELL_IN_TAB' and online and inbox then
         -- WoWee sends the actual spell ID from SMSG_LEARNED_SPELL, not a tab index.
         local id = tonumber((...))
@@ -193,7 +200,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
     render()
 end)
 for _, event in ipairs({'ADDON_LOADED', 'PLAYER_ENTERING_WORLD', 'PLAYER_LEAVING_WORLD',
-    'LEARNED_SPELL_IN_TAB', 'CHARACTER_POINTS_CHANGED', 'PLAYER_TALENT_UPDATE'}) do driver:RegisterEvent(event) end
+    'LEARNED_SPELL_IN_TAB', 'CHARACTER_POINTS_CHANGED', 'PLAYER_TALENT_UPDATE', 'UI_ERROR_MESSAGE'}) do driver:RegisterEvent(event) end
 driver:SetScript('OnUpdate', function()
     if GetTime() < nextCheck then return end
     nextCheck = GetTime() + 3

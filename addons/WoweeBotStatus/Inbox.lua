@@ -95,6 +95,37 @@ function Inbox:learn(id, name, rank, now)
     return true
 end
 
+-- These are WoWee's actual spell-failure strings. UI_ERROR_MESSAGE also carries
+-- fishing-bite notifications, so never treat every event as a failure.
+local observedErrors = {['Item not ready'] = 'item-not-ready', ['Need more items'] = 'need-more-items'}
+function Inbox:observeError(message, clock, now, generation)
+    if type(generation) ~= 'number' or generation < 1 then self.errorWindow = nil; return false end
+    if type(clock) ~= 'number' or type(now) ~= 'number' then return false end
+    local window = self.errorWindow
+    if not window or window.generation ~= generation or clock < window.clock then
+        window = {generation = generation, recent = {}}
+        self.errorWindow = window
+    end
+    window.clock = clock
+    local code = observedErrors[message]
+    if not code then return false end
+    local recent = {}
+    for _, at in ipairs(window.recent[code] or {}) do
+        if clock - at <= 30 then recent[#recent + 1] = at end
+    end
+    recent[#recent + 1] = clock
+    while #recent > 3 do table.remove(recent, 1) end
+    window.recent[code] = recent
+    if #recent < 3 then return false end
+    -- One FYI per error per five-minute bucket, including across relogs. Normal
+    -- note dismissal/retention applies; this never blocks play or chooses items.
+    return self:put('game-error:' .. code .. ':' .. math.floor(now / 300), 'note',
+        'Repeated game error: ' .. message,
+        'The game reported "' .. message .. '" at least 3 times within 30 seconds while bot control was confirmed. ' ..
+        'Check Bot activity for the current action, or take manual control to inspect equipment and supplies.',
+        now, 'botstatus')
+end
+
 function Inbox:visible()
     local result = {}
     for _, e in ipairs(self.data.entries) do if not e.dismissed then result[#result + 1] = e end end

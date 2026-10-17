@@ -2,6 +2,9 @@ local Status = WoweeBotStatus
 local model = Status.new()
 local controller = WoweeBotControl.new()
 local activity = WoweeBotActivity.new()
+function WoweeBotConfirmedControlGeneration()
+    if controller:isBot(GetTime()) then return controller.generation end
+end
 local driver = CreateFrame('Frame', 'WoweeBotController', UIParent)
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
 panel:SetSize(690, 234)
