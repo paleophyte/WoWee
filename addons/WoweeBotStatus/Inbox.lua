@@ -72,6 +72,50 @@ function Inbox:talents(points, now)
         '. Open Talents when you are ready to choose.', now, 'talents')
 end
 
+local function coins(value)
+    return math.floor(value/10000) .. 'g ' .. math.floor(value/100)%100 .. 's ' .. value%100 .. 'c'
+end
+
+-- A complete, authenticated server snapshot updates one durable option. These
+-- observations are advisory; they never purchase training or change control.
+function Inbox:training(snapshot, now)
+    if type(snapshot) ~= 'table' or snapshot.status ~= 'ok' then return false end
+    local changed, present = false, {}
+    for _, row in ipairs(snapshot.rows) do
+        local key = 'training:' .. row.lesson
+        present[key] = true
+        local reason = ({coins='Not enough coins.', coins_unknown_budget='Not enough coins. The bot reservation budget is unavailable while AI is absent.', budget='Coins are reserved by the bot training budget.',
+            ready='Funds now permit this lesson. It has not been learned yet.',
+            learned='Confirmed learned.', ineligible='This lesson is no longer eligible under the current trainer prerequisites.',
+            unavailable='This trainer or lesson is no longer available.',
+            unknown_budget='Wallet funds are sufficient; the bot reservation budget is unavailable while AI is absent.',
+            free='The server automatic-training policy currently bypasses payment. This does not imply manual training is free.'})[row.state]
+        local text = row.title .. ' at ' .. row.trainer .. '.\n' .. reason
+        if row.state == 'coins' or row.state == 'coins_unknown_budget' or row.state == 'budget' or row.state == 'ready' or row.state == 'unknown_budget' then
+            text = text .. '\nDiscounted price: ' .. coins(row.cost) .. '. Wallet: ' .. coins(row.money) .. '.'
+            if row.state ~= 'unknown_budget' and row.state ~= 'coins_unknown_budget' then text = text .. '\nSpendable under the observed budget: ' .. coins(row.spendable) .. '.' end
+            if row.state == 'coins' or row.state == 'coins_unknown_budget' then text = text .. '\nMissing from wallet: ' .. coins(row.cost-row.money) .. '.'
+            elseif row.state == 'budget' then text = text .. '\nMissing from spendable budget: ' .. coins(row.cost-row.spendable) .. '.' end
+        end
+        if row.state == 'coins' or row.state == 'coins_unknown_budget' or row.state == 'budget' then text = text .. '\nOther activities can continue.' end
+        local blocked = row.state == 'coins' or row.state == 'coins_unknown_budget' or row.state == 'budget' or row.state == 'unknown_budget'
+        changed = self:put(key, blocked and 'blocked' or 'note',
+            (blocked and 'Training waits: ' or 'Training update: ') .. row.title, text, now, 'spellbook') or changed
+    end
+    -- The server retains32 observed options. Absence is not proof of learning.
+    -- Keep an explicit historical record instead of a permanently stale blocker.
+    local old = {}
+    for _, entry in ipairs(self.data.entries) do
+        if entry.key:match('^training:%d+$') and entry.kind == 'blocked' and not present[entry.key] then old[#old+1] = entry end
+    end
+    for _, entry in ipairs(old) do
+        changed = self:put(entry.key, 'note', 'Earlier training observation',
+            'This option is outside the server\'s current32-option watch list. Its availability has not been rechecked.\n' .. entry.text,
+            now, 'spellbook') or changed
+    end
+    return changed
+end
+
 function Inbox:learn(id, name, rank, now)
     if not id or not name or name == '' then return false end
     local e

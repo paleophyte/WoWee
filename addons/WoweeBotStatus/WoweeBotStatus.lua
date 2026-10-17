@@ -7,6 +7,11 @@ local function newHistory()
     if type(module)=='table' and type(module.new)=='function' then return module.new() end
 end
 local history = newHistory()
+local function newTraining()
+    local module=rawget(_G,'WoweeBotTraining')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local training = newTraining()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
@@ -78,7 +83,10 @@ end
 
 local function request()
     local now = GetTime()
-    if not inWorld or not controller:isBot(now) or now - lastRequest < 2 then return end
+    local observeManual = training and training.supported and activity.supported and
+        controller.mode == 'manual' and controller:fresh(now) and not controller.failure and not controller.intent and
+        not (controller.pending and controller.pending.verb == 'control')
+    if not inWorld or (not controller:isBot(now) and not observeManual) or now - lastRequest < 2 then return end
     local player = UnitName('player')
     if not player or player == '' or player == 'Unknown' then return end
     if activity.supported and activity.pending then return end
@@ -87,6 +95,7 @@ local function request()
     if activity.supported then
         local command=activity:request(controller.generation, now)
         if history then history:expect(activity.pending.id,controller.generation,now) end
+        if training then training:expect(activity.pending.id,controller.generation,now) end
         SendChatMessage(command, 'SAY')
         return
     end
@@ -405,6 +414,7 @@ driver:SetScript('OnUpdate', function()
     local now = GetTime()
     lastDriverTick = now
     if inWorld then
+        if training then training:expire(now,controller.generation) end
         if history then
             local pending=history.pending
             history:expire(now,controller.generation)
@@ -445,9 +455,11 @@ driver:SetScript('OnEvent', function(self, event, ...)
     elseif event == 'PLAYER_ENTERING_WORLD' then
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
+        training=newTraining()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
+        if training then training.pending=nil end
         notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
@@ -468,11 +480,19 @@ driver:SetScript('OnEvent', function(self, event, ...)
         end
         if received and previousMode ~= controller.mode then
             if history then history.pending,history.failure=nil,nil end
+            if training then training.pending,training.failure=nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if training then
+            training:capability(prefix,text,sender,player,controller)
+            if training:receive(prefix,text,sender,player,controller.generation,now) and
+                not training.failure and training.snapshot and WoweeBotReportTraining then
+                WoweeBotReportTraining(training.snapshot)
+            end
+        end
         if history then
             history:capability(prefix,text,sender,player,controller)
             history:receive(prefix,text,sender,player,controller.generation,now)

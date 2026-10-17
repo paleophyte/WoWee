@@ -10,6 +10,7 @@ Control.lua
 Activity.lua
 History.lua
 HistoryUI.lua
+Training.lua
 Inbox.lua
 NotesUI.lua
 WoweeBotStatus.lua

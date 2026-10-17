@@ -183,6 +183,10 @@ function WoweeBotReportCollectionWarning(fact)
     if online and inbox and inbox:collectionWarning(fact, now()) then save(); render() end
 end
 
+function WoweeBotReportTraining(snapshot)
+    if online and inbox and inbox:training(snapshot, now()) then save(); render() end
+end
+
 driver:SetScript('OnEvent', function(self, event, ...)
     if event == 'ADDON_LOADED' then
         if (...) ~= 'WoweeBotStatus' then return end
