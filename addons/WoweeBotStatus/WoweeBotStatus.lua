@@ -260,7 +260,7 @@ shortcut('Spellbook', 400, function() if ToggleSpellBook then ToggleSpellBook(BO
 shortcut('Map', 496, function() if ToggleWorldMap then ToggleWorldMap() end end)
 
 local policies = CreateFrame('Frame', 'WoweeBotPoliciesFrame', UIParent)
-policies:SetSize(430, 230); policies:SetPoint('CENTER', UIParent, 'CENTER', 0, 0)
+policies:SetSize(430, 390); policies:SetPoint('CENTER', UIParent, 'CENTER', 0, 0)
 policies:SetFrameStrata('DIALOG'); policies:EnableMouse(true)
 policies:SetBackdrop({bgFile='Interface\\Tooltips\\UI-Tooltip-Background',
     edgeFile='Interface\\Tooltips\\UI-Tooltip-Border',tile=true,tileSize=16,edgeSize=16,
@@ -294,6 +294,22 @@ policyButton('WoweeBotSocialRefresh','Refresh',278,-188,130,function()
     if not controller:fresh(GetTime()) or controller.failure then controller:refresh() end
     drawPolicy()
 end)
+policyText(nil,'GameFontHighlightSmall',-222,42):SetText('Fishing permits autonomous casts and fishing trips. Off keeps manual fishing available.')
+local fishingState = policyText('WoweeBotFishingState','GameFontNormal',-273,22)
+local fishingDetail = policyText('WoweeBotFishingDetail','GameFontHighlightSmall',-301,40)
+local fishingToggle = policyButton('WoweeBotFishingToggle','Waiting...',18,-350,245,function()
+    local now = GetTime()
+    if inWorld and controller:fresh(now) and controller:fishingFresh(now) and not controller.intent and not controller.failure then
+        controller:wantFishing(not controller.fishingEnabled)
+        drawPolicy()
+    end
+end)
+policyButton('WoweeBotFishingRefresh','Refresh',278,-350,130,function()
+    controller:refreshFishing()
+    if not controller:fresh(GetTime()) or controller.failure then controller:refresh() end
+    drawPolicy()
+end)
+
 drawPolicy = function()
     if not policies:IsShown() then return end
     local now = GetTime()
@@ -325,6 +341,35 @@ drawPolicy = function()
     end
     policyToggle:SetText(pending and 'Waiting...' or fresh and
         (controller.socialEnabled and 'Disable social detours' or 'Allow social detours') or 'Awaiting confirmed policy')
+    local fishingFresh = controller:fishingFresh(now)
+    local fishingPending = controller.fishingIntent ~= nil or (controller.pending and controller.pending.verb == 'fishing')
+    fishingToggle:Disable()
+    if not inWorld then
+        fishingState:SetText('Log into a character to change Fishing')
+        fishingDetail:SetText('Policies do not enable bot control.')
+    elseif not controller:fresh(now) or controller.failure then
+        fishingState:SetText('Fishing: waiting for control confirmation')
+        fishingDetail:SetText('Refresh to query the server. This does not enable AI.')
+    elseif not controller.fishingSupported then
+        fishingState:SetText('Fishing: unavailable')
+        fishingDetail:SetText('This server has not advertised Fishing controls.')
+    elseif fishingPending then
+        fishingState:SetText('Fishing: waiting for confirmation')
+        fishingDetail:SetText('The server confirms and saves this preference.')
+    elseif controller.fishingFailure then
+        fishingState:SetText('Fishing: unconfirmed')
+        fishingDetail:SetText(controller.fishingFailure .. '. Refresh to retry.')
+    elseif fishingFresh then
+        fishingState:SetText('Fishing: ' .. (controller.fishingEnabled and 'On' or 'Off') .. ' (server confirmed)')
+        fishingDetail:SetText('Saved for this character. Manual fishing remains available. Turning On does not switch control or bypass the retry pause.')
+        if not controller.intent then fishingToggle:Enable() end
+    else
+        fishingState:SetText('Fishing: asking the server')
+        fishingDetail:SetText('No current policy confirmation. The default is Off.')
+    end
+    fishingToggle:SetText(fishingPending and 'Waiting...' or fishingFresh and
+        (controller.fishingEnabled and 'Disable fishing' or 'Allow fishing') or 'Awaiting confirmed policy')
+
 end
 local policyLauncher = CreateFrame('Button','WoweeBotPoliciesLauncher',panel,'UIPanelButtonTemplate')
 policyLauncher:SetSize(80,21); policyLauncher:SetPoint('BOTTOMLEFT',panel,'BOTTOMLEFT',592,8)
@@ -365,6 +410,7 @@ driver:SetScript('OnUpdate', function()
             if controller.failure then WoweeBotReportStatusProblem('control', controller.failure) end
             if controller:isBot(now) and activity.failure then WoweeBotReportStatusProblem('activity', activity.failure) end
             if controller.socialFailure then WoweeBotReportStatusProblem('social', controller.socialFailure) end
+            if controller.fishingFailure then WoweeBotReportStatusProblem('fishing', controller.fishingFailure) end
         end
     end
     if now >= nextDraw then draw(); nextDraw = now + 0.25 end
@@ -399,6 +445,9 @@ driver:SetScript('OnEvent', function(self, event, ...)
         end
         if received and prefix == 'WIDLEPOL' and not controller.socialFailure and WoweeBotReportStatusProblem then
             WoweeBotReportStatusProblem('social', nil, 'Social Detours preference confirmed by the server.')
+        end
+        if received and prefix == 'WIDLEFISH' and not controller.fishingFailure and WoweeBotReportStatusProblem then
+            WoweeBotReportStatusProblem('fishing', nil, 'Fishing preference confirmed by the server.')
         end
         if received and previousMode ~= controller.mode then
             model, nextPoll, lastRequest = Status.new(), 0, -100

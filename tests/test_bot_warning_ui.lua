@@ -43,3 +43,48 @@ do
     if not old.shown then WoweeBotNotesFrame:Hide() end
     print('Real controller-to-Notes fishing warning scenarios passed')
 end
+
+-- The real Fishing buttons query and mutate only their own policy in Manual.
+do
+    local old={clock=GetTime,unit=UnitName,send=SendChatMessage}
+    local clock,sent=0,{}
+    GetTime=function() return clock end
+    UnitName=function(unit) if unit=='player' then return 'Jizzle' end return old.unit(unit) end
+    SendChatMessage=function(command) sent[#sent+1]=command end
+    local event=WoweeBotController:GetScript('OnEvent')
+    local update=WoweeBotController:GetScript('OnUpdate')
+    event(WoweeBotController,'PLAYER_ENTERING_WORLD')
+    SlashCmdList.WOWEEBOTPOLICY('')
+    update()
+    local id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) status$'))
+    local function reply(prefix,body) event(WoweeBotController,'CHAT_MSG_ADDON',prefix,body,'WHISPER','Jizzle') end
+    reply('WIDLE','1\t'..id..'\tok\tmanual\t5\t0\tnone')
+    reply('WIDLECAP','1\t'..id..'\t5\tactivity_1,social_1,fishing_1')
+    update()
+    id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) social 5 status$'))
+    reply('WIDLEPOL','1\t'..id..'\t5\tok\t0\tstored\tnone')
+    update()
+    id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) fishing 5 status$'))
+    reply('WIDLEFISH','1\t'..id..'\t5\tok\t0\tstored\tnone')
+    SlashCmdList.WOWEEBOTPOLICY('')
+    assert(WoweeBotFishingState:GetText()=='Fishing: Off (server confirmed)')
+    assert(WoweeBotFishingToggle:IsEnabled() and WoweeBotFishingToggle:GetText()=='Allow fishing')
+    assert(WoweeBotSocialState:GetText()=='Social Detours: Off (server confirmed)')
+    WoweeBotFishingToggle:GetScript('OnClick')()
+    assert(WoweeBotFishingState:GetText()=='Fishing: waiting for confirmation')
+    update()
+    id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) fishing 5 on$'))
+    reply('WIDLEFISH','1\t'..id..'\t5\tok\t1\tstored\tnone')
+    assert(WoweeBotFishingState:GetText()=='Fishing: On (server confirmed)')
+    assert(WoweeBotFishingToggle:GetText()=='Disable fishing')
+    assert(WoweeBotSocialState:GetText()=='Social Detours: Off (server confirmed)')
+    WoweeBotFishingToggle:GetScript('OnClick')();update()
+    id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) fishing 5 off$'))
+    reply('WIDLEFISH','1\t'..id..'\t5\tok\t0\tstored\tnone')
+    assert(WoweeBotFishingState:GetText()=='Fishing: Off (server confirmed)')
+    for _,command in ipairs(sent) do assert(not command:find(' control ',1,true) and not command:find(' grind ',1,true)) end
+    event(WoweeBotController,'PLAYER_LEAVING_WORLD')
+    GetTime,UnitName,SendChatMessage=old.clock,old.unit,old.send
+    WoweeBotPoliciesFrame:Hide()
+    print('Real Fishing policy UI and manual-control independence scenarios passed')
+end
