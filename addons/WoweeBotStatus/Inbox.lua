@@ -97,7 +97,9 @@ end
 
 -- These are WoWee's actual spell-failure strings. UI_ERROR_MESSAGE also carries
 -- fishing-bite notifications, so never treat every event as a failure.
-local observedErrors = {['Item not ready'] = 'item-not-ready', ['Need more items'] = 'need-more-items'}
+local observedErrors = {['Item not ready'] = 'item-not-ready', ['Need more items'] = 'need-more-items',
+    ['Target not in line of sight'] = 'line-of-sight', ["You can't fish in this area."] = 'not-fishable',
+    ['Face open water and try casting again.'] = 'face-open-water'}
 function Inbox:observeError(message, clock, now, generation)
     if type(generation) ~= 'number' or generation < 1 then self.errorWindow = nil; return false end
     if type(clock) ~= 'number' or type(now) ~= 'number' then return false end
@@ -107,7 +109,12 @@ function Inbox:observeError(message, clock, now, generation)
         self.errorWindow = window
     end
     window.clock = clock
-    local code = observedErrors[message]
+    if type(message) ~= 'string' or #message > 200 or message:find('[%z\1-\31\127]') then return false end
+    local reason = message
+    -- SMSG_SPELL_FAILURE prefixes the same reason with the spell's name when
+    -- it is cached; SMSG_CAST_RESULT supplies the plain reason.
+    if not observedErrors[reason] then reason = message:match('^.+: ([^:]+)$') end
+    local code = observedErrors[reason]
     if not code then return false end
     local recent = {}
     for _, at in ipairs(window.recent[code] or {}) do
@@ -119,10 +126,15 @@ function Inbox:observeError(message, clock, now, generation)
     if #recent < 3 then return false end
     -- One FYI per error per five-minute bucket, including across relogs. Normal
     -- note dismissal/retention applies; this never blocks play or chooses items.
-    return self:put('game-error:' .. code .. ':' .. math.floor(now / 300), 'note',
-        'Repeated game error: ' .. message,
-        'The game reported "' .. message .. '" at least 3 times within 30 seconds while bot control was confirmed. ' ..
-        'Check Bot activity for the current action, or take manual control to inspect equipment and supplies.',
+    local key = 'game-error:' .. code .. ':' .. math.floor(now / 300)
+    if self:find(key) then return false end
+    local inspect = code == 'line-of-sight' and 'the target and line of sight' or
+        (code == 'not-fishable' or code == 'face-open-water') and 'the fishing spot and facing' or
+        'equipment and supplies'
+    return self:put(key, 'note', 'Repeated game error: ' .. reason,
+        'The game reported "' .. reason .. '" at least 3 times within 30 seconds while bot control was confirmed. ' ..
+        'Most recent message: "' .. message .. '". ' ..
+        'Check Bot activity for the current action, or take manual control to inspect ' .. inspect .. '.',
         now, 'botstatus')
 end
 

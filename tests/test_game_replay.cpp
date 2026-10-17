@@ -7,6 +7,7 @@
 #include "game/entity.hpp"
 #include "game/game_utils.hpp"
 #include "game/packed_time.hpp"
+#include "game/packet_parsers.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -103,6 +104,51 @@ TEST_CASE("the session speaks WotLK", "[replay]") {
     Session s;
     CHECK(wowee::game::isActiveExpansion("wotlk"));
     CHECK_FALSE(wowee::game::isPreWotlk());
+}
+
+TEST_CASE("TBC cast failures retain their item and fishing meanings", "[replay][tbc-cast-errors]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    struct Failure { uint8_t raw, normalized; const char* text; };
+    // Deployed CMaNGOS TBC SpellDefines.h values, not the shared UI table.
+    const Failure cases[] = {{0x2a,45,"Item not ready"}, {0x2c,47,"Target not in line of sight"},
+        {0x36,58,"You can't fish in this area."}, {0x89,55,"Need more items"},
+        {0x5f,100,"Reagents required"}, {0x3f,67,"Not ready"}};
+    std::vector<std::string> messages;
+    s.handler().setAddonEventCallback([&](const std::string& event, const auto& args) {
+        if (event == "UI_ERROR_MESSAGE" && !args.empty()) messages.push_back(args.front());
+    });
+    for (const auto& failure : cases) {
+        CAPTURE(failure.raw, failure.normalized, failure.text);
+        // Spell::SendCastResult: spellId, result, cast_count. The separate
+        // SMSG_SPELL_FAILURE from SendInterrupted uses a packed caster first.
+        // The core calls 0x130 SMSG_CAST_RESULT; WoWee's TBC opcode table
+        // canonically names that same wire packet SMSG_CAST_FAILED.
+        for (const auto opcode : {Opcode::SMSG_CAST_FAILED, Opcode::SMSG_SPELL_FAILURE}) {
+            const auto before = messages.size();
+            wowee::network::Packet packet(wireOpcode(opcode));
+            if (opcode == Opcode::SMSG_SPELL_FAILURE) packet.writePackedGuid(Session::kPlayerGuid);
+            packet.writeUInt32(7620); // apprentice Fishing
+            packet.writeUInt8(failure.raw);
+            if (opcode == Opcode::SMSG_CAST_FAILED) packet.writeUInt8(0);
+            s.receive(packet);
+            REQUIRE(messages.size() == before + 1);
+            CHECK(messages.back().find(failure.text) != std::string::npos);
+        }
+        wowee::network::Packet packet(0);
+        packet.writeUInt32(7620); packet.writeUInt8(failure.raw); packet.writeUInt8(0);
+        CastFailedData data;
+        REQUIRE(s.handler().getPacketParsers()->parseCastFailed(packet, data));
+        CHECK(data.result == failure.normalized);
+        wowee::network::Packet resultPacket(0);
+        resultPacket.writeUInt32(7620); resultPacket.writeUInt8(failure.raw); resultPacket.writeUInt8(0);
+        uint32_t spell = 0, misc = 0, misc2 = 0;
+        uint8_t result = 0;
+        REQUIRE(s.handler().getPacketParsers()->parseCastResult(resultPacket, spell, result, misc, misc2));
+        CHECK(result == failure.normalized);
+    }
+    CHECK(createPacketParsers("classic")->castResult(44) == 45);
+    CHECK(createPacketParsers("wotlk")->castResult(45) == 45);
 }
 
 TEST_CASE("the player's create block makes the player's unit", "[replay]") {

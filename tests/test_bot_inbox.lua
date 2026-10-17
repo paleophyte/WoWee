@@ -85,6 +85,16 @@ assert(relog:counts().note == 3)
 for i = 1, 3 do assert(not relog:observeError('Need more items', i, 1303+i, 1)) end
 assert(Inbox.new(scoped, 'another realm', 'Jizzle'):counts().note == 0)
 print('Repeated bot-control error note scenarios passed')
+local prefixed = Inbox.new({}, 'errors', 'Other')
+assert(not prefixed:observeError('Fishing: You can\'t fish in this area.', 1, 1001, 1))
+assert(not prefixed:observeError('Fishing: You can\'t fish in this area.', 2, 1002, 1))
+assert(prefixed:observeError('Fishing: You can\'t fish in this area.', 3, 1003, 1))
+assert(prefixed:visible()[1].text:find('Fishing:',1,true))
+assert(prefixed:visible()[1].text:find('fishing spot and facing',1,true))
+for i=4,6 do assert(not prefixed:observeError('Another Fishing Rank: You can\'t fish in this area.', i, 1000+i, 1)) end
+assert(prefixed:counts().note == 1)
+for i=7,9 do assert(not prefixed:observeError('Unrelated: unknown reason', i, 1000+i, 1)) end
+assert(not prefixed:observeError('Fishing:\nNeed more items', 10, 1010, 1))
 
 -- Exercise the real Notes frame handler as well as the standalone model. The
 -- replay harness has already loaded NotesUI; restore globals before its tests.
