@@ -6,13 +6,13 @@
 // type-specific data fields.
 //
 //   Classic  none
-//   TBC      two - iconName, castBarCaption
+//   TBC      three - IconName, openingText, closingText (deployed CMaNGOS)
 //   WotLK    three - iconName, castBarCaption, unk1
 //
-// The order is the server's, off AzerothCore's QueryHandler.cpp:
-// entry, type, displayId, Name, name2, name3, name4, IconName, CastBarCaption,
-// unk1, raw[24], size. The bytes below are written in that order rather than by
-// asking this client's own writer.
+// The TBC order was verified against the deployed CMaNGOS QueryHandler.cpp:
+// entry, type, displayId, Name, name2, name3, name4, IconName, openingText,
+// closingText, raw[24], size. The bytes below are written independently of
+// this client's packet writer.
 //
 // Getting the count wrong does not raise. The strings are usually empty, so
 // each one costs a single NUL, and reading one too few starts data[0] on that
@@ -57,7 +57,8 @@ struct Writer {
 
 /// The packet as the server writes it, with `extraStrings` of the 2.0.3 block.
 std::vector<uint8_t> buildResponse(uint32_t entry, uint32_t type,
-                                   const std::string& name, int extraStrings) {
+                                   const std::string& name, int extraStrings,
+                                   const std::string& closingText = "") {
     Writer w;
     w.u32(entry);
     w.u32(type);
@@ -66,7 +67,7 @@ std::vector<uint8_t> buildResponse(uint32_t entry, uint32_t type,
     w.cstr("");                    // name2
     w.cstr("");                    // name3
     w.cstr("");                    // name4
-    const char* extras[] = {"Attack", "Collecting", ""};
+    const char* extras[] = {"Attack", "Collecting", closingText.c_str()};
     for (int i = 0; i < extraStrings; ++i) w.cstr(extras[i]);
     for (uint32_t i = 0; i < 24; ++i) w.u32(0xA000 + i);
     w.f32(1.5f);                   // size, which this client does not read
@@ -97,16 +98,21 @@ TEST_CASE("the WotLK gameobject query reads three strings before the data",
     CHECK(data.data[23] == 0xA017);
 }
 
-TEST_CASE("TBC reads two, Classic reads none", "[gameobject][wire]") {
+TEST_CASE("TBC reads all three server strings; Classic retains its layout", "[gameobject][wire]") {
     SECTION("TBC") {
-        auto bytes = buildResponse(180, 0, "Door", 2);
-        auto packet = makePacket(bytes);
-        GameObjectQueryResponseData data;
-        TbcPacketParsers parsers;
-        REQUIRE(parsers.parseGameObjectQueryResponse(packet, data));
-        CHECK(data.name == "Door");
-        CHECK(data.data[0] == 0xA000);
-        CHECK(data.data[23] == 0xA017);
+        for (const std::string closing : {"", "Closing"}) {
+            INFO("CMaNGOS closingText: " << closing);
+            auto bytes = buildResponse(180, 0, "Door", 3, closing);
+            auto packet = makePacket(bytes);
+            GameObjectQueryResponseData data;
+            TbcPacketParsers parsers;
+            REQUIRE(parsers.parseGameObjectQueryResponse(packet, data));
+            CHECK(data.name == "Door");
+            REQUIRE(data.hasData);
+            for (uint32_t i = 0; i < 24; ++i) CHECK(data.data[i] == 0xA000 + i);
+            REQUIRE(packet.getRemainingSize() == 4);
+            CHECK(packet.readFloat() == 1.5f);
+        }
     }
     SECTION("Classic") {
         auto bytes = buildResponse(180, 0, "Door", 0);
@@ -122,13 +128,12 @@ TEST_CASE("TBC reads two, Classic reads none", "[gameobject][wire]") {
 
 TEST_CASE("one string too few shifts every data field", "[gameobject][wire]") {
     // Not an error - a wrong answer, and the reason the count is asserted at
-    // all. A WotLK packet read by the TBC reader leaves an empty string's NUL
-    // in front of data[0].
+    // all. Reproduce the former TBC count explicitly: it left the third
+    // string's empty terminator ahead of data[0].
     auto bytes = buildResponse(1731, 3, "Copper Vein", 3);
     auto packet = makePacket(bytes);
     GameObjectQueryResponseData data;
-    TbcPacketParsers parsers;
-    REQUIRE(parsers.parseGameObjectQueryResponse(packet, data));
+    REQUIRE(parseGameObjectQueryBody(packet, data, 2));
     CHECK(data.name == "Copper Vein");
     CHECK(data.data[0] != 0xA000);
 }
@@ -154,12 +159,11 @@ TEST_CASE("what is left after the data fields says whether the count was right",
         REQUIRE(GameObjectQueryResponseParser::parse(packet, data));
         CHECK(packet.getRemainingSize() % 4 == 0);
     }
-    SECTION("one short does not") {
+    SECTION("the former TBC count leaves five bytes") {
         auto packet = makePacket(bytes);
         GameObjectQueryResponseData data;
-        TbcPacketParsers parsers;
-        REQUIRE(parsers.parseGameObjectQueryResponse(packet, data));
-        CHECK(packet.getRemainingSize() % 4 != 0);
+        REQUIRE(parseGameObjectQueryBody(packet, data, 2));
+        CHECK(packet.getRemainingSize() == 5);
     }
 }
 

@@ -1836,7 +1836,8 @@ struct GameObjectQueryResponseData {
 /** SMSG_GAMEOBJECT_QUERY_RESPONSE parser */
 /// SMSG_GAMEOBJECT_QUERY_RESPONSE, whose three shapes differ in one number:
 /// how many strings sit between the four names and the twenty-four
-/// type-specific data fields. None on vanilla, two on TBC, three on WotLK.
+/// type-specific data fields. TBC and WotLK read three strings; the existing
+/// Classic adapter retains its separate layout.
 bool parseGameObjectQueryBody(network::Packet& packet,
                               GameObjectQueryResponseData& data,
                               int extraStrings);

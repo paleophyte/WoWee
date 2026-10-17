@@ -2,9 +2,12 @@
 #include "core/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
+#include "game/spell_handler.hpp"
 #include "rendering/camera_controller.hpp"
 #include "addons/addon_manager.hpp"
 #include <imgui.h>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 extern "C" {
@@ -636,6 +639,66 @@ TEST_CASE("bot notes use real realm identity and actual learned-spell events",
     CHECK(lua->evaluateBoolean("saved > 0"));
     CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).empty()); // reading notes never enables AI
     lua->widgets().layout(1920.0f, 1080.0f);
+    CAPTURE(errors);
+    CHECK(errors.empty());
+}
+
+TEST_CASE("legacy aura tooltips use raw slots and money tooltips tolerate older global strings",
+          "[replay][addon][compatibility]") {
+    Session s("tbc");
+    addPlayer(s);
+    auto* spells = s.handler().getSpellHandler();
+    REQUIRE(spells != nullptr);
+    spells->resetPlayerAuras(24);
+    auto& helpful = spells->getPlayerAuraSlotRef(3);
+    helpful.spellId = 133;
+    auto& harmful = spells->getPlayerAuraSlotRef(7);
+    harmful.spellId = 116;
+    harmful.flags = 0x80;
+    harmful.charges = 3;
+    harmful.durationMs = harmful.maxDurationMs = 60000;
+    harmful.receivedAtMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    auto& secondHarmful = spells->getPlayerAuraSlotRef(15);
+    secondHarmful.spellId = 118;
+    secondHarmful.flags = 0x80;
+    std::vector<std::string> errors;
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua != nullptr);
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    REQUIRE(lua->executeString("compatTip=CreateFrame('GameTooltip','CompatAuraTooltip',UIParent); compatTip:SetPlayerBuff(GetPlayerBuff(0,'HELPFUL'))"));
+    CHECK(lua->evaluateBoolean("compatTip.__spellId == 133"));
+    auto* tooltip = lua->widgets().findByName("CompatAuraTooltip");
+    REQUIRE(tooltip != nullptr);
+    REQUIRE_FALSE(tooltip->tooltipLines.empty());
+    CHECK(tooltip->tooltipLines[0].lc[1] == 1.0f);
+    REQUIRE(lua->executeString("compatTip:SetPlayerBuff(GetPlayerBuff(0,'HARMFUL'))"));
+    CHECK(lua->evaluateBoolean("compatTip.__spellId == 116"));
+    REQUIRE_FALSE(tooltip->tooltipLines.empty());
+    CHECK(tooltip->tooltipLines[0].lc[1] == 0.0f); // harmful title is red
+    CHECK(std::any_of(tooltip->tooltipLines.begin(), tooltip->tooltipLines.end(), [](const auto& line) {
+        return line.left == "3 stacks";
+    }));
+    CHECK(std::any_of(tooltip->tooltipLines.begin(), tooltip->tooltipLines.end(), [](const auto& line) {
+        return line.left.find("sec remaining") != std::string::npos;
+    }));
+    REQUIRE(lua->executeString("compatTip:SetPlayerBuff(GetPlayerBuff(1,'HARMFUL'))"));
+    CHECK(lua->evaluateBoolean("compatTip.__spellId == 118")); // second debuff is raw slot 15, not index 2
+    for (const auto* slot : {"0", "-1", "24", "1.5", "1e100"}) {
+        REQUIRE(lua->executeString(std::string("compatTip:SetPlayerBuff(") + slot + ")"));
+        CHECK(lua->evaluateBoolean("compatTip.__spellId == nil"));
+        CHECK(tooltip->tooltipLines.empty());
+    }
+    REQUIRE(lua->executeString("GOLD_AMOUNT_TEXTURE=nil; SILVER_AMOUNT_TEXTURE=nil; COPPER_AMOUNT_TEXTURE=nil"));
+    CHECK(lua->evaluateBoolean(R"(GetCoinTextureString(198156) == '19|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t 81|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t 56|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t')"));
+    CHECK(lua->evaluateBoolean(R"(GetCoinTextureString(0) == '0|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t')"));
+    REQUIRE(lua->executeString("GOLD_AMOUNT_TEXTURE=function() end; SILVER_AMOUNT_TEXTURE=4; COPPER_AMOUNT_TEXTURE={}"));
+    CHECK(lua->evaluateBoolean("GetCoinTextureString(10101):find('UI-GoldIcon',1,true) ~= nil"));
+    REQUIRE(lua->executeString("GOLD_AMOUNT_TEXTURE='%d gold'; SILVER_AMOUNT_TEXTURE='%d silver'; COPPER_AMOUNT_TEXTURE='%d copper'"));
+    CHECK(lua->evaluateBoolean("GetCoinTextureString(198156) == '19 gold 81 silver 56 copper'"));
+    CHECK(s.sent().of(Opcode::CMSG_MESSAGECHAT).empty());
     CAPTURE(errors);
     CHECK(errors.empty());
 }

@@ -2160,6 +2160,36 @@ int lua_Tooltip_SetSpellByID(lua_State* L) {
     return 1;
 }
 
+// Classic/TBC BuffFrame hands back the opaque zero-based slot returned by
+// GetPlayerBuff. UnitAura instead counts a one-based filtered list. Convert
+// that index here, then reuse the normal aura tooltip and its description.
+int lua_Tooltip_SetPlayerBuff(lua_State* L) {
+    auto* gh = wowee::addons::getGameHandler(L);
+    const double requested = luaL_optnumber(L, 2, -1);
+    int index = 0;
+    bool harmful = false;
+    if (gh && std::isfinite(requested) && requested >= 0 && std::floor(requested) == requested) {
+        const auto& auras = gh->getPlayerAuras();
+        if (requested < static_cast<double>(auras.size())) {
+            const auto slot = static_cast<size_t>(requested);
+            if (!auras[slot].isEmpty()) {
+                harmful = (auras[slot].flags & 0x80) != 0;
+                for (size_t i = 0; i <= slot; ++i)
+                    if (!auras[i].isEmpty() && ((auras[i].flags & 0x80) != 0) == harmful) ++index;
+            }
+        }
+    }
+    // Index zero deliberately clears an empty/invalid slot through the same
+    // path, rather than leaving the previously hovered aura in the tooltip.
+    lua_getfield(L, 1, "SetUnitAura");
+    lua_pushvalue(L, 1);
+    lua_pushstring(L, "player");
+    lua_pushinteger(L, index);
+    lua_pushstring(L, harmful ? "HARMFUL" : "HELPFUL");
+    lua_call(L, 4, 0);
+    return 0;
+}
+
 /// A glyph in its socket, hovered on the glyph panel.
 ///
 /// SetGlyph(socketID, talentGroup) - the same one-based socket and spec
@@ -6096,6 +6126,7 @@ void LuaEngine::registerCoreAPI() {
         {"SetBackpackToken", lua_Tooltip_ReturnFalse},
         {"SetGuildBankItem", lua_Tooltip_SetGuildBankItem},
         {"SetSpellByID",    lua_Tooltip_SetSpellByID},
+        {"SetPlayerBuff",   lua_Tooltip_SetPlayerBuff},
         {"SetQuestLogRewardSpell", lua_Tooltip_SetQuestLogRewardSpell},
         {"SetEquipmentSet",        lua_Tooltip_SetEquipmentSet},
         {"SetLFGCompletionReward", lua_Tooltip_SetLFGCompletionReward},
@@ -7925,6 +7956,7 @@ void LuaEngine::registerCoreAPI() {
         "end\n"
         "function __WoweeFrameMT:SetUnitAura(unit, index, filter)\n"
         "    self:ClearLines()\n"
+        "    self.__spellId = nil\n"
         "    local name, rank, icon, count, debuffType, duration, expTime, caster, steal, consolidate, spellId = UnitAura(unit, index, filter)\n"
         "    if not name then return end\n"
         // Harmful auras name their school and are titled in red; a buff is
@@ -8490,9 +8522,13 @@ void LuaEngine::registerCoreAPI() {
         "    local s = math.floor(math.fmod(copper, 10000) / 100)\n"
         "    local c = math.fmod(copper, 100)\n"
         "    local r = ''\n"
-        "    if g > 0 then r = r .. format(GOLD_AMOUNT_TEXTURE, g, 0, 0) .. ' ' end\n"
-        "    if s > 0 then r = r .. format(SILVER_AMOUNT_TEXTURE, s, 0, 0) .. ' ' end\n"
-        "    if c > 0 or r == '' then r = r .. format(COPPER_AMOUNT_TEXTURE, c, 0, 0) end\n"
+        "    local function coin(value, pattern, icon)\n"
+        "        if type(pattern) ~= 'string' then pattern = '%d|TInterface\\\\MoneyFrame\\\\UI-' .. icon .. 'Icon:%d:%d:2:0|t' end\n"
+        "        return string.format(pattern, value, 0, 0)\n"
+        "    end\n"
+        "    if g > 0 then r = r .. coin(g, rawget(_G, 'GOLD_AMOUNT_TEXTURE'), 'Gold') .. ' ' end\n"
+        "    if s > 0 then r = r .. coin(s, rawget(_G, 'SILVER_AMOUNT_TEXTURE'), 'Silver') .. ' ' end\n"
+        "    if c > 0 or r == '' then r = r .. coin(c, rawget(_G, 'COPPER_AMOUNT_TEXTURE'), 'Copper') end\n"
         "    return r\n"
         "end\n"
         "GetCoinText = GetCoinTextureString\n"
