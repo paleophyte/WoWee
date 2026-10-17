@@ -71,6 +71,21 @@ assert(inbox:training(snapshot,17) and inbox:training(T.decode('1\tok\t0'),18))
 assert(entry.kind=='note' and entry.text:find('has not been rechecked',1,true))
 assert(#WoweeBotInbox.new(root,'realm2','Jizzle').data.entries==0)
 assert(#WoweeBotInbox.new(root,'realm1','Other').data.entries==0)
+-- budget0 is an actual core purchase's wallet gate, independent of any AI
+-- reservation or automatic-free policy. The old v1 frame remains compatible.
+local function manual(state,cost,money,spendable)
+    return (row(state,cost,money,spendable):gsub('^(%d+\t%d+\t)8\t',function(prefix) return prefix..'0\t' end))
+end
+local wallet=assert(T.decode(body(manual('coins',9,6,6))))
+local manualInbox=WoweeBotInbox.new({},'realm','Buyer')
+assert(manualInbox:training(wallet,30))
+assert(manualInbox:find('training:202').text:find('Available for this manual purchase: 0g 0s 6c',1,true))
+assert(manualInbox:find('training:202').text:find('Missing from wallet: 0g 0s 3c',1,true))
+assert(not manualInbox:training(wallet,31))
+assert(not T.decode(body(manual('coins',9,6,0))))
+assert(not T.decode(body(manual('budget',9,20,0))))
+assert(not T.decode(body(manual('free',9,20,20))))
+assert(T.decode(body(manual('ready',9,20,20))))
 print('Training decode, framing, shortfalls, reconciliation, durability and scope passed')
 if arg and arg[1]=='--server-fixture' then
     local file=assert(io.open(arg[2],'rb'));local data=file:read('*a');file:close()

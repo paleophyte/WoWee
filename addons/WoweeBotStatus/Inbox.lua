@@ -93,7 +93,9 @@ function Inbox:training(snapshot, now)
         local text = row.title .. ' at ' .. row.trainer .. '.\n' .. reason
         if row.state == 'coins' or row.state == 'coins_unknown_budget' or row.state == 'budget' or row.state == 'ready' or row.state == 'unknown_budget' then
             text = text .. '\nDiscounted price: ' .. coins(row.cost) .. '. Wallet: ' .. coins(row.money) .. '.'
-            if row.state ~= 'unknown_budget' and row.state ~= 'coins_unknown_budget' then text = text .. '\nSpendable under the observed budget: ' .. coins(row.spendable) .. '.' end
+            if row.state ~= 'unknown_budget' and row.state ~= 'coins_unknown_budget' then
+                text = text .. (row.budget == 0 and '\nAvailable for this manual purchase: ' or '\nSpendable under the observed budget: ') .. coins(row.spendable) .. '.'
+            end
             if row.state == 'coins' or row.state == 'coins_unknown_budget' then text = text .. '\nMissing from wallet: ' .. coins(row.cost-row.money) .. '.'
             elseif row.state == 'budget' then text = text .. '\nMissing from spendable budget: ' .. coins(row.cost-row.spendable) .. '.' end
         end

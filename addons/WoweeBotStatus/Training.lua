@@ -40,6 +40,8 @@ function Training.decode(body)
         if ((row.state == 'coins' or row.state == 'coins_unknown_budget') and row.cost <= row.money) or
             (row.state == 'budget' and (row.cost > row.money or row.cost <= row.spendable)) or
             (row.state == 'ready' and row.cost > row.spendable) then return end
+        if row.budget == 0 and ((row.state == 'coins' or row.state == 'ready') and row.spendable ~= row.money or
+            row.state == 'budget' or row.state == 'free' or row.state == 'unknown_budget' or row.state == 'coins_unknown_budget') then return end
         seen[row.lesson], rows[#rows+1] = true, row
     end
     return {status=status, rows=rows}
