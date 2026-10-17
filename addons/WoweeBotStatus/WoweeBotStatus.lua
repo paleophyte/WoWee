@@ -202,7 +202,8 @@ local function draw()
         end
     end
     progress:SetText(objective)
-    if model.actionAt and now - model.actionAt <= Status.STALE_AFTER then
+    if type(model.action) == 'string' and model.action ~= '' and model.actionAt and
+        now - model.actionAt <= Status.STALE_AFTER then
         action:SetText((model.typed and 'Last successful action: ' or 'Last action: ') .. model.action)
     end
 end

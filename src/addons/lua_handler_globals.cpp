@@ -1,6 +1,8 @@
 #include "addons/lua_handler_globals.hpp"
 
 #include <cstring>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include <lua.h>
@@ -13,19 +15,10 @@ namespace {
 
 bool gLegacyHandlerGlobals = false;
 
-/// How deep the dispatch is, so a nested handler saves into its own row.
-///
-/// Handlers nest: Show() runs OnShow from inside whoever called it. Without the
-/// save the outer handler's arg1 would be the inner one's from the moment it
-/// returned.
-int gHandlerDepth = 0;
-int gHandlerSaveRef = LUA_NOREF;
-
-constexpr int kMaxHandlerArgs = 9;
-const char* const kHandlerArgNames[kMaxHandlerArgs] = {
-    "arg1", "arg2", "arg3", "arg4", "arg5", "arg6", "arg7", "arg8", "arg9"};
-/// `this`, `event`, and one per argN.
-constexpr int kHandlerSaveSlots = 2 + kMaxHandlerArgs;
+// Names are cached as longer event payloads arrive. TBC chat reads arg11/12,
+// and combat events can carry more; publish the actual payload without truncation.
+std::vector<std::string> gHandlerArgNames;
+char gHandlerSaveKey;
 
 /// Read a global without the missing-API fallback answering for it.
 ///
@@ -38,24 +31,45 @@ void rawGetGlobal(lua_State* L, const char* name) {
     lua_rawget(L, LUA_GLOBALSINDEX);
 }
 
-/// Push the table the saved values live in.
-///
-/// Held by reference rather than looked up by name, and checked rather than
-/// trusted: a reference belongs to one lua_State and this file outlives them.
-/// A client that tears the interface down and builds it again gets a new state
-/// in which that number means something else or nothing at all, and writing
-/// through it is not an error Lua reports - it is a write into whatever is
-/// there.
+// Registry ownership is per Lua state, including when an allocator reuses a
+// destroyed state's address. Rows/depth belong to that state too.
 void pushSaveTable(lua_State* L) {
-    if (gHandlerSaveRef != LUA_NOREF) {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, gHandlerSaveRef);
-        if (lua_istable(L, -1)) return;
+    lua_pushlightuserdata(L, &gHandlerSaveKey);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_istable(L, -1)) return;
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_pushlightuserdata(L, &gHandlerSaveKey);
+    lua_pushvalue(L, -2);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+}
+
+// Each nested handler has a reusable row, with no fixed-width slot overlap
+// when an inner event carries more arguments than the outer event.
+int pushSaveRow(lua_State* L, bool entering, int depth = -1) {
+    pushSaveTable(L);
+    const int table = lua_gettop(L);
+    if (depth < 0) {
+        lua_rawgeti(L, table, 0);
+        depth = static_cast<int>(lua_tointeger(L, -1));
         lua_pop(L, 1);
     }
-    lua_newtable(L);
-    lua_pushvalue(L, -1);
-    gHandlerSaveRef = luaL_ref(L, LUA_REGISTRYINDEX);
-    gHandlerDepth = 0;
+    lua_pushinteger(L, entering ? depth + 1 : depth);
+    lua_rawseti(L, table, 0);
+    lua_rawgeti(L, table, depth + 1);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_rawseti(L, table, depth + 1);
+    }
+    lua_remove(L, table);
+    return depth;
+}
+
+void clearSaved(lua_State* L, int row, int slot) {
+    lua_pushnil(L);
+    lua_rawseti(L, row, slot);
 }
 
 }  // namespace
@@ -66,6 +80,14 @@ bool legacyHandlerGlobals() { return gLegacyHandlerGlobals; }
 int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
     if (!gLegacyHandlerGlobals || nargs < 1)
         return lua_pcall(L, nargs, 0, errfunc);
+
+    // The caller reserves its argument payload. Our registry bookkeeping also
+    // needs scratch slots before lua_pcall gets a chance to grow the stack.
+    if (!lua_checkstack(L, 8)) {
+        lua_pop(L, nargs + 1);
+        lua_pushliteral(L, "not enough Lua stack for handler globals");
+        return LUA_ERRMEM;
+    }
 
     const int selfIdx = lua_gettop(L) - nargs + 1;
     // OnEvent alone puts the event name before the payload; every other
@@ -79,24 +101,24 @@ int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
     const int firstArg = selfIdx + (isEvent ? 2 : 1);
     int argCount = lua_gettop(L) - firstArg + 1;
     if (argCount < 0) argCount = 0;
-    if (argCount > kMaxHandlerArgs) argCount = kMaxHandlerArgs;
+    while (static_cast<int>(gHandlerArgNames.size()) < argCount)
+        gHandlerArgNames.push_back("arg" + std::to_string(gHandlerArgNames.size() + 1));
 
     // Only the names about to be overwritten are saved, and only those are put
     // back. A client before 3.0 left the higher argN wherever the last event
     // had left them, and a body written against one reads no further than the
     // count its own event carries.
-    pushSaveTable(L);
+    const int depth = pushSaveRow(L, true);
     const int save = lua_gettop(L);
-    const int base = gHandlerDepth * kHandlerSaveSlots;
     rawGetGlobal(L, "this");
-    lua_rawseti(L, save, base + 1);
+    lua_rawseti(L, save, 1);
     if (isEvent) {
         rawGetGlobal(L, "event");
-        lua_rawseti(L, save, base + 2);
+        lua_rawseti(L, save, 2);
     }
     for (int i = 0; i < argCount; ++i) {
-        rawGetGlobal(L, kHandlerArgNames[i]);
-        lua_rawseti(L, save, base + 3 + i);
+        rawGetGlobal(L, gHandlerArgNames[i].c_str());
+        lua_rawseti(L, save, 3 + i);
     }
     lua_pop(L, 1);   // the save table - the call's own stack is left as it was
 
@@ -108,26 +130,27 @@ int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
     }
     for (int i = 0; i < argCount; ++i) {
         lua_pushvalue(L, firstArg + i);
-        lua_setglobal(L, kHandlerArgNames[i]);
+        lua_setglobal(L, gHandlerArgNames[i].c_str());
     }
 
-    ++gHandlerDepth;
     const int rc = lua_pcall(L, nargs, 0, errfunc);
-    --gHandlerDepth;
 
     // Above whatever pcall left - nothing on success, the error on failure -
     // and popped again, so a caller still finds its error at the top.
-    pushSaveTable(L);
+    pushSaveRow(L, false, depth);
     const int back = lua_gettop(L);
-    lua_rawgeti(L, back, base + 1);
+    lua_rawgeti(L, back, 1);
     lua_setglobal(L, "this");
+    clearSaved(L, back, 1);
     if (isEvent) {
-        lua_rawgeti(L, back, base + 2);
+        lua_rawgeti(L, back, 2);
         lua_setglobal(L, "event");
+        clearSaved(L, back, 2);
     }
     for (int i = 0; i < argCount; ++i) {
-        lua_rawgeti(L, back, base + 3 + i);
-        lua_setglobal(L, kHandlerArgNames[i]);
+        lua_rawgeti(L, back, 3 + i);
+        lua_setglobal(L, gHandlerArgNames[i].c_str());
+        clearSaved(L, back, 3 + i);
     }
     lua_pop(L, 1);
     return rc;

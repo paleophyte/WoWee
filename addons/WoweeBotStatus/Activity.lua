@@ -149,6 +149,7 @@ function Activity.apply(model, s, now)
     model.interactionType = s.interactionType
     model.interactionTask = s.task ~= '' and s.task or nil
     model.moveRetries, model.workRetries = s.moveRetries, s.workRetries
-    model.action, model.actionAt = s.executed ~= '' and s.executed or nil, now
+    model.action = s.executed ~= '' and s.executed or nil
+    model.actionAt = model.action and now or nil
     model.report, model.reportAt, model.actionDeadline = nil, nil, nil
 end

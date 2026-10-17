@@ -1690,27 +1690,20 @@ void GameHandler::removeIgnore(const std::string& playerName) {
 void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     movementInfo.orientation = canonicalYaw;
 
-    // One-shot check that the renderer's facing round-trips to the same
-    // canonical yaw we just computed from positions. If it does not, the
-    // per-frame resync replaces this with a different heading and the server
-    // re-checks the arc against that instead.
-    if (auto* r = services_.renderer) {
-        const float fromRender = core::coords::characterYawDegToCanonical(r->getCharacterYaw());
-        const float delta = core::coords::normalizeAngleRad(fromRender - canonicalYaw);
-        if (std::abs(delta) > 0.2f) {
-            LOG_WARNING("Facing mismatch: computed canonical=", canonicalYaw,
-                        " but the character's ", r->getCharacterYaw(),
-                        " deg maps to ", fromRender, " (off by ",
-                        delta * 57.2957795f, " deg) - the resync will undo this");
-        }
-    }
-
     // The renderer owns facing; the game side is downstream of it every frame.
     if (auto* renderer = services_.renderer) {
         const float facingDeg = core::coords::canonicalToCharacterYawDeg(canonicalYaw);
         renderer->setCharacterYaw(facingDeg);
         if (auto* cc = renderer->getCameraController()) {
             cc->setFacingYaw(facingDeg);
+        }
+        // Compare after applying the turn. Comparing the old pose with the
+        // requested heading reported ordinary auto-turns as broken facing.
+        const float applied = core::coords::characterYawDegToCanonical(renderer->getCharacterYaw());
+        const float delta = core::coords::normalizeAngleRad(applied - canonicalYaw);
+        if (std::abs(delta) > 0.2f) {
+            LOG_WARNING("Facing conversion mismatch after applying turn: requested=", canonicalYaw,
+                        " applied=", applied);
         }
     }
 

@@ -8931,6 +8931,14 @@ void pushEventArg(lua_State* L, const std::string& arg) {
 void LuaEngine::fireEvent(const std::string& eventName,
                            const std::vector<std::string>& args) {
     if (!L_) return;
+    // Lua's C API guarantees only a small initial stack. Reserve the entire
+    // payload plus dispatch bookkeeping before pushing it, including when an
+    // event is fired recursively from a C callback.
+    if (args.size() > static_cast<size_t>(INT_MAX - 16) ||
+        !lua_checkstack(L_, static_cast<int>(args.size()) + 16)) {
+        LOG_ERROR("LuaEngine: insufficient stack for event '", eventName, "'");
+        return;
+    }
 
     // The trade skill list may change shape now, and only now. It is held still
     // between these events because the frame reads it many times to draw one

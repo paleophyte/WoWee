@@ -6,6 +6,7 @@
 #include "rendering/camera_controller.hpp"
 #include "rendering/renderer.hpp"
 #include "addons/addon_manager.hpp"
+#include "addons/lua_handler_globals.hpp"
 #include <imgui.h>
 #include <algorithm>
 #include <chrono>
@@ -278,6 +279,80 @@ TEST_CASE("server spline facing survives application and renderer frame synchron
 }
 
 
+TEST_CASE("manual pickup faces the object on screen and on the TBC wire through later frames",
+          "[replay][movement][gameobject][pickup-facing]") {
+    using Access = wowee::game::GameHandlerTestAccess;
+    using RenderAccess = wowee::rendering::RendererTestAccess;
+    using namespace wowee::core::coords;
+    wowee::game::GameServices services;
+    wowee::core::Application app;
+    auto registry = std::make_unique<wowee::game::ExpansionRegistry>();
+    registry->initialize(std::string(WOWEE_SOURCE_DIR) + "/Data");
+    REQUIRE(registry->setActive("tbc"));
+    const auto path = registry->getActive()->dataPath;
+    services.expansionRegistry = registry.get();
+    Access::setExpansions(app, std::move(registry));
+    auto& game = Access::installFrameGame(app, services);
+    REQUIRE(game.getOpcodeTable().loadFromJson(path + "/opcodes.json"));
+    REQUIRE(game.getUpdateFieldTable().loadFromJson(path + "/update_fields.json"));
+    game.setPacketParsers(wowee::game::createPacketParsers("tbc"));
+    game.setPlayerGuid(Session::kPlayerGuid);
+    game.getEntityManager().addEntity(Session::kPlayerGuid,
+        std::make_shared<wowee::game::Player>(Session::kPlayerGuid));
+    auto socket = std::make_unique<replay::SentPackets>();
+    auto* sent = socket.get();
+    Access::setSocket(game, std::move(socket));
+    Access::enterWorld(game);
+    auto renderer = std::make_unique<wowee::rendering::Renderer>();
+    RenderAccess::createCamera(*renderer);
+    auto& render = Access::installFrameRenderer(app, std::move(renderer));
+    services.renderer = &render;
+    auto* camera = render.getCameraController();
+    auto* context = ImGui::CreateContext();
+    struct Cleanup {
+        ImGuiContext* context;
+        ~Cleanup() { ImGui::DestroyContext(context); }
+    } cleanup{context};
+    const glm::vec3 origin{200, 100, 30};
+    uint64_t guid = 0xF11002B299000100ull;
+    for (const auto offset : {glm::vec3{3, 2, 0}, glm::vec3{-3, 2, 0},
+                              glm::vec3{-3, -2, 0}, glm::vec3{3, -2, 0}}) {
+        ++guid;
+        game.setPosition(origin.x, origin.y, origin.z);
+        render.getCharacterPosition() = canonicalToRender(origin);
+        render.setCharacterYaw(21.8772f);
+        camera->setFacingYaw(21.8772f);
+        auto object = std::make_shared<wowee::game::GameObject>(guid);
+        object->setEntry(176793);
+        object->setName("Bundle of Wood");
+        object->setPosition(origin.x + offset.x, origin.y + offset.y, origin.z, 0);
+        game.getEntityManager().addEntity(guid, object);
+        const float expected = std::atan2(-offset.y, offset.x);
+        const auto priorUses = sent->of(Opcode::CMSG_GAMEOBJ_USE).size();
+        game.interactWithGameObject(guid);
+        REQUIRE(sent->of(Opcode::CMSG_GAMEOBJ_USE).size() == priorUses + 1);
+        REQUIRE_FALSE(sent->of(Opcode::MSG_MOVE_SET_FACING).empty());
+        auto facing = sent->of(Opcode::MSG_MOVE_SET_FACING).back();
+        facing.readUInt32(); // movement flags
+        facing.readUInt8();  // TBC extra flags
+        facing.readUInt32(); // time
+        CHECK(facing.readFloat() == Catch::Approx(origin.y));
+        CHECK(facing.readFloat() == Catch::Approx(origin.x));
+        CHECK(facing.readFloat() == Catch::Approx(origin.z));
+        const float wireYaw = facing.readFloat();
+        CHECK(normalizeAngleRad(wireYaw - canonicalToServerYaw(expected)) == Catch::Approx(0).margin(0.0001));
+        for (int frame = 0; frame < 3; ++frame) {
+            Access::applyServerMovement(app, 0.016f);
+            RenderAccess::updateCharacterFacing(render, 0.016f);
+            camera->update(0.016f);
+            CHECK(normalizeAngleRad(characterYawDegToCanonical(render.getCharacterYaw()) - expected)
+                  == Catch::Approx(0).margin(0.0001));
+            CHECK(normalizeAngleRad(characterYawDegToCanonical(camera->getFacingYaw()) - expected)
+                  == Catch::Approx(0).margin(0.0001));
+        }
+    }
+}
+
 TEST_CASE("own TBC splines drive movement state and hold their endpoint",
           "[replay][movement][playerbot]") {
     Session s("tbc");
@@ -435,6 +510,50 @@ TEST_CASE("Lua boolean evaluation returns the expression and preserves the stack
     lua_settop(state, base);
 }
 
+TEST_CASE("TBC local loot and system chat expose line IDs to legacy FrameXML handlers",
+          "[replay][addon][chat][loot-globals]") {
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    std::vector<std::string> errors;
+    lua->setLuaErrorCallback([&](const auto& error) { errors.push_back(error); });
+    wowee::addons::setLegacyHandlerGlobals(true);
+    struct Cleanup {
+        wowee::game::GameHandler& game;
+        ~Cleanup() { game.setAddonEventCallback({}); wowee::addons::setLegacyHandlerGlobals(false); }
+    } cleanup{s.handler()};
+    REQUIRE(lua->executeString(R"(
+        lootChat = CreateFrame("Frame")
+        lootChat:RegisterEvent("CHAT_MSG_LOOT")
+        lootChat:RegisterEvent("CHAT_MSG_SYSTEM")
+        lootChat:RegisterEvent("LONG_TEST_EVENT")
+        chatCount = 0
+        lootChat:SetScript("OnEvent", function()
+            if event == "LONG_TEST_EVENT" then longTail = arg40; return end
+            -- The same legacy global access that raises in TBC ChatFrame.lua.
+            chatLink = "|Hplayer:" .. arg2 .. ":" .. arg11 .. "|h"
+            chatGuid = arg12
+            chatCount = chatCount + 1
+        end)
+    )"));
+    s.handler().setAddonEventCallback([lua](const auto& name, const auto& args) { lua->fireEvent(name, args); });
+    s.handler().addLocalChatLine(wowee::game::ChatType::LOOT, "You receive loot: Bundle of Wood.");
+    s.handler().addSystemChatMessage("Received item: Bundle of Wood");
+    CHECK(lua->evaluateBoolean("chatCount == 2 and type(chatLink) == 'string' and type(chatGuid) == 'string'"));
+    CHECK(lua->evaluateBoolean("arg11 == nil and arg12 == nil and event == nil and this == nil"));
+    // The production emitter must reserve stack capacity before pushing a
+    // payload longer than Lua's initial C stack, for both registration paths.
+    REQUIRE(lua->executeString(R"(
+        __WoweeEvents.LONG_TEST_EVENT = {function(...) addonTail = select(41, ...) end}
+    )"));
+    std::vector<std::string> payload;
+    for (int i = 1; i <= 40; ++i) payload.push_back("value" + std::to_string(i));
+    lua->fireEvent("LONG_TEST_EVENT", payload);
+    CHECK(lua->evaluateBoolean("longTail == 'value40' and addonTail == 'value40' and arg40 == nil"));
+    CHECK(errors.empty());
+}
+
 TEST_CASE("bot control is acknowledged and runs independently of the activity panel",
           "[replay][addon][playerbot]") {
     Session s("tbc");
@@ -588,10 +707,14 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
 
     // Exercise the reported trigger repeatedly: typed Bot -> manual -> Bot,
     // with new snapshot IDs/generations and late fragments from the old mode.
-    auto snapshot = [&](int id, int generation, const std::string& title) {
+    auto snapshot = [&](int id, int generation, const std::string& title, bool emptyAction = false) {
         std::string current = body;
         const auto oldTitle = hex("Wolves Across the Border");
         current.replace(current.find(oldTitle), oldTitle.size(), hex(title));
+        if (emptyAction) {
+            const auto action = hex("rpg ai chat");
+            current.replace(current.rfind(action), action.size(), "-");
+        }
         const auto parts = (current.size() + 159) / 160;
         for (size_t i = 0; i < parts; ++i)
             s.receive(botChat("WIDLEACT\t1\t0_a" + std::to_string(id) + "\t" + std::to_string(generation) + "\t" +
@@ -616,8 +739,15 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
         CHECK(lastCommand() == ".bot idle 0_a" + std::to_string(cycle + 2) + " snapshot " + std::to_string(generation + 2));
         snapshot(cycle + 1, generation, "Obsolete snapshot");
         CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
-        snapshot(cycle + 2, generation + 2, "Replay cycle " + std::to_string(cycle + 1));
+        snapshot(cycle + 2, generation + 2, "Replay cycle " + std::to_string(cycle + 1), cycle != 1);
         CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Replay cycle " + std::to_string(cycle + 1) + "'"));
+        CHECK(lua->evaluateBoolean(cycle != 1 ? "WoweeBotStatusAction:GetText() == ''" :
+            "WoweeBotStatusAction:GetText() == 'Last successful action: rpg ai chat'"));
+        // The reported empty executed-action field used to throw in draw(),
+        // then five consecutive native callbacks removed the entire driver.
+        REQUIRE(lua->executeString("testNow=" + std::to_string(52.4 + cycle * 2)));
+        for (int frame = 0; frame < 8; ++frame) tick();
+        CHECK(lua->evaluateBoolean("type(WoweeBotController:GetScript('OnUpdate')) == 'function'"));
     }
     // Lose all replies for one status request. Recover via observation only,
     // even while the panel is closed; the independent server may still play.
@@ -640,8 +770,18 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     ack("17", "bot", 9, false);
     tick();
     CHECK(lastCommand() == ".bot idle 0_a6 snapshot 9");
-    snapshot(6, 9, "Recovered without relog");
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest: Recovered without relog'"));
+    // Productive training may interrupt a quest. Explain the actual trip even
+    // before the bot has executed its first action at the destination.
+    const std::string training = "bot\tnon_combat\ttrainer\ttraveling\t0\t-1\tnone\t927\t42\t" +
+        hex("Brother Wilhelm") + "\t-\t" + hex("Goldshire") + "\tnone\t0\t-\t-\t-\t0\t0";
+    const auto trainingParts = (training.size() + 159) / 160;
+    for (size_t i = 0; i < trainingParts; ++i)
+        s.receive(botChat("WIDLEACT\t1\t0_a6\t9\t" + std::to_string(i + 1) + "\t" +
+            std::to_string(trainingParts) + "\t" + training.substr(i * 160, 160)));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Goal: Train at Brother Wilhelm'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == ''"));
+    for (int frame = 0; frame < 8; ++frame) tick();
+    CHECK(lua->evaluateBoolean("type(WoweeBotController:GetScript('OnUpdate')) == 'function'"));
     const auto beforeDebug = count();
     CHECK(lua->dispatchSlashCommand("/botstatus", "debug"));
     CHECK(count() == beforeDebug); // diagnostics are local, including while hidden

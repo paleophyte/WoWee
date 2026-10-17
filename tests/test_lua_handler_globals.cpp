@@ -60,6 +60,7 @@ struct Fixture {
     /// Dispatch the way lua_engine.cpp does: the handler, the frame, then the
     /// handler's own arguments, all pushed before the call.
     int dispatch(const char* script, const std::vector<std::string>& args) {
+        REQUIRE(lua_checkstack(L, static_cast<int>(args.size()) + 12));
         lua_getglobal(L, "f");
         lua_getfield(L, -1, "__scripts");
         lua_getfield(L, -1, script);
@@ -113,6 +114,80 @@ TEST_CASE("OnEvent names the event and numbers the payload", "[handlerglobals]")
     CHECK(fx.global("sawEvent") == "UNIT_HEALTH");
     CHECK(fx.global("sawOne") == "player");
     CHECK(fx.global("sawTwo") == "1234");
+}
+
+TEST_CASE("TBC chat handlers can build links from arg11 and read the sender GUID",
+          "[handlerglobals][chat]") {
+    Fixture fx;
+    setLegacyHandlerGlobals(true);
+    fx.handler("OnEvent", "link = '|Hplayer:' .. arg2 .. ':' .. arg11 .. '|h'; guid = arg12");
+    REQUIRE(fx.dispatch("OnEvent", {"CHAT_MSG_LOOT", "You receive loot", "Jizzle", "Universal",
+        "", "", "", "0", "0", "", "0", "42", "0x000000000000071D"}) == 0);
+    CHECK(fx.global("link") == "|Hplayer:Jizzle:42|h");
+    CHECK(fx.global("guid") == "0x000000000000071D");
+    CHECK(fx.globalIsNil("arg11"));
+    CHECK(fx.globalIsNil("arg12"));
+}
+
+TEST_CASE("Long legacy payloads survive nested handlers and errors", "[handlerglobals]") {
+    Fixture fx;
+    setLegacyHandlerGlobals(true);
+    std::vector<std::string> payload{"COMBAT_LOG_EVENT_UNFILTERED"};
+    for (int i = 1; i <= 40; ++i) payload.push_back("value" + std::to_string(i));
+    fx.handler("OnShow", "innerSaw = arg1; inheritedTail = arg40");
+    fx.handler("OnEvent", "before = arg40; __inner(); after = arg40; tail = arg39");
+    lua_pushcfunction(fx.L, [](lua_State* L) -> int {
+        lua_getglobal(L, "f"); lua_getfield(L, -1, "__scripts"); lua_getfield(L, -1, "OnShow");
+        lua_getglobal(L, "f"); lua_pushstring(L, "inner");
+        const int rc = pcallScript(L, "OnShow", 2, 0);
+        if (rc) return lua_error(L);
+        lua_pop(L, 2); return 0;
+    });
+    lua_setglobal(fx.L, "__inner");
+    REQUIRE(fx.dispatch("OnEvent", payload) == 0);
+    CHECK(fx.global("before") == "value40");
+    CHECK(fx.global("after") == "value40");
+    CHECK(fx.global("tail") == "value39");
+    CHECK(fx.global("innerSaw") == "inner");
+    CHECK(fx.global("inheritedTail") == "value40");
+    CHECK(fx.globalIsNil("arg40"));
+    REQUIRE(luaL_dostring(fx.L, "arg40 = 'kept'") == 0);
+    fx.handler("OnEvent", "error('long payload error')");
+    CHECK(fx.dispatch("OnEvent", payload) != 0);
+    CHECK(fx.global("arg40") == "kept");
+    // A shorter later event must not leave the long event's values behind.
+    fx.handler("OnEvent", "shortSaw = arg1; oldTail = arg39");
+    REQUIRE(fx.dispatch("OnEvent", {"BAG_UPDATE", "player"}) == 0);
+    CHECK(fx.global("shortSaw") == "player");
+    CHECK(fx.globalIsNil("oldTail"));
+    CHECK(fx.global("arg40") == "kept");
+}
+
+TEST_CASE("A longer nested event restores the shorter outer event and prior globals",
+          "[handlerglobals]") {
+    Fixture fx;
+    setLegacyHandlerGlobals(true);
+    REQUIRE(luaL_dostring(fx.L, "arg12 = 'prior'") == 0);
+    fx.handler("OnShow", "innerTail = arg40; innerFirst = arg1");
+    fx.handler("OnEvent", "__longInner(); outerFirst = arg1; outerTail = arg12");
+    lua_pushcfunction(fx.L, [](lua_State* L) -> int {
+        if (!lua_checkstack(L, 52)) return luaL_error(L, "test stack reservation failed");
+        lua_getglobal(L, "f"); lua_getfield(L, -1, "__scripts"); lua_getfield(L, -1, "OnShow");
+        lua_getglobal(L, "f");
+        for (int i = 1; i <= 40; ++i) lua_pushinteger(L, i);
+        const int rc = pcallScript(L, "OnShow", 41, 0);
+        if (rc) return lua_error(L);
+        lua_pop(L, 2); return 0;
+    });
+    lua_setglobal(fx.L, "__longInner");
+    REQUIRE(fx.dispatch("OnEvent", {"BAG_UPDATE", "outer"}) == 0);
+    CHECK(fx.global("innerTail") == "40");
+    CHECK(fx.global("innerFirst") == "1");
+    CHECK(fx.global("outerFirst") == "outer");
+    CHECK(fx.global("outerTail") == "prior");
+    CHECK(fx.globalIsNil("arg1"));
+    CHECK(fx.globalIsNil("arg40"));
+    CHECK(fx.global("arg12") == "prior");
 }
 
 TEST_CASE("Every other handler's own arguments start at arg1",

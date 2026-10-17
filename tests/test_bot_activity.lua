@@ -57,4 +57,11 @@ c:request(2,11)
 local _, changed = receive('1\ttest_a5\t3\terror\tstale_generation',12)
 assert(changed and c.failure:find('stale_generation',1,true))
 assert(c.lastRejected and #table.concat(c:diagnostic(12),'\n') < 1000)
+-- A valid server snapshot can have no successful action yet. Do not attach
+-- a fresh timestamp to nil: the display must safely omit that optional line.
+fields[17]='-'
+local emptyAction = Activity.decode(table.concat(fields, '\t'))
+assert(emptyAction and emptyAction.executed == '')
+Activity.apply(model, emptyAction, 42)
+assert(model.action == nil and model.actionAt == nil)
 print('Typed activity snapshot scenarios passed')
