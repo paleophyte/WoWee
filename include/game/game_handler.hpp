@@ -328,8 +328,8 @@ public:
         return entityController_->getPlayerAppearance(guid, race, gender,
                                                       appearanceBytes, facial);
     }
-    EntityManager& getEntityManager() override { return entityController_->getEntityManager(); }
-    const EntityManager& getEntityManager() const override { return entityController_->getEntityManager(); }
+    EntityManager& getEntityManager() override;
+    const EntityManager& getEntityManager() const override;
 
     /**
      * Send a chat message

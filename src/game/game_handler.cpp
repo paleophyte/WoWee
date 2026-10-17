@@ -115,6 +115,17 @@ GameHandler::~GameHandler() {
     disconnect();
 }
 
+// Keep these facade overrides with GameHandler's vtable. MinGW LTO can discard
+// an inline override's adjustment thunk when the application and replay both
+// retain the multiply inherited GameHandler through different interfaces.
+EntityManager& GameHandler::getEntityManager() {
+    return entityController_->getEntityManager();
+}
+
+const EntityManager& GameHandler::getEntityManager() const {
+    return entityController_->getEntityManager();
+}
+
 void GameHandler::setPacketParsers(std::unique_ptr<PacketParsers> parsers) {
     packetParsers_ = std::move(parsers);
 }

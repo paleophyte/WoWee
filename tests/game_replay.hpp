@@ -28,6 +28,7 @@
 #include "game/update_field_table.hpp"
 #include "network/packet.hpp"
 #include "network/world_socket.hpp"
+#include "rendering/renderer.hpp"
 
 #include <cstdint>
 #include <map>
@@ -58,6 +59,17 @@ struct GameHandlerTestAccess {
     }
     static void setExpansions(core::Application& app, std::unique_ptr<ExpansionRegistry> registry) {
         app.expansionRegistry_ = std::move(registry);
+    }
+    static GameHandler& installFrameGame(core::Application& app, GameServices& services) {
+        app.gameHandler = std::make_unique<GameHandler>(services);
+        return *app.gameHandler;
+    }
+    static rendering::Renderer& installFrameRenderer(core::Application& app, std::unique_ptr<rendering::Renderer> renderer) {
+        app.renderer = std::move(renderer);
+        return *app.renderer;
+    }
+    static void applyServerMovement(core::Application& app, float dt) {
+        app.applyServerMovementState(dt);
     }
 };
 

@@ -3018,6 +3018,9 @@ void Application::applyServerMovementState(float deltaTime) {
         renderer->getCharacterPosition() = renderPos;
         renderer->setCharacterYaw(core::coords::canonicalToCharacterYawDeg(move.orientation));
         if (auto* camera = renderer->getCameraController()) {
+            // Renderer::update also reads camera facing for locomotion. Keep
+            // that input aligned without rotating the user's orbit camera.
+            camera->setFacingYaw(core::coords::canonicalToCharacterYawDeg(move.orientation));
             if (auto* followTarget = camera->getFollowTargetMutable()) *followTarget = renderPos;
         }
     } else {

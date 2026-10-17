@@ -4,6 +4,7 @@
 #include "game/movement_handler.hpp"
 #include "game/spell_handler.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/renderer.hpp"
 #include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <algorithm>
@@ -17,6 +18,19 @@ extern "C" {
 using replay::Session;
 using wowee::game::Opcode;
 using wowee::network::Packet;
+
+namespace wowee::rendering {
+struct RendererTestAccess {
+    static void createCamera(Renderer& renderer) {
+        renderer.camera = std::make_unique<Camera>();
+        renderer.cameraController = std::make_unique<CameraController>(renderer.camera.get());
+        renderer.cameraController->setFollowTarget(&renderer.getCharacterPosition());
+    }
+    static void updateCharacterFacing(Renderer& renderer, float dt) {
+        renderer.updateCharacterFacing(dt);
+    }
+};
+}
 
 namespace {
 
@@ -184,6 +198,83 @@ TEST_CASE("TBC smooth self paths face their curve and manual takeover discards f
     s.handler().update(8);
     CHECK(s.handler().getMovementInfo().orientation == Catch::Approx(manual.orientation));
     CHECK(s.sent().of(Opcode::MSG_MOVE_START_FORWARD).size() == 1);
+}
+
+TEST_CASE("server spline facing survives application and renderer frame synchronization",
+          "[replay][movement][playerbot][frame-facing]") {
+    using Access = wowee::game::GameHandlerTestAccess;
+    using RenderAccess = wowee::rendering::RendererTestAccess;
+    wowee::game::GameServices services;
+    wowee::core::Application app;
+    auto registry = std::make_unique<wowee::game::ExpansionRegistry>();
+    registry->initialize(std::string(WOWEE_SOURCE_DIR) + "/Data");
+    REQUIRE(registry->setActive("tbc"));
+    const auto path = registry->getActive()->dataPath;
+    services.expansionRegistry = registry.get();
+    Access::setExpansions(app, std::move(registry));
+    auto& game = Access::installFrameGame(app, services);
+    REQUIRE(game.getOpcodeTable().loadFromJson(path + "/opcodes.json"));
+    REQUIRE(game.getUpdateFieldTable().loadFromJson(path + "/update_fields.json"));
+    game.setPacketParsers(wowee::game::createPacketParsers("tbc"));
+    game.setPlayerGuid(Session::kPlayerGuid);
+    game.getEntityManager().addEntity(Session::kPlayerGuid,
+        std::make_shared<wowee::game::Player>(Session::kPlayerGuid));
+    Access::setSocket(game, std::make_unique<replay::SentPackets>());
+    Access::enterWorld(game);
+    auto renderer = std::make_unique<wowee::rendering::Renderer>();
+    RenderAccess::createCamera(*renderer);
+    auto& render = Access::installFrameRenderer(app, std::move(renderer));
+    services.renderer = &render;
+    auto* camera = render.getCameraController();
+    auto* context = ImGui::CreateContext();
+    struct InputCleanup {
+        ImGuiContext* context;
+        ~InputCleanup() {
+            auto& input = wowee::core::Input::getInstance();
+            input.clearVirtualKeys(); input.update();
+            ImGui::DestroyContext(context);
+        }
+    } cleanup{context};
+    auto& input = wowee::core::Input::getInstance();
+    camera->setMovementCallback([&](uint32_t opcode) { game.sendMovement(static_cast<Opcode>(opcode)); });
+    render.getCharacterPosition() = {100, 200, 30};
+    game.setPosition(200, 100, 30);
+    // First manual frame: no earlier bot spline is required to permit input.
+    Access::applyServerMovement(app, 0.016f);
+    const auto startPosition = render.getCharacterPosition();
+    input.setVirtualKey(SDL_SCANCODE_W, true); input.update();
+    camera->update(0.016f);
+    CHECK_FALSE(game.getMovementHandler()->hasServerDrivenMovement());
+    CHECK(glm::distance(glm::vec2(startPosition), glm::vec2(render.getCharacterPosition())) > 0.01f);
+    input.setVirtualKey(SDL_SCANCODE_W, false); input.update();
+    camera->update(0.016f);
+    Access::receive(game, tbcReturningSpline());
+    for (float dt : {0.5f, 1.0f, 1.5f, 1.5f}) {
+        game.update(dt);
+        // Simulate a camera heading left over from manual play/orbit.
+        camera->setFacingYaw(37.0f);
+        const auto orbit = camera->getYaw();
+        Access::applyServerMovement(app, dt);
+        const float expected = wowee::core::coords::canonicalToCharacterYawDeg(
+            game.getMovementInfo().orientation);
+        CHECK(render.getCharacterYaw() == Catch::Approx(expected));
+        CHECK(camera->getFacingYaw() == Catch::Approx(expected));
+        // Even a later camera-facing change must not replace a server-owned
+        // model pose. Orbit remains independent of both facing values.
+        camera->setFacingYaw(expected + 73.0f);
+        RenderAccess::updateCharacterFacing(render, dt);
+        CHECK(render.getCharacterYaw() == Catch::Approx(expected));
+        CHECK(camera->getYaw() == Catch::Approx(orbit));
+        camera->setFacingYaw(expected);
+    }
+    // Actual local input must still interrupt external following and permit
+    // the renderer to use manual facing again.
+    input.setVirtualKey(SDL_SCANCODE_W, true); input.update();
+    camera->update(0.016f);
+    CHECK_FALSE(game.getMovementHandler()->hasServerDrivenMovement());
+    CHECK_FALSE(camera->isExternallyFollowing());
+    RenderAccess::updateCharacterFacing(render, 0.016f);
+    CHECK(render.getCharacterYaw() == Catch::Approx(camera->getFacingYaw()));
 }
 
 

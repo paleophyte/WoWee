@@ -1922,6 +1922,52 @@ float Renderer::sampleSunOcclusion() const {
     return 0.0f;
 }
 
+float Renderer::updateCharacterFacing(float deltaTime) {
+    if (!cameraController) return 0.0f;
+    // Movement-facing comes from camera controller and is decoupled from LMB orbit.
+    bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
+    bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
+                         && !cameraController->isMovingBackward();
+    float torsoYawDeltaDeg = 0.0f;
+    if (cameraController->isExternallyFollowing() && !taxiFlight) {
+        // The application/charge script already supplied the model's facing.
+        // Local input and target-facing must not overwrite that authoritative pose.
+    } else if (taxiFlight) {
+        characterYaw = cameraController->getFacingYaw();
+    } else if (cameraController->isMoving() && activeStrafe) {
+        characterYaw = cameraController->getTravelYaw();
+        torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
+    } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
+               cameraController->isTurningLeft() || cameraController->isTurningRight()) {
+        characterYaw = cameraController->getFacingYaw();
+    } else if (animationController_ && animationController_->isInCombat() &&
+               animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
+        glm::vec3 toTarget = *animationController_->getTargetPosition() - characterPosition;
+        if (toTarget.x * toTarget.x + toTarget.y * toTarget.y > 0.01f) {
+            // Go through canonical, the way spawning and the camera do.
+            // Taking atan2 of the render delta directly yields a heading in
+            // a different convention - a mirror about 135 degrees - so the
+            // spin looked roughly right but the frame loop then converted it
+            // back to a canonical yaw that pointed somewhere else, and the
+            // server rejected the cast for not facing the target.
+            const glm::vec3 toTargetCanonical = ::wowee::core::coords::renderToCanonical(toTarget);
+            const float canonYawToTarget =
+                std::atan2(-toTargetCanonical.y, toTargetCanonical.x);
+            float targetYaw = ::wowee::core::coords::canonicalToCharacterYawDeg(canonYawToTarget);
+            float diff = targetYaw - characterYaw;
+            while (diff > 180.0f) diff -= 360.0f;
+            while (diff < -180.0f) diff += 360.0f;
+            float rotSpeed = 360.0f * deltaTime;
+            if (std::abs(diff) < rotSpeed) {
+                characterYaw = targetYaw;
+            } else {
+                characterYaw += (diff > 0 ? rotSpeed : -rotSpeed);
+            }
+        }
+    }
+    return torsoYawDeltaDeg;
+}
+
 void Renderer::update(float deltaTime) {
     ZoneScopedN("Renderer::update");
     globalTime += deltaTime;
@@ -2051,44 +2097,7 @@ void Renderer::update(float deltaTime) {
     if (characterInstanceId > 0 && characterRenderer && cameraController) {
         characterRenderer->setInstancePosition(characterInstanceId, characterPosition);
 
-        // Movement-facing comes from camera controller and is decoupled from LMB orbit.
-        bool taxiFlight = animationController_ && animationController_->isTaxiFlight();
-        bool activeStrafe = (cameraController->isStrafingLeft() || cameraController->isStrafingRight())
-                             && !cameraController->isMovingBackward();
-        float torsoYawDeltaDeg = 0.0f;
-        if (taxiFlight) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (cameraController->isMoving() && activeStrafe) {
-            characterYaw = cameraController->getTravelYaw();
-            torsoYawDeltaDeg = cameraController->getFacingYaw() - characterYaw;
-        } else if (cameraController->isMoving() || cameraController->isRightMouseHeld() ||
-                   cameraController->isTurningLeft() || cameraController->isTurningRight()) {
-            characterYaw = cameraController->getFacingYaw();
-        } else if (animationController_ && animationController_->isInCombat() &&
-                   animationController_->getTargetPosition() && !animationController_->isEmoteActive() && !(animationController_ && animationController_->isMounted())) {
-            glm::vec3 toTarget = *animationController_->getTargetPosition() - characterPosition;
-            if (toTarget.x * toTarget.x + toTarget.y * toTarget.y > 0.01f) {
-                // Go through canonical, the way spawning and the camera do.
-                // Taking atan2 of the render delta directly yields a heading in
-                // a different convention - a mirror about 135 degrees - so the
-                // spin looked roughly right but the frame loop then converted it
-                // back to a canonical yaw that pointed somewhere else, and the
-                // server rejected the cast for not facing the target.
-                const glm::vec3 toTargetCanonical = ::wowee::core::coords::renderToCanonical(toTarget);
-                const float canonYawToTarget =
-                    std::atan2(-toTargetCanonical.y, toTargetCanonical.x);
-                float targetYaw = ::wowee::core::coords::canonicalToCharacterYawDeg(canonYawToTarget);
-                float diff = targetYaw - characterYaw;
-                while (diff > 180.0f) diff -= 360.0f;
-                while (diff < -180.0f) diff += 360.0f;
-                float rotSpeed = 360.0f * deltaTime;
-                if (std::abs(diff) < rotSpeed) {
-                    characterYaw = targetYaw;
-                } else {
-                    characterYaw += (diff > 0 ? rotSpeed : -rotSpeed);
-                }
-            }
-        }
+        float torsoYawDeltaDeg = updateCharacterFacing(deltaTime);
         float yawRad = glm::radians(characterYaw);
         characterRenderer->setInstanceRotation(characterInstanceId, glm::vec3(0.0f, 0.0f, yawRad));
 

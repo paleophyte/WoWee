@@ -204,6 +204,7 @@ public:
     void setIgnoreSlopeLimit(bool ignore) { ignoreSlopeLimit_ = ignore; }
     [[nodiscard]] bool ignoresSlopeLimit() const { return ignoreSlopeLimit_; }
     [[nodiscard]] bool isOnTaxi() const { return externalFollow_; }
+    [[nodiscard]] bool isExternallyFollowing() const { return externalFollow_; }
     [[nodiscard]] const glm::vec3* getFollowTarget() const { return followTarget; }
     glm::vec3* getFollowTargetMutable() { return followTarget; }
 

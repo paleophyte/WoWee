@@ -80,6 +80,8 @@ class SunShafts;
 class ScreenCapture;
 
 class Renderer {
+    friend struct RendererTestAccess;
+    float updateCharacterFacing(float deltaTime);
 public:
     Renderer();
     ~Renderer();
