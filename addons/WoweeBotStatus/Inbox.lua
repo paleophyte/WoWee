@@ -72,6 +72,31 @@ function Inbox:talents(points, now)
         '. Open Talents when you are ready to choose.', now, 'talents')
 end
 
+-- These are historical skips, not global blockers: the bot can continue other work.
+function Inbox:itemUse(snapshot,now)
+    if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.rows)~='table' then return false end
+    local changed=false
+    for _,row in ipairs(snapshot.rows) do
+        local key='item-limit:'..snapshot.epoch..':'..row.item
+        local previous=self:find(key)
+        if not previous or not previous.itemLimitAt or row.at>previous.itemLimitAt then
+            local title,text
+            if row.blocked==1 then
+                title='Pickup skipped: '..row.itemName
+                text='Skipped '..row.objectName..': already carrying '..row.count..' of the '..row.limit..
+                    ' allowed '..row.itemName..'. This count includes bank storage. The bot can continue other work and reconsider this pickup after using or removing the item.'
+            else
+                title='Pickup limit cleared: '..row.itemName
+                text='The server observed '..row.count..' of '..row.limit..' allowed '..row.itemName..
+                    '. This item limit no longer prevents the pickup. Availability and other requirements still apply.'
+            end
+            changed=self:put(key,'note',title,text,row.at) or changed
+            local entry=self:find(key);entry.itemLimitAt=row.at
+        end
+    end
+    return changed
+end
+
 function Inbox:recovery(snapshot,now)
     if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.notes)~='table' or
         type(snapshot.phase)~='number' or type(snapshot.observed)~='number' or type(snapshot.stationary)~='number' then return false end

@@ -14,6 +14,7 @@ Training.lua
 TrainingPlan.lua
 Travel.lua
 Recovery.lua
+ItemUse.lua
 Inbox.lua
 NotesUI.lua
 WoweeBotStatus.lua

@@ -27,6 +27,11 @@ local function newRecovery()
     if type(module)=='table' and type(module.new)=='function' then return module.new() end
 end
 local recovery=newRecovery()
+local function newItemUse()
+    local module=rawget(_G,'WoweeBotItemUse')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local itemUse=newItemUse()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
@@ -116,6 +121,7 @@ local function request()
         if trainingPlan then trainingPlan:expect(activity.pending.id,controller.generation,now) end
         if travel then travel:expect(activity.pending.id,controller.generation,now) end
         if recovery then recovery:expect(activity.pending.id,controller.generation,now) end
+        if itemUse then itemUse:expect(activity.pending.id,controller.generation,now) end
         SendChatMessage(command, 'SAY')
         return
     end
@@ -442,6 +448,7 @@ driver:SetScript('OnUpdate', function()
         if trainingPlan then trainingPlan:expire(now,controller.generation) end
         if travel then travel:expire(now,controller.generation) end
         if recovery then recovery:expire(now,controller.generation) end
+        if itemUse then itemUse:expire(now,controller.generation) end
         if history then
             local pending=history.pending
             history:expire(now,controller.generation)
@@ -483,7 +490,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
     elseif event == 'PLAYER_ENTERING_WORLD' then
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
-        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery()
+        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery();itemUse=newItemUse()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
@@ -491,6 +498,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
         if trainingPlan then trainingPlan.pending=nil end
         if travel then travel.pending=nil end
         if recovery then recovery.pending=nil end
+        if itemUse then itemUse.pending=nil end
         notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
@@ -516,11 +524,18 @@ driver:SetScript('OnEvent', function(self, event, ...)
             if trainingPlan then trainingPlan.pending,trainingPlan.failure=nil,nil end
             if travel then travel.pending,travel.snapshot,travel.failure=nil,nil,nil end
             if recovery then recovery.pending,recovery.snapshot,recovery.failure=nil,nil,nil end
+            if itemUse then itemUse.pending,itemUse.snapshot,itemUse.failure=nil,nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if itemUse then
+            itemUse:capability(prefix,text,sender,player,controller)
+            if itemUse:receive(prefix,text,sender,player,controller.generation,now) and not itemUse.failure and itemUse.snapshot then
+                if WoweeBotReportItemUse then WoweeBotReportItemUse(itemUse.snapshot) end
+            end
+        end
         if recovery then
             recovery:capability(prefix,text,sender,player,controller)
             if recovery:receive(prefix,text,sender,player,controller.generation,now) and not recovery.failure and recovery.snapshot then
