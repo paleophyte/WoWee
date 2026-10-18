@@ -4625,41 +4625,67 @@ void SpellHandler::handleSpellEnergizeLog(network::Packet& packet) {
 }
 
 void SpellHandler::handleExtraAuraInfo(network::Packet& packet, bool isInit) {
-    // TBC 2.4.3 aura tracking: replaces SMSG_AURA_UPDATE which doesn't exist in TBC.
-    // Format: uint64 targetGuid + uint8 count + N×{uint8 slot, uint32 spellId,
-    //         uint8 effectIndex, uint8 flags, uint32 durationMs, uint32 maxDurationMs}
+    // CMaNGOS TBC SpellAuraHolder / Player: packed target GUID, then entries
+    // {slot, spellId, maxDuration, remaining}. INIT has entries until EOF;
+    // SET and NEED_UPDATE have one entry. These supplement the aura fields.
     auto remaining = [&]() { return packet.getRemainingSize(); };
-    if (remaining() < 9) { packet.skipAll(); return; }
-    uint64_t auraTargetGuid = packet.readUInt64();
-    uint8_t count = packet.readUInt8();
+    const bool tbc = isActiveExpansion("tbc");
+    uint64_t auraTargetGuid = 0;
+    size_t count = 0;
+    if (tbc) {
+        if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+        auraTargetGuid = packet.readPackedGuid();
+        if (remaining() % 13 != 0 || (!isInit && remaining() != 13) || remaining() / 13 > 56) {
+            packet.skipAll(); return;
+        }
+        count = remaining() / 13;
+    } else {
+        // Preserve the existing legacy handler outside the reviewed TBC wire.
+        if (remaining() < 9) { packet.skipAll(); return; }
+        auraTargetGuid = packet.readUInt64();
+        count = packet.readUInt8();
+    }
 
     std::vector<AuraSlot>* auraList = nullptr;
     if (auraTargetGuid == owner_.getPlayerGuid())       auraList = &playerAuras_;
     else if (auraTargetGuid == owner_.getTargetGuid())   auraList = &targetAuras_;
     else if (auraTargetGuid != 0)                   auraList = &unitAurasCache_[auraTargetGuid];
 
-    if (auraList && isInit) auraList->clear();
+    if (auraList && isInit && !tbc) auraList->clear();
 
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    for (uint8_t i = 0; i < count && remaining() >= 15; i++) {
+    for (size_t i = 0; i < count && remaining() >= (tbc ? 13u : 15u); i++) {
         uint8_t  slot        = packet.readUInt8();   // 1 byte
         uint32_t spellId     = packet.readUInt32();  // 4 bytes
-        (void)               packet.readUInt8();     // effectIndex: 1 byte (unused for slot display)
-        uint8_t  flags       = packet.readUInt8();   // 1 byte
-        uint32_t durationMs  = packet.readUInt32();  // 4 bytes
-        uint32_t maxDurMs    = packet.readUInt32();  // 4 bytes - total 15 bytes per entry
+        uint8_t flags = 0;
+        uint32_t durationMs, maxDurMs;
+        if (tbc) {
+            maxDurMs = packet.readUInt32();
+            durationMs = packet.readUInt32();
+            // Passive slots are not part of the visible aura field array.
+            if (slot >= 56 || spellId == 0) continue;
+        } else {
+            (void)packet.readUInt8(); // legacy effect index
+            flags = packet.readUInt8();
+            durationMs = packet.readUInt32();
+            maxDurMs = packet.readUInt32();
+        }
 
         if (auraList) {
             while (auraList->size() <= slot) auraList->push_back(AuraSlot{});
             AuraSlot& a = (*auraList)[slot];
+            if (tbc && a.spellId != spellId) a = AuraSlot{};
             a.spellId      = spellId;
-            // TBC uses same flag convention as Classic: 0x02=harmful, 0x04=beneficial.
-            // Normalize to WotLK SMSG_AURA_UPDATE convention: 0x80=debuff, 0=buff.
-            a.flags        = (flags & 0x02) ? 0x80u : 0u;
-            a.durationMs   = (durationMs == 0xFFFFFFFF) ? -1 : static_cast<int32_t>(durationMs);
+            if (tbc) {
+                a.flags = static_cast<uint8_t>((a.flags & ~0x80u) | (slot >= 40 ? 0x80u : 0u));
+                // Single updates are sent to the caster; the INIT list can
+                // include other casters and carries no caster identity.
+                if (!isInit) a.casterGuid = owner_.getPlayerGuid();
+            } else a.flags = (flags & 0x02) ? 0x80u : 0u;
+            a.durationMs   = (durationMs == 0xFFFFFFFF || (tbc && maxDurMs == 0xFFFFFFFF)) ? -1 : static_cast<int32_t>(durationMs);
             a.maxDurationMs= (maxDurMs   == 0xFFFFFFFF) ? -1 : static_cast<int32_t>(maxDurMs);
             a.receivedAtMs = nowMs;
         }
@@ -5087,8 +5113,34 @@ void SpellHandler::handleSpellLogExecute(network::Packet& packet) {
 }
 
 void SpellHandler::handleClearExtraAuraInfo(network::Packet& packet) {
-    // TBC 2.4.3: clear a single aura slot for a unit
-    // Format: uint64 targetGuid + uint8 slot
+    // TBC ClearExtraAuraInfo identifies a spell after a packed target GUID,
+    // not a raw GUID followed by an aura slot.
+    if (isActiveExpansion("tbc")) {
+        if (!packet.hasFullPackedGuid()) { packet.skipAll(); return; }
+        const uint64_t guid = packet.readPackedGuid();
+        if (!packet.hasRemaining(4)) { packet.skipAll(); return; }
+        const uint32_t spell = packet.readUInt32();
+        std::vector<AuraSlot>* auras = nullptr;
+        if (guid == owner_.getPlayerGuid()) auras = &playerAuras_;
+        else if (guid == owner_.getTargetGuid()) auras = &targetAuras_;
+        else if (const auto it = unitAurasCache_.find(guid); it != unitAurasCache_.end()) auras = &it->second;
+        bool changed = false;
+        if (auras) {
+            for (auto& aura : *auras) if (aura.spellId == spell && spell != 0) {
+                aura = AuraSlot{};
+                changed = true;
+            }
+            mirrorAurasByGuid(guid, *auras);
+        }
+        if (changed && owner_.addonEventCallbackRef()) {
+            const auto unit = owner_.guidToUnitId(guid);
+            if (!unit.empty()) owner_.addonEventCallbackRef()("UNIT_AURA", {unit});
+            if (guid == owner_.getPlayerGuid()) owner_.addonEventCallbackRef()("PLAYER_AURAS_CHANGED", {});
+        }
+        if (guid == owner_.getPlayerGuid()) refreshRestorationFromPlayerAuras();
+        packet.skipAll();
+        return;
+    }
     if (packet.hasRemaining(9)) {
         uint64_t clearGuid  = packet.readUInt64();
         uint8_t  slot       = packet.readUInt8();

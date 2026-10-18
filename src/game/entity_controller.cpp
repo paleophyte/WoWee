@@ -460,33 +460,49 @@ void EntityController::updateNonPlayerTransportAttachment(const UpdateBlock& blo
     }
 }
 
-//     Rebuild playerAuras from UNIT_FIELD_AURAS (Classic/TBC-era clients).
-//     blockFields is used to check if any aura field was updated in this packet.
-//     entity->getFields() is used for reading the full accumulated state.
-//     Normalises pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80) so
-//     downstream code checking for 0x80 works consistently across expansions.
-void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>& entity) {
+// TBC has 56 spell slots and three arrays of 14 packed metadata words.
+// Only an aura-field update should rebuild this view; ordinary wallet/stat
+// updates must neither erase duration packets nor announce another aura change.
+void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>& entity,
+                                                 const FlatFieldMap& blockFields) {
     if (!isPreWotlk() || !owner_.getSpellHandler()) return;
 
     const uint16_t ufAuras     = fieldIndex(UF::UNIT_FIELD_AURAS);
     const uint16_t ufAuraFlags = fieldIndex(UF::UNIT_FIELD_AURAFLAGS);
+    const uint16_t ufAuraLevels = fieldIndex(UF::UNIT_FIELD_AURALEVELS);
+    const uint16_t ufAuraApplications = fieldIndex(UF::UNIT_FIELD_AURAAPPLICATIONS);
     if (ufAuras == 0xFFFF) return;
 
     const auto& allFields = entity->getFields();
+    const bool tbc = isActiveExpansion("tbc");
+    const int slotCount = tbc ? 56 : 48;
+    const auto inRange = [](uint16_t key, uint16_t start, int size) {
+        return start != 0xFFFF && key >= start && key < start + size;
+    };
     bool hasAuraField = false;
-    for (const auto& [fk, fv] : allFields) {
-        if (fk >= ufAuras && fk < ufAuras + 48) { hasAuraField = true; break; }
+    for (const auto& [fk, fv] : tbc ? blockFields : allFields) {
+        if (inRange(fk, ufAuras, slotCount) || (tbc &&
+            (inRange(fk, ufAuraFlags, 14) || inRange(fk, ufAuraLevels, 14) ||
+             inRange(fk, ufAuraApplications, 14)))) { hasAuraField = true; break; }
     }
     if (!hasAuraField) return;
 
-    owner_.getSpellHandler()->resetPlayerAuras(48);
+    if (tbc) owner_.getSpellHandler()->getPlayerAurasMut().resize(slotCount);
+    else owner_.getSpellHandler()->resetPlayerAuras(slotCount);
     uint64_t nowMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
-    for (int slot = 0; slot < 48; ++slot) {
+    const auto packedByte = [&](uint16_t base, int slot) -> uint8_t {
+        if (base == 0xFFFF) return 0;
+        const auto it = allFields.find(static_cast<uint16_t>(base + slot / 4));
+        return it == allFields.end() ? 0 : static_cast<uint8_t>(it->second >> ((slot % 4) * 8));
+    };
+    for (int slot = 0; slot < slotCount; ++slot) {
         auto it = allFields.find(static_cast<uint16_t>(ufAuras + slot));
+        AuraSlot& a = owner_.getSpellHandler()->getPlayerAuraSlotRef(slot);
         if (it != allFields.end() && it->second != 0) {
-            AuraSlot& a = owner_.getSpellHandler()->getPlayerAuraSlotRef(slot);
+            const bool changedIdentity = a.spellId != it->second;
+            if (tbc && changedIdentity) a = AuraSlot{};
             a.spellId = it->second;
             // Read aura flag byte: packed 4-per-uint32 at ufAuraFlags
             uint8_t aFlag = 0;
@@ -495,15 +511,27 @@ void EntityController::syncPreWotlkAurasFromFields(const std::shared_ptr<Entity>
                 if (fit != allFields.end())
                     aFlag = static_cast<uint8_t>((fit->second >> ((slot % 4) * 8)) & 0xFF);
             }
-            // Normalize pre-WotLK harmful bit (0x02) to WotLK debuff bit (0x80)
-            // so downstream code checking for 0x80 works consistently.
-            if (aFlag & 0x02)
-                aFlag = (aFlag & ~0x02) | 0x80;
-            a.flags = aFlag;
-            a.durationMs = -1;
-            a.maxDurationMs = -1;
-            a.casterGuid = owner_.getPlayerGuid();
-            a.receivedAtMs = nowMs;
+            if (tbc) {
+                // Effect1 (0x02) is independent of helpful/harmful. TBC
+                // allocates helpful slots below40 and harmful slots above.
+                a.flags = static_cast<uint8_t>((aFlag & ~0x80u) | (slot >= 40 ? 0x80u : 0u));
+                a.level = packedByte(ufAuraLevels, slot);
+                a.charges = static_cast<uint8_t>(std::min(255u, 1u + packedByte(ufAuraApplications, slot)));
+                // Fields do not identify the caster. Preserve any duration
+                // information for this identity; replacement starts unknown.
+                if (changedIdentity) a.receivedAtMs = nowMs;
+            } else {
+                // Preserve the existing Classic/Turtle interpretation.
+                if (aFlag & 0x02)
+                    aFlag = (aFlag & ~0x02) | 0x80;
+                a.flags = aFlag;
+                a.durationMs = -1;
+                a.maxDurationMs = -1;
+                a.casterGuid = owner_.getPlayerGuid();
+                a.receivedAtMs = nowMs;
+            }
+        } else if (tbc) {
+            a = AuraSlot{};
         }
     }
     LOG_DEBUG("[pre-WotLK] Rebuilt playerAuras from UNIT_FIELD_AURAS");
@@ -631,7 +659,7 @@ void EntityController::detectPlayerMountChange(uint32_t newMountDisplayId,
             const uint16_t ufAuras = fieldIndex(UF::UNIT_FIELD_AURAS);
             if (ufAuras != 0xFFFF) {
                 for (const auto& [fk, fv] : blockFields) {
-                    if (fk >= ufAuras && fk < ufAuras + 48 && fv != 0) {
+                    if (fk >= ufAuras && fk < ufAuras + (isActiveExpansion("tbc") ? 56 : 48) && fv != 0) {
                         owner_.mountAuraSpellIdRef() = fv;
                         break;
                     }
@@ -2132,7 +2160,7 @@ void EntityController::onCreatePlayer(const UpdateBlock& block, std::shared_ptr<
     }
     // Pre-WotLK aura sync on initial object create
     if (block.guid == owner_.getPlayerGuid()) {
-        syncPreWotlkAurasFromFields(entity);
+        syncPreWotlkAurasFromFields(entity, block.fields);
     }
 
     // Hostility
@@ -2375,7 +2403,7 @@ void EntityController::onValuesUpdatePlayer(const UpdateBlock& block, std::share
 
     // Pre-WotLK aura sync from UNIT_FIELD_AURAS when those fields are updated
     if (block.guid == owner_.getPlayerGuid()) {
-        syncPreWotlkAurasFromFields(entity);
+        syncPreWotlkAurasFromFields(entity, block.fields);
     }
 
     // Display ID changed - re-spawn/model-change

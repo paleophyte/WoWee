@@ -39,8 +39,10 @@ enum class UF : uint16_t {
     UNIT_FIELD_COMBATREACH,
     UNIT_FIELD_DISPLAYID,
     UNIT_FIELD_MOUNTDISPLAYID,
-    UNIT_FIELD_AURAS,           // Start of aura spell ID array (48 consecutive uint32 slots, pre-WotLK clients)
-    UNIT_FIELD_AURAFLAGS,       // Aura flags packed 4-per-uint32 (12 uint32 slots); 0x01=cancelable,0x02=harmful,0x04=helpful
+    UNIT_FIELD_AURAS,           // Pre-WotLK spell ID array; TBC has 56 slots (40 helpful)
+    UNIT_FIELD_AURAFLAGS,       // TBC: four flag bytes per word; effect bits and cancelability
+    UNIT_FIELD_AURALEVELS,      // TBC: four caster-level bytes per word
+    UNIT_FIELD_AURAAPPLICATIONS, // TBC: four application-count-minus-one bytes per word
     UNIT_NPC_FLAGS,
     UNIT_NPC_EMOTESTATE,       // Persistent NPC emote animation ID (uint32)
     UNIT_DYNAMIC_FLAGS,

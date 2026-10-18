@@ -8,6 +8,7 @@
 #include "game/game_utils.hpp"
 #include "game/packed_time.hpp"
 #include "game/packet_parsers.hpp"
+#include "game/spell_handler.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -199,6 +200,142 @@ TEST_CASE("TBC coinage follows the server's field on login and values updates", 
     CHECK(s.handler().getMoneyCopper() == 0);
     CHECK(lua->evaluateBoolean("GetMoney() == 0"));
     CHECK(moneyEvents() == 3);
+}
+
+TEST_CASE("TBC aura fields use all 56 slots and packed metadata", "[replay][tbc-aura-fields]") {
+    // Literal CMaNGOS TBC UpdateFields.h / SpellAuras.cpp wire values. Do not
+    // construct these from the client's field table: that hid the old errors.
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua);
+    REQUIRE(lua->executeString("__WoweeInterfaceVersion=20400"));
+    std::vector<std::string> events;
+    s.handler().setAddonEventCallback([&](const auto& event, const auto&) { events.push_back(event); });
+    s.receive(unitFields({{22,180},{28,180},{34,7},
+        {48,133},{87,116},{88,17},{103,1243},
+        {104,0x12},{113,0x12000000},{114,0x21},{117,0x21000000},
+        {118,60},{127,30u<<24},{128,70},{131,80u<<24},
+        {132,1},{141,2u<<24},{142,0},{145,4u<<24}},true,true));
+    const auto& auras = s.handler().getPlayerAuras();
+    REQUIRE(auras.size() == 56);
+    CHECK(std::count_if(auras.begin(),auras.end(),[](const auto& a){return !a.isEmpty();}) == 4);
+    CHECK(auras[0].spellId == 133);
+    CHECK(auras[39].spellId == 116);
+    CHECK(auras[40].spellId == 17);
+    CHECK(auras[55].spellId == 1243);
+    CHECK((auras[0].flags & 0x02) != 0); // effect 1, not harmful
+    CHECK((auras[0].flags & 0x80) == 0);
+    CHECK((auras[39].flags & 0x80) == 0);
+    CHECK((auras[40].flags & 0x80) != 0);
+    CHECK((auras[55].flags & 0x80) != 0);
+    CHECK(auras[0].level == 60);
+    CHECK(auras[39].level == 30);
+    CHECK(auras[40].level == 70);
+    CHECK(auras[55].level == 80);
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HELPFUL') == 1 and GetPlayerBuff(2,'HELPFUL') == 40 and GetPlayerBuff(3,'HELPFUL') == 0"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HARMFUL') == 41 and GetPlayerBuff(2,'HARMFUL') == 56 and GetPlayerBuff(3,'HARMFUL') == 0"));
+    CHECK(lua->evaluateBoolean("GetPlayerBuffApplications(1) == 2 and GetPlayerBuffApplications(40) == 3 and GetPlayerBuffApplications(41) == 1 and GetPlayerBuffApplications(56) == 5"));
+
+    // Actual SMSG_UPDATE_AURA_DURATION payload: byte slot, uint32 remaining.
+    wowee::network::Packet duration(0x137);
+    duration.writeUInt8(55); duration.writeUInt32(45000);
+    s.receive(duration);
+    REQUIRE(auras[55].durationMs == 45000);
+    const auto received = auras[55].receivedAtMs;
+    events.clear();
+    s.receive(unitFields({{1461,600},{926,123}},false,true));
+    CHECK(auras[55].durationMs == 45000);
+    CHECK(auras[55].receivedAtMs == received);
+    CHECK(std::count(events.begin(),events.end(),"UNIT_AURA") == 0);
+    s.receive(unitFields({{104,0x11},{145,254u<<24}},false,true));
+    CHECK(auras[0].flags == 0x11);
+    CHECK(auras[55].durationMs == 45000);
+    CHECK(auras[55].receivedAtMs == received);
+    CHECK(lua->evaluateBoolean("GetPlayerBuffApplications(56) == 255"));
+    CHECK(std::count(events.begin(),events.end(),"UNIT_AURA") == 1);
+    s.receive(unitFields({{103,133}},false,true));
+    CHECK(auras[55].spellId == 133);
+    CHECK(auras[55].durationMs == -1); // no inherited duration from previous identity
+    s.receive(unitFields({{48,0},{87,0},{88,0},{103,0}},false,true));
+    CHECK(std::all_of(auras.begin(),auras.end(),[](const auto& a){return a.isEmpty();}));
+    CHECK(lua->evaluateBoolean("GetPlayerBuff(1,'HELPFUL') == 0 and GetPlayerBuff(1,'HARMFUL') == 0"));
+}
+
+TEST_CASE("TBC aura applications cannot act as unit visibility bytes", "[replay][tbc-aura-fields]") {
+    Session s("tbc");
+    s.receive(unitFields({{22,180},{28,180},{34,7}},true,true));
+    auto unit = playerUnit(s);
+    REQUIRE(unit);
+    s.receive(unitFields({{159,0x00010000}},false,true));
+    CHECK(unit->getVisibilityFlags() == 1);
+    // Actual applications word5, formerly misidentified as UNIT_FIELD_BYTES_1.
+    s.receive(unitFields({{137,0x01020000}},false,true));
+    CHECK(unit->getVisibilityFlags() == 1);
+}
+
+TEST_CASE("TBC extra aura duration uses packed guid and one slot", "[replay][tbc-aura-fields]") {
+    Session s("tbc");
+    s.receive(unitFields({{22,180},{28,180},{34,7}},true,true));
+    auto* spells = s.handler().getSpellHandler();
+    REQUIRE(spells);
+    spells->resetPlayerAuras(56);
+    spells->getPlayerAuraSlotRef(55).spellId = 1243;
+    spells->getPlayerAuraSlotRef(55).flags = 0x81;
+    // SpellAuraHolder::SendAuraDurationToCaster[NeedUpdate]: packed target,
+    // slot, spell id, max duration, remaining. No count/effect/flags bytes.
+    for (const uint16_t opcode : {0x3a4,0x3a5}) {
+        wowee::network::Packet packet(opcode);
+        packet.writePackedGuid(Session::kPlayerGuid);
+        packet.writeUInt8(55); packet.writeUInt32(1243);
+        packet.writeUInt32(60000); packet.writeUInt32(42000);
+        s.receive(packet);
+        const auto& aura = s.handler().getPlayerAuras().at(55);
+        CHECK(aura.spellId == 1243);
+        CHECK(aura.flags == 0x81);
+        CHECK(aura.maxDurationMs == 60000);
+        CHECK(aura.durationMs == 42000);
+    }
+    // A truncated duration or invalid slot cannot mutate the current aura.
+    wowee::network::Packet truncated(0x3a4);
+    truncated.writePackedGuid(Session::kPlayerGuid);
+    truncated.writeUInt8(55); truncated.writeUInt32(1243);
+    truncated.writeUInt32(60000);
+    s.receive(truncated);
+    CHECK(s.handler().getPlayerAuras().at(55).durationMs == 42000);
+    spells->getPlayerAuraSlotRef(0).spellId = 133;
+    spells->getPlayerAuraSlotRef(0).flags = 0x12;
+    // Player::SendExtraAuraDurationsOnLogin(visible): same entries until EOF,
+    // including an empty list. Neither form clears update-field identities.
+    wowee::network::Packet initial(0x3a3);
+    initial.writePackedGuid(Session::kPlayerGuid);
+    initial.writeUInt8(0); initial.writeUInt32(133);
+    initial.writeUInt32(60000); initial.writeUInt32(50000);
+    initial.writeUInt8(55); initial.writeUInt32(1243);
+    initial.writeUInt32(0xffffffff); initial.writeUInt32(0);
+    s.receive(initial);
+    CHECK(s.handler().getPlayerAuras().at(0).spellId == 133);
+    CHECK(s.handler().getPlayerAuras().at(0).flags == 0x12);
+    CHECK(s.handler().getPlayerAuras().at(0).durationMs == 50000);
+    CHECK(s.handler().getPlayerAuras().at(55).durationMs == -1);
+    wowee::network::Packet empty(0x3a3);
+    empty.writePackedGuid(Session::kPlayerGuid);
+    s.receive(empty);
+    CHECK(s.handler().getPlayerAuras().at(0).spellId == 133);
+    // ClearExtraAuraInfo names the spell, rather than a raw slot. Preserve
+    // another aura while clearing the matching identity.
+    wowee::network::Packet clear(0x3a6);
+    clear.writePackedGuid(Session::kPlayerGuid); clear.writeUInt32(1243);
+    s.receive(clear);
+    CHECK(s.handler().getPlayerAuras().at(55).isEmpty());
+    CHECK(s.handler().getPlayerAuras().at(0).spellId == 133);
+    wowee::network::Packet passive(0x3a4);
+    passive.writePackedGuid(Session::kPlayerGuid);
+    passive.writeUInt8(56); passive.writeUInt32(20597);
+    passive.writeUInt32(0xffffffff); passive.writeUInt32(0);
+    s.receive(passive);
+    CHECK(s.handler().getPlayerAuras().size() == 56);
 }
 
 TEST_CASE("unit power arrays respect each expansion's field boundaries", "[replay][power-layout]") {

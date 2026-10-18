@@ -41,6 +41,8 @@ static const UFNameEntry kUFNames[] = {
     {.name = "UNIT_FIELD_MOUNTDISPLAYID", .field = UF::UNIT_FIELD_MOUNTDISPLAYID},
     {.name = "UNIT_FIELD_AURAS", .field = UF::UNIT_FIELD_AURAS},
     {.name = "UNIT_FIELD_AURAFLAGS", .field = UF::UNIT_FIELD_AURAFLAGS},
+    {.name = "UNIT_FIELD_AURALEVELS", .field = UF::UNIT_FIELD_AURALEVELS},
+    {.name = "UNIT_FIELD_AURAAPPLICATIONS", .field = UF::UNIT_FIELD_AURAAPPLICATIONS},
     {.name = "UNIT_NPC_FLAGS", .field = UF::UNIT_NPC_FLAGS},
     {.name = "UNIT_NPC_EMOTESTATE", .field = UF::UNIT_NPC_EMOTESTATE},
     {.name = "UNIT_DYNAMIC_FLAGS", .field = UF::UNIT_DYNAMIC_FLAGS},
