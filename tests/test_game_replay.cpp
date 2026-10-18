@@ -164,6 +164,43 @@ TEST_CASE("the player's create block makes the player's unit", "[replay]") {
     CHECK(unit->getLevel() == 9);
 }
 
+TEST_CASE("TBC coinage follows the server's field on login and values updates", "[replay][tbc-wallet]") {
+    // CMaNGOS TBC UpdateFields.h: UNIT_END234 +0x04CB =1461.
+    // Use literal server indices: building this packet with the client's own
+    // field table would make a wrong table pass by agreeing with itself.
+    // 1441, the former coinage mapping, lies inside the explored-zone bitset.
+    Session s("tbc");
+    CHECK(wowee::game::fieldIndex(UF::PLAYER_FIELD_COINAGE) == 1461);
+    std::vector<std::string> events;
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua);
+    s.handler().setAddonEventCallback([&](const auto& event, const auto&) { events.push_back(event); });
+    const auto moneyEvents = [&] { return std::count(events.begin(), events.end(), "PLAYER_MONEY"); };
+    s.receive(unitFields({{22,180},{28,180},{34,7},{1441,0},{1461,600}},true,true));
+    CHECK(s.handler().getMoneyCopper() == 600);
+    CHECK(lua->evaluateBoolean("GetMoney() == 600"));
+    CHECK(moneyEvents() == 1);
+
+    s.receive(unitFields({{1461,650}},false,true));
+    CHECK(s.handler().getMoneyCopper() == 650);
+    CHECK(lua->evaluateBoolean("GetMoney() == 650"));
+    CHECK(moneyEvents() == 2);
+    s.receive(unitFields({{1461,650}},false,true));
+    CHECK(moneyEvents() == 2); // Repeating a balance is not another change.
+
+    // Exploration and rested XP cannot become a wallet balance or money event.
+    s.receive(unitFields({{1441,0x80000000u},{1460,321}},false,true));
+    CHECK(s.handler().getMoneyCopper() == 650);
+    CHECK(lua->evaluateBoolean("GetMoney() == 650"));
+    CHECK(moneyEvents() == 2);
+    s.receive(unitFields({{1461,0}},false,true));
+    CHECK(s.handler().getMoneyCopper() == 0);
+    CHECK(lua->evaluateBoolean("GetMoney() == 0"));
+    CHECK(moneyEvents() == 3);
+}
+
 TEST_CASE("unit power arrays respect each expansion's field boundaries", "[replay][power-layout]") {
     struct Profile { const char* name; uint8_t powers; bool preWotlk; };
     for (const auto profile : {Profile{"classic",5,true}, Profile{"tbc",5,true},
