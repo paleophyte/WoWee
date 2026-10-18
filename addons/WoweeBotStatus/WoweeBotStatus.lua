@@ -22,6 +22,11 @@ local function newTravel()
     if type(module)=='table' and type(module.new)=='function' then return module.new() end
 end
 local travel = newTravel()
+local function newRecovery()
+    local module=rawget(_G,'WoweeBotRecovery')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local recovery=newRecovery()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
@@ -110,6 +115,7 @@ local function request()
         if training then training:expect(activity.pending.id,controller.generation,now) end
         if trainingPlan then trainingPlan:expect(activity.pending.id,controller.generation,now) end
         if travel then travel:expect(activity.pending.id,controller.generation,now) end
+        if recovery then recovery:expect(activity.pending.id,controller.generation,now) end
         SendChatMessage(command, 'SAY')
         return
     end
@@ -209,6 +215,7 @@ local function draw()
         return
     end
     if travel and controller:isBot(now) then travelDetail:SetText(travel:summary(now) or '') end
+    if recovery and controller:isBot(now) and recovery:summary(now) then travelDetail:SetText(recovery:summary(now)) end
     freshness:SetText('Updated ' .. math.floor(now - model.travelAt) .. 's ago')
     local questId, questTitle = model:currentQuest(now)
     goal:SetText(questTitle and ((model.typed and 'Quest plan: ' or 'Quest: ') .. questTitle) or
@@ -222,6 +229,7 @@ local function draw()
     if model.location then parts[#parts + 1] = Status.clean(model.location) end
     details:SetText(table.concat(parts, '  -  '))
     if model.typed then interaction:SetText(WoweeBotActivity.currentWork(model)) end
+    if recovery and recovery:currentWork(now) then interaction:SetText(recovery:currentWork(now)) end
     local objective = questProgress(questId)
     if objective == '' and model.kind and model.kind:find('quest', 1, true) and not questId then
         objective = grouped() and 'Quest name unavailable while grouped; showing the destination.' or
@@ -433,6 +441,7 @@ driver:SetScript('OnUpdate', function()
         if training then training:expire(now,controller.generation) end
         if trainingPlan then trainingPlan:expire(now,controller.generation) end
         if travel then travel:expire(now,controller.generation) end
+        if recovery then recovery:expire(now,controller.generation) end
         if history then
             local pending=history.pending
             history:expire(now,controller.generation)
@@ -453,6 +462,7 @@ driver:SetScript('OnUpdate', function()
             if controller:isBot(now) and activity.failure then WoweeBotReportStatusProblem('activity', activity.failure) end
             if controller.socialFailure then WoweeBotReportStatusProblem('social', controller.socialFailure) end
             if controller.fishingFailure then WoweeBotReportStatusProblem('fishing', controller.fishingFailure) end
+            if recovery and recovery.supported and recovery.failure then WoweeBotReportStatusProblem('recovery',recovery.failure) end
         end
     end
     if now >= nextDraw then draw(); nextDraw = now + 0.25 end
@@ -473,13 +483,14 @@ driver:SetScript('OnEvent', function(self, event, ...)
     elseif event == 'PLAYER_ENTERING_WORLD' then
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
-        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel()
+        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
         if training then training.pending=nil end
         if trainingPlan then trainingPlan.pending=nil end
         if travel then travel.pending=nil end
+        if recovery then recovery.pending=nil end
         notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
@@ -490,6 +501,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
             WoweeBotReportStatusProblem('control', nil)
             if controller.mode == 'manual' then
                 WoweeBotReportStatusProblem('activity', nil, 'Activity queries are paused while you play manually.')
+                WoweeBotReportStatusProblem('recovery', nil, 'Recovery observation is paused while you play manually.')
             end
         end
         if received and prefix == 'WIDLEPOL' and not controller.socialFailure and WoweeBotReportStatusProblem then
@@ -503,11 +515,19 @@ driver:SetScript('OnEvent', function(self, event, ...)
             if training then training.pending,training.failure=nil,nil end
             if trainingPlan then trainingPlan.pending,trainingPlan.failure=nil,nil end
             if travel then travel.pending,travel.snapshot,travel.failure=nil,nil,nil end
+            if recovery then recovery.pending,recovery.snapshot,recovery.failure=nil,nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if recovery then
+            recovery:capability(prefix,text,sender,player,controller)
+            if recovery:receive(prefix,text,sender,player,controller.generation,now) and not recovery.failure and recovery.snapshot then
+                if WoweeBotReportRecovery then WoweeBotReportRecovery(recovery.snapshot) end
+                if WoweeBotReportStatusProblem then WoweeBotReportStatusProblem('recovery',nil,'Fresh recovery status received.') end
+            end
+        end
         if travel then
             travel:capability(prefix,text,sender,player,controller)
             if travel:receive(prefix,text,sender,player,controller.generation,now) and

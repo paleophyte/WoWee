@@ -50,3 +50,23 @@ The server independently samples actual map/instance/XYZ. Destination changes an
 Combat, casts/channels, flights, transport/vehicle handoffs, party waits, loot, death, teleport delays, immobilization, trade and movement policy have explicit explanations. The safeguard does not interrupt their owning action. A long observed stationary wait can create an informational Note, without guessing a missing item or a bad route. Navigation-pause Notes also describe a past event: the pause may already have ended. Dismissed facts do not reappear on later snapshots or relog, and unrelated later facts remain visible.
 
 This is an addon-only update if your client already has the Notes/realm native support. Pull the branch, run the updater shown above, and restart/reload the interface. No native rebuild is required for these new controls. The original manual/bot controller remains authoritative; an unconfirmed control change never displays automation as stopped. Explicit named go-order preservation across Manual→Bot resume is still a separate known server follow-up.
+
+## Death recovery observations
+
+Servers advertising the separate `WIDLERCAP` recovery capability can supply
+self-correlated `WIDLEREC` snapshot fragments. The panel keeps the saved
+quest/travel plan visible and adds a recovery line for release, corpse recovery,
+reclaim delay/range, spirit-healer attempts and unavailable/other-map corpses.
+A resurrection acceptance or reclaim attempt is not presented as success;
+the core must report the character alive. Recently observed health/mana appear
+for60seconds after that transition.
+
+Notes retain repeated-death counters, a ghost missing its corpse for10 observed
+seconds,120 observed seconds without recovery movement, and alive transitions.
+Manual takeover preserves historical warnings. A manual handoff alone does not
+resolve a gameplay blocker. These displays do not choose resurrection policies,
+spend resources, move the character or change quest priorities.
+
+Older servers keep the existing display. Recovery shares the normal snapshot
+poll and adds no chat commands. This update needs an addon refresh/reload;
+it adds no native client APIs. The TBC server feature must also be installed.

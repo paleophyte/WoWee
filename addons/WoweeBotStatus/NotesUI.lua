@@ -167,7 +167,7 @@ function WoweeBotReportStatusProblem(key, message, resolution)
     if not online or not inbox then return end
     local changed
     if message then changed = inbox:put(key, 'blocked',
-        key == 'control' and 'Control needs attention' or key == 'social' and 'Social Detours policy needs attention' or key == 'fishing' and 'Fishing policy needs attention' or 'Activity status unavailable',
+        key == 'control' and 'Control needs attention' or key == 'social' and 'Social Detours policy needs attention' or key == 'fishing' and 'Fishing policy needs attention' or key=='recovery' and 'Recovery status unavailable' or 'Activity status unavailable',
         message .. ((key == 'social' or key == 'fishing') and '. Open Policies and press Refresh to retry.' or '. Open Bot activity and press Refresh to retry.'), now())
     else changed = inbox:resolve(key, now(), resolution or 'Fresh server confirmation received. This status problem is resolved.') end
     if changed then save(); render() end
@@ -185,6 +185,10 @@ end
 
 function WoweeBotReportTravelWarning(fact)
     if online and inbox and inbox:travelWarning(fact, now()) then save(); render() end
+end
+
+function WoweeBotReportRecovery(snapshot)
+    if online and inbox and inbox:recovery(snapshot,now()) then save();render() end
 end
 
 function WoweeBotReportTrainingPlan(snapshot)

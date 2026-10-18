@@ -72,6 +72,54 @@ function Inbox:talents(points, now)
         '. Open Talents when you are ready to choose.', now, 'talents')
 end
 
+function Inbox:recovery(snapshot,now)
+    if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.notes)~='table' or
+        type(snapshot.phase)~='number' or type(snapshot.observed)~='number' or type(snapshot.stationary)~='number' then return false end
+    for _,fact in ipairs(snapshot.notes) do
+        if type(fact)~='table' or type(fact.sequence)~='number' or type(fact.at)~='number' or
+            type(fact.kind)~='number' or type(fact.deaths)~='number' or type(fact.seconds)~='number' then return false end
+    end
+    local changed=false
+    local root='recovery:'..snapshot.epoch..':'
+    for _,fact in ipairs(snapshot.notes) do
+        local key=root..fact.sequence
+        if not self:find(key) then
+            local title,text,kind
+            if fact.kind==1 then
+                title,kind='Repeated deaths','note'
+                text='The bot reports a death counter of '..fact.deaths..'. This includes earlier recorded deaths. See Bot activity for its current recovery method.'
+            elseif fact.kind==2 then
+                title,kind='Death recovery has not moved','blocked'
+                text='No movement was observed for '..fact.seconds..'s during recovery. A failed route or another recovery problem may need attention. Take manual control if needed.'
+            elseif fact.kind==3 then
+                title,kind='Corpse unavailable','blocked'
+                text='The server reported a ghost without a corpse for '..fact.seconds..' observed seconds. The bot cannot report a normal corpse destination yet.'
+            elseif fact.kind==4 then
+                title,kind='Alive again','note'
+                text='The server observed your character alive again. This does not establish which resurrection method succeeded or whether the previous plan has resumed.'
+            end
+            if title then
+                changed=self:put(key,kind,title,text,fact.at) or changed
+                local stored=self:find(key);stored.recoveryEpoch=snapshot.epoch;stored.recoveryKind=fact.kind
+            end
+        end
+    end
+    -- Fresh automatic observations can resolve historical blockers. Manual
+    -- takeover alone cannot: its observer is deliberately paused.
+    if snapshot.phase~=1 and snapshot.observed>0 then
+        for _,entry in ipairs(self.data.entries) do
+            if entry.kind=='blocked' and entry.recoveryEpoch==snapshot.epoch then
+                local resolved=entry.recoveryKind==2 and (snapshot.phase==0 or snapshot.phase==9 or snapshot.phase==10) or
+                    entry.recoveryKind==3 and snapshot.phase~=7
+                if resolved then
+                    changed=self:resolve(entry.key,now,'Fresh server recovery observations no longer show this condition. See Bot activity for the current state.') or changed
+                end
+            end
+        end
+    end
+    return changed
+end
+
 local function coins(value)
     return math.floor(value/10000) .. 'g ' .. math.floor(value/100)%100 .. 's ' .. value%100 .. 'c'
 end
