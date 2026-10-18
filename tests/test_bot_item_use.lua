@@ -32,6 +32,13 @@ do
     assert(inbox:itemUse(M.decode(body(1011,0,0)),1012));assert(not inbox.data.entries[1].dismissed)
     assert(inbox.data.entries[1].title=='Pickup limit cleared: Water Bucket')
     assert(not inbox:itemUse(M.decode(wire),1013)) -- older facts cannot resurrect the warning
+    assert(inbox:itemUse(M.decode(body(1030,1,1)),1031))
+    assert(inbox:itemUse(M.decode(body(1030,0,0)),1032), 'Same-second pickup clearance was lost')
+    assert(inbox.data.entries[1].title=='Pickup limit cleared: Water Bucket')
+    assert(not inbox:itemUse(M.decode(body(1030,0,0)),1033))
+    assert(inbox:itemUse(M.decode(body(1030,1,1)),1034), 'Same-second pickup retry was lost')
+    assert(inbox.data.entries[1].title=='Pickup skipped: Water Bucket')
+    assert(not inbox:itemUse(M.decode(body(1029,0,0)),1035))
     local saved=WoweeBotInbox.new(root,'TBC QA','Jizzle');assert(#saved.data.entries==1)
     assert(#WoweeBotInbox.new(root,'Other realm','Jizzle').data.entries==0)
 

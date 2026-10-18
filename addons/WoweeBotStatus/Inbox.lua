@@ -79,7 +79,10 @@ function Inbox:itemUse(snapshot,now)
     for _,row in ipairs(snapshot.rows) do
         local key='item-limit:'..snapshot.epoch..':'..row.item
         local previous=self:find(key)
-        if not previous or not previous.itemLimitAt or row.at>previous.itemLimitAt then
+        -- Server event times have one-second resolution. A fresh, correlated
+        -- report may clear and restart a limit within that same second.
+        if not previous or not previous.itemLimitAt or row.at>previous.itemLimitAt or
+            row.at==previous.itemLimitAt and row.blocked~=previous.itemLimitBlocked then
             local title,text
             if row.blocked==1 then
                 title='Pickup skipped: '..row.itemName
@@ -91,7 +94,7 @@ function Inbox:itemUse(snapshot,now)
                     '. This item limit no longer prevents the pickup. Availability and other requirements still apply.'
             end
             changed=self:put(key,'note',title,text,row.at) or changed
-            local entry=self:find(key);entry.itemLimitAt=row.at
+            local entry=self:find(key);entry.itemLimitAt,entry.itemLimitBlocked=row.at,row.blocked
         end
     end
     return changed
