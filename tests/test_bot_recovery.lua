@@ -63,8 +63,10 @@ if WoweeBotController and WoweeBotNotesDriver then
     SlashCmdList.WOWEEBOTNOTES('')
     local id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) status$'))
     receive('WIDLE','1\t'..id..'\tok\tbot\t7\t0\tnone')
-    receive('WIDLECAP','1\t'..id..'\t7\tactivity_1')
-    receive('WIDLERCAP','1\t'..id..'\t7\trecovery_1');clock=1;tick()
+    -- The server advertises recovery first: native observers may request a
+    -- snapshot synchronously inside the legacy capability callback.
+    receive('WIDLERCAP','1\t'..id..'\t7\trecovery_1')
+    receive('WIDLECAP','1\t'..id..'\t7\tactivity_1');clock=1;tick()
     local snap
     for _,command in ipairs(sent) do snap=command:match('^%.bot idle ([%w_-]+) snapshot 7$') or snap end
     assert(snap)
