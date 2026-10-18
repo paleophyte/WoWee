@@ -132,7 +132,7 @@ inline const char* getSpellCastResultString(uint8_t result, int powerType = -1) 
         // players, which is less useful than a safe generic explanation.
         case 27:  return "You can't do that right now";
         case 28:  return "Equipped item required";
-        case 29:  return "Equipped item class (mainhand)";
+        case 29:  return "Required item class is not equipped";
         case 30:  return "Equipped item class (mainhand)";
         case 31:  return "Equipped item class (offhand)";
         case 32:  return "Error";
@@ -298,6 +298,11 @@ inline const char* getSpellCastResultString(uint8_t result, int powerType = -1) 
         case 185: return "Pet can rename";
         case 186: return "Target cannot be resurrected";
         case 187: return "Unknown error";
+        // Internal normalized extensions for TBC-only failure meanings.
+        case 188: return "Training points required";
+        case 189: return "Cannot disenchant while looting";
+        case 190: return "Cannot prospect while looting";
+        case 191: return "Too many skills";
         case 255: return nullptr; // SPELL_CAST_OK
         default:  return nullptr;
     }

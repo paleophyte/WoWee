@@ -155,6 +155,253 @@ TEST_CASE("TBC cast failures retain their item and fishing meanings", "[replay][
     CHECK(createPacketParsers("wotlk")->castResult(45) == 45);
 }
 
+TEST_CASE("every TBC cast failure matches the actual core enum", "[replay][tbc-cast-table]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    auto* parser = s.handler().getPacketParsers();
+    // Literal names/numbers from the installed CMaNGOS SpellDefines.h and
+    // AzerothCore SharedDefines.h. Four TBC-only meanings use shared UI codes
+    // 188-191, outside the WotLK wire range. No production lookup generates this.
+    struct Result { uint8_t raw, normalized; const char* name; };
+    const Result cases[] = {
+        {0x00, 1, "SPELL_FAILED_AFFECTING_COMBAT"},
+        {0x01, 2, "SPELL_FAILED_ALREADY_AT_FULL_HEALTH"},
+        {0x02, 3, "SPELL_FAILED_ALREADY_AT_FULL_MANA"},
+        {0x03, 4, "SPELL_FAILED_ALREADY_AT_FULL_POWER"},
+        {0x04, 5, "SPELL_FAILED_ALREADY_BEING_TAMED"},
+        {0x05, 6, "SPELL_FAILED_ALREADY_HAVE_CHARM"},
+        {0x06, 7, "SPELL_FAILED_ALREADY_HAVE_SUMMON"},
+        {0x07, 8, "SPELL_FAILED_ALREADY_OPEN"},
+        {0x08, 9, "SPELL_FAILED_AURA_BOUNCED"},
+        {0x09, 10, "SPELL_FAILED_AUTOTRACK_INTERRUPTED"},
+        {0x0a, 11, "SPELL_FAILED_BAD_IMPLICIT_TARGETS"},
+        {0x0b, 12, "SPELL_FAILED_BAD_TARGETS"},
+        {0x0c, 13, "SPELL_FAILED_CANT_BE_CHARMED"},
+        {0x0d, 14, "SPELL_FAILED_CANT_BE_DISENCHANTED"},
+        {0x0e, 15, "SPELL_FAILED_CANT_BE_DISENCHANTED_SKILL"},
+        {0x0f, 17, "SPELL_FAILED_CANT_BE_PROSPECTED"},
+        {0x10, 18, "SPELL_FAILED_CANT_CAST_ON_TAPPED"},
+        {0x11, 19, "SPELL_FAILED_CANT_DUEL_WHILE_INVISIBLE"},
+        {0x12, 20, "SPELL_FAILED_CANT_DUEL_WHILE_STEALTHED"},
+        {0x13, 21, "SPELL_FAILED_CANT_STEALTH"},
+        {0x14, 22, "SPELL_FAILED_CASTER_AURASTATE"},
+        {0x15, 23, "SPELL_FAILED_CASTER_DEAD"},
+        {0x16, 24, "SPELL_FAILED_CHARMED"},
+        {0x17, 25, "SPELL_FAILED_CHEST_IN_USE"},
+        {0x18, 26, "SPELL_FAILED_CONFUSED"},
+        {0x19, 27, "SPELL_FAILED_DONT_REPORT"},
+        {0x1a, 28, "SPELL_FAILED_EQUIPPED_ITEM"},
+        {0x1b, 29, "SPELL_FAILED_EQUIPPED_ITEM_CLASS"},
+        {0x1c, 30, "SPELL_FAILED_EQUIPPED_ITEM_CLASS_MAINHAND"},
+        {0x1d, 31, "SPELL_FAILED_EQUIPPED_ITEM_CLASS_OFFHAND"},
+        {0x1e, 32, "SPELL_FAILED_ERROR"},
+        {0x1f, 33, "SPELL_FAILED_FIZZLE"},
+        {0x20, 34, "SPELL_FAILED_FLEEING"},
+        {0x21, 35, "SPELL_FAILED_FOOD_LOWLEVEL"},
+        {0x22, 36, "SPELL_FAILED_HIGHLEVEL"},
+        {0x23, 37, "SPELL_FAILED_HUNGER_SATIATED"},
+        {0x24, 38, "SPELL_FAILED_IMMUNE"},
+        {0x25, 40, "SPELL_FAILED_INTERRUPTED"},
+        {0x26, 41, "SPELL_FAILED_INTERRUPTED_COMBAT"},
+        {0x27, 42, "SPELL_FAILED_ITEM_ALREADY_ENCHANTED"},
+        {0x28, 43, "SPELL_FAILED_ITEM_GONE"},
+        {0x29, 44, "SPELL_FAILED_ITEM_NOT_FOUND"},
+        {0x2a, 45, "SPELL_FAILED_ITEM_NOT_READY"},
+        {0x2b, 46, "SPELL_FAILED_LEVEL_REQUIREMENT"},
+        {0x2c, 47, "SPELL_FAILED_LINE_OF_SIGHT"},
+        {0x2d, 48, "SPELL_FAILED_LOWLEVEL"},
+        {0x2e, 49, "SPELL_FAILED_LOW_CASTLEVEL"},
+        {0x2f, 50, "SPELL_FAILED_MAINHAND_EMPTY"},
+        {0x30, 51, "SPELL_FAILED_MOVING"},
+        {0x31, 52, "SPELL_FAILED_NEED_AMMO"},
+        {0x32, 53, "SPELL_FAILED_NEED_AMMO_POUCH"},
+        {0x33, 54, "SPELL_FAILED_NEED_EXOTIC_AMMO"},
+        {0x34, 56, "SPELL_FAILED_NOPATH"},
+        {0x35, 57, "SPELL_FAILED_NOT_BEHIND"},
+        {0x36, 58, "SPELL_FAILED_NOT_FISHABLE"},
+        {0x37, 59, "SPELL_FAILED_NOT_FLYING"},
+        {0x38, 60, "SPELL_FAILED_NOT_HERE"},
+        {0x39, 61, "SPELL_FAILED_NOT_INFRONT"},
+        {0x3a, 62, "SPELL_FAILED_NOT_IN_CONTROL"},
+        {0x3b, 63, "SPELL_FAILED_NOT_KNOWN"},
+        {0x3c, 64, "SPELL_FAILED_NOT_MOUNTED"},
+        {0x3d, 65, "SPELL_FAILED_NOT_ON_TAXI"},
+        {0x3e, 66, "SPELL_FAILED_NOT_ON_TRANSPORT"},
+        {0x3f, 67, "SPELL_FAILED_NOT_READY"},
+        {0x40, 68, "SPELL_FAILED_NOT_SHAPESHIFT"},
+        {0x41, 69, "SPELL_FAILED_NOT_STANDING"},
+        {0x42, 70, "SPELL_FAILED_NOT_TRADEABLE"},
+        {0x43, 71, "SPELL_FAILED_NOT_TRADING"},
+        {0x44, 72, "SPELL_FAILED_NOT_UNSHEATHED"},
+        {0x45, 73, "SPELL_FAILED_NOT_WHILE_GHOST"},
+        {0x46, 75, "SPELL_FAILED_NO_AMMO"},
+        {0x47, 76, "SPELL_FAILED_NO_CHARGES_REMAIN"},
+        {0x48, 77, "SPELL_FAILED_NO_CHAMPION"},
+        {0x49, 78, "SPELL_FAILED_NO_COMBO_POINTS"},
+        {0x4a, 79, "SPELL_FAILED_NO_DUELING"},
+        {0x4b, 80, "SPELL_FAILED_NO_ENDURANCE"},
+        {0x4c, 81, "SPELL_FAILED_NO_FISH"},
+        {0x4d, 82, "SPELL_FAILED_NO_ITEMS_WHILE_SHAPESHIFTED"},
+        {0x4e, 83, "SPELL_FAILED_NO_MOUNTS_ALLOWED"},
+        {0x4f, 84, "SPELL_FAILED_NO_PET"},
+        {0x50, 85, "SPELL_FAILED_NO_POWER"},
+        {0x51, 86, "SPELL_FAILED_NOTHING_TO_DISPEL"},
+        {0x52, 87, "SPELL_FAILED_NOTHING_TO_STEAL"},
+        {0x53, 88, "SPELL_FAILED_ONLY_ABOVEWATER"},
+        {0x54, 89, "SPELL_FAILED_ONLY_DAYTIME"},
+        {0x55, 90, "SPELL_FAILED_ONLY_INDOORS"},
+        {0x56, 91, "SPELL_FAILED_ONLY_MOUNTED"},
+        {0x57, 92, "SPELL_FAILED_ONLY_NIGHTTIME"},
+        {0x58, 93, "SPELL_FAILED_ONLY_OUTDOORS"},
+        {0x59, 94, "SPELL_FAILED_ONLY_SHAPESHIFT"},
+        {0x5a, 95, "SPELL_FAILED_ONLY_STEALTHED"},
+        {0x5b, 96, "SPELL_FAILED_ONLY_UNDERWATER"},
+        {0x5c, 97, "SPELL_FAILED_OUT_OF_RANGE"},
+        {0x5d, 98, "SPELL_FAILED_PACIFIED"},
+        {0x5e, 99, "SPELL_FAILED_POSSESSED"},
+        {0x5f, 100, "SPELL_FAILED_REAGENTS"},
+        {0x60, 101, "SPELL_FAILED_REQUIRES_AREA"},
+        {0x61, 102, "SPELL_FAILED_REQUIRES_SPELL_FOCUS"},
+        {0x62, 103, "SPELL_FAILED_ROOTED"},
+        {0x63, 104, "SPELL_FAILED_SILENCED"},
+        {0x64, 105, "SPELL_FAILED_SPELL_IN_PROGRESS"},
+        {0x65, 106, "SPELL_FAILED_SPELL_LEARNED"},
+        {0x66, 107, "SPELL_FAILED_SPELL_UNAVAILABLE"},
+        {0x67, 108, "SPELL_FAILED_STUNNED"},
+        {0x68, 109, "SPELL_FAILED_TARGETS_DEAD"},
+        {0x69, 110, "SPELL_FAILED_TARGET_AFFECTING_COMBAT"},
+        {0x6a, 111, "SPELL_FAILED_TARGET_AURASTATE"},
+        {0x6b, 112, "SPELL_FAILED_TARGET_DUELING"},
+        {0x6c, 113, "SPELL_FAILED_TARGET_ENEMY"},
+        {0x6d, 114, "SPELL_FAILED_TARGET_ENRAGED"},
+        {0x6e, 115, "SPELL_FAILED_TARGET_FRIENDLY"},
+        {0x6f, 116, "SPELL_FAILED_TARGET_IN_COMBAT"},
+        {0x70, 117, "SPELL_FAILED_TARGET_IS_PLAYER"},
+        {0x71, 118, "SPELL_FAILED_TARGET_IS_PLAYER_CONTROLLED"},
+        {0x72, 119, "SPELL_FAILED_TARGET_NOT_DEAD"},
+        {0x73, 120, "SPELL_FAILED_TARGET_NOT_IN_PARTY"},
+        {0x74, 121, "SPELL_FAILED_TARGET_NOT_LOOTED"},
+        {0x75, 122, "SPELL_FAILED_TARGET_NOT_PLAYER"},
+        {0x76, 123, "SPELL_FAILED_TARGET_NO_POCKETS"},
+        {0x77, 124, "SPELL_FAILED_TARGET_NO_WEAPONS"},
+        {0x78, 126, "SPELL_FAILED_TARGET_UNSKINNABLE"},
+        {0x79, 127, "SPELL_FAILED_THIRST_SATIATED"},
+        {0x7a, 128, "SPELL_FAILED_TOO_CLOSE"},
+        {0x7b, 129, "SPELL_FAILED_TOO_MANY_OF_ITEM"},
+        {0x7c, 130, "SPELL_FAILED_TOTEM_CATEGORY"},
+        {0x7d, 131, "SPELL_FAILED_TOTEMS"},
+        {0x7e, 188, "SPELL_FAILED_TRAINING_POINTS"},
+        {0x7f, 132, "SPELL_FAILED_TRY_AGAIN"},
+        {0x80, 133, "SPELL_FAILED_UNIT_NOT_BEHIND"},
+        {0x81, 134, "SPELL_FAILED_UNIT_NOT_INFRONT"},
+        {0x82, 135, "SPELL_FAILED_WRONG_PET_FOOD"},
+        {0x83, 136, "SPELL_FAILED_NOT_WHILE_FATIGUED"},
+        {0x84, 137, "SPELL_FAILED_TARGET_NOT_IN_INSTANCE"},
+        {0x85, 138, "SPELL_FAILED_NOT_WHILE_TRADING"},
+        {0x86, 139, "SPELL_FAILED_TARGET_NOT_IN_RAID"},
+        {0x87, 189, "SPELL_FAILED_DISENCHANT_WHILE_LOOTING"},
+        {0x88, 190, "SPELL_FAILED_PROSPECT_WHILE_LOOTING"},
+        {0x89, 55, "SPELL_FAILED_NEED_MORE_ITEMS"},
+        {0x8a, 140, "SPELL_FAILED_TARGET_FREEFORALL"},
+        {0x8b, 141, "SPELL_FAILED_NO_EDIBLE_CORPSES"},
+        {0x8c, 142, "SPELL_FAILED_ONLY_BATTLEGROUNDS"},
+        {0x8d, 143, "SPELL_FAILED_TARGET_NOT_GHOST"},
+        {0x8e, 191, "SPELL_FAILED_TOO_MANY_SKILLS"},
+        {0x8f, 144, "SPELL_FAILED_TRANSFORM_UNUSABLE"},
+        {0x90, 145, "SPELL_FAILED_WRONG_WEATHER"},
+        {0x91, 146, "SPELL_FAILED_DAMAGE_IMMUNE"},
+        {0x92, 147, "SPELL_FAILED_PREVENTED_BY_MECHANIC"},
+        {0x93, 148, "SPELL_FAILED_PLAY_TIME"},
+        {0x94, 149, "SPELL_FAILED_REPUTATION"},
+        {0x95, 150, "SPELL_FAILED_MIN_SKILL"},
+        {0x96, 151, "SPELL_FAILED_NOT_IN_ARENA"},
+        {0x97, 152, "SPELL_FAILED_NOT_ON_SHAPESHIFT"},
+        {0x98, 153, "SPELL_FAILED_NOT_ON_STEALTHED"},
+        {0x99, 154, "SPELL_FAILED_NOT_ON_DAMAGE_IMMUNE"},
+        {0x9a, 155, "SPELL_FAILED_NOT_ON_MOUNTED"},
+        {0x9b, 156, "SPELL_FAILED_TOO_SHALLOW"},
+        {0x9c, 157, "SPELL_FAILED_TARGET_NOT_IN_SANCTUARY"},
+        {0x9d, 158, "SPELL_FAILED_TARGET_IS_TRIVIAL"},
+        {0x9e, 159, "SPELL_FAILED_BM_OR_INVISGOD"},
+        {0x9f, 160, "SPELL_FAILED_EXPERT_RIDING_REQUIREMENT"},
+        {0xa0, 161, "SPELL_FAILED_ARTISAN_RIDING_REQUIREMENT"},
+        {0xa1, 162, "SPELL_FAILED_NOT_IDLE"},
+        {0xa2, 163, "SPELL_FAILED_NOT_INACTIVE"},
+        {0xa3, 164, "SPELL_FAILED_PARTIAL_PLAYTIME"},
+        {0xa4, 165, "SPELL_FAILED_NO_PLAYTIME"},
+        {0xa5, 166, "SPELL_FAILED_NOT_IN_BATTLEGROUND"},
+        {0xa6, 168, "SPELL_FAILED_ONLY_IN_ARENA"},
+        {0xa7, 169, "SPELL_FAILED_TARGET_LOCKED_TO_RAID_INSTANCE"},
+        {0xa8, 187, "SPELL_FAILED_UNKNOWN"},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.raw, c.name);
+        CHECK(parser->castResult(c.raw) == c.normalized);
+    }
+    for (unsigned raw = 0xa9; raw < 0xff; ++raw) {
+        CAPTURE(raw);
+        CHECK(parser->castResult(static_cast<uint8_t>(raw)) == 187); // unknown, never a guessed reason
+    }
+    CHECK(parser->castResult(0xff) == 0); // server-only OK, same shared success convention
+    CHECK(createPacketParsers("wotlk")->castResult(97) == 97);
+    CHECK(createPacketParsers("classic")->castResult(44) == 45);
+}
+
+TEST_CASE("TBC resource, range and tool failures explain the actual blocker", "[replay][tbc-cast-table]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    std::vector<std::string> messages;
+    s.handler().setAddonEventCallback([&](const std::string& event, const auto& args) {
+        if (event == "UI_ERROR_MESSAGE" && !args.empty()) messages.push_back(args.front());
+    });
+    struct Failure { uint8_t raw, normalized; const char* text; };
+    const Failure cases[] = {
+        {0x1b, 29, "Required item class is not equipped"},
+        {0x1c, 30, "mainhand"}, {0x1d, 31, "offhand"},
+        {0x50, 85, "Not enough mana"}, {0x5c, 97, "Out of range"},
+        {0x62, 103, "rooted"}, {0x63, 104, "silenced"}, {0x64, 105, "Spell in progress"},
+        {0x6a, 111, "required state"}, {0x73, 120, "Target not in party"},
+        {0x7e, 188, "Training points required"}, {0x87, 189, "Cannot disenchant while looting"},
+        {0x88, 190, "Cannot prospect while looting"}, {0x8e, 191, "Too many skills"},
+        {0xa6, 168, "Only in arena"}, {0xa7, 169, "Target locked to raid instance"},
+        {0xa8, 187, "Unknown error"}
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.raw, c.normalized, c.text);
+        for (auto opcode : {Opcode::SMSG_CAST_FAILED, Opcode::SMSG_SPELL_FAILURE}) {
+            const auto before=messages.size();
+            wowee::network::Packet packet(wireOpcode(opcode));
+            if (opcode == Opcode::SMSG_SPELL_FAILURE) packet.writePackedGuid(Session::kPlayerGuid);
+            packet.writeUInt32(585); packet.writeUInt8(c.raw);
+            if (opcode == Opcode::SMSG_CAST_FAILED) packet.writeUInt8(0);
+            s.receive(packet);
+            REQUIRE(messages.size() == before+1);
+            CHECK(messages.back().find(c.text) != std::string::npos);
+        }
+    }
+    // Spell::SendCastResult appends a focus id or two tool/category ids after
+    // spell, raw result and cast count. Mapping must happen before tail parsing.
+    for (const auto raw : {0x61, 0x7c, 0x7d}) {
+        CAPTURE(raw);
+        wowee::network::Packet packet(0);
+        packet.writeUInt32(585); packet.writeUInt8(static_cast<uint8_t>(raw)); packet.writeUInt8(7);
+        packet.writeUInt32(123); if (raw != 0x61) packet.writeUInt32(456);
+        CastFailedData data;
+        REQUIRE(s.handler().getPacketParsers()->parseCastFailed(packet, data));
+        CHECK(data.spellId == 585); CHECK(data.castCount == 7);
+        CHECK(data.result == (raw == 0x61 ? 102 : raw == 0x7c ? 130 : 131));
+        CHECK(data.miscArg == 123); CHECK(data.miscArg2 == (raw == 0x61 ? 0 : 456));
+        CHECK(packet.getRemainingSize() == 0);
+        wowee::network::Packet resultPacket(0);
+        resultPacket.writeUInt32(585); resultPacket.writeUInt8(static_cast<uint8_t>(raw)); resultPacket.writeUInt8(7);
+        resultPacket.writeUInt32(123); if (raw != 0x61) resultPacket.writeUInt32(456);
+        uint32_t spell=0, misc=0, misc2=0; uint8_t result=0;
+        REQUIRE(s.handler().getPacketParsers()->parseCastResult(resultPacket,spell,result,misc,misc2));
+        CHECK(result == data.result); CHECK(misc == 123); CHECK(misc2 == data.miscArg2);
+        CHECK(resultPacket.getRemainingSize() == 0);
+    }
+}
+
 TEST_CASE("the player's create block makes the player's unit", "[replay]") {
     Session s;
     s.spawnPlayer({{UF::UNIT_FIELD_HEALTH, 181},
