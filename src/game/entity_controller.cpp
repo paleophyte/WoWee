@@ -312,9 +312,16 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
     bool havePbytes = readField(ufPbytes, pbytes);
     bool havePbytes2 = readField(ufPbytes2, pbytes2);
 
+    const bool tbc = isActiveExpansion("tbc");
+    // Public TBC appearance fields belong to every player CREATE. The core
+    // omits zero values from its create mask, so absence in accumulated state
+    // means a valid zero byte, not permission to guess from guild/health data.
+    if (tbc && ufPbytes != 0xFFFF) havePbytes = true;
+    if (tbc && ufPbytes2 != 0xFFFF) havePbytes2 = true;
+
     // Heuristic fallback: Turtle can run with unusual build numbers; if the JSON table is missing,
     // try to locate plausible packed fields by scanning.
-    if (!haveBytes0) {
+    if (!tbc && !haveBytes0) {
         for (const auto& [idx, v] : fields) {
             uint8_t race = static_cast<uint8_t>(v & 0xFF);
             uint8_t cls = static_cast<uint8_t>((v >> 8) & 0xFF);
@@ -330,7 +337,7 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
             }
         }
     }
-    if (!havePbytes) {
+    if (!tbc && !havePbytes) {
         for (const auto& [idx, v] : fields) {
             uint8_t skin = static_cast<uint8_t>(v & 0xFF);
             uint8_t face = static_cast<uint8_t>((v >> 8) & 0xFF);
@@ -343,7 +350,7 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
             }
         }
     }
-    if (!havePbytes2) {
+    if (!tbc && !havePbytes2) {
         for (const auto& [idx, v] : fields) {
             uint8_t facial = static_cast<uint8_t>(v & 0xFF);
             if (facial <= 100) {
@@ -365,6 +372,9 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
 
 void EntityController::maybeDetectCoinageIndex(const FlatFieldMap& oldFields,
                                                const FlatFieldMap& newFields) {
+    // TBC has a verified protocol mapping. An equal XP/stat increment after
+    // group loot is not evidence that those fields contain the wallet.
+    if (isActiveExpansion("tbc")) return;
     if (owner_.pendingMoneyDeltaRef() == 0 || owner_.pendingMoneyDeltaTimerRef() <= 0.0f) return;
     if (oldFields.empty() || newFields.empty()) return;
 
@@ -2221,12 +2231,15 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
     // does: a door standing open when the player walks into the room says so
     // here and nowhere else. Only the update path read it, so every object came
     // into view in its closed pose and stayed there until something changed it.
-    const uint16_t ufBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
+    const uint16_t ufState = fieldIndex(UF::GAMEOBJECT_STATE);
+    const uint16_t ufBytes1 = ufState != 0xFFFF ? ufState : fieldIndex(UF::GAMEOBJECT_BYTES_1);
     if (ufBytes1 != 0xFFFF) {
         auto itBytes = block.fields.find(ufBytes1);
-        if (itBytes != block.fields.end() && owner_.gameObjectStateCallbackRef()) {
+        // A separate TBC STATE of zero is omitted on CREATE. VALUES remains
+        // partial, handled below, and must never infer a missing state change.
+        if ((ufState != 0xFFFF || itBytes != block.fields.end()) && owner_.gameObjectStateCallbackRef()) {
             owner_.gameObjectStateCallbackRef()(
-                block.guid, static_cast<uint8_t>(itBytes->second & 0xFF));
+                block.guid, itBytes == block.fields.end() ? 0 : static_cast<uint8_t>(itBytes->second & 0xFF));
         }
     }
 
@@ -2467,8 +2480,10 @@ void EntityController::onValuesUpdateGameObject(const UpdateBlock& block, std::s
         }
     }
 
-    // Detect GO state changes from GAMEOBJECT_BYTES_1 (packed: byte0=state, byte1=type, byte2=artKit, byte3=animProgress)
-    const uint16_t ufGoBytes1 = fieldIndex(UF::GAMEOBJECT_BYTES_1);
+    // TBC publishes STATE separately. Other profiles retain packed BYTES_1
+    // (byte0=state); TBC's former packed mapping17 was actually position Z.
+    const uint16_t ufState = fieldIndex(UF::GAMEOBJECT_STATE);
+    const uint16_t ufGoBytes1 = ufState != 0xFFFF ? ufState : fieldIndex(UF::GAMEOBJECT_BYTES_1);
     if (ufGoBytes1 != 0xFFFF) {
         auto itB = block.fields.find(ufGoBytes1);
         if (itB != block.fields.end()) {

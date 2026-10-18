@@ -129,6 +129,7 @@ enum class UF : uint16_t {
     // GameObject fields
     GAMEOBJECT_DISPLAYID,
     GAMEOBJECT_BYTES_1,
+    GAMEOBJECT_STATE, // TBC has a separate uint32 state, not packed BYTES_1
     // MO_TRANSPORT route clock. LEVEL carries the route's period in ms; the high
     // int16 of DYNAMIC carries how far through that period the transport is, as a
     // fraction of 65535. Both are WotLK-only - nothing before it published a

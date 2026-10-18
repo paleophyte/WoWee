@@ -37,17 +37,20 @@ std::shared_ptr<wowee::game::Unit> playerUnit(Session& s) {
 // Pre-WotLK has a transport byte in the packet and eight-bit create flags;
 // WotLK uses sixteen-bit flags. The values mask has the same wire shape.
 wowee::network::Packet unitFields(const std::map<uint16_t, uint32_t>& fields,
-                                 bool create, bool preWotlk) {
+                                 bool create, bool preWotlk,
+                                 uint64_t guid = Session::kPlayerGuid,
+                                 wowee::game::ObjectType type = wowee::game::ObjectType::PLAYER) {
     using namespace wowee::game;
     wowee::network::Packet packet(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
     packet.writeUInt32(1);
     if (preWotlk) packet.writeUInt8(0);
     packet.writeUInt8(static_cast<uint8_t>(create ? UpdateType::CREATE_OBJECT2 : UpdateType::VALUES));
-    packet.writePackedGuid(Session::kPlayerGuid);
+    packet.writePackedGuid(guid);
     if (create) {
-        packet.writeUInt8(static_cast<uint8_t>(ObjectType::PLAYER));
-        if (preWotlk) packet.writeUInt8(1); // UPDATEFLAG_SELF
-        else packet.writeUInt16(1);
+        packet.writeUInt8(static_cast<uint8_t>(type));
+        const uint16_t flags = type == ObjectType::PLAYER && guid == Session::kPlayerGuid ? 1 : 0;
+        if (preWotlk) packet.writeUInt8(static_cast<uint8_t>(flags)); // UPDATEFLAG_SELF
+        else packet.writeUInt16(flags);
     }
     const auto blocks = static_cast<uint8_t>(fields.rbegin()->first / 32 + 1);
     packet.writeUInt8(blocks);
@@ -336,6 +339,179 @@ TEST_CASE("TBC extra aura duration uses packed guid and one slot", "[replay][tbc
     passive.writeUInt32(0xffffffff); passive.writeUInt32(0);
     s.receive(passive);
     CHECK(s.handler().getPlayerAuras().size() == 56);
+}
+
+TEST_CASE("TBC primary stats and resistances follow literal owner fields", "[replay][tbc-field-families]") {
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua);
+    std::vector<std::string> events;
+    s.handler().setAddonEventCallback([&](const auto& event,const auto&) {events.push_back(event);});
+    s.receive(unitFields({{22,180},{28,180},{34,8},{36,1|(5<<8)},
+        {159,0},{160,0},{161,0},{162,0},{163,0},{185,0x42100000},
+        {171,21},{172,22},{173,23},{174,24},{175,25},
+        {186,80},{187,1},{188,2},{189,3},{190,4},{191,5},{192,6}},true,true));
+    for (int i=0;i<5;++i) {
+        CAPTURE(i);
+        CHECK(s.handler().getPlayerStat(i)==21+i);
+        CHECK(lua->evaluateBoolean("select(2,UnitStat('player',"+std::to_string(i+1)+")) == "+std::to_string(21+i)));
+    }
+    CHECK(s.handler().getArmorRating()==80);
+    CHECK(lua->evaluateBoolean("select(2,UnitArmor('player')) == 80 and select(2,UnitResistance('player',0)) == 80"));
+    for (int school=1;school<=6;++school) {
+        CHECK(s.handler().getResistance(school)==school);
+        CHECK(lua->evaluateBoolean("select(2,UnitResistance('player',"+std::to_string(school)+")) == "+std::to_string(school)));
+    }
+    events.clear();
+    s.receive(unitFields({{171,31},{172,32},{173,33},{174,34},{175,35},
+        {186,180},{187,11},{188,12},{189,13},{190,14},{191,15},{192,16}},false,true));
+    CHECK(std::count(events.begin(),events.end(),"UNIT_STATS")==1);
+    CHECK(std::count(events.begin(),events.end(),"UNIT_RESISTANCES")==1);
+    for (int i=0;i<5;++i) CHECK(s.handler().getPlayerStat(i)==31+i);
+    for (int school=1;school<=6;++school) CHECK(s.handler().getResistance(school)==10+school);
+    CHECK(lua->evaluateBoolean("select(2,UnitStat('player',3)) == 33 and select(2,UnitArmor('player')) == 180"));
+    events.clear();
+    // Former mappings now name stand/visibility and pet metadata, and the
+    // maximum offhand damage float. They cannot become character sheet stats.
+    s.receive(unitFields({{159,0},{160,91},{161,92},{162,93},{163,94},{185,0x42400000}},false,true));
+    for (int i=0;i<5;++i) CHECK(s.handler().getPlayerStat(i)==31+i);
+    CHECK(s.handler().getArmorRating()==180);
+    CHECK(std::count(events.begin(),events.end(),"UNIT_STATS")==0);
+    CHECK(std::count(events.begin(),events.end(),"UNIT_RESISTANCES")==0);
+    // Zero is a received value rather than an unknown stat or old resistance.
+    s.receive(unitFields({{173,0},{186,0},{192,0}},false,true));
+    CHECK(s.handler().getPlayerStat(2)==0);
+    CHECK(s.handler().getArmorRating()==0);
+    CHECK(s.handler().getResistance(6)==0);
+}
+
+TEST_CASE("TBC loot cannot reidentify XP as the verified coinage field", "[replay][tbc-field-families]") {
+    Session s("tbc");
+    s.receive(unitFields({{22,180},{28,180},{34,8},{926,100},{1461,600}},true,true));
+    // CMaNGOS TBC Loot::SendGold sends group shares as one uint32, without a
+    // sole-looter byte. Coinage can arrive separately from an equal XP increment.
+    wowee::network::Packet notification(0x163);
+    notification.writeUInt32(25);
+    s.receive(notification);
+    CHECK(s.handler().getMoneyCopper()==625);
+    s.receive(unitFields({{926,125}},false,true));
+    CHECK(wowee::game::fieldIndex(UF::PLAYER_FIELD_COINAGE)==1461);
+    s.receive(unitFields({{1461,625}},false,true));
+    CHECK(s.handler().getMoneyCopper()==625);
+    s.receive(unitFields({{1461,630}},false,true));
+    CHECK(s.handler().getMoneyCopper()==630);
+}
+
+TEST_CASE("TBC exploration rested XP and PvP currencies use distinct fields", "[replay][tbc-field-families]") {
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua=manager.getLuaEngine();
+    REQUIRE(lua);
+    std::vector<std::string> events;
+    s.handler().setAddonEventCallback([&](const auto& event,const auto&) {events.push_back(event);});
+    s.receive(unitFields({{22,180},{28,180},{34,8},{1312,8},{1332,2},
+        {1440,4},{1459,0x80000000},{1460,900},{1461,600},
+        {1505,0x3f800000},{1506,0x40000000},{1562,45},{1563,67}},true,true));
+    REQUIRE(s.handler().getPlayerExploredZoneMasks().size()==128);
+    CHECK(s.handler().hasPlayerExploredZoneMasks());
+    CHECK(s.handler().getPlayerExploredZoneMasks()[0]==2);
+    CHECK(s.handler().getPlayerExploredZoneMasks()[108]==4);
+    CHECK(s.handler().getPlayerExploredZoneMasks()[127]==0x80000000u);
+    CHECK(s.handler().getPlayerRestedXp()==900);
+    CHECK(s.handler().getHonorPoints()==45);
+    CHECK(s.handler().getArenaPoints()==67);
+    CHECK(lua->evaluateBoolean("GetXPExhaustion() == 900 and GetHonorCurrency() == 45 and GetArenaCurrency() == 67"));
+    events.clear();
+    s.receive(unitFields({{1312,0x80000000},{1440,64},{1505,0x40400000},{1506,0x40800000}},false,true));
+    CHECK(s.handler().getPlayerExploredZoneMasks()[0]==2);
+    CHECK(s.handler().getPlayerExploredZoneMasks()[108]==64);
+    CHECK(s.handler().getPlayerRestedXp()==900);
+    CHECK(s.handler().getHonorPoints()==45);
+    CHECK(s.handler().getArenaPoints()==67);
+    CHECK(std::count(events.begin(),events.end(),"UPDATE_EXHAUSTION")==0);
+    s.receive(unitFields({{1332,0},{1459,16},{1460,950},{1461,650},{1562,145},{1563,167}},false,true));
+    CHECK(s.handler().getPlayerExploredZoneMasks()[0]==0);
+    CHECK(s.handler().getPlayerExploredZoneMasks()[127]==16);
+    CHECK(lua->evaluateBoolean("GetXPExhaustion() == 950 and GetHonorCurrency() == 145 and GetArenaCurrency() == 167 and GetMoney() == 650"));
+    CHECK(std::count(events.begin(),events.end(),"UPDATE_EXHAUSTION")==1);
+    s.receive(unitFields({{1460,0},{1562,0},{1563,0}},false,true));
+    CHECK(lua->evaluateBoolean("GetXPExhaustion() == nil and GetHonorCurrency() == 0 and GetArenaCurrency() == 0"));
+}
+
+TEST_CASE("TBC appearance fields do not read guild metadata or invent missing bytes", "[replay][tbc-field-families]") {
+    Session s("tbc");
+    wowee::game::Character character{};
+    character.guid=Session::kPlayerGuid;
+    s.handler().charactersRef().push_back(character);
+    int appearanceChanges=0, rebuilds=0;
+    s.handler().setAppearanceChangedCallback([&] {++appearanceChanges;});
+    s.handler().setPlayerModelRebuildCallback([&] {++rebuilds;});
+    s.receive(unitFields({{22,180},{28,180},{34,8},{36,1|(5<<8)},
+        {237,0x11223344},{238,0x55667788},{239,0x04030201},{240,0x02030005}},true,true));
+    uint8_t race=0,gender=0,facial=0;uint32_t appearance=0;
+    REQUIRE(s.handler().getPlayerAppearance(Session::kPlayerGuid,race,gender,appearance,facial));
+    CHECK(race==1);CHECK(gender==0);CHECK(appearance==0x04030201u);CHECK(facial==5);
+    CHECK(s.handler().getInventory().getPurchasedBankBagSlots()==3);
+    s.receive(unitFields({{239,0x08070605},{240,0x02020009}},false,true));
+    CHECK(s.handler().getCharacters()[0].appearanceBytes==0x08070605u);
+    CHECK(s.handler().getCharacters()[0].facialFeatures==9);
+    CHECK(s.handler().getInventory().getPurchasedBankBagSlots()==2);
+    CHECK(appearanceChanges==2);CHECK(rebuilds==2);
+    s.receive(unitFields({{237,1},{238,2}},false,true));
+    CHECK(appearanceChanges==2);CHECK(rebuilds==2);
+    CHECK(s.handler().getCharacters()[0].appearanceBytes==0x08070605u);
+    CHECK(s.handler().getCharacters()[0].facialFeatures==9);
+    CHECK(s.handler().getInventory().getPurchasedBankBagSlots()==2);
+    s.receive(unitFields({{239,0},{240,0}},false,true));
+    REQUIRE(s.handler().getPlayerAppearance(Session::kPlayerGuid,race,gender,appearance,facial));
+    CHECK(appearance==0);CHECK(facial==0);
+}
+
+TEST_CASE("TBC omitted zero appearance fields cannot be guessed from guild metadata", "[replay][tbc-field-families]") {
+    Session s("tbc");
+    s.receive(unitFields({{22,180},{28,180},{34,8},{36,1|(5<<8)},{237,1},{238,2}},true,true));
+    uint8_t race=0,gender=0,facial=0;uint32_t appearance=0;
+    // Object::_SetCreateBits omits zero fields, including valid all-zero
+    // appearance. Known public fields default to zero, not nearby guild data.
+    REQUIRE(s.handler().getPlayerAppearance(Session::kPlayerGuid,race,gender,appearance,facial));
+    CHECK(appearance==0);CHECK(facial==0);
+    s.receive(unitFields({{239,0x04030201}},false,true));
+    REQUIRE(s.handler().getPlayerAppearance(Session::kPlayerGuid,race,gender,appearance,facial));
+    CHECK(appearance==0x04030201u);CHECK(facial==0);
+    s.handler().updateFieldTableRef().setIndex(UF::PLAYER_BYTES,0xffff);
+    CHECK_FALSE(s.handler().getPlayerAppearance(Session::kPlayerGuid,race,gender,appearance,facial));
+}
+
+TEST_CASE("game object state reads TBC STATE and retains WotLK packed bytes", "[replay][tbc-field-families]") {
+    using wowee::game::ObjectType;
+    constexpr uint64_t guid=0xf110000000000124ull;
+    for (const bool tbc : {true,false}) {
+        const char* profile=tbc ? "tbc" : "wotlk";
+        DYNAMIC_SECTION(profile) {
+            Session s(tbc ? "tbc" : "wotlk");
+            std::vector<uint8_t> states;
+            s.handler().setGameObjectStateCallback([&](uint64_t id,uint8_t state) {CHECK(id==guid);states.push_back(state);});
+            // On TBC17 is a position float. On WotLK17 is packed bytes.
+            s.receive(unitFields({{3,31},{8,1},{14,0},{17,tbc ? 0x429b002au : 0x64ab0300u}},true,tbc,guid,ObjectType::GAMEOBJECT));
+            REQUIRE(states.size()==1);CHECK(states.back()==0);
+            s.receive(unitFields({{static_cast<uint16_t>(tbc ? 17 : 14),0x42b00001}},false,tbc,guid,ObjectType::GAMEOBJECT));
+            CHECK(states.size()==1);
+            s.receive(unitFields({{static_cast<uint16_t>(tbc ? 14 : 17),1}},false,tbc,guid,ObjectType::GAMEOBJECT));
+            REQUIRE(states.size()==2);CHECK(states.back()==1);
+            s.receive(unitFields({{14,2},{17,tbc ? 0x42b00000u : 0x64ab0302u}},false,tbc,guid,ObjectType::GAMEOBJECT));
+            REQUIRE(states.size()==3);CHECK(states.back()==2);
+            s.receive(unitFields({{static_cast<uint16_t>(tbc ? 14 : 17),0}},false,tbc,guid,ObjectType::GAMEOBJECT));
+            REQUIRE(states.size()==4);CHECK(states.back()==0);
+            // A second TBC CREATE can omit STATE entirely when it is zero.
+            if (tbc) {
+                s.receive(unitFields({{3,32},{8,1},{17,0x429b002a}},true,true,guid,ObjectType::GAMEOBJECT));
+                REQUIRE(states.size()==5);CHECK(states.back()==0);
+            }
+        }
+    }
 }
 
 TEST_CASE("unit power arrays respect each expansion's field boundaries", "[replay][power-layout]") {

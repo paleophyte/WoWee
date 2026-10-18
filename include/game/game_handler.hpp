@@ -1622,7 +1622,7 @@ public:
     using GameObjectCustomAnimCallback = std::function<void(uint64_t guid, uint32_t animId)>;
     void setGameObjectCustomAnimCallback(GameObjectCustomAnimCallback cb) { gameObjectCustomAnimCallback_ = std::move(cb); }
 
-    // GameObject state change callback (triggered when GAMEOBJECT_BYTES_1 updates - state byte changes)
+    // GameObject state callback (separate TBC STATE or packed BYTES_1 on other profiles)
     // goState: 0=READY(closed), 1=OPEN, 2=DESTROYED
     using GameObjectStateCallback = std::function<void(uint64_t guid, uint8_t goState)>;
     void setGameObjectStateCallback(GameObjectStateCallback cb) { gameObjectStateCallback_ = std::move(cb); }
