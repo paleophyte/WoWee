@@ -23,6 +23,17 @@ local function unhex(text)
 end
 
 function Activity:capability(prefix, text, sender, player, control)
+    if prefix == 'WIDLEGCAP' then
+        if not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 100 then return false end
+        local id, generation = text:match('^1\t([%w_-]+)\t(%d+)\tgrind_activity_1$')
+        if not id or id ~= control.ackId or tonumber(generation) ~= control.generation then
+            self.capabilityRejected = 'grind capability does not match accepted control reply'
+            return false
+        end
+        self.grindCapabilityRequest, self.grindCapabilityGeneration = id, tonumber(generation)
+        self.grindSupported = self.capabilityRequest == id and self.capabilityGeneration == tonumber(generation)
+        return true
+    end
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
         type(text) ~= 'string' or #text > 160 then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
@@ -34,16 +45,18 @@ function Activity:capability(prefix, text, sender, player, control)
     end
     self.supported = true
     self.capabilityRequest, self.capabilityGeneration = id, tonumber(generation)
+    self.grindSupported = self.grindCapabilityRequest == id and self.grindCapabilityGeneration == tonumber(generation)
     return true
 end
 
 function Activity:request(generation, now)
     self.sequence = self.sequence + 1
     local id = self.nonce .. '_a' .. self.sequence
-    self.pending = {id = id, generation = generation, sentAt = now, parts = {}}
+    local grindActivity = self.grindSupported and self.grindCapabilityGeneration == generation
+    self.pending = {id = id, generation = generation, sentAt = now, parts = {}, grindActivity = grindActivity}
     self.lastRequest, self.requestedAt = id .. ' generation ' .. generation, now
     self.failure = nil
-    return '.bot idle ' .. id .. ' snapshot ' .. generation
+    return '.bot idle ' .. id .. ' snapshot ' .. generation .. (grindActivity and ' grind_1' or '')
 end
 
 function Activity:reject(reason, now)
@@ -73,7 +86,7 @@ end
 
 local states = {off=true, manual=true, combat=true, non_combat=true, dead=true, reaction=true, unknown=true}
 local kinds = {none=true, quest_offer=true, quest_turnin=true, quest_objective=true,
-    trainer=true, vendor=true, repair=true, social=true, other=true}
+    trainer=true, vendor=true, repair=true, social=true, other=true, grind=true}
 local statuses = {none=true, preparing=true, ready=true, traveling=true, working=true, cooldown=true, expired=true}
 local objectives = {none=true, kill=true, creature_loot=true, object_loot=true, vendor_item=true, spell=true, interact=true}
 local interactions = {none=true, npc=true, object=true, player=true}
@@ -97,6 +110,7 @@ function Activity.decode(body)
         not s.interactionName or not s.task or not s.executed then return end
     if s.kind:match('^quest_') and s.questId == 0 then return end
     if s.kind == 'quest_objective' and s.objective < 0 then return end
+    if s.kind == 'grind' and (s.mode ~= 'bot' or s.questId ~= 0 or s.objective ~= -1 or s.objectiveType ~= 'none' or s.entry <= 0) then return end
     if s.mode == 'bot' and (s.state == 'manual' or s.state == 'off') then return end
     return s
 end
@@ -129,13 +143,15 @@ function Activity:receive(prefix, text, sender, player, generation, now)
     local snapshot = Activity.decode(table.concat(p.parts))
     self.pending = nil
     if not snapshot then self.failure = 'Invalid activity reply'; return nil, true end
+    if snapshot.kind == 'grind' and not p.grindActivity then self.failure = 'Unrequested grind activity'; return nil, true end
+    snapshot.grindActivity = p.grindActivity == true
     self.failure = nil
     self.completedAt = now
     return snapshot, true
 end
 
 -- A vendor destination permits several kinds of shopping, not just selling.
-local goalVerbs = {trainer='Train at ', vendor='Visit vendor: ', repair='Repair at ', social='Social visit: '}
+local goalVerbs = {grind='Grind for XP or gold: ', trainer='Train at ', vendor='Visit vendor: ', repair='Repair at ', social='Social visit: '}
 local taskNames = {
     ['rpg buy']='Buy items', ['rpg sell']='Sell items', ['rpg repair']='Repair gear',
     ['rpg train']='Train skills', ['rpg start quest']='Accept quests', ['rpg end quest']='Turn in quests',
@@ -171,6 +187,7 @@ end
 
 function Activity.apply(model, s, now)
     model.typed, model.aiState, model.objectiveType = true, s.state, s.objectiveType
+    model.grindActivity = s.grindActivity == true
     model.kind = s.kind == 'quest_objective' and 'questobjective' or s.kind
     model.goal = (goalVerbs[s.kind] or '') .. (s.goal ~= '' and s.goal or 'No destination')
     model.status, model.distance = s.status, s.distance >= 0 and s.distance or nil
