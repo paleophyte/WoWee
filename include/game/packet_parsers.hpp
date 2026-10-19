@@ -58,6 +58,9 @@ public:
     // Classic: none, TBC: u8, WotLK: u16.
     [[nodiscard]] virtual uint8_t movementFlags2Size() const { return 2; }
 
+    // The mover GUID prefix is packed, but TBC's embedded transport GUID is not.
+    [[nodiscard]] virtual bool movementTransportGuidIsPacked() const { return true; }
+
     // Wire-format movement flag that gates transport data in MSG_MOVE_* payloads.
     // WotLK/TBC: 0x200, Classic/Turtle: 0x02000000.
     [[nodiscard]] virtual uint32_t wireOnTransportFlag() const { return 0x00000200; }
@@ -375,6 +378,7 @@ class WotlkPacketParsers : public PacketParsers {
 class TbcPacketParsers : public PacketParsers {
 public:
     [[nodiscard]] uint8_t movementFlags2Size() const override { return 1; }
+    [[nodiscard]] bool movementTransportGuidIsPacked() const override { return false; }
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;
     void writeMovementPayload(network::Packet& packet, const MovementInfo& info) override;
     network::Packet buildMovementPacket(LogicalOpcode opcode,
@@ -472,6 +476,7 @@ public:
 class ClassicPacketParsers : public TbcPacketParsers {
 public:
     [[nodiscard]] uint8_t movementFlags2Size() const override { return 0; }
+    [[nodiscard]] bool movementTransportGuidIsPacked() const override { return true; }
     [[nodiscard]] uint32_t wireOnTransportFlag() const override { return 0x02000000; }
     bool parseCharEnum(network::Packet& packet, CharEnumResponse& response) override;
     bool parseMovementBlock(network::Packet& packet, UpdateBlock& block) override;

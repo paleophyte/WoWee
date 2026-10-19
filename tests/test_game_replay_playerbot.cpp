@@ -9,9 +9,12 @@
 #include "addons/lua_handler_globals.hpp"
 #include <imgui.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <limits>
+#include "game/transport_manager.hpp"
 extern "C" {
 #include <lua.h>
 }
@@ -118,6 +121,197 @@ size_t botCommandCount(Session& session, const std::string& command) {
 }
 
 } // namespace
+
+TEST_CASE("angle normalization terminates for corrupt and multi-turn wire values",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::core::coords;
+    for (float angle : {0.0f, PI, -PI, 10.0f, -10.0f, 1e30f, -1e30f,
+                        std::numeric_limits<float>::max()}) {
+        const auto normalized = normalizeAngleRad(angle);
+        CHECK(std::isfinite(normalized));
+        CHECK(normalized >= -PI);
+        CHECK(normalized <= PI);
+        CHECK(normalizeAngleRad(normalized) == normalized);
+    }
+    CHECK(normalizeAngleRad(PI) == PI);
+    CHECK(normalizeAngleRad(-PI) == -PI);
+    CHECK(normalizeAngleRad(10) == Catch::Approx(10 - TWO_PI * 2));
+    for (float angle : {std::numeric_limits<float>::infinity(),
+                        -std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::quiet_NaN()}) {
+        CHECK(normalizeAngleRad(angle) == 0);
+    }
+}
+
+namespace {
+constexpr uint64_t kDockPassenger = 0x1234;
+constexpr uint64_t kDockFerry = 0x1fc000001235ull;
+// A normal 0.750006-radian deck facing. With the old packed-GUID read, its
+// low byte becomes the exponent of the misaligned local facing (>1e22),
+// reproducing the infinite normalization loop with entirely finite wire data.
+constexpr float kDockLocalYaw = std::bit_cast<float>(0x3f400065u);
+
+// CMaNGOS TBC MovementInfo::Write (Unit.cpp) and ObjectGuid's ByteBuffer
+// operator (ObjectGuid.cpp): packed mover prefix, raw embedded transport GUID.
+// The later expansions use a packed embedded GUID. Do not use the client's
+// movement writer as the oracle for incoming bytes.
+Packet dockMovement(const char* expansion, bool aboard = true, float yaw = 1.25f,
+                    float localYaw = kDockLocalYaw, float x = -3741.0f) {
+    const bool tbc = std::string(expansion) == "tbc";
+    const bool classic = std::string(expansion) == "classic";
+    Packet p(wowee::game::wireOpcode(Opcode::MSG_MOVE_STOP));
+    p.writePackedGuid(kDockPassenger);
+    p.writeUInt32(aboard ? (classic ? 0x02000000 : 0x200) : 0);
+    if (tbc) p.writeUInt8(0);
+    else if (!classic) p.writeUInt16(0);
+    p.writeUInt32(1000);
+    p.writeFloat(x); p.writeFloat(-744); p.writeFloat(11); p.writeFloat(yaw);
+    if (aboard) {
+        if (tbc) p.writeUInt64(kDockFerry);
+        else p.writePackedGuid(kDockFerry);
+        p.writeFloat(7); p.writeFloat(13); p.writeFloat(5); p.writeFloat(localYaw);
+        if (!classic) p.writeUInt32(700);
+        if (!classic && !tbc) p.writeUInt8(0); // WotLK seat
+    }
+    p.writeUInt32(0); // fall time
+    return p;
+}
+
+std::shared_ptr<wowee::game::Player> dockPassenger(Session& s) {
+    auto p = std::make_shared<wowee::game::Player>(kDockPassenger);
+    p->setPosition(10, 20, 30, 0.5f);
+    s.handler().getEntityManager().addEntity(kDockPassenger, p);
+    return p;
+}
+}
+
+TEST_CASE("remote ferry passengers decode the expansion-specific GUID without losing world position",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::core::coords;
+    for (const char* expansion : {"classic", "tbc", "wotlk"}) {
+        CAPTURE(expansion);
+        Session s(expansion);
+        auto passenger = dockPassenger(s);
+        REQUIRE(s.handler().getTransportManager());
+        s.receive(dockMovement(expansion)); // passenger arrives before ferry
+        CHECK(passenger->getX() == -744);
+        CHECK(passenger->getY() == -3741);
+        CHECK(passenger->getZ() == 11);
+        CHECK(passenger->getOrientation() == Catch::Approx(serverToCanonicalYaw(1.25f)));
+        auto& attachments = s.handler().transportAttachmentsRef();
+        REQUIRE(attachments.count(kDockPassenger) == 1);
+        CHECK(attachments.at(kDockPassenger).transportGuid == kDockFerry);
+        CHECK(attachments.at(kDockPassenger).localOffset.x == 13);
+        CHECK(attachments.at(kDockPassenger).localOffset.y == 7);
+
+        // A registered M2 uses translation; the pending attachment must resolve
+        // to the actual ferry rather than a shifted/truncated identifier.
+        s.handler().getTransportManager()->loadPathFromNodes(1, {{0, 0, 0}}, false);
+        s.handler().getTransportManager()->registerTransport(
+            kDockFerry, 0, 1, {100, 200, 30}, 0, 0, true);
+        REQUIRE(s.handler().getTransportManager()->getTransport(kDockFerry));
+        s.receive(dockMovement(expansion));
+        CHECK(passenger->getX() == 113);
+        CHECK(passenger->getY() == 207);
+        CHECK(passenger->getZ() == 35);
+        s.receive(dockMovement(expansion, false));
+        CHECK(attachments.count(kDockPassenger) == 0);
+        CHECK(passenger->getY() == -3741);
+    }
+}
+
+TEST_CASE("invalid remote movement preserves the last valid passenger state",
+          "[replay][movement][dock-movement]") {
+    Session s("tbc");
+    auto passenger = dockPassenger(s);
+    auto valid = dockMovement("tbc");
+    s.receive(valid);
+    for (size_t length = 0; length < valid.getSize() - 4; ++length) {
+        CAPTURE(length);
+        Packet truncated(valid.getOpcode(), std::vector<uint8_t>(
+            valid.getData().begin(), valid.getData().begin() + length));
+        s.receive(truncated);
+        CHECK(passenger->getX() == -744);
+        CHECK(passenger->getY() == -3741);
+        CHECK(s.handler().transportAttachmentsRef().at(kDockPassenger).transportGuid == kDockFerry);
+    }
+    for (float invalid : {std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN()}) {
+        s.receive(dockMovement("tbc", false, invalid));
+        s.receive(dockMovement("tbc", true, 1.25f, invalid));
+        s.receive(dockMovement("tbc", false, 1.25f, 0.75f, invalid));
+        CHECK(passenger->getY() == -3741);
+        CHECK(passenger->getOrientation() == Catch::Approx(
+            wowee::core::coords::serverToCanonicalYaw(1.25f)));
+        CHECK(s.handler().transportAttachmentsRef().count(kDockPassenger) == 1);
+    }
+    // A finite but enormous angle also used to spin forever. It now completes
+    // the actual production dispatch and a following ordinary packet still works.
+    s.receive(dockMovement("tbc", false, 1e30f));
+    CHECK(std::isfinite(passenger->getOrientation()));
+    s.receive(dockMovement("tbc", false));
+    CHECK(passenger->getOrientation() == Catch::Approx(
+        wowee::core::coords::serverToCanonicalYaw(1.25f)));
+}
+
+TEST_CASE("TBC login passenger blocks leave following object fields aligned",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    Packet p(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+    p.writeUInt32(2); p.writeUInt8(1);
+    p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+    p.writePackedGuid(kDockPassenger);
+    p.writeUInt8(static_cast<uint8_t>(ObjectType::PLAYER));
+    p.writeUInt8(0x20); // LIVING
+    auto movement = dockMovement("tbc");
+    movement.readPackedGuid();
+    const auto offset = movement.getReadPos();
+    p.writeBytes(movement.getData().data() + offset, movement.getSize() - offset);
+    for (float speed : {2.5f, 7.0f, 4.5f, 4.7f, 2.5f, 7.0f, 4.5f, 3.14f}) p.writeFloat(speed);
+    p.writeUInt8(0); // no value fields
+    constexpr uint64_t other = 0xf110000001000123ull;
+    p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+    p.writePackedGuid(other);
+    p.writeUInt8(static_cast<uint8_t>(ObjectType::GAMEOBJECT));
+    p.writeUInt8(0x40); // HAS_POSITION
+    p.writeFloat(-3740); p.writeFloat(-743); p.writeFloat(12); p.writeFloat(1);
+    p.writeUInt8(1); p.writeUInt32(1u << fieldIndex(UF::OBJECT_FIELD_ENTRY));
+    p.writeUInt32(176495);
+    auto parsed = p;
+    UpdateObjectData data;
+    REQUIRE(s.handler().getPacketParsers()->parseUpdateObject(parsed, data));
+    REQUIRE(data.blocks.size() == 2);
+    CHECK(parsed.getRemainingSize() == 0);
+    CHECK(data.blocks[0].transportGuid == kDockFerry);
+    CHECK(data.blocks[0].transportO == kDockLocalYaw);
+    CHECK(data.blocks[0].runSpeed == 7);
+    CHECK(data.blocks[1].guid == other);
+    const auto entry = data.blocks[1].fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
+    REQUIRE(entry != data.blocks[1].fields.end());
+    CHECK(entry->second == 176495);
+    s.receive(p);
+    REQUIRE(s.handler().getEntityManager().getEntity(other));
+    CHECK(s.handler().getEntityManager().getEntity(other)->getX() == -743);
+}
+
+TEST_CASE("TBC outgoing passenger movement matches the server raw transport GUID layout",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    MovementInfo info{};
+    info.flags = 0x200; info.time = 1000;
+    info.x = -3741; info.y = -744; info.z = 11; info.orientation = 1.25f;
+    info.transportGuid = kDockFerry;
+    info.transportX = 7; info.transportY = 13; info.transportZ = 5;
+    info.transportO = kDockLocalYaw; info.transportTime = 700;
+    auto packet = s.handler().getPacketParsers()->buildMovementPacket(Opcode::MSG_MOVE_STOP, info);
+    auto incoming = dockMovement("tbc");
+    incoming.readPackedGuid();
+    CHECK(packet.getData() == std::vector<uint8_t>(incoming.getData().begin() + incoming.getReadPos(),
+                                                  incoming.getData().end()));
+}
 
 TEST_CASE("own TBC splines follow intermediate path corners",
           "[replay][movement][playerbot]") {

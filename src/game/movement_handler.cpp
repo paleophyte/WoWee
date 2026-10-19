@@ -1251,6 +1251,11 @@ void MovementHandler::handleMoveSetSpeed(network::Packet& packet) {
 }
 
 void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
+    const auto malformed = [&packet]() {
+        LOG_WARNING("Ignoring malformed remote movement: opcode=0x", std::hex,
+                    packet.getOpcode(), std::dec, " size=", packet.getSize());
+    };
+    if (!packet.hasFullPackedGuid()) { malformed(); return; }
     // Same packed-guid mismatch found and fixed for MSG_MOVE_TELEPORT_ACK:
     // CMaNGOS sends a packed guid here on TBC too, not a raw UInt64. Reading
     // it as raw corrupted moverGuid, so getEntity(moverGuid) below always
@@ -1264,8 +1269,10 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     }
 
     MovementInfo info = {};
+    const auto* parsers = owner_.getPacketParsers();
+    const uint8_t flags2Size = parsers ? parsers->movementFlags2Size() : 2;
+    if (!packet.hasRemaining(24 + flags2Size)) { malformed(); return; }
     info.flags = packet.readUInt32();
-    uint8_t flags2Size = owner_.getPacketParsers() ? owner_.getPacketParsers()->movementFlags2Size() : 2;
     if (flags2Size == 2) info.flags2 = packet.readUInt16();
     else if (flags2Size == 1) info.flags2 = packet.readUInt8();
     info.time = packet.readUInt32();
@@ -1279,7 +1286,14 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
     uint64_t transportGuid = 0;
     float tLocalX = 0, tLocalY = 0, tLocalZ = 0, tLocalO = 0;
     if (onTransport) {
-        transportGuid = packet.readPackedGuid();
+        const bool packed = !parsers || parsers->movementTransportGuidIsPacked();
+        if (packed ? !packet.hasFullPackedGuid() : !packet.hasRemaining(8)) {
+            malformed(); return;
+        }
+        transportGuid = packed ? packet.readPackedGuid() : packet.readUInt64();
+        const size_t transportTail = 16 + (flags2Size >= 1 ? 4 : 0) +
+            (flags2Size >= 2 ? 1 + ((info.flags2 & 0x0200) ? 4 : 0) : 0);
+        if (!packet.hasRemaining(transportTail)) { malformed(); return; }
         tLocalX = packet.readFloat();
         tLocalY = packet.readFloat();
         tLocalZ = packet.readFloat();
@@ -1295,6 +1309,15 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
         }
     }
 
+    // Packet's scalar readers zero-fill short reads; reject incomplete or
+    // non-finite input before changing attachments, interpolation or callbacks.
+    if (!std::isfinite(info.x) || !std::isfinite(info.y) ||
+        !std::isfinite(info.z) || !std::isfinite(info.orientation) ||
+        (onTransport && (!std::isfinite(tLocalX) || !std::isfinite(tLocalY) ||
+                         !std::isfinite(tLocalZ) || !std::isfinite(tLocalO)))) {
+        malformed(); return;
+    }
+
     auto entity = owner_.getEntityManager().getEntity(moverGuid);
     if (!entity) {
         return;
@@ -1308,8 +1331,12 @@ void MovementHandler::handleOtherPlayerMovement(network::Packet& packet) {
             transportGuid, glm::vec3(tLocalX, tLocalY, tLocalZ));
         owner_.setTransportAttachment(moverGuid, entity->getType(), transportGuid, localCanonical, true,
                                core::coords::serverToCanonicalYaw(tLocalO));
-        glm::vec3 worldPos = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
-        canonical = worldPos;
+        // A passenger can arrive before its ferry. Retain the packet's absolute
+        // position until that transport exists, rather than treating deck-local
+        // coordinates as a position near the world's origin.
+        if (owner_.getTransportManager()->getTransport(transportGuid)) {
+            canonical = owner_.getTransportManager()->getPlayerWorldPosition(transportGuid, localCanonical);
+        }
     } else if (!onTransport) {
         owner_.clearTransportAttachment(moverGuid);
     }

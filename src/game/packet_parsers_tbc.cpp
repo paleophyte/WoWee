@@ -83,10 +83,12 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
 
         // Transport data
         if (moveFlags & TbcMoveFlags::ON_TRANSPORT) {
-            if (rem() < 1) return false;
+            if (rem() < 28) return false; // raw uint64 GUID, 4 floats, time
             block.onTransport = true;
-            block.transportGuid = packet.readPackedGuid();
-            if (rem() < 20) return false; // 4 floats + 1 uint32
+            // CMaNGOS MovementInfo::Write writes ObjectGuid as uint64 here.
+            // Only the outer mover GUID is packed. Confusing them shifts every
+            // remaining movement field and the following update blocks.
+            block.transportGuid = packet.readUInt64();
             block.transportX = packet.readFloat();
             block.transportY = packet.readFloat();
             block.transportZ = packet.readFloat();
@@ -240,8 +242,8 @@ void TbcPacketParsers::writeMovementPayload(network::Packet& packet, const Movem
 
     // Transport data (TBC ON_TRANSPORT = 0x200, same bit as WotLK)
     if (info.flags & TbcMoveFlags::ON_TRANSPORT) {
-        // Packed transport GUID
-        packet.writePackedGuid(info.transportGuid);
+        // MovementInfo::Read expects the embedded transport GUID as uint64.
+        packet.writeUInt64(info.transportGuid);
 
         // Transport local position
         packet.writeFloat(info.transportX);

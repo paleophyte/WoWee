@@ -46,8 +46,14 @@ inline glm::vec3 canonicalToServer(const glm::vec3& canonical) {
 
 // Normalize angle to [-PI, PI].
 inline float normalizeAngleRad(float a) {
-    while (a > PI) a -= TWO_PI;
-    while (a < -PI) a += TWO_PI;
+    // Subtracting one turn can stop changing a large float altogether. Wire
+    // data must never turn angle conversion into an unbounded main-thread loop.
+    // Keep already-normalized values (including the two signed endpoints) exact.
+    if (!std::isfinite(a)) return 0.0f;
+    if (a >= -PI && a <= PI) return a;
+    a = std::fmod(a, TWO_PI);
+    if (a > PI) a -= TWO_PI;
+    if (a < -PI) a += TWO_PI;
     return a;
 }
 
