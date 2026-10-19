@@ -210,3 +210,54 @@ do
     event(WoweeBotController,'PLAYER_ENTERING_WORLD')
 end
 print('Native frames: negotiated grind label/On, container Off and Manual handoff passed')
+
+-- Real policy frames and request events: no implicit control toggle or manual rejection.
+do
+ local oldTime,oldName,oldSend=GetTime,UnitName,SendChatMessage
+ local oldGroup,oldGuild,oldTrade,oldHide=DeclineGroup,DeclineGuild,CloseTrade,StaticPopup_Hide
+ local clock,sent,declined=0,{}, {group=0,guild=0,trade=0}
+ GetTime=function()return clock end
+ UnitName=function(u)if u=='player'then return 'Jizzle'end return oldName(u)end
+ SendChatMessage=function(text)sent[#sent+1]=text end
+ DeclineGroup=function()declined.group=declined.group+1 end
+ DeclineGuild=function()declined.guild=declined.guild+1 end
+ CloseTrade=function()declined.trade=declined.trade+1 end
+ StaticPopup_Hide=function()end
+ local event=WoweeBotController:GetScript('OnEvent')
+ local function tick()WoweeBotController:GetScript('OnUpdate')()end
+ local function receive(prefix,text)event(WoweeBotController,'CHAT_MSG_ADDON',prefix,text,'WHISPER','Jizzle')end
+ local function id(verb)
+  for i=#sent,1,-1 do local v=sent[i]:match('^%.bot idle ([%w_-]+) '..verb..' ');if v then return v end end
+  error('No '..verb..' request')
+ end
+ -- status has no trailing argument, so identify it separately.
+ local function statusId()
+  for i=#sent,1,-1 do local v=sent[i]:match('^%.bot idle ([%w_-]+) status$');if v then return v end end
+  error('No status request')
+ end
+ event(WoweeBotController,'PLAYER_ENTERING_WORLD');tick()
+ receive('WIDLE','1\t'..statusId()..'\tok\tmanual\t44\t0\tnone')
+ receive('WIDLECAP','1\t'..statusId()..'\t44\trequests_1')
+ WoweeBotPoliciesFrame:Show();tick()
+ receive('WIDLEREQ','1\t'..id('requests')..'\t44\tok\t7\tstored\tnone')
+ assert(WoweeBotRequestguildState:GetText()=='Guild invites: Reject (server confirmed)')
+ assert(WoweeBotRequestgroupToggle:IsEnabled()==1)
+ WoweeBotRequestgroupToggle:GetScript('OnClick')();tick()
+ assert(sent[#sent]:find('group_off',1,true))
+ receive('WIDLEREQ','1\t'..id('requests')..'\t44\tok\t5\tstored\tnone')
+ assert(WoweeBotRequestgroupState:GetText()=='Group invites: Allow (server confirmed)')
+ for _,v in ipairs({'PARTY_INVITE_REQUEST','GUILD_INVITE_REQUEST','TRADE_REQUEST'})do event(WoweeBotController,v,'Other')end
+ assert(declined.group==0 and declined.guild==0 and declined.trade==0)
+ for _,v in ipairs(sent)do assert(not v:find(' control ',1,true))end
+ SlashCmdList.WOWEEBOTPLAY('bot');tick()
+ receive('WIDLE','1\t'..id('control')..'\tok\tbot\t45\t0\tnone');tick()
+ receive('WIDLEREQ','1\t'..id('requests')..'\t45\tok\t5\tstored\tnone')
+ for _,v in ipairs({'PARTY_INVITE_REQUEST','GUILD_INVITE_REQUEST','TRADE_REQUEST'})do event(WoweeBotController,v,'Other')end
+ assert(declined.group==0 and declined.guild==1 and declined.trade==1)
+ clock=30 -- stale bot confirmation cannot reject on the addon's behalf
+ event(WoweeBotController,'GUILD_INVITE_REQUEST','Other');assert(declined.guild==1)
+ GetTime,UnitName,SendChatMessage=oldTime,oldName,oldSend
+ DeclineGroup,DeclineGuild,CloseTrade,StaticPopup_Hide=oldGroup,oldGuild,oldTrade,oldHide
+ WoweeBotPoliciesFrame:Hide();event(WoweeBotController,'PLAYER_ENTERING_WORLD')
+end
+print('Incoming request policy UI, independent toggles, Manual preservation and bot event rejection passed')

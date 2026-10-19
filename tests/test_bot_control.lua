@@ -315,3 +315,41 @@ assert(stop:capability('WIDLECAP','1\tstop_1\t9\tcollection_1','Jizzle','Jizzle'
 assert(not stop.collectionStopSupported and not stop:collectionWarning('WIDLESTOP',sw,'Jizzle','Jizzle',1))
 assert(not stop:collectionWarning('WIDLECOL',sw,'Jizzle','Jizzle',1))
 print('Independent empty collection-stop fact scenarios passed')
+
+-- Incoming requests are independent, correlated, persisted server preferences.
+do
+ local c=Control.new('requests')
+ assert(c:update(0)=='.bot idle requests_1 status')
+ assert(c:receive('WIDLE','1\trequests_1\tok\tmanual\t4\t0\tnone','Jizzle','Jizzle',0))
+ assert(c:capability('WIDLECAP','1\trequests_1\t4\tactivity_1,requests_1','Jizzle','Jizzle'))
+ assert(c:update(1)=='.bot idle requests_2 requests 4 status')
+ local function reply(id,gen,result,mask,storage,reason,now,sender)
+  return c:receive('WIDLEREQ',table.concat({'1',id,tostring(gen),result,tostring(mask),storage,reason},'\t'),sender or 'Jizzle','Jizzle',now or 1)
+ end
+ assert(not reply('requests_2',4,'ok',7,'stored','none',1,'Other'))
+ assert(not reply('other',4,'ok',7,'stored','none'))
+ assert(not reply('requests_2',4,'ok',8,'stored','none'))
+ assert(not reply('requests_2',4,'ok',7,'unavailable','none'))
+ assert(reply('requests_2',4,'ok',7,'stored','none'))
+ assert(c:rejectsRequest('guild') and c:rejectsRequest('group') and c:rejectsRequest('trade'))
+ assert(not c:isBot(1)) -- saving policy never enables AI
+ c:wantRequest('group',false)
+ assert(c:update(2)=='.bot idle requests_3 requests 4 group_off')
+ assert(not reply('requests_3',4,'ok',7,'stored','none',2))
+ assert(reply('requests_3',4,'ok',5,'stored','none',2))
+ assert(c:rejectsRequest('guild') and not c:rejectsRequest('group') and c:rejectsRequest('trade'))
+ c:wantRequest('trade',false);assert(c:update(3)=='.bot idle requests_4 requests 4 trade_off')
+ assert(reply('requests_4',4,'ok',1,'stored','none',3))
+ c:wantRequest('guild',false);assert(c:update(4)=='.bot idle requests_5 requests 4 guild_off')
+ c:want('bot');assert(not c.requestsIntent)
+ assert(c:update(4)=='.bot idle requests_6 control 4 bot')
+ assert(not reply('requests_5',4,'ok',0,'stored','none',4)) -- old toggle cannot overtake handoff
+ assert(c:receive('WIDLE','1\trequests_6\tok\tbot\t5\t0\tnone','Jizzle','Jizzle',4))
+ assert(c:update(5)=='.bot idle requests_7 requests 5 status')
+ assert(reply('requests_7',5,'ok',1,'stored','none',5))
+ c:wantRequest('guild',false);assert(c:update(6)=='.bot idle requests_8 requests 5 guild_off')
+ assert(reply('requests_8',6,'error',1,'stored','stale_generation',6))
+ assert(not c.requestsIntent and not c.requestsAt and not c.confirmedAt)
+ assert(c:update(7)=='.bot idle requests_9 status') -- recover by observing, never replay the edit
+end
+print('Incoming request policy correlation, independent bits, handoffs and stale recovery passed')

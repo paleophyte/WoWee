@@ -36,6 +36,7 @@ function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
 local driver = CreateFrame('Frame', 'WoweeBotController', UIParent)
+local rejectedPopup
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
 panel:SetSize(690, 258)
 panel:SetPoint('BOTTOM', UIParent, 'BOTTOM', 0, 138)
@@ -308,7 +309,7 @@ shortcut('Spellbook', 400, function() if ToggleSpellBook then ToggleSpellBook(BO
 shortcut('Map', 496, function() if ToggleWorldMap then ToggleWorldMap() end end)
 
 local policies = CreateFrame('Frame', 'WoweeBotPoliciesFrame', UIParent)
-policies:SetSize(430, 390); policies:SetPoint('CENTER', UIParent, 'CENTER', 0, 0)
+policies:SetSize(430, 650); policies:SetPoint('CENTER', UIParent, 'CENTER', 0, 0)
 policies:SetFrameStrata('DIALOG'); policies:EnableMouse(true)
 policies:SetBackdrop({bgFile='Interface\\Tooltips\\UI-Tooltip-Background',
     edgeFile='Interface\\Tooltips\\UI-Tooltip-Border',tile=true,tileSize=16,edgeSize=16,
@@ -354,6 +355,28 @@ local fishingToggle = policyButton('WoweeBotFishingToggle','Waiting...',18,-350,
 end)
 policyButton('WoweeBotFishingRefresh','Refresh',278,-350,130,function()
     controller:refreshFishing()
+    if not controller:fresh(GetTime()) or controller.failure then controller:refresh() end
+    drawPolicy()
+end)
+
+policyText(nil,'GameFontNormal',-396,24):SetText('Incoming requests — bot control only')
+policyText(nil,'GameFontHighlightSmall',-424,32):SetText('Each policy defaults to Reject. Manual control leaves incoming requests for you to handle.')
+local requestRows = {}
+for index, entry in ipairs({{'guild','Guild invites'}, {'group','Group invites'}, {'trade','Trade requests'}}) do
+    local kind, title, y = entry[1], entry[2], -468 - (index-1)*44
+    local label = policyText('WoweeBotRequest' .. kind .. 'State','GameFontNormal',y,38)
+    label:SetSize(250,38)
+    local button = policyButton('WoweeBotRequest' .. kind .. 'Toggle','Waiting...',278,y,130,function()
+        local now = GetTime()
+        if inWorld and controller:fresh(now) and controller:requestsFresh(now) and not controller.intent and not controller.failure and not controller.requestsIntent then
+            controller:wantRequest(kind,not controller:rejectsRequest(kind)); drawPolicy()
+        end
+    end)
+    requestRows[#requestRows+1] = {kind=kind,title=title,label=label,button=button}
+end
+local requestsDetail=policyText('WoweeBotRequestsDetail','GameFontHighlightSmall',-604,32)
+policyButton('WoweeBotRequestsRefresh','Refresh',278,-598,130,function()
+    controller:refreshRequests()
     if not controller:fresh(GetTime()) or controller.failure then controller:refresh() end
     drawPolicy()
 end)
@@ -417,6 +440,19 @@ drawPolicy = function()
     end
     fishingToggle:SetText(fishingPending and 'Waiting...' or fishingFresh and
         (controller.fishingEnabled and 'Disable fishing' or 'Allow fishing') or 'Awaiting confirmed policy')
+    local freshRequests = inWorld and controller:fresh(now) and not controller.failure and controller:requestsFresh(now)
+    local pendingRequests = controller.requestsIntent or (controller.pending and controller.pending.verb == 'requests')
+    for _, row in ipairs(requestRows) do
+        row.button:Disable()
+        local state = not inWorld and 'log in first' or not controller.requestsSupported and 'unavailable' or
+            pendingRequests and 'waiting for confirmation' or controller.requestsFailure and 'unconfirmed' or
+            freshRequests and (controller:rejectsRequest(row.kind) and 'Reject' or 'Allow') or 'asking the server'
+        row.label:SetText(row.title .. ': ' .. state .. (freshRequests and not pendingRequests and ' (server confirmed)' or ''))
+        row.button:SetText(freshRequests and not pendingRequests and (controller:rejectsRequest(row.kind) and 'Allow' or 'Reject') or 'Waiting...')
+        if freshRequests and not pendingRequests and not controller.intent then row.button:Enable() end
+    end
+    requestsDetail:SetSize(250,38)
+    requestsDetail:SetText(controller.requestsFailure or (controller.requestsSupported and 'Saved per character. Applies only in bot control.' or 'Server request-policy support required.'))
 
 end
 local policyLauncher = CreateFrame('Button','WoweeBotPoliciesLauncher',panel,'UIPanelButtonTemplate')
@@ -443,6 +479,14 @@ end)
 driver:SetScript('OnUpdate', function()
     local now = GetTime()
     lastDriverTick = now
+    -- FrameXML may create its popup after our event handler. Hide that same
+    -- rejected request once more on the following tick, only in the same bot epoch.
+    if rejectedPopup then
+        if inWorld and controller:isBot(now) and rejectedPopup.generation == controller.generation and StaticPopup_Hide then
+            StaticPopup_Hide(rejectedPopup.name)
+        end
+        rejectedPopup = nil
+    end
     if inWorld then
         if training then training:expire(now,controller.generation) end
         if trainingPlan then trainingPlan:expire(now,controller.generation) end
@@ -469,6 +513,7 @@ driver:SetScript('OnUpdate', function()
             if controller:isBot(now) and activity.failure then WoweeBotReportStatusProblem('activity', activity.failure) end
             if controller.socialFailure then WoweeBotReportStatusProblem('social', controller.socialFailure) end
             if controller.fishingFailure then WoweeBotReportStatusProblem('fishing', controller.fishingFailure) end
+            if controller.requestsFailure then WoweeBotReportStatusProblem('requests', controller.requestsFailure) end
             if recovery and recovery.supported and recovery.failure then WoweeBotReportStatusProblem('recovery',recovery.failure) end
         end
     end
@@ -487,7 +532,21 @@ driver:SetScript('OnEvent', function(self, event, ...)
             panel:ClearAllPoints(); panel:SetPoint(p[1], UIParent, p[2], p[3], p[4])
         end
         if settings.enabled == false then panel:Hide() end
+    elseif event == 'PARTY_INVITE_REQUEST' or event == 'GUILD_INVITE_REQUEST' or event == 'TRADE_REQUEST' then
+        local kind = event == 'PARTY_INVITE_REQUEST' and 'group' or event == 'GUILD_INVITE_REQUEST' and 'guild' or 'trade'
+        local now = GetTime()
+        if inWorld and controller:isBot(now) and controller:requestsFresh(now) and controller:rejectsRequest(kind) then
+            local decline
+            if kind == 'group' then decline = DeclineGroup
+            elseif kind == 'guild' then decline = DeclineGuild
+            else decline = CloseTrade or CancelTrade end
+            if decline then decline() end
+            local popup = kind == 'group' and 'PARTY_INVITE' or kind == 'guild' and 'GUILD_INVITE' or 'TRADE'
+            if StaticPopup_Hide then StaticPopup_Hide(popup) end
+            rejectedPopup = {name=popup,generation=controller.generation}
+        end
     elseif event == 'PLAYER_ENTERING_WORLD' then
+        rejectedPopup = nil
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
         training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery();itemUse=newItemUse()
@@ -514,6 +573,9 @@ driver:SetScript('OnEvent', function(self, event, ...)
         end
         if received and prefix == 'WIDLEPOL' and not controller.socialFailure and WoweeBotReportStatusProblem then
             WoweeBotReportStatusProblem('social', nil, 'Social Detours preference confirmed by the server.')
+        end
+        if received and prefix == 'WIDLEREQ' and not controller.requestsFailure and WoweeBotReportStatusProblem then
+            WoweeBotReportStatusProblem('requests', nil, 'Incoming request policies confirmed by the server.')
         end
         if received and prefix == 'WIDLEFISH' and not controller.fishingFailure and WoweeBotReportStatusProblem then
             WoweeBotReportStatusProblem('fishing', nil, 'Fishing preference confirmed by the server.')
@@ -595,7 +657,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
     draw()
 end)
 for _, event in ipairs({'ADDON_LOADED', 'PLAYER_ENTERING_WORLD', 'PLAYER_LEAVING_WORLD',
-    'CHAT_MSG_ADDON', 'CHAT_MSG_SYSTEM', 'QUEST_LOG_UPDATE'}) do driver:RegisterEvent(event) end
+    'CHAT_MSG_ADDON', 'CHAT_MSG_SYSTEM', 'QUEST_LOG_UPDATE', 'PARTY_INVITE_REQUEST', 'GUILD_INVITE_REQUEST', 'TRADE_REQUEST'}) do driver:RegisterEvent(event) end
 
 local function diagnostic()
     local now = GetTime()

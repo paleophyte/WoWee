@@ -25,6 +25,7 @@ function Control:want(mode)
     self.desiredGrind = nil
     self.socialIntent, self.socialAt = nil, nil
     self.fishingIntent, self.fishingAt = nil, nil
+    self.requestsIntent, self.requestsAt = nil, nil
     self.recoverAt, self.recoveryDelay = nil, nil
 end
 
@@ -33,12 +34,13 @@ function Control:refresh()
     self.confirmedAt = nil
     -- Refresh only observes. It must not replay an old, unconfirmed mutation.
     self.intent, self.desiredGrind, self.recoverAt, self.recoveryDelay = nil, nil, nil, nil
-    self:refreshSocial(); self:refreshFishing()
+    self:refreshSocial(); self:refreshFishing(); self:refreshRequests()
 end
 
 function Control:fail(message, now)
     self.failure, self.pending = message, nil
     self.intent, self.desiredGrind, self.socialIntent, self.fishingIntent = nil, nil, nil, nil
+    self.requestsIntent = nil
     self.recoveryDelay = math.min((self.recoveryDelay or 15) * 2, 120)
     self.recoverAt = now + self.recoveryDelay
 end
@@ -72,6 +74,11 @@ function Control:update(now)
                 self.socialFailure, self.nextSocial = 'No policy confirmation', now + 30
                 return
             end
+            if p.verb == 'requests' then
+                self.pending, self.requestsIntent, self.requestsAt = nil, nil, nil
+                self.requestsFailure, self.nextRequests = 'No policy confirmation', now + 30
+                return
+            end
             if p.verb == 'fishing' then
                 self.pending, self.fishingIntent, self.fishingAt = nil, nil, nil
                 self.fishingFailure, self.nextFishing = 'No policy confirmation', now + 30
@@ -98,6 +105,9 @@ function Control:update(now)
     if self:fresh(now) and self.fishingSupported and self.fishingIntent ~= nil then
         return self:start('fishing', now, self.fishingIntent and 'on' or 'off')
     end
+    if self:fresh(now) and self.requestsSupported and self.requestsIntent then
+        return self:start('requests', now, self.requestsIntent)
+    end
     if self:isBot(now) and self.desiredGrind ~= nil and self.desiredGrind ~= self.grind then
         return self:start('grind', now, self.desiredGrind and 'on' or 'off')
     end
@@ -105,12 +115,16 @@ function Control:update(now)
     if self.socialSupported and now >= (self.nextSocial or 0) and not self:socialFresh(now) then
         return self:start('social', now, 'status')
     end
+    if self.requestsSupported and now >= (self.nextRequests or 0) and not self:requestsFresh(now) then
+        return self:start('requests', now, 'status')
+    end
     if self.fishingSupported and now >= (self.nextFishing or 0) and not self:fishingFresh(now) then
         return self:start('fishing', now, 'status')
     end
 end
 
 function Control:receive(prefix, text, sender, player, now)
+    if prefix == 'WIDLEREQ' then return self:receiveRequests(text, sender, player, now) end
     if prefix == 'WIDLEPOL' then return self:receiveSocial(text, sender, player, now) end
     if prefix == 'WIDLEFISH' then return self:receiveFishing(text, sender, player, now) end
     if prefix ~= 'WIDLE' then return false end
@@ -123,12 +137,12 @@ function Control:receive(prefix, text, sender, player, now)
         (result ~= 'ok' and result ~= 'error') or (mode ~= 'manual' and mode ~= 'bot') or
         not generation or generation < 1 or generation > 4294967295 then return self:reject('invalid control fields', now) end
     if not self.pending then return self:reject('no pending control request', now) end
-    if self.pending.verb == 'social' or self.pending.verb == 'fishing' then return self:reject('control reply while awaiting policy', now) end
+    if self.pending.verb == 'social' or self.pending.verb == 'fishing' or self.pending.verb == 'requests' then return self:reject('control reply while awaiting policy', now) end
     if id ~= self.pending.id then return self:reject('control request ' .. id .. ', expected ' .. self.pending.id, now) end
     if self.generation and generation < self.generation then
         return self:reject('control generation ' .. generation .. ', expected at least ' .. self.generation, now)
     end
-    if self.generation ~= generation then self:refreshSocial(); self:refreshFishing() end
+    if self.generation ~= generation then self:refreshSocial(); self:refreshFishing(); self:refreshRequests() end
     self.mode, self.generation, self.grind = mode, generation, grind == '1'
     self.ackId = id
     self.confirmedAt, self.nextStatus, self.pending = now, now + 8, nil
@@ -144,9 +158,11 @@ end
 
 function Control:capability(prefix, text, sender, player)
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
-        type(text) ~= 'string' or #text > 160 then return false end
+        type(text) ~= 'string' or #text > 240 then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id or id ~= self.ackId or tonumber(generation) ~= self.generation then return false end
+    self.requestsSupported = (',' .. features .. ','):find(',requests_1,', 1, true) ~= nil
+    if not self.requestsSupported then self.requestsAt, self.requestsIntent, self.requestsFailure = nil, nil, nil end
     self.warningSupported = (',' .. features .. ','):find(',warning_1,', 1, true) ~= nil
     self.collectionSupported = (',' .. features .. ','):find(',collection_1,', 1, true) ~= nil
     self.collectionStopSupported = (',' .. features .. ','):find(',collection_stop_1,', 1, true) ~= nil
@@ -280,6 +296,57 @@ function Control:receiveFishing(text, sender, player, now)
         self.fishingFailure, self.fishingAt = 'Policy rejected: ' .. reason, nil
     else
         self.fishingEnabled, self.fishingAt, self.fishingFailure = enabled == '1', now, nil
+    end
+    return true
+end
+
+local requestBits = {guild=1, group=2, trade=4}
+function Control:requestsFresh(now)
+    return self.requestsSupported and self.requestsAt and now - self.requestsAt <= self.FRESH_FOR and not self.requestsFailure
+end
+function Control:rejectsRequest(kind)
+    local bit = requestBits[kind]
+    return bit and self.requestsMask and math.floor(self.requestsMask / bit) % 2 == 1 or false
+end
+function Control:wantRequest(kind, enabled)
+    if not requestBits[kind] or type(enabled) ~= 'boolean' or not self.requestsSupported then return end
+    self.requestsIntent, self.requestsFailure = kind .. (enabled and '_on' or '_off'), nil
+    if self.pending and self.pending.verb == 'requests' then self.pending = nil end
+end
+function Control:refreshRequests()
+    self.requestsAt, self.requestsIntent, self.requestsFailure, self.nextRequests = nil, nil, nil, 0
+    if self.pending and self.pending.verb == 'requests' then self.pending = nil end
+end
+function Control:receiveRequests(text, sender, player, now)
+    if not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 240 then return false end
+    local id, generation, result, mask, storage, reason =
+        text:match('^1\t([%w_-]+)\t(%d+)\t(%a+)\t([0-7])\t(%a+)\t([%w_]+)$')
+    local p = self.pending
+    generation, mask = tonumber(generation), tonumber(mask)
+    if not id or not p or p.verb ~= 'requests' or id ~= p.id or
+        (result ~= 'ok' and result ~= 'error') or (storage ~= 'stored' and storage ~= 'unavailable') or
+        not generation or generation < 1 or generation > 4294967295 then return false end
+    if generation ~= self.generation then
+        if result ~= 'error' or reason ~= 'stale_generation' or generation < self.generation then return false end
+        self.pending, self.requestsIntent, self.requestsAt = nil, nil, nil
+        self.confirmedAt, self.nextStatus = nil, 0
+        self.requestsFailure = 'Control changed; refreshing before policy changes'
+        return true
+    end
+    if result == 'ok' then
+        if storage ~= 'stored' or reason ~= 'none' then return false end
+        if p.desired ~= 'status' then
+            local kind, desired = p.desired:match('^(%a+)_([a-z]+)$')
+            local bit = requestBits[kind]
+            if not bit or (math.floor(mask / bit) % 2 == 1) ~= (desired == 'on') then return false end
+        end
+    end
+    self.pending, self.requestsIntent = nil, nil
+    self.nextRequests = now + 30
+    if result == 'error' then
+        self.requestsFailure, self.requestsAt = 'Policy rejected: ' .. reason, nil
+    else
+        self.requestsMask, self.requestsAt, self.requestsFailure = mask, now, nil
     end
     return true
 end
