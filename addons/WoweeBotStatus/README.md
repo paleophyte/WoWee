@@ -45,6 +45,17 @@ python3 tools/update_bot_addon.py --target build/bin/addons/WoweeBotStatus
 Restart WoWee or reload its interface. The helper copies only Lua/XML/TOC code and preserves character saved variables and other addons. Adjust the target if you installed Bot Status under your game-data `Interface/AddOns` folder: WoWee finds that copy before bundled copies, and its log reports which path was registered. Rebuilding only the `wowee` target does not run the bundled-addon copy target.
 
 
+## Gathering tools
+
+With TBC server patch0052 (`gather_tools_1`), Notes explain autonomous skinning or
+mining skipped for a missing carried Skinning Knife or Mining Pick. Banked tools
+cannot satisfy the loot executor. Other eligible work can continue. Acquiring
+the tool normally creates a separate availability note; other gathering
+requirements still apply. Repeated checks do not duplicate the note, and clearing
+notes keeps already-seen events cleared across relog. Gathering destinations also
+name their purpose, such as **Skin Stonetusk Boar**. These reports are optional on
+servers without the capability and never change character control.
+
 ## Travel progress and waiting
 
 On servers advertising nav_1, the existing snapshot query also reports physical travel progress. The panel shows a route rebuild, a timed travel pause, or an observed wait reason. Quest progress and the selected travel plan remain visible. Stale/missing travel replies are labeled unavailable rather than presented as current.

@@ -763,7 +763,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "Inbox.lua", "NotesUI.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua"})
         REQUIRE(lua->executeFile(root + file));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_control.lua"));
@@ -992,6 +992,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     CHECK(botCommandCount(s, "#a nc +grind,?") == 0); // all mutations use the guarded protocol
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_activity_ui.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_item_use.lua"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_gather_tools.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_history.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_history_ui.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_training.lua"));
@@ -1018,7 +1019,7 @@ TEST_CASE("social policy buttons require server confirmation and preserve manual
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; GetServerTime=function() return 1000+testNow end; UnitCharacterPoints=function() return 0 end; WoweeSaveVariables=function() end; WoweeBotStatusSettings={}"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "Inbox.lua", "NotesUI.lua", "WoweeBotStatus.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua", "WoweeBotStatus.lua"})
         REQUIRE(lua->executeFile(root + file));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");

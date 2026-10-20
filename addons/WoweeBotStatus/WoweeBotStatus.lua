@@ -32,6 +32,11 @@ local function newItemUse()
     if type(module)=='table' and type(module.new)=='function' then return module.new() end
 end
 local itemUse=newItemUse()
+local function newGatherTools()
+    local module=rawget(_G,'WoweeBotGatherTools')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local gatherTools=newGatherTools()
 function WoweeBotConfirmedControlGeneration()
     if controller:isBot(GetTime()) then return controller.generation end
 end
@@ -123,6 +128,7 @@ local function request()
         if travel then travel:expect(activity.pending.id,controller.generation,now) end
         if recovery then recovery:expect(activity.pending.id,controller.generation,now) end
         if itemUse then itemUse:expect(activity.pending.id,controller.generation,now) end
+        if gatherTools then gatherTools:expect(activity.pending.id,controller.generation,now) end
         SendChatMessage(command, 'SAY')
         return
     end
@@ -493,6 +499,7 @@ driver:SetScript('OnUpdate', function()
         if travel then travel:expire(now,controller.generation) end
         if recovery then recovery:expire(now,controller.generation) end
         if itemUse then itemUse:expire(now,controller.generation) end
+        if gatherTools then gatherTools:expire(now,controller.generation) end
         if history then
             local pending=history.pending
             history:expire(now,controller.generation)
@@ -549,7 +556,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
         rejectedPopup = nil
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
-        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery();itemUse=newItemUse()
+        training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery();itemUse=newItemUse();gatherTools=newGatherTools()
     elseif event == 'PLAYER_LEAVING_WORLD' then
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
@@ -558,6 +565,7 @@ driver:SetScript('OnEvent', function(self, event, ...)
         if travel then travel.pending=nil end
         if recovery then recovery.pending=nil end
         if itemUse then itemUse.pending=nil end
+        if gatherTools then gatherTools.pending=nil end
         notifyHistory()
     elseif event == 'CHAT_MSG_ADDON' then
         local prefix, text, _, sender = ...
@@ -587,11 +595,18 @@ driver:SetScript('OnEvent', function(self, event, ...)
             if travel then travel.pending,travel.snapshot,travel.failure=nil,nil,nil end
             if recovery then recovery.pending,recovery.snapshot,recovery.failure=nil,nil,nil end
             if itemUse then itemUse.pending,itemUse.snapshot,itemUse.failure=nil,nil,nil end
+            if gatherTools then gatherTools.pending,gatherTools.snapshot,gatherTools.failure=nil,nil,nil end
             model, nextPoll, lastRequest = Status.new(), 0, -100
             activity.pending = nil
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if gatherTools then
+            gatherTools:capability(prefix,text,sender,player,controller)
+            if gatherTools:receive(prefix,text,sender,player,controller.generation,now) and not gatherTools.failure and gatherTools.snapshot then
+                if WoweeBotReportGatherTools then WoweeBotReportGatherTools(gatherTools.snapshot) end
+            end
+        end
         if itemUse then
             itemUse:capability(prefix,text,sender,player,controller)
             if itemUse:receive(prefix,text,sender,player,controller.generation,now) and not itemUse.failure and itemUse.snapshot then

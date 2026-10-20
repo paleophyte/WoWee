@@ -187,6 +187,10 @@ function WoweeBotReportTravelWarning(fact)
     if online and inbox and inbox:travelWarning(fact, now()) then save(); render() end
 end
 
+function WoweeBotReportGatherTools(snapshot)
+    if online and inbox and inbox:gatherTools(snapshot,now()) then save();render() end
+end
+
 function WoweeBotReportItemUse(snapshot)
     if online and inbox and inbox:itemUse(snapshot,now()) then save();render() end
 end

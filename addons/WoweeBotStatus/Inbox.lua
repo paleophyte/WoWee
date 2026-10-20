@@ -72,6 +72,39 @@ function Inbox:talents(points, now)
         '. Open Talents when you are ready to choose.', now, 'talents')
 end
 
+-- Historical prerequisite skips, not a claim that all bot work is blocked.
+function Inbox:gatherTools(snapshot,now)
+    if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.rows)~='table' then return false end
+    if type(self.data.gatherToolsWatermarks)~='table' then self.data.gatherToolsWatermarks={} end
+    local marks=self.data.gatherToolsWatermarks
+    local mark
+    for _,value in ipairs(marks) do if value.epoch==snapshot.epoch then mark=value end end
+    if not mark then
+        mark={epoch=snapshot.epoch,sequence=0};marks[#marks+1]=mark
+        while #marks>8 do table.remove(marks,1) end
+    end
+    local changed=false
+    for _,row in ipairs(snapshot.rows) do
+        if row.sequence>mark.sequence then
+            local name=({[7005]='Skinning Knife',[2901]='Mining Pick'})[row.item]
+            local profession=row.item==7005 and 'skinning' or 'mining'
+            local title,text
+            if row.missing==1 then
+                title='Gathering skipped: missing '..name
+                text='The server skipped autonomous '..profession..' work because no '..name..
+                    ' was carried. Bank storage does not satisfy this requirement. Other eligible work can continue. Buy or retrieve the tool to make this gathering work eligible again.'
+            else
+                title='Gathering tool available: '..name
+                text='The server observed a carried '..name..' after an earlier missing-tool skip. That prerequisite no longer prevents '..profession..'. Other requirements still apply; this does not mean any gathering has completed.'
+            end
+            changed=self:put('gather-tool:'..snapshot.epoch..':'..row.sequence,'note',title,text,row.at) or changed
+            mark.sequence=row.sequence
+            changed=true
+        end
+    end
+    return changed
+end
+
 -- These are historical skips, not global blockers: the bot can continue other work.
 function Inbox:itemUse(snapshot,now)
     if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.rows)~='table' then return false end
