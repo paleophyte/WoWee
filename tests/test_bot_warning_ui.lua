@@ -154,3 +154,33 @@ do
     if not old.shown then WoweeBotNotesFrame:Hide() end
     print('Real controller-to-Notes collection failure scenarios passed')
 end
+
+-- Recovery wait is visible even before an activity snapshot and produces one Note.
+do
+ local old={clock=GetTime,wall=GetServerTime,unit=UnitName,send=SendChatMessage,identity=GetWoweeRealmIdentity,realm=GetRealmName,data=WoweeBotNotesData,points=UnitCharacterPoints}
+ local clock,sent=0,{}
+ GetTime=function()return clock end;GetServerTime=function()return 1000+clock end
+ UnitName=function(unit)if unit=='player'then return 'Jizzle'end return old.unit(unit)end
+ GetWoweeRealmIdentity=function()return 'sickness-warning-ui-test'end;GetRealmName=function()return 'Sickness UI Test'end
+ WoweeBotNotesData={};UnitCharacterPoints=function()return 0 end;SendChatMessage=function(command)sent[#sent+1]=command end
+ local event=WoweeBotController:GetScript('OnEvent');local notes=WoweeBotNotesDriver:GetScript('OnEvent')
+ event(WoweeBotController,'PLAYER_ENTERING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_ENTERING_WORLD')
+ WoweeBotController:GetScript('OnUpdate')()
+ local id=assert(sent[#sent]:match('^%.bot idle ([%w_-]+) status$'))
+ local function reply(prefix,body,sender)event(WoweeBotController,'CHAT_MSG_ADDON',prefix,body,'WHISPER',sender or 'Jizzle')end
+ reply('WIDLE','1\t'..id..'\tok\tbot\t9\t0\tnone')
+ reply('WIDLESCAP','1\t'..id..'\t9\tsickness_wait_1');SlashCmdList.WOWEEBOTNOTES('')
+ local body='1\t'..id..'\t9\t1000\t1\t1001\t599\t1'
+ reply('WIDLESICK',body,'Other');assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  0 notes')
+ reply('WIDLESICK',body)
+ assert(WoweeBotStatusInteraction:GetText():find('Waiting for Resurrection Sickness',1,true))
+ assert(WoweeBotNotesSummary:GetText()=='0 choices  |  1 blocked  |  0 notes')
+ reply('WIDLESICK',body);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  1 blocked  |  0 notes')
+ reply('WIDLESICK','1\t'..id..'\t9\t1000\t1\t1600\t0\t0')
+ assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  1 notes')
+ assert(not WoweeBotStatusInteraction:GetText():find('Waiting for Resurrection Sickness',1,true))
+ event(WoweeBotController,'PLAYER_LEAVING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_LEAVING_WORLD')
+ GetTime,GetServerTime,UnitName,SendChatMessage=old.clock,old.wall,old.unit,old.send
+ GetWoweeRealmIdentity,GetRealmName,WoweeBotNotesData=old.identity,old.realm,old.data;UnitCharacterPoints=old.points
+ print('Real controller-to-Notes sickness wait and live activity scenarios passed')
+end

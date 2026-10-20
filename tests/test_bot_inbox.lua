@@ -232,3 +232,16 @@ assert(ei:dismiss(en.key) and not ei:collectionWarning(ef,1200))
 ef.source='empty_stop';assert(not ei:collectionWarning(ef,1201))
 ef.source='loot';assert(not ei:collectionWarning(ef,1201))
 print('Durable objective-wide collection pause Notes scenarios passed')
+
+do
+ local a=assert(Inbox.new({},'sickness-test','Jizzle'))
+ local fact={at=1000,sequence=1,remaining=600,holding=true}
+ assert(a:sickness(fact,1000));assert(a:counts().blocked==1)
+ fact.remaining=599;assert(not a:sickness(fact,1001));assert(a:find('sickness:1000:1').text:find('600s remaining',1,true))
+ fact.holding=false;assert(not a:sickness(fact,1002))
+ fact.remaining=0;assert(a:sickness(fact,1600));assert(a:counts().blocked==0 and a:counts().note==1)
+ fact={at=2000,sequence=2,remaining=600,holding=true};assert(a:sickness(fact,2000))
+ fact={at=2200,sequence=3,remaining=600,holding=true};assert(a:sickness(fact,2200));assert(a:counts().blocked==1)
+ assert(a:sickness({at=0,sequence=0,remaining=0,holding=false},3000));assert(a:counts().blocked==0)
+end
+print('Durable sickness wait Note deduplication and resolution scenarios passed')

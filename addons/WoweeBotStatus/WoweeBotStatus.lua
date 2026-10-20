@@ -205,6 +205,15 @@ local function draw()
         control:SetText('Addon automation paused; querying status. Refresh queries without changing control.')
         return
     end
+    local sicknessWork=controller:sicknessWork(now)
+    if sicknessWork then
+        freshness:SetText('Server-confirmed recovery wait')
+        goal:SetText('Waiting for Resurrection Sickness')
+        details:SetText('The selected quest is preserved. Bot play will resume after recovery.')
+        interaction:SetText(sicknessWork)
+        travelDetail:SetText('Waiting at the spirit healer. Manual control is available.')
+        return
+    end
     if model.disabled then
         freshness:SetText('Player AI is off')
         goal:SetText('Player AI disabled')
@@ -668,6 +677,8 @@ driver:SetScript('OnEvent', function(self, event, ...)
             notifyHistory()
         end
         local warning = controller:warning(prefix, text, sender, player, now)
+        local sickness=controller:sicknessWarning(prefix,text,sender,player,now)
+        if sickness and WoweeBotReportSicknessWait then WoweeBotReportSicknessWait(sickness) end
         if warning and WoweeBotReportFishingWarning then WoweeBotReportFishingWarning(warning) end
         local collection = controller:collectionWarning(prefix, text, sender, player, now)
         if collection and WoweeBotReportCollectionWarning then WoweeBotReportCollectionWarning(collection) end

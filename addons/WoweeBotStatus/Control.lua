@@ -216,6 +216,37 @@ function Control:collectionWarning(prefix, text, sender, player, now)
         reason=reason,untilAt=untilAt,title=title,source=emptyEpisode and 'empty_episode' or emptyStop and 'empty_stop' or 'loot'}
 end
 
+function Control:sicknessWarning(prefix,text,sender,player,now)
+    if not WoweeBotStatus.samePlayer(sender,player) or type(text)~='string' or #text>180 or
+        not self:fresh(now) or self.failure or self.intent or (self.pending and self.pending.verb=='control') then return end
+    if prefix=='WIDLESCAP' then
+        local id,generation=text:match('^1\t([%w_-]+)\t(%d+)\tsickness_wait_1$')
+        if id==self.ackId and tonumber(generation)==self.generation then self.sicknessSupported=true end
+        return
+    end
+    if prefix~='WIDLESICK' or not self.sicknessSupported then return end
+    local id,generation,at,sequence,observed,remaining,holding=
+        text:match('^1\t([%w_-]+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t(%d+)\t([01])$')
+    generation,at,sequence,observed,remaining=tonumber(generation),tonumber(at),tonumber(sequence),tonumber(observed),tonumber(remaining)
+    if not id or id~=self.ackId or generation~=self.generation or at>4294966695 or
+        sequence>4294967295 or (at==0)~=(sequence==0) or (at==0 and holding=='1') or
+        observed<1 or observed<at or observed>4294967295 or remaining>600 or
+        holding=='1' and self.mode~='bot' then return end
+    local fact={at=at,sequence=sequence,observed=observed,remaining=remaining,holding=holding=='1',
+        generation=generation,ackId=id,receivedAt=now}
+    self.sickness=fact
+    return fact
+end
+
+function Control:sicknessWork(now)
+    local s=self.sickness
+    if not s or not self:isBot(now) or s.generation~=self.generation or s.ackId~=self.ackId or
+        not s.holding or now<s.receivedAt or now-s.receivedAt>self.FRESH_FOR then return end
+    local left=math.max(0,math.ceil(s.remaining-(now-s.receivedAt)))
+    if left==0 then return end
+    return 'Recovery: Waiting for Resurrection Sickness ('..left..'s remaining)'
+end
+
 function Control:socialFresh(now)
     return self.socialSupported and self.socialAt and now - self.socialAt <= self.FRESH_FOR and not self.socialFailure
 end

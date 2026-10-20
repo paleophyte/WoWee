@@ -199,6 +199,10 @@ function WoweeBotReportRecovery(snapshot)
     if online and inbox and inbox:recovery(snapshot,now()) then save();render() end
 end
 
+function WoweeBotReportSicknessWait(fact)
+    if online and inbox and inbox:sickness(fact,now()) then save();render() end
+end
+
 function WoweeBotReportTrainingPlan(snapshot)
     if online and inbox and inbox:trainingPlan(snapshot, now()) then save(); render() end
 end

@@ -371,3 +371,20 @@ do
  assert(c:update(7)=='.bot idle requests_9 status') -- recover by observing, never replay the edit
 end
 print('Incoming request policy correlation, independent bits, handoffs and stale recovery passed')
+
+-- A read-only recovery wait must be correlated, bounded and subordinate to Manual.
+do
+ local c=Control.new('sick');assert(c:update(0)=='.bot idle sick_1 status')
+ assert(c:receive('WIDLE','1\tsick_1\tok\tbot\t2\t0\tnone','Jizzle','Jizzle',0))
+ local function fact(body,sender,now)return c:sicknessWarning('WIDLESICK',body,sender or 'Jizzle','Jizzle',now or 1)end
+ local body='1\tsick_1\t2\t1000\t1\t1001\t599\t1'
+ assert(not fact(body));c:sicknessWarning('WIDLESCAP','1\tsick_1\t2\tsickness_wait_1','Jizzle','Jizzle',0)
+ assert(not fact(body,'Other'));assert(not fact(body:gsub('sick_1','wrong')))
+ assert(not fact(body:gsub('\t599\t','\t601\t')))
+ assert(fact(body));assert(c:sicknessWork(2):find('598s remaining',1,true))
+ assert(fact('1\tsick_1\t2\t0\t0\t1600\t0\t0'));assert(not c:sicknessWork(2))
+ assert(fact(body))
+ assert(not c:sicknessWork(30));assert(not fact(body,'Jizzle',30))
+ c:want('manual');assert(not c:sicknessWork(2));assert(not fact(body))
+end
+print('Sickness wait correlation, duration, ownership and freshness scenarios passed')

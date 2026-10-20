@@ -114,6 +114,16 @@ Older servers keep the existing display. Recovery shares the normal snapshot
 poll and adds no chat commands. This update needs an addon refresh/reload;
 it adds no native client APIs. The TBC server feature must also be installed.
 
+Servers advertising the separate `WIDLESCAP` sickness-wait capability can also
+report a current wait after spirit-healer resurrection. The panel shows the
+server-confirmed countdown separately from the selected quest. Notes keep one
+entry per wait and resolve it after a fresh report that sickness has ended.
+Manual/Bot handoffs preserve the selected quest; the addon does not start,
+extend or cancel a wait. Missing or stale confirmation hides the current wait.
+This compatible addon support is published ahead of the matching TBC server
+release. Older servers retain their existing behavior. No native rebuild is
+needed for this display and Notes update.
+
 
 ## Selected skinning work
 

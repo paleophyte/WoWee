@@ -133,6 +133,33 @@ function Inbox:itemUse(snapshot,now)
     return changed
 end
 
+function Inbox:sickness(fact,now)
+    if not fact or not fact.at or not fact.sequence then return end
+    if fact.remaining==0 then
+        local changed=false
+        for _,entry in ipairs(self.data.entries) do
+            if type(entry)=='table' and entry.kind=='blocked' and type(entry.key)=='string' and entry.key:match('^sickness:') then
+                changed=self:resolve(entry.key,now,'The recovery wait ended. See Bot activity for the current task.') or changed
+            end
+        end
+        return changed
+    end
+    if fact.at==0 or fact.sequence==0 then return false end
+    local key='sickness:'..fact.at..':'..fact.sequence
+    if fact.holding and fact.remaining>0 then
+        local changed=false
+        for _,entry in ipairs(self.data.entries) do
+            if type(entry)=='table' and entry.kind=='blocked' and type(entry.key)=='string' and entry.key~=key and entry.key:match('^sickness:') then
+                changed=self:resolve(entry.key,now,'Another recovery wait is now active. See Bot activity.') or changed
+            end
+        end
+        if self:find(key) then return changed end
+        return self:put(key,'blocked','Waiting after spirit-healer resurrection',
+            'The server paused at the spirit healer while Resurrection Sickness was active ('..fact.remaining..
+            's remaining at that report). The selected quest is preserved. Bot play resumes after the wait; Manual control remains available.',now)
+    end
+end
+
 function Inbox:recovery(snapshot,now)
     if type(snapshot)~='table' or type(snapshot.epoch)~='string' or type(snapshot.notes)~='table' or
         type(snapshot.phase)~='number' or type(snapshot.observed)~='number' or type(snapshot.stationary)~='number' then return false end
