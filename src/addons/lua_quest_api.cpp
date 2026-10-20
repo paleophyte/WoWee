@@ -490,6 +490,37 @@ static void fireItemTextReady(lua_State* L) {
     if (auto* gh = getGameHandler(L)) gh->fireAddonEvent("ITEM_TEXT_READY", {});
 }
 
+// A read-only copilot view independent of the stock log's collapsed groups and
+// selected row. Reuse the same objective builder as the log and tracker.
+static int lua_WoweeGetAcceptedQuests(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh || gh->getState() != game::WorldState::IN_WORLD) return luaReturnNil(L);
+    lua_newtable(L);
+    int index = 0;
+    for (const auto& quest : gh->getQuestLog()) {
+        if (!quest.questId) continue;
+        lua_newtable(L);
+        lua_pushnumber(L, quest.questId); lua_setfield(L, -2, "questId");
+        lua_pushnumber(L, quest.level); lua_setfield(L, -2, "level");
+        lua_pushstring(L, forPlayer(L, quest.title).c_str()); lua_setfield(L, -2, "title");
+        lua_pushstring(L, forPlayer(L, quest.objectives).c_str()); lua_setfield(L, -2, "summary");
+        lua_pushboolean(L, quest.complete); lua_setfield(L, -2, "complete");
+        lua_pushboolean(L, quest.failed); lua_setfield(L, -2, "failed");
+        lua_newtable(L);
+        int objectiveIndex = 0;
+        for (const auto& objective : game::questObjectives(*gh, quest)) {
+            lua_newtable(L);
+            lua_pushstring(L, objective.text.c_str()); lua_setfield(L, -2, "text");
+            lua_pushstring(L, objective.type); lua_setfield(L, -2, "type");
+            lua_pushboolean(L, objective.finished); lua_setfield(L, -2, "finished");
+            lua_rawseti(L, -2, ++objectiveIndex);
+        }
+        lua_setfield(L, -2, "objectives");
+        lua_rawseti(L, -2, ++index);
+    }
+    return 1;
+}
+
 static int lua_GetQuestLogTitle(lua_State* L) {
     auto* gh = getGameHandler(L);
     // optnumber, not checknumber: FrameXML walks the quest log with an index
@@ -2895,6 +2926,7 @@ static int lua_GetQuestSpellLink(lua_State* L) {
 
 void registerQuestLuaAPI(lua_State* L) {
     static const struct { const char* name; lua_CFunction func; } api[] = {
+                {"WoweeGetAcceptedQuests", lua_WoweeGetAcceptedQuests},
                 {"GetNumQuestLogEntries",   lua_GetNumQuestLogEntries},
                 // Whether a quest has been finished, ever.
                 //

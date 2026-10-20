@@ -2,6 +2,16 @@
 
 Compact activity and control panel for a self-playerbot on the patched CMaNGOS TBC server. Keep the game connected while the bot plays.
 
+**Quests** or `/botquests` opens the accepted-quest browser. It lists the
+character's accepted quests, including entries under collapsed stock log headers,
+and shows live objective counts and readiness for turn-in. Failed quests stay
+distinct; a server completion flag with unfinished reported counts is labeled as
+checking progress. Click a row to view its objectives. Browsing does not change
+the stock log selection, bot quest focus, or Manual/Bot control. This first view
+requires the native `WoweeGetAcceptedQuests` API and an addon refresh; older
+clients show an unavailable message. A server-confirmed quest picker is the next
+increment, and is not implemented by this browser.
+
 - **Let me play** pauses your character's AI. Wait for **I am playing (server confirmed)**, then play normally.
 - **Bot, you play** resumes it and refreshes its route from your current state. Wait for **Bot is playing (server confirmed)**.
 - `/botplay manual` and `/botplay bot` request explicit states. `/botplay` toggles the requested state.

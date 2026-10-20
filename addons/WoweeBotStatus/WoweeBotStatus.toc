@@ -10,6 +10,7 @@ Control.lua
 Activity.lua
 History.lua
 HistoryUI.lua
+QuestsUI.lua
 Training.lua
 TrainingPlan.lua
 Travel.lua

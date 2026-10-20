@@ -5,12 +5,85 @@
 #include "game/quest_handler.hpp"
 #include "game/quest_objectives.hpp"
 #include "game/entity.hpp"
+#include "addons/addon_manager.hpp"
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
 using replay::Session;
+
+TEST_CASE("accepted quest copilot view preserves stock selection and reconciles objectives",
+          "[replay][quest][accepted-quests][addon]") {
+    // Synthetic local cache entries test the UI/API, not earned gameplay.
+    Session s("tbc");
+    auto* quests = s.handler().getQuestHandler();
+    wowee::game::QuestHandler::QuestLogEntry kill;
+    kill.questId = 15; kill.title = "Kill test"; kill.level = 3; kill.zoneOrSort = 12;
+    kill.killObjectives[0] = {299, 10}; kill.killCounts[299] = {3, 10};
+    wowee::game::QuestHandler::QuestLogEntry collection;
+    collection.questId = 5545; collection.title = "Collection test"; collection.level = 9;
+    collection.zoneOrSort = 12; collection.complete = true;
+    collection.itemObjectives[0] = {49001, 8}; collection.itemCounts[49001] = 7;
+    quests->questLogRef() = {kill, collection};
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua);
+    REQUIRE(lua->executeString(R"(
+        CollapseQuestHeader(0)
+        oldSelection=GetQuestLogSelection()
+        accepted=WoweeGetAcceptedQuests()
+    )"));
+    CHECK(lua->evaluateBoolean("select(1,GetNumQuestLogEntries())==1 and #accepted==2"));
+    CHECK(lua->evaluateBoolean("accepted[1].questId==15 and accepted[1].objectives[1].text:find('3/10',1,true)~=nil"));
+    CHECK(lua->evaluateBoolean("accepted[2].complete and not accepted[2].failed and not accepted[2].objectives[1].finished"));
+    CHECK(lua->evaluateBoolean("GetQuestLogSelection()==oldSelection"));
+
+    lua->widgets().noteScreenSize(1920.0f, 1080.0f);
+    std::vector<std::string> errors;
+    lua->setLuaErrorCallback([&](const auto& message) { errors.push_back(message); });
+    REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end"));
+    REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR)+"/addons/WoweeBotStatus/QuestsUI.lua"));
+    lua->fireEvent("PLAYER_ENTERING_WORLD");
+    REQUIRE(lua->executeString("SlashCmdList.WOWEEBOTQUESTS()"));
+    lua->widgets().layout(1920.0f, 1080.0f); // Resolve the shown popup's visibility before OnUpdate.
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsFrame:IsShown() and WoweeBotQuestsStatus:GetText()=='2 accepted - page 1/1'"));
+    REQUIRE(lua->executeString("WoweeBotQuestRow2:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Server marked complete; checking objective progress',1,true)~=nil"));
+    quests->questLogRef()[1].itemCounts[49001] = 8;
+    lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Ready to turn in',1,true)~=nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('8/8',1,true)~=nil"));
+    CHECK(lua->evaluateBoolean("not accepted[2].objectives[1].finished")); // prior snapshot is immutable
+    quests->questLogRef()[1].failed = true;
+    lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Failed',1,true)~=nil"));
+    quests->questLogRef().erase(quests->questLogRef().begin()+1);
+    lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Kill test',1,true)~=nil and not WoweeBotQuestRow2:IsShown()"));
+    CHECK(lua->evaluateBoolean("GetQuestLogSelection()==oldSelection and select(1,GetNumQuestLogEntries())==1"));
+    lua->fireEvent("PLAYER_LEAVING_WORLD"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsStatus:GetText()=='Log in to view accepted quests.' and WoweeBotQuestsDetail:GetText()==''"));
+    for (uint32_t i = 1; i <= 5; ++i) {
+        auto extra = kill; extra.questId = 1000+i; extra.title = "Extra "+std::to_string(i);
+        quests->questLogRef().push_back(extra);
+    }
+    lua->fireEvent("PLAYER_ENTERING_WORLD"); lua->dispatchOnUpdate(0.25f);
+    REQUIRE(lua->executeString("WoweeBotQuestsNext:GetScript('OnClick')()"));
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsStatus:GetText()=='6 accepted - page 2/2' and WoweeBotQuestsDetail:GetText():find('Extra 5',1,true)~=nil"));
+    quests->questLogRef().resize(1);
+    lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsStatus:GetText()=='1 accepted - page 1/1' and WoweeBotQuestsDetail:GetText():find('Kill test',1,true)~=nil"));
+    REQUIRE(lua->executeString("savedQuestReader=WoweeGetAcceptedQuests; WoweeGetAcceptedQuests=nil"));
+    lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestsStatus:GetText():find('Quest data unavailable',1,true)~=nil and WoweeBotQuestsDetail:GetText()==''"));
+    REQUIRE(lua->executeString("WoweeGetAcceptedQuests=savedQuestReader"));
+    CHECK(s.sent().of(wowee::game::Opcode::CMSG_MESSAGECHAT).empty());
+    CHECK(s.sent().of(wowee::game::Opcode::CMSG_QUESTGIVER_ACCEPT_QUEST).empty());
+    CHECK(errors.empty());
+    lua->setLuaErrorCallback({});
+}
 
 namespace {
 
