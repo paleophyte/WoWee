@@ -42,7 +42,8 @@ void QuestHandler::reconcileItemObjectivesFromInventory(
     // firing it once with nothing named watched nothing at all.
     std::vector<uint32_t> movedQuests;
     for (auto& quest : questLog_) {
-        if (quest.complete) continue;
+        // Completion may arrive before the item's inventory update. Keep the
+        // objective count tied to carried items even after the ready flag is set.
         for (const auto& obj : quest.itemObjectives) {
             if (obj.itemId == 0 || obj.required == 0) continue;
             // Keep the derived required-count map in sync so the

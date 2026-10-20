@@ -3,6 +3,7 @@
 
 #include "game_replay.hpp"
 #include "game/quest_handler.hpp"
+#include "game/quest_objectives.hpp"
 #include "game/entity.hpp"
 
 #include <algorithm>
@@ -139,4 +140,55 @@ TEST_CASE("TBC server-assigned quests appear and disappear without local dialog 
     s.receive(replay::UpdateObject().values(Session::kPlayerGuid,
         {{wowee::game::UF::PLAYER_QUEST_LOG_START, 0}}).packet(true));
     CHECK(s.handler().getQuestLog().empty());
+}
+
+TEST_CASE("completed item quests reconcile later inventory updates", "[replay][quest][quest-item-order]") {
+    Session s("tbc");
+    auto* handler = s.handler().getQuestHandler();
+    handler->addQuestToLocalLogIfMissing(6, "Bounty on Garrick Padfoot", "");
+    REQUIRE(handler->getQuestLog().size() == 1);
+    // Metadata fixture; completion itself comes through the real packet handler.
+    auto& quest = const_cast<wowee::game::QuestHandler::QuestLogEntry&>(handler->getQuestLog()[0]);
+    quest.itemObjectives[0] = {182, 1};
+    quest.requiredItemCounts[182] = 1;
+    quest.itemCounts[182] = 0;
+    Packet complete(wireOpcode(Opcode::SMSG_QUESTUPDATE_COMPLETE));
+    complete.writeUInt32(6);
+    s.receive(complete);
+    REQUIRE(quest.complete);
+    CHECK(quest.itemCounts.at(182) == 0);
+    wowee::game::ItemDef head;
+    head.itemId = 182; head.name = "Garrick's Head"; head.stackCount = 1;
+    REQUIRE(s.handler().getInventory().setBackpackSlot(0, head));
+    const auto held = s.handler().getInventory().countItem(182);
+    REQUIRE(held == 1);
+    s.handler().reconcileQuestItemObjectives({{182, held}});
+    CHECK(quest.complete);
+    CHECK(quest.itemCounts.at(182) == 1);
+    const auto lines = wowee::game::questObjectives(s.handler(), quest);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].finished);
+    CHECK(lines[0].text.ends_with("1/1"));
+    // A later removal is reflected too; a ready flag never invents possession.
+    REQUIRE(s.handler().getInventory().clearBackpackSlot(0));
+    s.handler().reconcileQuestItemObjectives({});
+    CHECK(quest.itemCounts.at(182) == 0);
+    CHECK_FALSE(wowee::game::questObjectives(s.handler(), quest)[0].finished);
+}
+
+TEST_CASE("inventory reconciliation clamps counts without completing unrelated objectives", "[replay][quest][quest-item-order]") {
+    Session s("tbc");
+    auto* handler = s.handler().getQuestHandler();
+    handler->addQuestToLocalLogIfMissing(33, "Collection", "");
+    auto& quest = const_cast<wowee::game::QuestHandler::QuestLogEntry&>(handler->getQuestLog()[0]);
+    quest.itemObjectives[0] = {2934, 3};
+    quest.itemObjectives[1] = {2318, 2};
+    s.handler().reconcileQuestItemObjectives({{2934, 20}, {999, 5}});
+    CHECK(quest.itemCounts.at(2934) == 3);
+    CHECK(quest.itemCounts.at(2318) == 0);
+    CHECK_FALSE(quest.complete);
+    const auto lines = wowee::game::questObjectives(s.handler(), quest);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0].finished);
+    CHECK_FALSE(lines[1].finished);
 }
