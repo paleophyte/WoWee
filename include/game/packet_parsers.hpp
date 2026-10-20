@@ -369,9 +369,9 @@ class WotlkPacketParsers : public PacketParsers {
  * - SMSG_UPDATE_OBJECT: u8 has_transport after blockCount (WotLK removed it)
  * - UpdateFlags is u8 (not u16), no VEHICLE/ROTATION/POSITION flags
  * - Movement flags2 is u8 (not u16), no transport seat byte
- * - Movement flags: JUMPING=0x2000 gates jump data (WotLK: FALLING=0x1000)
+ * - Movement flags: FALLING=0x1000 gates jump data; JUMPING=0x2000 does not
  * - SPLINE_ENABLED=0x08000000, SPLINE_ELEVATION=0x04000000 (same as WotLK)
- * - Pitch: SWIMMING or else ONTRANSPORT(0x02000000)
+ * - Pitch: SWIMMING or FLYING2(0x02000000)
  * - CharEnum: uint8 firstLogin (not uint32+uint8), 20 equipment items (not 23)
  * - Aura updates use inline update fields, not SMSG_AURA_UPDATE
  */

@@ -10,9 +10,9 @@ namespace game {
 // ============================================================================
 namespace TbcMoveFlags {
     constexpr uint32_t ON_TRANSPORT     = 0x00000200;  // Gates transport data (same as WotLK)
-    constexpr uint32_t JUMPING          = 0x00002000;  // Gates jump data (WotLK: FALLING=0x1000)
+    constexpr uint32_t FALLING          = 0x00001000;  // Gates jump data in CMaNGOS 2.4.3
     constexpr uint32_t SWIMMING         = 0x00200000;  // Same as WotLK
-    constexpr uint32_t ONTRANSPORT      = 0x02000000;  // Secondary pitch check
+    constexpr uint32_t FLYING2          = 0x02000000;  // Actual flying mode; carries pitch
     constexpr uint32_t SPLINE_ELEVATION = 0x04000000;  // Same as WotLK
     constexpr uint32_t SPLINE_ENABLED   = 0x08000000;  // Same as WotLK
 }
@@ -25,7 +25,7 @@ namespace TbcMoveFlags {
 // - moveFlags2 is uint8 (not uint16)
 // - No transport seat byte
 // - No interpolated movement (flags2 & 0x0200) check
-// - Pitch check: SWIMMING, else ONTRANSPORT(0x02000000)
+// - Pitch check: SWIMMING or FLYING2(0x02000000)
 // - Spline data: has splineId, no durationMod/durationModNext/verticalAccel/effectStartTime/splineMode
 // - Trailer order matches CMaNGOS TBC BuildMovementUpdate:
 //   LOWGUID, HIGHGUID, attacking target, transport time
@@ -96,11 +96,11 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
             /*uint32_t tTime =*/ packet.readUInt32();
         }
 
-        // Pitch: SWIMMING, or else ONTRANSPORT (TBC-specific secondary pitch)
+        // MovementInfo::Write includes pitch while swimming or flying.
         if (moveFlags & TbcMoveFlags::SWIMMING) {
             if (rem() < 4) return false;
             /*float pitch =*/ packet.readFloat();
-        } else if (moveFlags & TbcMoveFlags::ONTRANSPORT) {
+        } else if (moveFlags & TbcMoveFlags::FLYING2) {
             if (rem() < 4) return false;
             /*float pitch =*/ packet.readFloat();
         }
@@ -109,12 +109,13 @@ bool TbcPacketParsers::parseMovementBlock(network::Packet& packet, UpdateBlock& 
         if (rem() < 4) return false;
         /*uint32_t fallTime =*/ packet.readUInt32();
 
-        // Jumping (TBC: JUMPING=0x2000, WotLK: FALLING=0x1000)
-        if (moveFlags & TbcMoveFlags::JUMPING) {
+        // CMaNGOS gates these four floats on FALLING, not its separate
+        // JUMPING bit. Skipping them shifts speeds, fields and later objects.
+        if (moveFlags & TbcMoveFlags::FALLING) {
             if (rem() < 16) return false;
             /*float jumpVelocity =*/ packet.readFloat();
-            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpCosAngle =*/ packet.readFloat();
+            /*float jumpSinAngle =*/ packet.readFloat();
             /*float jumpXYSpeed =*/ packet.readFloat();
         }
 
@@ -258,21 +259,21 @@ void TbcPacketParsers::writeMovementPayload(network::Packet& packet, const Movem
         // TBC: NO interpolated movement time
     }
 
-    // Pitch: SWIMMING or else ONTRANSPORT (TBC flag positions)
+    // Pitch: SWIMMING or FLYING2 (TBC flag positions)
     if (info.flags & TbcMoveFlags::SWIMMING) {
         packet.writeFloat(info.pitch);
-    } else if (info.flags & TbcMoveFlags::ONTRANSPORT) {
+    } else if (info.flags & TbcMoveFlags::FLYING2) {
         packet.writeFloat(info.pitch);
     }
 
     // Fall time (always present)
     packet.writeUInt32(info.fallTime);
 
-    // Jump data (TBC JUMPING = 0x2000, WotLK FALLING = 0x1000)
-    if (info.flags & TbcMoveFlags::JUMPING) {
+    // MovementInfo::Read: FALLING, then zspeed/cosAngle/sinAngle/xyspeed.
+    if (info.flags & TbcMoveFlags::FALLING) {
         packet.writeFloat(info.jumpVelocity);
-        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpCosAngle);
+        packet.writeFloat(info.jumpSinAngle);
         packet.writeFloat(info.jumpXYSpeed);
     }
 }

@@ -313,6 +313,84 @@ TEST_CASE("TBC outgoing passenger movement matches the server raw transport GUID
                                                   incoming.getData().end()));
 }
 
+TEST_CASE("TBC falling passengers leave speeds and the next update object aligned",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::game;
+    // Literal CMaNGOS MovementInfo::Write: FALLING(0x1000) controls the
+    // four jump floats. JUMPING(0x2000) alone never adds them.
+    for (uint32_t flags : {0x1000u, 0x2000u, 0x3000u, 0x1200u, 0x2200u, 0x3200u}) {
+        CAPTURE(flags);
+        Session s("tbc");
+        Packet p(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+        p.writeUInt32(2); p.writeUInt8(1);
+        p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+        p.writePackedGuid(kDockPassenger);
+        p.writeUInt8(static_cast<uint8_t>(ObjectType::PLAYER));
+        p.writeUInt8(0x20); // LIVING
+        p.writeUInt32(flags); p.writeUInt8(0); p.writeUInt32(1000);
+        p.writeFloat(-3741); p.writeFloat(-744); p.writeFloat(11); p.writeFloat(1.25f);
+        if (flags & 0x200u) {
+            p.writeUInt64(kDockFerry);
+            for (float value : {7.0f, 13.0f, 5.0f, kDockLocalYaw}) p.writeFloat(value);
+            p.writeUInt32(700);
+        }
+        p.writeUInt32(73); // fall time
+        if (flags & 0x1000u) {
+            for (float value : {4.0f, 0.25f, 0.75f, 2.0f}) p.writeFloat(value);
+        }
+        for (float speed : {2.5f, 7.0f, 4.5f, 4.7f, 2.5f, 7.0f, 4.5f, 3.14f}) p.writeFloat(speed);
+        p.writeUInt8(1); p.writeUInt32(1u << fieldIndex(UF::UNIT_FIELD_HEALTH));
+        p.writeUInt32(200);
+        constexpr uint64_t nextGuid = 0xf110000001000123ull;
+        p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+        p.writePackedGuid(nextGuid);
+        p.writeUInt8(static_cast<uint8_t>(ObjectType::GAMEOBJECT));
+        p.writeUInt8(0x40);
+        p.writeFloat(-3740); p.writeFloat(-743); p.writeFloat(12); p.writeFloat(1);
+        p.writeUInt8(1); p.writeUInt32(1u << fieldIndex(UF::OBJECT_FIELD_ENTRY));
+        p.writeUInt32(176231);
+
+        UpdateObjectData data;
+        REQUIRE(s.handler().getPacketParsers()->parseUpdateObject(p, data));
+        REQUIRE(data.blocks.size() == 2);
+        CHECK(p.getRemainingSize() == 0);
+        CHECK(data.blocks[0].moveFlags == flags);
+        CHECK(data.blocks[0].walkSpeed == 2.5f);
+        CHECK(data.blocks[0].runSpeed == 7);
+        CHECK(data.blocks[0].turnRate == Catch::Approx(3.14f));
+        const auto health = data.blocks[0].fields.find(fieldIndex(UF::UNIT_FIELD_HEALTH));
+        REQUIRE(health != data.blocks[0].fields.end());
+        CHECK(health->second == 200);
+        CHECK(data.blocks[1].guid == nextGuid);
+        const auto entry = data.blocks[1].fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
+        REQUIRE(entry != data.blocks[1].fields.end());
+        CHECK(entry->second == 176231);
+    }
+}
+
+TEST_CASE("TBC outgoing falls match the server jump flag and cosine-sine order",
+          "[replay][movement][dock-movement]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    for (uint32_t flags : {0x1000u, 0x2000u, 0x3000u}) {
+        CAPTURE(flags);
+        MovementInfo info{};
+        info.flags = flags; info.time = 1000;
+        info.x = -3741; info.y = -744; info.z = 11; info.orientation = 1.25f;
+        info.fallTime = 73; info.jumpVelocity = 4;
+        info.jumpCosAngle = 0.25f; info.jumpSinAngle = 0.75f; info.jumpXYSpeed = 2;
+        auto packet = s.handler().getPacketParsers()->buildMovementPacket(Opcode::MSG_MOVE_JUMP, info);
+        Packet expected(wireOpcode(Opcode::MSG_MOVE_JUMP));
+        expected.writeUInt32(flags); expected.writeUInt8(0); expected.writeUInt32(1000);
+        for (float value : {-3741.0f, -744.0f, 11.0f, 1.25f}) expected.writeFloat(value);
+        expected.writeUInt32(73);
+        if (flags & 0x1000u) {
+            for (float value : {4.0f, 0.25f, 0.75f, 2.0f}) expected.writeFloat(value);
+        }
+        CHECK(packet.getData() == expected.getData());
+    }
+}
+
 TEST_CASE("own TBC splines follow intermediate path corners",
           "[replay][movement][playerbot]") {
     Session s("tbc");
