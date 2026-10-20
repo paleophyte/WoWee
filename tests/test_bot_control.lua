@@ -316,6 +316,24 @@ assert(not stop.collectionStopSupported and not stop:collectionWarning('WIDLESTO
 assert(not stop:collectionWarning('WIDLECOL',sw,'Jizzle','Jizzle',1))
 print('Independent empty collection-stop fact scenarios passed')
 
+local episode=Control.new('episode')
+assert(episode:update(0)=='.bot idle episode_1 status')
+assert(episode:receive('WIDLE','1\tepisode_1\tok\tmanual\t9\t0\tnone','Jizzle','Jizzle',0))
+local ew='1\tepisode_1\t9\t1000\t1\t5545\t13872\t6\t8\t6\t1120\t'..title
+assert(not episode:collectionWarning('WIDLEEP',ew,'Jizzle','Jizzle',1))
+assert(episode:capability('WIDLECAP','1\tepisode_1\t9\tcollection_stop_1','Jizzle','Jizzle'))
+local ef=assert(episode:collectionWarning('WIDLEEP',ew,'Jizzle','Jizzle',1))
+assert(ef.source=='empty_episode' and ef.reason==6 and ef.quest==5545)
+for _,bad in ipairs({ew:gsub('episode_1','old'),ew:gsub('\t9\t','\t8\t'),
+    ew:gsub('\t6\t1120','\t5\t1120'),ew:gsub('\t1120\t','\t1121\t'),ew..'\textra'}) do
+    assert(not episode:collectionWarning('WIDLEEP',bad,'Jizzle','Jizzle',1))
+end
+assert(not episode:collectionWarning('WIDLESTOP',ew,'Jizzle','Jizzle',1))
+assert(not episode:collectionWarning('WIDLEEP',ew,'Other','Jizzle',1))
+assert(not episode:collectionWarning('WIDLEEP',ew,'Jizzle','Jizzle',26))
+assert(episode.mode=='manual' and not episode.intent and not episode.pending)
+print('Objective-wide empty collection fact scenarios passed')
+
 -- Incoming requests are independent, correlated, persisted server preferences.
 do
  local c=Control.new('requests')

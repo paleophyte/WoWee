@@ -216,3 +216,19 @@ assert(not si:collectionWarning(bad,2001))
 assert(Inbox.new(stopRoot,'other-realm','Jizzle'):collectionWarning(sf,1001))
 assert(Inbox.new(stopRoot,'stop-realm','Other'):collectionWarning(sf,1001))
 print('Durable independently scoped empty-stop Notes scenarios passed')
+
+local ei=Inbox.new({},'episode-realm','Jizzle')
+local ef={at=1000,sequence=1,quest=5545,item=13872,current=6,required=8,reason=6,
+    source='empty_episode',untilAt=1120,title='A Bundle of Trouble'}
+assert(ei:collectionWarning(ef,1001))
+local en=ei:visible()[1]
+assert(en.title=='Collection objective paused: A Bundle of Trouble')
+assert(en.text:find('different stops',1,true) and en.text:find('two minutes',1,true))
+assert(en.text:find('6/8',1,true) and en.text:find('Gaining the item clears',1,true))
+assert(en.text:find('manual control remain available',1,true) and en.text:find('do not establish a respawn problem',1,true))
+assert(not en.text:find('skipped that stop',1,true))
+assert(not ei:collectionWarning(ef,1002))
+assert(ei:dismiss(en.key) and not ei:collectionWarning(ef,1200))
+ef.source='empty_stop';assert(not ei:collectionWarning(ef,1201))
+ef.source='loot';assert(not ei:collectionWarning(ef,1201))
+print('Durable objective-wide collection pause Notes scenarios passed')

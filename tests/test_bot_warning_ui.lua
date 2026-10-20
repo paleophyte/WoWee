@@ -136,6 +136,16 @@ do
     assert(WoweeBotNotesDetail:GetText():find('7/8',1,true))
     WoweeBotNotesOpen:GetScript('OnClick')();assert(opened==2)
     reply('WIDLESTOP',missing);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  2 notes')
+    -- Synthetic0060 objective pause: exercise the real event-to-inbox path.
+    local episode=missing:gsub('\t5\t1792247012','\t6\t1792247012')
+    reply('WIDLEEP',episode,'Other');assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  2 notes')
+    reply('WIDLEEP',episode)
+    assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  3 notes')
+    WoweeBotNotesBack:GetScript('OnClick')()
+    WoweeBotNotesRow1:GetScript('OnClick')()
+    assert(WoweeBotNotesDetail:GetText():find('different stops',1,true))
+    assert(WoweeBotNotesDetail:GetText():find('Gaining the item clears',1,true))
+    reply('WIDLEEP',episode);assert(WoweeBotNotesSummary:GetText()=='0 choices  |  0 blocked  |  3 notes')
     assert(#sent==1) -- historical facts, including in Manual, never send a command
     event(WoweeBotController,'PLAYER_LEAVING_WORLD');notes(WoweeBotNotesDriver,'PLAYER_LEAVING_WORLD')
     GetTime,GetServerTime,UnitName,SendChatMessage=old.clock,old.wall,old.unit,old.send

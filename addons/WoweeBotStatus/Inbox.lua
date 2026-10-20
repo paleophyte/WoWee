@@ -375,7 +375,8 @@ local collectionReasons = {
     'The server still reported full bags after trying to make room.',
     "The quest item or its container was on the bot's skip-loot list.",
     'The last checked container was in use or not ready.',
-    'No spawned quest container was found nearby in three fresh checks at a collection stop.'}
+    'No spawned quest container was found nearby in three fresh checks at a collection stop.',
+    'Three fresh checks found no spawned container for this objective near the bot. The checks may have been at different stops.'}
 function Inbox:collectionWarning(fact, now)
     if type(fact) ~= 'table' or type(now) ~= 'number' then return false end
     for _, key in ipairs({'at','sequence','quest','item','current','required','reason','untilAt'}) do
@@ -383,13 +384,15 @@ function Inbox:collectionWarning(fact, now)
     end
     local reason=collectionReasons[fact.reason]
     local emptyStop = fact.source == 'empty_stop'
-    if not reason or (emptyStop and fact.reason ~= 5) or (not emptyStop and fact.reason == 5) or
+    local emptyEpisode = fact.source == 'empty_episode'
+    if not reason or (emptyStop and fact.reason ~= 5) or (emptyEpisode and fact.reason ~= 6) or
+        (not emptyStop and not emptyEpisode and (fact.reason < 1 or fact.reason > 4)) or
         fact.at < 1 or fact.at > 4294967175 or fact.sequence < 1 or fact.sequence > 4294967295 or
         fact.quest < 1 or fact.quest > 4294967295 or fact.item < 1 or fact.item > 4294967295 or
         fact.current < 0 or fact.required < 1 or fact.required > 65535 or fact.current >= fact.required or
         fact.untilAt ~= fact.at + 120 or (fact.title ~= nil and
         (type(fact.title) ~= 'string' or #fact.title > 40 or fact.title:find('[%c]'))) then return false end
-    local watermark = emptyStop and 'lastCollectionStopWarning' or 'lastCollectionWarning'
+    local watermark = emptyEpisode and 'lastCollectionEpisodeWarning' or emptyStop and 'lastCollectionStopWarning' or 'lastCollectionWarning'
     local last=self.data[watermark]
     if type(last)=='table' and type(last.at)=='number' and type(last.sequence)=='number' and
         (fact.at < last.at or (fact.at==last.at and fact.sequence<=last.sequence)) then return false end
@@ -397,6 +400,14 @@ function Inbox:collectionWarning(fact, now)
     local title=fact.title and fact.title~='' and fact.title or ('Quest #'..fact.quest)
     local item=type(GetItemInfo)=='function' and GetItemInfo(fact.item)
     item=item or ('item #'..fact.item)
+    if emptyEpisode then
+        return self:put('collection-episode-warning:'..fact.at..':'..fact.sequence,'note',
+            'Collection objective paused: '..title,
+            reason..' The server paused container destinations for this quest item for two minutes, then allows a retry. '..
+            'At that time, '..item..' was '..fact.current..'/'..fact.required..'. Gaining the item clears the pause sooner. '..
+            'The selected quest was kept; other eligible work and manual control remain available. '..
+            'These checks do not establish a respawn problem or availability elsewhere. This records a past pause; it may already have ended.',now,'botstatus')
+    end
     if emptyStop then
         return self:put('collection-stop-warning:'..fact.at..':'..fact.sequence,'note',
             'No quest containers nearby: '..title,

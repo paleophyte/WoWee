@@ -17,6 +17,13 @@ read-only confirmation returns. A request retries at most three times; timeout
 or rejection discards the write intent and refreshes status, rather than
 replaying it after recovery. Notes explain selection communication errors.
 
+On TBC0060, three eligible empty collection scans accumulate for the same quest
+item even when the bot changes locations or does maintenance between checks.
+The server pauses that objective's container destinations for two minutes;
+an item-count increase clears the pause sooner. Notes report the observed
+absence and planned retry without guessing at respawn rates. This objective
+pause is separate from rejected-loot recovery and keeps manual control available.
+
 Failed quests remain distinct from ready ones. Server completion with unfinished
 reported counts says checking progress. Browsing rows still leaves stock quest
 log selection and bot focus untouched. This view requires the native
