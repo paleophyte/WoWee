@@ -5,6 +5,7 @@
 #pragma once
 
 #include "math/spline.hpp"
+#include "game/legacy_transport_route.hpp"
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
@@ -70,6 +71,8 @@ struct PathEntry {
     bool zOnly = false;       // Elevator/bobbing - no meaningful XY travel
     bool fromDBC = false;     // Loaded from TransportAnimation.dbc
     bool worldCoords = false; // TaxiPathNode absolute world positions (not local offsets)
+    std::shared_ptr<const LegacyTransportRoute> legacyRoute;
+    uint32_t legacyMapId = 0;
 
     /// Spans of the route's cycle during which the hull is on this slice's map.
     ///
@@ -84,6 +87,7 @@ struct PathEntry {
     std::vector<std::pair<uint32_t, uint32_t>> presentMs;
 
     [[nodiscard]] bool presentAt(uint32_t timeMs) const {
+        if (legacyRoute) return legacyRoute->evaluate(timeMs, legacyMapId).present;
         if (presentMs.empty()) return true;
         for (const auto& [from, to] : presentMs) {
             if (timeMs >= from && timeMs <= to) return true;
@@ -100,6 +104,7 @@ struct TaxiRouteNode {
     glm::vec3 position;      ///< canonical world coordinates
     uint32_t mapId = 0;
     uint32_t dwellMs = 0;    ///< authored stop at this node
+    uint32_t actionFlags = 0; ///< bit0: teleport boundary; bit1: dock stop
 };
 
 /// A transport's whole route, across every map it touches.

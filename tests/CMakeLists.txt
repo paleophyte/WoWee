@@ -748,6 +748,7 @@ wowee_add_test(test_transport_path_repo
     SOURCES test_transport_path_repo.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/transport_path_repository.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/legacy_transport_route.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp
             ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp)
 
@@ -1275,6 +1276,7 @@ wowee_add_test(test_transport_components
     SOURCES test_transport_components.cpp
             ${TEST_COMMON_SOURCES}
             ${CMAKE_SOURCE_DIR}/src/game/transport_clock_sync.cpp
+            ${CMAKE_SOURCE_DIR}/src/game/legacy_transport_route.cpp
             ${CMAKE_SOURCE_DIR}/src/game/transport_animator.cpp
             ${CMAKE_SOURCE_DIR}/src/math/spline.cpp)
 

@@ -139,6 +139,10 @@ struct ActiveTransport {
     float routePhase = 0.0f;
     uint32_t routePeriodMs = 0;
     double routePhaseAtTime = 0.0;
+    bool hasLegacyRoute = false;
+    bool hasServerPathProgress = false;
+    uint32_t serverPathProgressMs = 0;
+    std::chrono::steady_clock::time_point serverPathProgressAt{};
 };
 
 class TransportManager {
@@ -272,6 +276,8 @@ public:
     // fraction in [0,1) of periodMs. Cheap and idempotent - safe to call on every
     // object update that carries the fields.
     void applyServerRouteClock(uint64_t transportGuid, float phase, uint32_t periodMs);
+    void applyServerPathProgress(uint64_t guid, uint32_t progressMs,
+        std::chrono::steady_clock::time_point receivedAt);
 
     // Ship machinery follows the hull: ShipMoving while under way, ShipStop when
     // holding at a dock. Cheap to call every frame - it only reaches the
@@ -307,7 +313,8 @@ public:
     // Assign a TaxiPathNode path to an existing transport (called when GO query response arrives).
     // mapId selects the per-map segment (cross-map boat paths only have valid world
     // geometry on the transport's current map). Returns true if the transport was updated.
-    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId);
+    bool assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId,
+        float legacySpeed = 0, float legacyAcceleration = 0);
 
     // Check if a path exists for a given GameObject entry
     [[nodiscard]] bool hasPathForEntry(uint32_t entry) const;
@@ -377,6 +384,11 @@ private:
     /// server puts the route phase. See applyServerRouteClock.
     struct PendingRouteClock { float phase; uint32_t periodMs; };
     std::unordered_map<uint64_t, PendingRouteClock> pendingRouteClocks_;
+    struct PendingPathProgress {
+        uint32_t progressMs;
+        std::chrono::steady_clock::time_point receivedAt;
+    };
+    std::unordered_map<uint64_t, PendingPathProgress> pendingPathProgress_;
     uint64_t riderTransportGuid_ = 0;
     rendering::WMORenderer* wmoRenderer_ = nullptr;
     rendering::M2Renderer* m2Renderer_ = nullptr;

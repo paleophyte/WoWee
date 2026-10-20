@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <chrono>
 
 namespace wowee::math { class CatmullRomSpline; }
 
@@ -23,7 +24,8 @@ public:
         const math::CatmullRomSpline& spline,
         double elapsedTime,
         float deltaTime,
-        uint32_t& outPathTimeMs) const;
+        uint32_t& outPathTimeMs,
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const;
 
     /// Process a server position update: update clock offset, detect yaw flips,
     /// bootstrap velocity, and switch between client/server driven modes.

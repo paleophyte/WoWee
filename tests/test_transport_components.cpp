@@ -5,6 +5,7 @@
 #include "game/transport_animator.hpp"
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
+#include "fixtures/tbc_ferry_route.hpp"
 #include "math/spline.hpp"
 #include "core/coordinates.hpp"
 #include <glm/gtc/constants.hpp>
@@ -57,6 +58,58 @@ static ActiveTransport makeTransport(uint64_t guid = 1, uint32_t pathId = 100) {
     t.allowBootstrapVelocity = true;
     t.isM2 = false;
     return t;
+}
+
+TEST_CASE("TBC ferry clock retains packet age, uint32 wrap and the server's phase",
+          "[transport_clock_sync][tbc-ferry]") {
+    TransportClockSync sync;
+    const auto route = LegacyTransportRoute::build(tbcTheramoreRoute(), 30, 1);
+    REQUIRE(route);
+    wowee::math::CatmullRomSpline timeline({{0, {}}, {route->periodMs(), {}}});
+    auto t = makeTransport();
+    t.hasLegacyRoute = true;
+    uint32_t out = 0;
+    using Clock = std::chrono::steady_clock;
+    const auto received = Clock::time_point(std::chrono::seconds(100));
+    CHECK_FALSE(sync.computePathTime(t, timeline, 0, 0, out, received));
+    t.hasServerPathProgress = true;
+    t.serverPathProgressMs = 3000000000u; // uptime must not be reduced with an approximate period
+    t.serverPathProgressAt = received;
+    REQUIRE(sync.computePathTime(t, timeline, 0, 0, out, received+std::chrono::seconds(5)));
+    CHECK(out == (3000000000u+5000u)%230162u);
+    // Frame elapsed time is unrelated: loading can stall it for several seconds.
+    REQUIRE(sync.computePathTime(t, timeline, 999999, 100, out, received+std::chrono::seconds(5)));
+    CHECK(out == (3000000000u+5000u)%230162u);
+    t.serverPathProgressMs = 0xfffffff0u;
+    REQUIRE(sync.computePathTime(t, timeline, 0, 0, out, received+std::chrono::milliseconds(40)));
+    CHECK(out == 24);
+}
+
+TEST_CASE("TBC ferry animator keeps the offshore approach and waits for server worldport",
+          "[transport_animator][tbc-ferry]") {
+    auto route = LegacyTransportRoute::build(tbcTheramoreRoute(), 30, 1);
+    REQUIRE(route);
+    PathEntry path(wowee::math::CatmullRomSpline({{0, {}}, {route->periodMs(), {}}}), 176231, false, false, true);
+    path.legacyRoute = route;
+    path.legacyMapId = 0;
+    auto t = makeTransport();
+    TransportAnimator animator;
+    animator.evaluateAndApply(t, path, 118678);
+    const auto offshore = t.position;
+    animator.evaluateAndApply(t, path, 118810);
+    CHECK(glm::distance(t.position, offshore) < 0.001f);
+    path.legacyMapId = 1;
+    animator.evaluateAndApply(t, path, 118810);
+    CHECK(glm::distance(t.position, tbcTheramoreRoute().nodes[14].position) > 250);
+    animator.evaluateAndApply(t, path, 150000);
+    CHECK(t.atDockDwell);
+    CHECK(glm::distance(t.position, tbcTheramoreRoute().nodes[14].position) < 0.01f);
+    const auto dock = t.position;
+    t.hasLegacyRoute = true;
+    TransportClockSync sync;
+    sync.processServerUpdate(t, &path, {1, 2, 3}, 0, 10);
+    CHECK(glm::distance(t.position, dock) < 0.001f);
+    CHECK(t.serverUpdateCount == 1);
 }
 
 // ══════════════════════════════════════════════════════════════════

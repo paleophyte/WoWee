@@ -14,6 +14,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <zlib.h>
 #include "game/transport_manager.hpp"
 extern "C" {
 #include <lua.h>
@@ -365,6 +366,63 @@ TEST_CASE("TBC falling passengers leave speeds and the next update object aligne
         const auto entry = data.blocks[1].fields.find(fieldIndex(UF::OBJECT_FIELD_ENTRY));
         REQUIRE(entry != data.blocks[1].fields.end());
         CHECK(entry->second == 176231);
+    }
+}
+
+TEST_CASE("TBC ferry create clocks survive compression and deferred model registration",
+          "[replay][movement][tbc-ferry]") {
+    using namespace wowee::game;
+    for (bool compressed : {false, true}) {
+        CAPTURE(compressed);
+        Session s("tbc");
+        auto* tm = s.handler().getTransportManager();
+        REQUIRE(tm);
+        Packet p(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+        const auto received = Packet::Clock::now()-std::chrono::seconds(5);
+        p.setReceivedAt(received);
+        p.writeUInt32(1); p.writeUInt8(1);
+        p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+        p.writePackedGuid(kDockFerry);
+        p.writeUInt8(static_cast<uint8_t>(ObjectType::GAMEOBJECT));
+        p.writeUInt8(0x42); // stationary position plus the ordinary transport clock
+        for (float value : {-4199.9365f, -372.2995f, 0.0f, 1.0f}) p.writeFloat(value);
+        p.writeUInt32(3000000000u);
+        const std::map<uint16_t, uint32_t> fields{
+            {fieldIndex(UF::OBJECT_FIELD_ENTRY), 176231},
+            {fieldIndex(UF::GAMEOBJECT_DISPLAYID), 3015},
+            {21, 15}}; // literal TBC GAMEOBJECT_TYPE_ID (OBJECT_END+0x0f)
+        uint32_t mask = 0;
+        for (const auto& [index, value] : fields) { REQUIRE(index < 32); mask |= 1u<<index; }
+        p.writeUInt8(1); p.writeUInt32(mask);
+        for (const auto& [index, value] : fields) p.writeUInt32(value);
+        auto parsed = p;
+        UpdateObjectData data;
+        REQUIRE(s.handler().getPacketParsers()->parseUpdateObject(parsed, data));
+        REQUIRE(data.blocks.size() == 1);
+        CHECK(data.blocks[0].hasTransportPathProgress);
+        CHECK(data.blocks[0].transportPathProgressMs == 3000000000u);
+        CHECK(data.blocks[0].transportClockReceivedAt == received);
+        if (compressed) {
+            uLongf length = compressBound(p.getSize());
+            std::vector<uint8_t> bytes(length);
+            REQUIRE(compress2(bytes.data(), &length, p.getData().data(), p.getSize(), Z_BEST_SPEED) == Z_OK);
+            Packet packed(wireOpcode(Opcode::SMSG_COMPRESSED_UPDATE_OBJECT));
+            packed.setReceivedAt(received);
+            packed.writeUInt32(static_cast<uint32_t>(p.getSize()));
+            packed.writeBytes(bytes.data(), length);
+            s.receive(packed);
+        } else s.receive(p);
+        tm->loadPathFromNodes(1, {{0, 0, 0}}, false);
+        tm->registerTransport(kDockFerry, 0, 1, {0, 0, 0}, 176231, 3015, false);
+        const auto* transport = tm->getTransport(kDockFerry);
+        REQUIRE(transport);
+        CHECK(transport->hasServerPathProgress);
+        CHECK(transport->serverPathProgressMs == 3000000000u);
+        CHECK(transport->serverPathProgressAt == received);
+        tm->clearTransports();
+        tm->registerTransport(kDockFerry, 0, 1, {0, 0, 0}, 176231, 3015, false);
+        REQUIRE(tm->getTransport(kDockFerry));
+        CHECK_FALSE(tm->getTransport(kDockFerry)->hasServerPathProgress);
     }
 }
 

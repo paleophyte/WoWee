@@ -18,10 +18,22 @@ bool TransportClockSync::computePathTime(
     const math::CatmullRomSpline& spline,
     double elapsedTime,
     float deltaTime,
-    uint32_t& outPathTimeMs) const
+    uint32_t& outPathTimeMs,
+    std::chrono::steady_clock::time_point now) const
 {
     uint32_t nowMs = static_cast<uint32_t>(elapsedTime * 1000.0);
     uint32_t durationMs = spline.durationMs();
+    if (durationMs == 0) return false;
+    if (transport.hasLegacyRoute) {
+        if (!transport.hasServerPathProgress) return false;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - transport.serverPathProgressAt).count();
+        // Apply the wire clock's uint32 wrap before the route's period wrap.
+        const uint32_t progress = transport.serverPathProgressMs +
+            static_cast<uint32_t>(std::max<int64_t>(0, elapsed));
+        outPathTimeMs = progress % durationMs;
+        return true;
+    }
 
     // The server's own route clock wins over anything the client worked out for
     // itself. It publishes the phase as a fraction of the route period, so it
@@ -92,6 +104,14 @@ void TransportClockSync::processServerUpdate(
     const bool hasPath = (pathEntry != nullptr);
     const bool isZOnlyPath = (hasPath && pathEntry->fromDBC && pathEntry->zOnly && pathEntry->spline.durationMs() > 0);
     const bool isWorldCoordPath = (hasPath && pathEntry->worldCoords && pathEntry->spline.durationMs() > 0);
+    if (transport.hasLegacyRoute && pathEntry && pathEntry->legacyRoute) {
+        // A legacy MO_TRANSPORT update repeats stationary spawn coordinates.
+        // Its separate clock trailer advances the live route; applying the
+        // position echo would snap a correctly animated ferry back to spawn.
+        transport.serverUpdateCount++;
+        transport.lastServerUpdate = elapsedTime;
+        return;
+    }
 
     // Don't let (0,0,0) server updates override a TaxiPathNode world-coordinate path
     if (isWorldCoordPath && glm::dot(position, position) < 1.0f) {

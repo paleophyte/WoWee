@@ -1106,6 +1106,21 @@ void EntitySpawner::processPendingTransportRegistrations() {
             continue;
         }
 
+        // TBC's stationary spawn coordinates are not the hull's current pose.
+        // Wait for the ordinary template's path/speed/acceleration before
+        // registering a ship and restoring a passenger after SMSG_NEW_WORLD.
+        // The create packet's clock is already retained by TransportManager.
+        if (game::isActiveExpansion("tbc") && game::isVehicleTransportDisplay(pending.displayId) &&
+            !gameHandler_->getCachedGameObjectInfo(pending.entry)) {
+            if (++it->retryFrames > 1800) {
+                LOG_WARNING("Transport registration dropped: no GO template for entry=", pending.entry);
+                it = pendingTransportRegistrations_.erase(it);
+            } else {
+                ++it;
+            }
+            continue;
+        }
+
         if (transportManager->getTransport(pending.guid)) {
             transportManager->rebindTransportInstance(
                 pending.guid, goIt->second.instanceId, !goIt->second.isWmo, pending.displayId);
@@ -1222,7 +1237,9 @@ void EntitySpawner::processPendingTransportRegistrations() {
                 uint32_t taxiPathId = goData->data[0];
                 const uint32_t mapId = gameHandler_->getCurrentMapId();
                 if (transportManager->hasTaxiPathForMap(taxiPathId, mapId)) {
-                    transportManager->assignTaxiPathToTransport(pending.entry, taxiPathId, mapId);
+                    transportManager->assignTaxiPathToTransport(pending.entry, taxiPathId, mapId,
+                        game::isActiveExpansion("tbc") ? static_cast<float>(goData->data[1]) : 0,
+                        game::isActiveExpansion("tbc") ? static_cast<float>(goData->data[2]) : 0);
                     LOG_DEBUG("Assigned cached TaxiPathNode path for MO_TRANSPORT entry=", pending.entry,
                              " taxiPathId=", taxiPathId, " map=", mapId);
                 }

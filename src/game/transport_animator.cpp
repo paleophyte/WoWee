@@ -34,6 +34,20 @@ void TransportAnimator::evaluateAndApply(
     uint32_t pathTimeMs) const
 {
     const auto& spline = pathEntry.spline;
+    if (pathEntry.legacyRoute) {
+        const auto pose = pathEntry.legacyRoute->evaluate(pathTimeMs, pathEntry.legacyMapId);
+        // Only the server can transfer the passenger to the other map. For
+        // network latency at that boundary retain this map's last hull pose.
+        if (!pose.present) return;
+        transport.position = pose.position;
+        transport.atDockDwell = pose.stopped;
+        if (glm::dot(pose.tangent, pose.tangent) > 1e-6f) {
+            const float yaw = std::atan2(pose.tangent.x, pose.tangent.y) +
+                TransportManager::transportModelBowOffset(transport.displayId);
+            transport.rotation = glm::angleAxis(yaw, glm::vec3(0, 0, 1));
+        }
+        return;
+    }
 
     // Evaluate position from time via CatmullRomSpline (path is local offsets, add base position)
     glm::vec3 pathOffset = spline.evaluatePosition(pathTimeMs);

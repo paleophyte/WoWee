@@ -2,6 +2,14 @@
 #include <catch_amalgamated.hpp>
 #include "network/packet.hpp"
 
+TEST_CASE("Packet copies retain network receipt time", "[packet][tbc-ferry]") {
+    wowee::network::Packet packet(1);
+    const auto received = wowee::network::Packet::Clock::time_point(std::chrono::seconds(100));
+    packet.setReceivedAt(received);
+    auto copy = packet;
+    CHECK(copy.receivedAt() == received);
+}
+
 #include <string>
 
 using wowee::network::Packet;

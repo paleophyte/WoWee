@@ -7,6 +7,8 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <cmath>
+#include "fixtures/tbc_ferry_route.hpp"
+#include <limits>
 
 // ── Minimal stubs for pipeline symbols referenced by DBC loading functions ──
 // The test never calls loadTransportAnimationDBC / loadTaxiPathNodeDBC,
@@ -19,6 +21,60 @@ std::vector<uint8_t> AssetManager::readFileOptional(const std::string&) const { 
 } // namespace wowee::pipeline
 
 using namespace wowee;
+
+TEST_CASE("TBC ferry derives the stock period and both shores from ordinary DBC rows",
+          "[transport_path_repo][tbc-ferry]") {
+    auto route = game::LegacyTransportRoute::build(tbcTheramoreRoute(), 30, 1);
+    REQUIRE(route);
+    // Independent reference: isolated stock ShipPath with these nineteen rows.
+    CHECK(route->periodMs() == 230162);
+    const auto dock0 = tbcTheramoreRoute().nodes[5].position;
+    const auto dock1 = tbcTheramoreRoute().nodes[14].position;
+    for (uint32_t t : {30023u, 45000u, 90022u}) {
+        const auto pose = route->evaluate(t, 0);
+        CHECK(pose.present);
+        CHECK(pose.stopped);
+        CHECK(glm::distance(pose.position, dock0) < 0.01f);
+    }
+    for (uint32_t t : {144275u, 170000u, 204274u}) {
+        const auto pose = route->evaluate(t, 1);
+        CHECK(pose.present);
+        CHECK(pose.stopped);
+        CHECK(glm::distance(pose.position, dock1) < 0.01f);
+    }
+    CHECK(route->evaluate(118678, 0).present);
+    CHECK_FALSE(route->evaluate(118679, 0).present);
+    CHECK(route->evaluate(118679, 1).present);
+    // At the server's actual map-change boundary the destination approach has
+    // just begun, rather than already displaying its dock.
+    const auto approach = route->evaluate(118810, 1);
+    CHECK(approach.present);
+    CHECK_FALSE(approach.stopped);
+    CHECK(glm::distance(approach.position, dock1) > 250);
+    CHECK(glm::distance(route->evaluate(130000, 1).position, dock1) <
+          glm::distance(approach.position, dock1));
+    CHECK(glm::distance(route->evaluate(230162, 0).position,
+                        route->evaluate(0, 0).position) < 0.01f);
+}
+
+TEST_CASE("TBC ferry rejects missing controls and invalid motion metadata", "[tbc-ferry]") {
+    auto data = tbcTheramoreRoute();
+    for (float speed : {0.0f, -1.0f, std::numeric_limits<float>::quiet_NaN()})
+        CHECK_FALSE(game::LegacyTransportRoute::build(data, speed, 1));
+    CHECK_FALSE(game::LegacyTransportRoute::build(data, 30, 0));
+    data.nodes.resize(3);
+    CHECK_FALSE(game::LegacyTransportRoute::build(data, 30, 1));
+}
+
+TEST_CASE("TBC route periods match isolated stock 2.4.3 calculations across ten ferries",
+          "[transport_path_repo][tbc-ferry]") {
+    for (const auto& reference : tbcFerryReferences()) {
+        CAPTURE(reference.entry);
+        auto route = game::LegacyTransportRoute::build(reference.route, reference.speed, reference.acceleration);
+        REQUIRE(route);
+        CHECK(route->periodMs() == reference.stockPeriod);
+    }
+}
 
 // ── Helpers ────────────────────────────────────────────────────
 

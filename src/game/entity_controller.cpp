@@ -2256,6 +2256,9 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
                  " pos=(", go->getX(), ", ", go->getY(), ", ", go->getZ(), ")");
         // Note: TransportSpawnCallback will be invoked from Application after WMO instance is created
     }
+    // A ferry's first clock normally arrives here, before its render model is
+    // registered. Retain that sample as well as clocks on later updates.
+    applyTransportRouteClock(block);
     if (go->getDisplayId() != 0 && owner_.gameObjectSpawnCallbackRef()) {
         float goScale = 1.0f;
         {
@@ -2534,6 +2537,11 @@ void EntityController::trackActiveCritter(const UpdateBlock& block) {
 }
 
 void EntityController::applyTransportRouteClock(const UpdateBlock& block) {
+    if (block.hasTransportPathProgress) {
+        if (auto* tm = owner_.getTransportManager())
+            tm->applyServerPathProgress(block.guid, block.transportPathProgressMs,
+                                       block.transportClockReceivedAt);
+    }
     // A moving transport publishes where it is on its route: LEVEL is the route's
     // period in milliseconds, and the high int16 of DYNAMIC is how far through
     // that period it currently is, as a fraction of 65535.
@@ -2544,8 +2552,8 @@ void EntityController::applyTransportRouteClock(const UpdateBlock& block) {
     // client composes from its own idea of where the hull is - could disagree
     // with the server's.
     //
-    // Both fields are WotLK-only. Nothing earlier published a transport's phase,
-    // so on those expansions fieldIndex returns 0xFFFF and this does nothing.
+    // These two fields are WotLK-only. Earlier profiles return 0xFFFF; TBC's
+    // separate running-clock trailer is handled above instead.
     auto* tm = owner_.getTransportManager();
     if (!tm || !tm->getTransport(block.guid)) return;
 
@@ -2695,6 +2703,11 @@ void EntityController::handleValuesUpdate(const UpdateBlock& block) {
 }
 
 void EntityController::handleMovementUpdate(const UpdateBlock& block) {
+    if (block.hasTransportPathProgress) {
+        if (auto* tm = owner_.getTransportManager())
+            tm->applyServerPathProgress(block.guid, block.transportPathProgressMs,
+                                       block.transportClockReceivedAt);
+    }
             // Diagnostic: Log if we receive MOVEMENT blocks for transports
             if (transportGuids_.count(block.guid)) {
                 LOG_INFO("MOVEMENT update for transport 0x", std::hex, block.guid, std::dec,
@@ -2801,6 +2814,7 @@ void EntityController::handleCompressedUpdateObject(network::Packet& packet) {
 
     // Create packet from decompressed data and parse it
     network::Packet decompressedPacket(wireOpcode(Opcode::SMSG_UPDATE_OBJECT), decompressed);
+    decompressedPacket.setReceivedAt(packet.receivedAt());
     handleUpdateObject(decompressedPacket);
 }
 void EntityController::handleDestroyObject(network::Packet& packet) {
@@ -3183,7 +3197,9 @@ void EntityController::handleGameObjectQueryResponse(network::Packet& packet) {
                                 owner_.getTransportManager()->hasTaxiPath(taxiPathId) ? 1 : 0, ")");
                 }
             } else if (owner_.getTransportManager()->assignTaxiPathToTransport(
-                           data.entry, taxiPathId, mapId)) {
+                           data.entry, taxiPathId, mapId,
+                           isActiveExpansion("tbc") ? static_cast<float>(data.data[1]) : 0,
+                           isActiveExpansion("tbc") ? static_cast<float>(data.data[2]) : 0)) {
                 if (sayThis) {
                     LOG_WARNING("MO_TRANSPORT entry=", data.entry, " assigned TaxiPathNode path ",
                                 taxiPathId, " on map ", mapId);

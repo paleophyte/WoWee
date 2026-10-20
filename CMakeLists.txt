@@ -681,6 +681,7 @@ set(WOWEE_SOURCES
     src/game/warden_memory.cpp
     src/game/transport_manager.cpp
     src/game/transport_path_repository.cpp
+    src/game/legacy_transport_route.cpp
     src/game/transport_clock_sync.cpp
     src/game/transport_animator.cpp
     src/game/world.cpp

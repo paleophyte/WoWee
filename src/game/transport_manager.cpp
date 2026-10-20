@@ -272,6 +272,13 @@ void TransportManager::registerTransport(uint64_t guid,
     pushTransform(transport);
 
     transports_[guid] = transport;
+    if (auto pending = pendingPathProgress_.find(guid); pending != pendingPathProgress_.end()) {
+        auto& registered = transports_.at(guid);
+        registered.hasServerPathProgress = true;
+        registered.serverPathProgressMs = pending->second.progressMs;
+        registered.serverPathProgressAt = pending->second.receivedAt;
+        pendingPathProgress_.erase(pending);
+    }
 
     // A route phase the server published before this was registered.
     if (auto pendingClock = pendingRouteClocks_.find(guid);
@@ -310,6 +317,7 @@ void TransportManager::clearTransports() {
     // Held phases belong to the map that published them; a reused GUID on the
     // next map must not inherit one.
     pendingRouteClocks_.clear();
+    pendingPathProgress_.clear();
     if (count != 0) {
         LOG_INFO("TransportManager: Cleared ", count, " transports for map transition");
     }
@@ -483,6 +491,17 @@ void TransportManager::applyServerRouteClock(uint64_t transportGuid, float phase
                      const auto* p = pathRepo_.findPath(transport->pathId);
                      return p ? p->spline.durationMs() : 0u;
                  }(), "ms)");
+    }
+}
+
+void TransportManager::applyServerPathProgress(uint64_t guid, uint32_t progressMs,
+        std::chrono::steady_clock::time_point receivedAt) {
+    if (auto* transport = getTransport(guid)) {
+        transport->hasServerPathProgress = true;
+        transport->serverPathProgressMs = progressMs;
+        transport->serverPathProgressAt = receivedAt;
+    } else {
+        pendingPathProgress_[guid] = {progressMs, receivedAt};
     }
 }
 
@@ -834,7 +853,8 @@ bool TransportManager::hasTaxiPathForMap(uint32_t taxiPathId, uint32_t mapId) co
     return pathRepo_.hasTaxiPathForMap(taxiPathId, mapId);
 }
 
-bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId) {
+bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPathId, uint32_t mapId,
+                                                float legacySpeed, float legacyAcceleration) {
     auto* taxiEntry = pathRepo_.findTaxiPath(taxiPathId, mapId);
     if (!taxiEntry) {
         LOG_WARNING("No TaxiPathNode segment for taxiPathId=", taxiPathId, " on mapId=", mapId,
@@ -848,6 +868,9 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
     // (a non-origin position), not at (0,0,0), so an origin-only gate here left
     // every continent-crossing ship without its route and falling back to an
     // unrelated TransportAnimation path (Deeprun Tram) instead.
+    const auto* rawRoute = pathRepo_.findTaxiRoute(taxiPathId);
+    const auto legacy = rawRoute && legacySpeed > 0 && legacyAcceleration > 0 ?
+        LegacyTransportRoute::build(*rawRoute, legacySpeed, legacyAcceleration) : nullptr;
     bool assignedAny = false;
     for (auto& [guid, transport] : transports_) {
         if (transport.entry != entry) continue;
@@ -871,7 +894,12 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         PathEntry copied(taxiEntry->spline, entry, taxiEntry->zOnly,
                          /*dbc=*/false, taxiEntry->worldCoords);
         copied.presentMs = taxiEntry->presentMs;
-        if (route && transport.hasServerRouteClock) {
+        if (legacy) {
+            const glm::vec3 first = legacy->evaluate(0, mapId).position;
+            copied.spline = math::CatmullRomSpline({{0, first}, {legacy->periodMs(), first}});
+            copied.legacyRoute = legacy;
+            copied.legacyMapId = mapId;
+        } else if (route && transport.hasServerRouteClock) {
             const float speed =
                 TransportPathRepository::taxiRouteSpeedFor(*route, transport.routePeriodMs);
             if (speed > 0.0f) {
@@ -896,12 +924,23 @@ bool TransportManager::assignTaxiPathToTransport(uint32_t entry, uint32_t taxiPa
         transport.borrowedPath = false;  // This route is its own now.
         transport.basePosition = glm::vec3(0.0f);  // World-coordinate path, no base offset
         transport.useClientAnimation = true;  // Server won't send position updates
+        transport.hasLegacyRoute = static_cast<bool>(legacy);
 
         // Most legacy routes retain their established deterministic phase. Kraken
         // crosses map boundaries, so anchor each freshly loaded segment to the
         // server-authored spawn location; otherwise it can still be approaching
         // Borean Tundra when the server correctly transfers the rider back to map 0.
-        if (storedEntry && storedEntry->spline.durationMs() > 0) {
+        if (legacy && storedEntry) {
+            uint32_t time = 0;
+            if (clockSync_.computePathTime(transport, storedEntry->spline, elapsedTime_, 0, time)) {
+                animator_.evaluateAndApply(transport, *storedEntry, time);
+                transport.onThisMap = storedEntry->presentAt(time);
+            }
+            LOG_WARNING("TBC ferry clock: entry=", entry, " path=", taxiPathId,
+                        " map=", mapId, " period=", legacy->periodMs(), "ms",
+                        " progress=", transport.serverPathProgressMs, "ms phase=", time,
+                        "ms sample=", transport.hasServerPathProgress);
+        } else if (storedEntry && storedEntry->spline.durationMs() > 0) {
             // Where the server says this hull is, not what time it happens to
             // be. A wall-clock modulo put the phase somewhere unrelated to the
             // route, so the zeppelin was departing its tower while the server

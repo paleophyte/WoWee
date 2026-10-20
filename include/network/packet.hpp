@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <chrono>
 
 namespace wowee {
 namespace network {
@@ -124,11 +125,17 @@ public:
     void setReadPos(size_t pos) { readPos = pos; }
     [[nodiscard]] bool hasData() const { return readPos < data.size(); }
     void skipAll() { readPos = data.size(); }
+    // Preserve arrival time through queueing, decompression and model loading.
+    // Transport clocks must age while the world is loading, not only on frames.
+    using Clock = std::chrono::steady_clock;
+    [[nodiscard]] Clock::time_point receivedAt() const { return receivedAt_; }
+    void setReceivedAt(Clock::time_point value) { receivedAt_ = value; }
 
 private:
     uint16_t opcode = 0;
     std::vector<uint8_t> data;
     size_t readPos = 0;
+    Clock::time_point receivedAt_ = Clock::now();
 
     // The open bit byte on each side. 8 means none is open, which is what
     // makes flushBits() and resetBitReader() free on the byte paths.
