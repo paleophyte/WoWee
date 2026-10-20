@@ -22,7 +22,25 @@ local function unhex(text)
     return value
 end
 
+local function refreshExtensions(self)
+    self.grindSupported = self.capabilityRequest == self.grindCapabilityRequest and
+        self.capabilityGeneration == self.grindCapabilityGeneration and self.capabilityRequest ~= nil
+    self.skinningSupported = self.grindSupported and self.capabilityRequest == self.skinningCapabilityRequest and
+        self.capabilityGeneration == self.skinningCapabilityGeneration
+end
+
 function Activity:capability(prefix, text, sender, player, control)
+    if prefix == 'WIDLEHCAP' then
+        if not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 100 then return false end
+        local id, generation = text:match('^1\t([%w_-]+)\t(%d+)\tskinning_hunt_1$')
+        if not id or id ~= control.ackId or tonumber(generation) ~= control.generation then
+            self.capabilityRejected = 'skinning capability does not match accepted control reply'
+            return false
+        end
+        self.skinningCapabilityRequest, self.skinningCapabilityGeneration = id, tonumber(generation)
+        refreshExtensions(self)
+        return true
+    end
     if prefix == 'WIDLEGCAP' then
         if not WoweeBotStatus.samePlayer(sender, player) or type(text) ~= 'string' or #text > 100 then return false end
         local id, generation = text:match('^1\t([%w_-]+)\t(%d+)\tgrind_activity_1$')
@@ -31,7 +49,7 @@ function Activity:capability(prefix, text, sender, player, control)
             return false
         end
         self.grindCapabilityRequest, self.grindCapabilityGeneration = id, tonumber(generation)
-        self.grindSupported = self.capabilityRequest == id and self.capabilityGeneration == tonumber(generation)
+        refreshExtensions(self)
         return true
     end
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
@@ -45,7 +63,7 @@ function Activity:capability(prefix, text, sender, player, control)
     end
     self.supported = true
     self.capabilityRequest, self.capabilityGeneration = id, tonumber(generation)
-    self.grindSupported = self.grindCapabilityRequest == id and self.grindCapabilityGeneration == tonumber(generation)
+    refreshExtensions(self)
     return true
 end
 
@@ -53,10 +71,11 @@ function Activity:request(generation, now)
     self.sequence = self.sequence + 1
     local id = self.nonce .. '_a' .. self.sequence
     local grindActivity = self.grindSupported and self.grindCapabilityGeneration == generation
-    self.pending = {id = id, generation = generation, sentAt = now, parts = {}, grindActivity = grindActivity}
+    local skinningHunt = grindActivity and self.skinningSupported and self.skinningCapabilityGeneration == generation
+    self.pending = {id = id, generation = generation, sentAt = now, parts = {}, grindActivity = grindActivity, skinningHunt = skinningHunt}
     self.lastRequest, self.requestedAt = id .. ' generation ' .. generation, now
     self.failure = nil
-    return '.bot idle ' .. id .. ' snapshot ' .. generation .. (grindActivity and ' grind_1' or '')
+    return '.bot idle ' .. id .. ' snapshot ' .. generation .. (skinningHunt and ' grind_2' or grindActivity and ' grind_1' or '')
 end
 
 function Activity:reject(reason, now)
@@ -86,7 +105,7 @@ end
 
 local states = {off=true, manual=true, combat=true, non_combat=true, dead=true, reaction=true, unknown=true}
 local kinds = {none=true, quest_offer=true, quest_turnin=true, quest_objective=true,
-    trainer=true, vendor=true, repair=true, social=true, other=true, grind=true}
+    trainer=true, vendor=true, repair=true, social=true, other=true, grind=true, skinning=true}
 local statuses = {none=true, preparing=true, ready=true, traveling=true, working=true, cooldown=true, expired=true}
 local objectives = {none=true, kill=true, creature_loot=true, object_loot=true, vendor_item=true, spell=true, interact=true}
 local interactions = {none=true, npc=true, object=true, player=true}
@@ -110,7 +129,7 @@ function Activity.decode(body)
         not s.interactionName or not s.task or not s.executed then return end
     if s.kind:match('^quest_') and s.questId == 0 then return end
     if s.kind == 'quest_objective' and s.objective < 0 then return end
-    if s.kind == 'grind' and (s.mode ~= 'bot' or s.questId ~= 0 or s.objective ~= -1 or s.objectiveType ~= 'none' or s.entry <= 0) then return end
+    if (s.kind == 'grind' or s.kind == 'skinning') and (s.mode ~= 'bot' or s.questId ~= 0 or s.objective ~= -1 or s.objectiveType ~= 'none' or s.entry <= 0) then return end
     if s.mode == 'bot' and (s.state == 'manual' or s.state == 'off') then return end
     return s
 end
@@ -144,6 +163,8 @@ function Activity:receive(prefix, text, sender, player, generation, now)
     self.pending = nil
     if not snapshot then self.failure = 'Invalid activity reply'; return nil, true end
     if snapshot.kind == 'grind' and not p.grindActivity then self.failure = 'Unrequested grind activity'; return nil, true end
+    if snapshot.kind == 'skinning' and not p.skinningHunt then self.failure = 'Unrequested skinning activity'; return nil, true end
+    snapshot.skinningHunt = p.skinningHunt == true
     snapshot.grindActivity = p.grindActivity == true
     self.failure = nil
     self.completedAt = now
@@ -188,6 +209,7 @@ end
 function Activity.apply(model, s, now)
     model.typed, model.aiState, model.objectiveType = true, s.state, s.objectiveType
     model.grindActivity = s.grindActivity == true
+    model.skinningHunt = s.skinningHunt == true
     model.kind = s.kind == 'quest_objective' and 'questobjective' or s.kind
     model.goal = (goalVerbs[s.kind] or '') .. (s.goal ~= '' and s.goal or 'No destination')
     model.status, model.distance = s.status, s.distance >= 0 and s.distance or nil

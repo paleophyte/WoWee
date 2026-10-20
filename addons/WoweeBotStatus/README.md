@@ -85,3 +85,20 @@ spend resources, move the character or change quest priorities.
 Older servers keep the existing display. Recovery shares the normal snapshot
 poll and adds no chat commands. This update needs an addon refresh/reload;
 it adds no native client APIs. The TBC server feature must also be installed.
+
+
+## Selected skinning work
+
+On a TBC server advertising `skinning_hunt_1`, the addon can distinguish a
+selected skinning hunt from travel or other gathering. Auto Grind may enable
+grinding while that eligible hunt is working, then disable it for travel,
+waiting, quest containers and other errands. The server validates the carried
+knife, skill/target eligibility and solo self-playerbot context.
+
+This uses a separately negotiated `grind_2` activity snapshot. Older servers
+keep their existing snapshot format and behavior. The normal confirmed Bot
+control, group and Auto Grind settings still apply. The label describes the
+selected plan; a successful kill or skin is not inferred from the label.
+
+The feature requires the matching server update. The client change is addon
+only: update the installed addon and reload/restart; no new native API is needed.

@@ -82,6 +82,7 @@ function Status:receive(prefix, text, sender, player, now)
             ((self.kind ~= kind or self.goal ~= goal) and not matchesRecentReport) then
             self.questId, self.questTitle, self.questAt = nil, nil, nil
         end
+        self.skinningHunt = nil
         self.grindActivity = nil -- A legacy description is not negotiated grind authority.
         self.kind, self.goal = kind, goal
         self.distance = tonumber(text:match('\nDistance (%d+)y'))
@@ -119,6 +120,11 @@ end
 -- quest-log entry. A ready travel target alone does not mean a finished quest.
 function Status:grindDecision(now, quest)
     if not self:isFresh(now) then return nil, 'waiting for bot status' end
+    if self.kind == 'skinning' then
+        if not self.typed or not self.grindActivity or not self.skinningHunt then return false, 'skinning requires typed confirmation' end
+        if self.aiState ~= 'non_combat' and self.aiState ~= 'combat' then return nil, 'waiting for normal activity' end
+        return self.status == 'working', self.status == 'working' and 'hunting selected skinning prey' or 'travelling or waiting to skin'
+    end
     if self.kind == 'grind' then
         if not self.typed or not self.grindActivity then return false, 'grind activity requires typed confirmation' end
         if self.aiState ~= 'non_combat' and self.aiState ~= 'combat' then return nil, 'waiting for normal activity' end

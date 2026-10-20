@@ -90,3 +90,89 @@ assert(Activity.actionName('rpg buy') == 'Buy items')
 assert(Activity.actionName('new unknown action') == 'new unknown action')
 assert(Activity.actionName(nil) == nil and Activity.actionName('') == nil)
 print('Typed activity snapshot scenarios passed')
+
+-- Negotiated selected-skinning work must never infer authority from goal text.
+do
+local A,S = WoweeBotActivity,WoweeBotStatus
+local ctl = {ackId='control_1',generation=2}
+local caps = {
+    {'WIDLECAP','activity_1'}, {'WIDLEGCAP','grind_activity_1'}, {'WIDLEHCAP','skinning_hunt_1'}
+}
+local function cap(a,which,id,gen,sender)
+    local c=caps[which]
+    return a:capability(c[1],table.concat({'1',id or ctl.ackId,gen or ctl.generation,c[2]},'\t'),
+        sender or 'Idlelabqfix','Idlelabqfix',ctl)
+end
+local function body(kind,status)
+    return table.concat({'bot','non_combat',kind or 'skinning',status or 'working','0','-1','none',
+        '721','2','536b696e20526162626974','-','-','none','0','-','-','-','0','0'},'\t')
+end
+local function receive(a,wire,now,gen,sender,id)
+    local packet=table.concat({'1',id or a.pending.id,gen or 2,'1','1',wire},'\t')
+    return a:receive('WIDLEACT',packet,sender or 'Idlelabqfix','Idlelabqfix',gen or 2,now or 1)
+end
+for _,order in ipairs({{1,2,3},{1,3,2},{2,1,3},{2,3,1},{3,1,2},{3,2,1}}) do
+    local a=A.new('all')
+    for i,which in ipairs(order) do
+        assert(cap(a,which));assert((a.skinningSupported == true)==(i==3))
+    end
+    assert(a:request(2,0)=='.bot idle all_a1 snapshot 2 grind_2')
+    local snap=assert(receive(a,body()));assert(snap.skinningHunt and snap.grindActivity)
+    local m=S.new();A.apply(m,snap,1)
+    local desired,reason=m:grindDecision(2,nil)
+    assert(desired==true and reason=='hunting selected skinning prey')
+    assert(not m:currentQuest(2) and m.goal=='Skin Rabbit')
+    for _,status in ipairs({'none','preparing','ready','traveling','cooldown','expired'}) do
+        snap.status=status;A.apply(m,snap,1);assert(m:grindDecision(2,nil)==false)
+    end
+    snap.status='working'
+    for _,state in ipairs({'dead','reaction','unknown'}) do
+        snap.state=state;A.apply(m,snap,1);assert(m:grindDecision(2,nil)==nil)
+    end
+    snap.state='combat';A.apply(m,snap,1);assert(m:grindDecision(2,nil)==true)
+    assert(m:grindDecision(30,nil)==nil)
+    -- A newer accepted control request cannot reuse the previous extension.
+    ctl.ackId='control_2';assert(cap(a,1));assert(not a.skinningSupported)
+    assert(a:request(2,3)=='.bot idle all_a2 snapshot 2')
+    assert(cap(a,2));assert(a:request(2,4)=='.bot idle all_a3 snapshot 2 grind_1')
+    assert(cap(a,3));assert(a:request(2,5)=='.bot idle all_a4 snapshot 2 grind_2')
+    assert(a:request(3,6)=='.bot idle all_a5 snapshot 3')
+    ctl.ackId='control_1'
+end
+-- Every missing capability falls back without granting skinning authority.
+for missing=1,3 do
+    local a=A.new('missing')
+    for i=1,3 do if i~=missing then assert(cap(a,i)) end end
+    assert(not a.skinningSupported)
+    a:request(2,0)
+    local snap,changed=receive(a,body())
+    assert(not snap and changed and a.failure=='Unrequested skinning activity')
+end
+local a=A.new('strict')
+for i=1,3 do assert(cap(a,i)) end
+assert(not cap(a,3,'stale'));assert(not cap(a,3,nil,3));assert(not cap(a,3,nil,nil,'Other'))
+a:request(2,0)
+assert(not receive(a,body(),1,2,'Other'))
+assert(not receive(a,body(),1,2,nil,'wrong_request'))
+assert(not receive(a,body(),1,3))
+assert(not receive(a,body(),5))
+assert(a:expire(5,2) and not a.pending)
+-- Decoding valid bytes alone does not authorize a strategy change.
+local raw=assert(A.decode(body()));local m=S.new();A.apply(m,raw,1)
+assert(m:grindDecision(2,nil)==false)
+for _,mutation in ipairs({
+    {'\t0\t%-1\tnone\t721\t','\t0\t-1\tnone\t-721\t'},
+    {'\t0\t%-1\tnone\t721\t','\t33\t-1\tnone\t721\t'},
+    {'\t0\t%-1\tnone\t721\t','\t0\t0\tnone\t721\t'},
+    {'\t0\t%-1\tnone\t721\t','\t0\t-1\tkill\t721\t'},
+    {'^bot','manual'}
+}) do assert(not A.decode((body():gsub(mutation[1],mutation[2])))) end
+-- Conflicting fragments cannot update the model atomically.
+a:request(2,6)
+local id=a.pending.id
+assert(not a:receive('WIDLEACT','1\t'..id..'\t2\t1\t2\tbot','Idlelabqfix','Idlelabqfix',2,7))
+local _,changed=a:receive('WIDLEACT','1\t'..id..'\t2\t1\t2\tbad','Idlelabqfix','Idlelabqfix',2,7)
+assert(changed and a.failure=='Conflicting activity fragments')
+print('Skinning capability orders, downgrade, selected work, lifecycle and frame authority pass')
+
+end

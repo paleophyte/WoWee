@@ -261,3 +261,73 @@ do
  WoweeBotPoliciesFrame:Hide();event(WoweeBotController,'PLAYER_ENTERING_WORLD')
 end
 print('Incoming request policy UI, independent toggles, Manual preservation and bot event rejection passed')
+
+-- Run after the normal native activity-frame scenarios. No mocked frames.
+do
+    local oldClock,oldUnit,oldSend=GetTime,UnitName,SendChatMessage
+    local oldCount,oldTitle,oldBoards=GetNumQuestLogEntries,GetQuestLogTitle,GetNumQuestLeaderBoards
+    local oldParty,oldRaid=GetNumPartyMembers,GetNumRaidMembers
+    local clock,sent=oldClock()+100,{}
+    GetTime=function()return clock end
+    UnitName=function(unit)if unit=='player'then return 'Jizzle'end;return oldUnit(unit)end
+    SendChatMessage=function(command)sent[#sent+1]=command end
+    GetNumQuestLogEntries=function()return 1 end
+    GetQuestLogTitle=function()return "Milly's Harvest",4,0,false,false,false,0,0,3904 end
+    GetNumQuestLeaderBoards=function()return 0 end
+    GetNumPartyMembers=function()return 0 end
+    GetNumRaidMembers=function()return 0 end
+    local event=WoweeBotController:GetScript('OnEvent')
+    local tick=function()WoweeBotController:GetScript('OnUpdate')()end
+    local function receive(prefix,text)event(WoweeBotController,'CHAT_MSG_ADDON',prefix,text,'WHISPER','Jizzle')end
+    local function last(verb)
+        for i=#sent,1,-1 do
+            local id=sent[i]:match('^%.bot idle ([%w_-]+) '..verb)
+            if id then return id,sent[i]end
+        end
+        error('Missing '..verb..' request; control='..tostring(WoweeBotStatusControl:GetText())..'; sent='..table.concat(sent,' | '))
+    end
+    local function ack(id,grind,mode,generation)
+        generation=generation or 21
+        receive('WIDLE','1\t'..id..'\tok\t'..(mode or 'bot')..'\t'..generation..'\t'..grind..'\tnone')
+        receive('WIDLEHCAP','1\t'..id..'\t'..generation..'\tskinning_hunt_1')
+        receive('WIDLEGCAP','1\t'..id..'\t'..generation..'\tgrind_activity_1')
+        receive('WIDLECAP','1\t'..id..'\t'..generation..'\tactivity_1')
+    end
+    local function hex(s)return s=='' and '-' or s:gsub('.',function(c)return string.format('%02x',c:byte())end)end
+    local function snapshot(kind,status)
+        clock=clock+8;tick();ack(last('status'),'0');tick()
+        local id,command=last('snapshot');assert(command:match(' snapshot 21 grind_2$'))
+        local object=kind=='quest_objective'
+        local body=table.concat({'bot','non_combat',kind,status,object and '3904' or '0',object and '0' or '-1',
+            object and 'object_loot' or 'none',object and '-161557' or '721','3',hex(object and 'Milly\'s Harvest' or 'Skin Rabbit'),
+            object and hex("Milly's Harvest")or '-',hex('Elwynn Forest'),'none','0','-','-','-','0','0'},'\t')
+        local count=math.ceil(#body/160)
+        for i=1,count do receive('WIDLEACT','1\t'..id..'\t21\t'..i..'\t'..count..'\t'..body:sub((i-1)*160+1,i*160))end
+        clock=clock+.3;tick()
+    end
+    WoweeBotStatusSettings.autoGrind=true
+    event(WoweeBotController,'PLAYER_ENTERING_WORLD');tick();ack(last('status'),'0')
+    snapshot('skinning','working')
+    assert(WoweeBotStatusGoal:GetText()=='Travel plan: Skin Rabbit')
+    local on,onCommand=last('grind');assert(onCommand:match(' grind 21 on$'));ack(on,'1')
+    -- The next confirmed task replaces the grind activity completely.
+    clock=clock+8;tick();ack(last('status'),'1');tick()
+    local id,command=last('snapshot');assert(command:match(' snapshot 21 grind_2$'))
+    local body=table.concat({'bot','non_combat','quest_objective','working','3904','0','object_loot','-161557','2',
+        hex("Milly's Harvest"),hex("Milly's Harvest"),hex('Elwynn Forest'),'none','0','-','-','-','0','0'},'\t')
+    local count=math.ceil(#body/160)
+    for i=1,count do receive('WIDLEACT','1\t'..id..'\t21\t'..i..'\t'..count..'\t'..body:sub((i-1)*160+1,i*160))end
+    clock=clock+.3;tick()
+    local off,offCommand=last('grind');assert(off~=on and offCommand:match(' grind 21 off$'));ack(off,'0')
+    assert(WoweeBotStatusGoal:GetText()=="Quest plan: Milly's Harvest")
+    SlashCmdList.WOWEEBOTPLAY('manual');tick()
+    local manual,manualCommand=last('control');assert(manualCommand:match(' control 21 manual$'));ack(manual,'0','manual',22)
+    clock=clock+.3;tick()
+    assert(WoweeBotStatusMode:GetText():find('I am playing',1,true))
+    assert(type(WoweeBotController:GetScript('OnUpdate'))=='function')
+    GetTime,UnitName,SendChatMessage=oldClock,oldUnit,oldSend
+    GetNumQuestLogEntries,GetQuestLogTitle,GetNumQuestLeaderBoards=oldCount,oldTitle,oldBoards
+    GetNumPartyMembers,GetNumRaidMembers=oldParty,oldRaid
+    event(WoweeBotController,'PLAYER_ENTERING_WORLD')
+end
+print('Native frames: negotiated skinning plan/On, container Off and Manual handoff passed')
