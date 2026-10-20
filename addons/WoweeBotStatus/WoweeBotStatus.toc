@@ -7,6 +7,7 @@
 Status.lua
 Grind.lua
 Control.lua
+Focus.lua
 Activity.lua
 History.lua
 HistoryUI.lua

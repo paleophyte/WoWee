@@ -1,6 +1,11 @@
 local Status = WoweeBotStatus
 local model = Status.new()
 local controller = WoweeBotControl.new()
+local function newFocus()
+    local module=rawget(_G,'WoweeBotQuestFocus')
+    if type(module)=='table' and type(module.new)=='function' then return module.new() end
+end
+local focus = newFocus()
 local activity = WoweeBotActivity.new()
 local function newHistory()
     local module=rawget(_G,'WoweeBotHistory')
@@ -43,7 +48,7 @@ end
 local driver = CreateFrame('Frame', 'WoweeBotController', UIParent)
 local rejectedPopup
 local panel = CreateFrame('Frame', 'WoweeBotStatusFrame', UIParent)
-panel:SetSize(690, 258)
+panel:SetSize(690, 284)
 panel:SetPoint('BOTTOM', UIParent, 'BOTTOM', 0, 138)
 panel:SetFrameStrata('MEDIUM')
 panel:SetMovable(true)
@@ -74,17 +79,18 @@ title:SetText('BOT ACTIVITY')
 title:SetTextColor(0.86, 0.72, 0.35)
 local freshness = label('Freshness', 'GameFontHighlightSmall', 175, -15, 170)
 freshness:SetTextColor(0.65, 0.68, 0.63)
-local goal = label('Goal', 'GameFontNormal', 16, -64, 655)
+local selectedQuest = label('SelectedQuest', 'GameFontNormal', 16, -38, 655)
+local goal = label('Goal', 'GameFontNormal', 16, -90, 655)
 goal:SetTextColor(1, 0.84, 0.25)
-local details = label('Details', 'GameFontHighlight', 16, -88, 655)
-local progress = label('Progress', 'GameFontHighlightSmall', 16, -113, 655)
-local action = label('Action', 'GameFontHighlightSmall', 16, -138, 655)
+local details = label('Details', 'GameFontHighlight', 16, -114, 655)
+local progress = label('Progress', 'GameFontHighlightSmall', 16, -139, 655)
+local action = label('Action', 'GameFontHighlightSmall', 16, -164, 655)
 action:SetTextColor(0.65, 0.7, 0.7)
-local control = label('Control', 'GameFontHighlightSmall', 16, -210, 655)
+local control = label('Control', 'GameFontHighlightSmall', 16, -236, 655)
 control:SetTextColor(0.72, 0.8, 0.62)
-local modeLabel = label('Mode', 'GameFontHighlight', 16, -186, 500)
-local interaction = label('Interaction', 'GameFontNormalLarge', 16, -38, 655)
-local travelDetail = label('Travel', 'GameFontHighlightSmall', 16, -162, 655)
+local modeLabel = label('Mode', 'GameFontHighlight', 16, -212, 500)
+local interaction = label('Interaction', 'GameFontNormalLarge', 16, -64, 655)
+local travelDetail = label('Travel', 'GameFontHighlightSmall', 16, -188, 655)
 travelDetail:SetTextColor(0.9,0.76,0.4)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
@@ -170,6 +176,7 @@ end
 
 local function draw()
     local now = GetTime()
+    selectedQuest:SetText(focus and focus:label(controller,now) or 'Selected quest: unavailable')
     if drawPolicy then drawPolicy() end
     progress:SetText('')
     action:SetText('')
@@ -231,8 +238,8 @@ local function draw()
     if recovery and controller:isBot(now) and recovery:summary(now) then travelDetail:SetText(recovery:summary(now)) end
     freshness:SetText('Updated ' .. math.floor(now - model.travelAt) .. 's ago')
     local questId, questTitle = model:currentQuest(now)
-    goal:SetText(questTitle and ((model.typed and 'Quest plan: ' or 'Quest: ') .. questTitle) or
-        ((model.typed and 'Travel plan: ' or 'Goal: ') .. (model.goal or 'No destination')))
+    goal:SetText(questTitle and ((model.typed and 'Quest destination: ' or 'Quest: ') .. questTitle) or
+        ((model.typed and 'Travel destination: ' or 'Goal: ') .. (model.goal or 'No destination')))
     local parts = {model.status or (model.kind == 'idle' and 'Idle' or 'No travel status reported')}
     if model.typed then
         parts[1] = (model.aiState or 'unknown'):gsub('_', ' ') .. ' - ' .. parts[1]
@@ -514,6 +521,14 @@ driver:SetScript('OnUpdate', function()
         controller:planGrind(desired)
         local command = controller:update(now)
         if command then SendChatMessage(command, 'SAY') end
+        if focus then
+            local focusCommand=focus:update(controller,now)
+            if focusCommand then SendChatMessage(focusCommand,'SAY') end
+            if WoweeBotReportStatusProblem then
+                if focus.failure then WoweeBotReportStatusProblem('focus',focus.failure)
+                elseif focus:fresh(controller,now) then WoweeBotReportStatusProblem('focus',nil,'Quest selection confirmed by the server.') end
+            end
+        end
         if not model.disabled and now >= nextPoll then request() end
         if WoweeBotReportStatusProblem then
             if controller.failure then WoweeBotReportStatusProblem('control', controller.failure) end
@@ -553,11 +568,13 @@ driver:SetScript('OnEvent', function(self, event, ...)
             rejectedPopup = {name=popup,generation=controller.generation}
         end
     elseif event == 'PLAYER_ENTERING_WORLD' then
+        focus=newFocus()
         rejectedPopup = nil
         model, controller, activity, inWorld, nextPoll = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), true, 0
         history=newHistory();notifyHistory()
         training=newTraining();trainingPlan=newTrainingPlan();travel=newTravel();recovery=newRecovery();itemUse=newItemUse();gatherTools=newGatherTools()
     elseif event == 'PLAYER_LEAVING_WORLD' then
+        focus=newFocus()
         model, controller, activity, inWorld = Status.new(), WoweeBotControl.new(), WoweeBotActivity.new(), false
         if history then history.pending=nil end
         if training then training.pending=nil end
@@ -601,6 +618,10 @@ driver:SetScript('OnEvent', function(self, event, ...)
         end
         local supported = activity.supported
         controller:capability(prefix, text, sender, player)
+        if focus then
+            focus:capability(prefix,text,sender,player,controller)
+            focus:receive(prefix,text,sender,player,controller,now)
+        end
         if gatherTools then
             gatherTools:capability(prefix,text,sender,player,controller)
             if gatherTools:receive(prefix,text,sender,player,controller.generation,now) and not gatherTools.failure and gatherTools.snapshot then
@@ -698,3 +719,14 @@ end
 SLASH_WOWEEBOTPOLICY1 = '/botpolicy'
 SlashCmdList.WOWEEBOTPOLICY = function() policies:Show(); drawPolicy() end
 draw()
+
+-- The picker expresses intent; only the matched server reply changes the label.
+function WoweeBotQuestFocusView()
+    local now=GetTime()
+    return focus and focus:label(controller,now) or 'Selected quest: unavailable',
+        inWorld and focus and focus:fresh(controller,now) and not focus.pending and focus.state~='unavailable',
+        focus and focus.questId
+end
+function WoweeBotSelectQuest(questId)
+    return inWorld and focus and focus:choose(questId,controller,GetTime())
+end

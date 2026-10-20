@@ -40,7 +40,7 @@ do
             receive('WIDLEACT', '1\t' .. request .. '\t13\t' .. i .. '\t' .. count .. '\t' ..
                 body:sub((i - 1) * 160 + 1, i * 160))
         end
-        assert(WoweeBotStatusGoal:GetText() == 'Travel plan: Train at Lee Brown')
+        assert(WoweeBotStatusGoal:GetText() == 'Travel destination: Train at Lee Brown')
     end
     snapshot('Bag vendor', 'rpg buy', '')
     assert(WoweeBotStatusInteraction:GetText() == 'Selected task: Buy items - Bag vendor')
@@ -187,7 +187,7 @@ do
     WoweeBotStatusSettings.autoGrind=true
     event(WoweeBotController,'PLAYER_ENTERING_WORLD');tick();ack(last('status'),'0')
     snapshot('grind','working')
-    assert(WoweeBotStatusGoal:GetText()=='Travel plan: Grind for XP or gold: Kobold Worker')
+    assert(WoweeBotStatusGoal:GetText()=='Travel destination: Grind for XP or gold: Kobold Worker')
     local on,onCommand=last('grind');assert(onCommand:match(' grind 21 on$'));ack(on,'1')
     -- The next confirmed task replaces the grind activity completely.
     clock=clock+8;tick();ack(last('status'),'1');tick()
@@ -198,7 +198,7 @@ do
     for i=1,count do receive('WIDLEACT','1\t'..id..'\t21\t'..i..'\t'..count..'\t'..body:sub((i-1)*160+1,i*160))end
     clock=clock+.3;tick()
     local off,offCommand=last('grind');assert(off~=on and offCommand:match(' grind 21 off$'));ack(off,'0')
-    assert(WoweeBotStatusGoal:GetText()=="Quest plan: Milly's Harvest")
+    assert(WoweeBotStatusGoal:GetText()=="Quest destination: Milly's Harvest")
     SlashCmdList.WOWEEBOTPLAY('manual');tick()
     local manual,manualCommand=last('control');assert(manualCommand:match(' control 21 manual$'));ack(manual,'0','manual',22)
     clock=clock+.3;tick()
@@ -308,7 +308,7 @@ do
     WoweeBotStatusSettings.autoGrind=true
     event(WoweeBotController,'PLAYER_ENTERING_WORLD');tick();ack(last('status'),'0')
     snapshot('skinning','working')
-    assert(WoweeBotStatusGoal:GetText()=='Travel plan: Skin Rabbit')
+    assert(WoweeBotStatusGoal:GetText()=='Travel destination: Skin Rabbit')
     local on,onCommand=last('grind');assert(onCommand:match(' grind 21 on$'));ack(on,'1')
     -- The next confirmed task replaces the grind activity completely.
     clock=clock+8;tick();ack(last('status'),'1');tick()
@@ -319,7 +319,7 @@ do
     for i=1,count do receive('WIDLEACT','1\t'..id..'\t21\t'..i..'\t'..count..'\t'..body:sub((i-1)*160+1,i*160))end
     clock=clock+.3;tick()
     local off,offCommand=last('grind');assert(off~=on and offCommand:match(' grind 21 off$'));ack(off,'0')
-    assert(WoweeBotStatusGoal:GetText()=="Quest plan: Milly's Harvest")
+    assert(WoweeBotStatusGoal:GetText()=="Quest destination: Milly's Harvest")
     SlashCmdList.WOWEEBOTPLAY('manual');tick()
     local manual,manualCommand=last('control');assert(manualCommand:match(' control 21 manual$'));ack(manual,'0','manual',22)
     clock=clock+.3;tick()

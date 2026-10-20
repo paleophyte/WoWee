@@ -1,6 +1,6 @@
 -- Browsing is local UI state. It never changes the server's quest focus.
 local frame=CreateFrame('Frame','WoweeBotQuestsFrame',UIParent)
-frame:SetSize(660,640);frame:SetPoint('CENTER',UIParent,'CENTER',0,20)
+frame:SetSize(660,700);frame:SetPoint('CENTER',UIParent,'CENTER',0,0)
 frame:SetFrameStrata('DIALOG');frame:SetClampedToScreen(true);frame:EnableMouse(true)
 frame:SetBackdrop({bgFile='Interface\\Tooltips\\UI-Tooltip-Background',
     edgeFile='Interface\\Tooltips\\UI-Tooltip-Border',tile=true,tileSize=16,edgeSize=16,
@@ -16,7 +16,8 @@ local scope=label('WoweeBotQuestsScope','GameFontHighlightSmall',-47,22)
 local status=label('WoweeBotQuestsStatus','GameFontHighlightSmall',-72,28)
 local detail=label('WoweeBotQuestsDetail','GameFontHighlight',-365,215)
 detail:SetJustifyV('TOP')
-label(nil,'GameFontHighlightSmall',-605,22):SetText('Browsing only. Your bot plan and control stay unchanged.')
+local selected=label('WoweeBotQuestsSelected','GameFontNormal',-585,42)
+label(nil,'GameFontHighlightSmall',-669,22):SetText('Browse rows, then choose Work on this quest. Manual/Bot control stays unchanged.')
 local page,viewing,online,dirty,nextDraw=1,nil,false,true,0
 local rows,entries={},{}
 local render
@@ -37,6 +38,14 @@ for i=1,5 do
 end
 local previous=button('WoweeBotQuestsPrevious','< Previous',18,-330,110,function() page=math.max(1,page-1);viewing=nil;render() end)
 local following=button('WoweeBotQuestsNext','Next >',138,-330,110,function() page=page+1;viewing=nil;render() end)
+local work=button('WoweeBotQuestWork','Work on this quest',18,-634,190,function()
+    if type(WoweeBotSelectQuest)=='function' and viewing then WoweeBotSelectQuest(viewing) end
+    render()
+end)
+local clear=button('WoweeBotQuestClear','Clear quest selection',220,-634,190,function()
+    if type(WoweeBotSelectQuest)=='function' then WoweeBotSelectQuest(0) end
+    render()
+end)
 local function questState(quest)
     if quest.failed then return 'Failed' end
     if quest.complete then
@@ -79,6 +88,12 @@ render=function()
         end
     elseif valid then lines={'No accepted quests in this character\'s quest log.'} end
     detail:SetText(table.concat(lines,'\n'))
+    local view=rawget(_G,'WoweeBotQuestFocusView')
+    local focusText,canChoose,focused
+    if online and type(view)=='function' then focusText,canChoose,focused=view() end
+    selected:SetText(focusText or 'Selected quest: waiting for server capability')
+    if canChoose and viewed and not viewed.failed and focused~=viewed.questId then work:Enable() else work:Disable() end
+    if canChoose then clear:Enable() else clear:Disable() end
     if page>1 then previous:Enable() else previous:Disable() end
     if page<pages then following:Enable() else following:Disable() end
     dirty=false

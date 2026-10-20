@@ -3,6 +3,7 @@
 #include "game/entity.hpp"
 #include "game/movement_handler.hpp"
 #include "game/spell_handler.hpp"
+#include "game/quest_handler.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/renderer.hpp"
 #include "addons/addon_manager.hpp"
@@ -840,6 +841,64 @@ TEST_CASE("Lua boolean evaluation returns the expression and preserves the stack
     lua_settop(state, base);
 }
 
+TEST_CASE("accepted quest picker waits for confirmation and preserves focus across control handoff",
+          "[replay][addon][playerbot][quest-focus]") {
+    Session s("tbc"); addPlayer(s);
+    auto player=std::dynamic_pointer_cast<wowee::game::Player>(s.handler().getEntityManager().getEntity(Session::kPlayerGuid));
+    player->setName("Jizzle");
+    s.handler().getQuestHandler()->addQuestToLocalLogIfMissing(15,"Quest test","");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua=manager.getLuaEngine(); REQUIRE(lua);
+    std::vector<std::string> errors;
+    lua->setLuaErrorCallback([&](const auto& error){errors.push_back(error);});
+    REQUIRE(lua->executeString("testNow=0;GetTime=function()return testNow end;GetServerTime=function()return 1000+testNow end;UnitCharacterPoints=function()return 0 end;WoweeSaveVariables=function()end;WoweeBotStatusSettings={}"));
+    const auto root=std::string(WOWEE_SOURCE_DIR)+"/addons/WoweeBotStatus/";
+    for (const auto* file:{"Status.lua","Grind.lua","Control.lua","Focus.lua","Activity.lua","History.lua","HistoryUI.lua","QuestsUI.lua","Training.lua","TrainingPlan.lua","Travel.lua","Recovery.lua","ItemUse.lua","GatherTools.lua","Inbox.lua","NotesUI.lua","WoweeBotStatus.lua"})
+        REQUIRE(lua->executeFile(root+file));
+    lua->fireEvent("ADDON_LOADED",{"WoweeBotStatus"});lua->fireEvent("PLAYER_ENTERING_WORLD");
+    s.handler().setAddonEventCallback([lua](const auto& event,const auto& args){lua->fireEvent(event,args);});
+    struct Cleanup {wowee::game::GameHandler& handler;~Cleanup(){handler.setAddonEventCallback({});}} cleanup{s.handler()};
+    lua->widgets().layout(1920,1080);
+    auto tick=[&]{lua->dispatchOnUpdate(0.25f);};
+    tick();
+    s.receive(botChat("WIDLE\t1\t0_1\tok\tmanual\t2\t0\tnone"));
+    REQUIRE(lua->executeString("SlashCmdList.WOWEEBOTQUESTS()"));lua->widgets().layout(1920,1080);
+    CHECK(lua->evaluateBoolean("WoweeBotQuestWork:IsEnabled()==0"));
+    s.receive(botChat("WIDLEFCAP\t1\t0_1\t2\tfocus_1"));tick();
+    s.receive(botChat("WIDLEFOCUS\t1\t0_f_1\t2\tok\t1\t0\tnone\tnone"));
+    REQUIRE(lua->executeString("testNow=1"));tick();
+    CHECK(lua->evaluateBoolean("WoweeBotQuestWork:IsEnabled()==1"));
+    REQUIRE(lua->executeString("WoweeBotQuestWork:GetScript('OnClick')()"));tick();
+    REQUIRE(lua->executeString("testNow=1.5"));tick();
+    CHECK(lua->evaluateBoolean("WoweeBotStatusSelectedQuest:GetText():find('waiting for server confirmation',1,true)~=nil"));
+    s.receive(botChat("WIDLEFOCUS\t1\twrong\t2\tok\t2\t15\tactive\tnone"));tick();
+    s.receive(botChat("WIDLEFOCUS\t1\t0_f_2\t2\tok\t2\t15\tactive\tnone"));
+    REQUIRE(lua->executeString("testNow=2"));tick();
+    CHECK(lua->evaluateBoolean("WoweeBotStatusSelectedQuest:GetText():find('Quest test (server confirmed)',1,true)~=nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText()=='I am playing (server confirmed)'"));
+    REQUIRE(lua->executeString("WoweeBotToggleControl();testNow=2.5"));tick();
+    s.receive(botChat("WIDLE\t1\t0_2\tok\tbot\t3\t0\tnone"));
+    s.receive(botChat("WIDLEFCAP\t1\t0_2\t3\tfocus_1"));tick();
+    s.receive(botChat("WIDLEFOCUS\t1\t0_f_3\t3\tok\t2\t15\tactive\tnone"));
+    REQUIRE(lua->executeString("testNow=3"));tick();
+    CHECK(lua->evaluateBoolean("WoweeBotStatusSelectedQuest:GetText():find('Quest test (server confirmed)',1,true)~=nil"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusMode:GetText()=='Bot is playing (server confirmed)'"));
+    s.receive(botChat("WIDLECAP\t1\t0_2\t3\tactivity_1"));
+    REQUIRE(lua->executeString("testNow=5"));tick();
+    auto hex=[](const std::string& text){
+        const char* digits="0123456789abcdef";std::string result;
+        for (unsigned char c:text){result+=digits[c>>4];result+=digits[c&15];}return result;
+    };
+    const std::string maintenance="bot\tnon_combat\ttrainer\ttraveling\t0\t-1\tnone\t927\t42\t"+
+        hex("Brother Wilhelm")+"\t-\t"+hex("Goldshire")+"\tnone\t0\t-\t-\t-\t0\t0";
+    const auto parts=(maintenance.size()+159)/160;
+    for (size_t i=0;i<parts;++i)s.receive(botChat("WIDLEACT\t1\t0_a1\t3\t"+std::to_string(i+1)+"\t"+std::to_string(parts)+"\t"+maintenance.substr(i*160,160)));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText()=='Travel destination: Train at Brother Wilhelm'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusSelectedQuest:GetText():find('Quest test (server confirmed)',1,true)~=nil"));
+    CHECK(errors.empty());lua->setLuaErrorCallback({});
+}
+
 TEST_CASE("TBC local loot and system chat expose line IDs to legacy FrameXML handlers",
           "[replay][addon][chat][loot-globals]") {
     Session s("tbc");
@@ -899,7 +958,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; WoweeSaveVariables=function() end"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "QuestsUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Focus.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "QuestsUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua"})
         REQUIRE(lua->executeFile(root + file));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_status.lua"));
     REQUIRE(lua->executeFile(std::string(WOWEE_SOURCE_DIR) + "/tests/test_bot_control.lua"));
@@ -1028,13 +1087,13 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
         if (i + 1 < fragments)
             CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
     }
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest destination: Wolves Across the Border'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusDetails:GetText():find('Eagan Peltskinner',1,true) ~= nil"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText():find('Dane Winslow',1,true) ~= nil"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText() == 'Selected task: Talk to an NPC - Dane Winslow'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == 'Last reported action: Talk to an NPC'"));
     s.receive(botChat("rpg travel target\nTarget: train at Someone Else\nDistance 1y\nStatus: working"));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Wolves Across the Border'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest destination: Wolves Across the Border'"));
 
     // Exercise the reported trigger repeatedly: typed Bot -> manual -> Bot,
     // with new snapshot IDs/generations and late fragments from the old mode.
@@ -1071,7 +1130,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
         snapshot(cycle + 1, generation, "Obsolete snapshot");
         CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Waiting for bot status'"));
         snapshot(cycle + 2, generation + 2, "Replay cycle " + std::to_string(cycle + 1), cycle != 1);
-        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest plan: Replay cycle " + std::to_string(cycle + 1) + "'"));
+        CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Quest destination: Replay cycle " + std::to_string(cycle + 1) + "'"));
         CHECK(lua->evaluateBoolean(cycle != 1 ? "WoweeBotStatusAction:GetText() == ''" :
             "WoweeBotStatusAction:GetText() == 'Last reported action: Talk to an NPC'"));
         // The reported empty executed-action field used to throw in draw(),
@@ -1109,7 +1168,7 @@ TEST_CASE("bot control is acknowledged and runs independently of the activity pa
     for (size_t i = 0; i < trainingParts; ++i)
         s.receive(botChat("WIDLEACT\t1\t0_a6\t9\t" + std::to_string(i + 1) + "\t" +
             std::to_string(trainingParts) + "\t" + training.substr(i * 160, 160)));
-    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Travel plan: Train at Brother Wilhelm'"));
+    CHECK(lua->evaluateBoolean("WoweeBotStatusGoal:GetText() == 'Travel destination: Train at Brother Wilhelm'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusInteraction:GetText() == 'Now: Traveling along the travel plan'"));
     CHECK(lua->evaluateBoolean("WoweeBotStatusAction:GetText() == ''"));
     for (int frame = 0; frame < 8; ++frame) tick();
@@ -1155,7 +1214,7 @@ TEST_CASE("social policy buttons require server confirmation and preserve manual
     lua->widgets().noteScreenSize(1920.0f, 1080.0f);
     REQUIRE(lua->executeString("testNow=0; GetTime=function() return testNow end; GetServerTime=function() return 1000+testNow end; UnitCharacterPoints=function() return 0 end; WoweeSaveVariables=function() end; WoweeBotStatusSettings={}"));
     const std::string root = std::string(WOWEE_SOURCE_DIR) + "/addons/WoweeBotStatus/";
-    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "QuestsUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua", "WoweeBotStatus.lua"})
+    for (const auto* file : {"Status.lua", "Grind.lua", "Control.lua", "Focus.lua", "Activity.lua", "History.lua", "HistoryUI.lua", "QuestsUI.lua", "Training.lua", "TrainingPlan.lua", "Travel.lua", "Recovery.lua", "ItemUse.lua", "GatherTools.lua", "Inbox.lua", "NotesUI.lua", "WoweeBotStatus.lua"})
         REQUIRE(lua->executeFile(root + file));
     lua->fireEvent("ADDON_LOADED", {"WoweeBotStatus"});
     lua->fireEvent("PLAYER_ENTERING_WORLD");

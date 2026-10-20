@@ -2,15 +2,26 @@
 
 Compact activity and control panel for a self-playerbot on the patched CMaNGOS TBC server. Keep the game connected while the bot plays.
 
-**Quests** or `/botquests` opens the accepted-quest browser. It lists the
-character's accepted quests, including entries under collapsed stock log headers,
-and shows live objective counts and readiness for turn-in. Failed quests stay
-distinct; a server completion flag with unfinished reported counts is labeled as
-checking progress. Click a row to view its objectives. Browsing does not change
-the stock log selection, bot quest focus, or Manual/Bot control. This first view
-requires the native `WoweeGetAcceptedQuests` API and an addon refresh; older
-clients show an unavailable message. A server-confirmed quest picker is the next
-increment, and is not implemented by this browser.
+**Quests** or `/botquests` lists accepted quests and live objectives, including
+entries under collapsed stock headers. Click a row to inspect it, then **Work on
+this quest** to request a plan. On servers advertising `focus_1` (TBC0059), the
+selected quest changes only after a matching server reply. **Clear quest
+selection** restores ordinary autonomous quest choice. Neither button changes
+Manual/Bot control; selecting during Manual prepares the plan for your next
+explicit Bot request. A stale plan revision cannot overwrite a newer selection.
+
+**Selected quest** stays separate from the current task and travel/quest
+destination. It survives necessary maintenance and control handoffs. During a
+handoff or missing reply, the last confirmed quest is labeled historical until
+read-only confirmation returns. A request retries at most three times; timeout
+or rejection discards the write intent and refreshes status, rather than
+replaying it after recovery. Notes explain selection communication errors.
+
+Failed quests remain distinct from ready ones. Server completion with unfinished
+reported counts says checking progress. Browsing rows still leaves stock quest
+log selection and bot focus untouched. This view requires the native
+`WoweeGetAcceptedQuests` API from93638bd1d plus the current addon. Older servers
+keep the browser and show selection unavailable; they receive no focus requests.
 
 - **Let me play** pauses your character's AI. Wait for **I am playing (server confirmed)**, then play normally.
 - **Bot, you play** resumes it and refreshes its route from your current state. Wait for **Bot is playing (server confirmed)**.
