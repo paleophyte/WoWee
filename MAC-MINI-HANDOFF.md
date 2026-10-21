@@ -5,6 +5,36 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Current state — offline scene coverage, October 21, 2026
+
+- Implemented/published baseline: server-confirmed control, accepted-quest intent,
+  truthful plan/activity and blockers. Existing earned turn-ins and ferry results
+  retain their original scope. Server0065 remains the historical deployment;
+  no server or character changes occurred during Mac investigation.
+- Mac regression: deterministic queued-Lua failure fixed; full replay passes
+  3,574 assertions in111cases. Valid evidence is preserved without needless reruns.
+- New scene probe: two Wetlands/Dustwallow cycles pass with49/45 actual tiles,
+  terrain/M2/WMO draws, water, screenshots and resets with real work pending.
+  Peak observed68,540allocations /984,461,936bytes; warm clears plateau at213 /
+  544,981,080bytes. No logged ERROR or abort. No production change was needed.
+- R52 remains open: authenticated world entry/transport ordering and the missing
+  original Metal assertion remain gaps. Scene cleanup mirrors public loader
+  calls but does not replay a live passenger snapshot or call world entry.
+  Any live validation still needs explicit scope. No deliberate crash is needed.
+
+Evidence: `logs/r52-scene-20261021/REPORT.txt`, `strengthened-probe/trace.jsonl`
+and screenshots. Build/runtime/source and shader/asset hashes are preserved.
+Run with the installed data ROOT (unlike terrain probe's explicit TBC leaf):
+
+```sh
+WOW_DATA_PATH='/Users/neko/Library/Application Support/Wowee/Data' \
+  bash tools/run_macos_scene_probe.sh NEW_OUTPUT_DIRECTORY
+```
+
+The one unresolved Mac checklist is the companion `MAC-TEST-CHECKLIST.md`.
+Older sections below preserve investigation history; their completed next steps
+and old missing-assets/publication blockers are superseded by this summary.
+
 ## Real multi-tile validation — October 21, 2026
 
 `--real-pressure` passes three seven-by-seven source/destination cycles using

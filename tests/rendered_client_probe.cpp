@@ -19,6 +19,9 @@
 
 namespace wowee::game {
 struct GameHandlerTestAccess {
+    static void prepareFrame(core::Application& app,float deltaTime){
+        core::Input::getInstance().update();app.update(deltaTime);
+    }
     static void frame(core::Application& app, float deltaTime) {
         core::Input::getInstance().update();
         app.update(deltaTime);
@@ -26,6 +29,8 @@ struct GameHandlerTestAccess {
     }
 };
 }
+
+#include "scene_terrain_probe.hpp"
 
 int main(int argc, char** argv) {
     using json = nlohmann::json;
@@ -36,9 +41,10 @@ int main(int argc, char** argv) {
         std::string line;
         if (!std::getline(std::cin,line)) throw std::runtime_error("Configuration missing");
         const auto config=json::parse(line);
+        const auto mode=config.value("mode",std::string{});
         if (config.value("scope",std::string{})!="isolated_tbc_qa" ||
-            config.value("mode",std::string{})!="renderer_smoke")
-            throw std::runtime_error("Only isolated renderer smoke mode is implemented");
+            (mode!="renderer_smoke" && mode!="scene_terrain"))
+            throw std::runtime_error("Only isolated renderer modes are implemented");
         const char* root=std::getenv("WOWEE_CONFIG_ROOT");
         const char* data=std::getenv("WOW_DATA_PATH");
         const char* hidden=std::getenv("WOWEE_WINDOW_HIDDEN");
@@ -56,7 +62,7 @@ int main(int argc, char** argv) {
         auto record=[&](const char* event,json values=json::object()) {
             values["event"]=event;trace << values.dump() << std::endl;
         };
-        record("starting",{{"mode","renderer_smoke"},{"game_connections_requested",0}});
+        record("starting",{{"mode",mode},{"game_connections_requested",0}});
         wowee::core::Application app;
         if (!app.initialize()) throw std::runtime_error("Normal Application::initialize failed");
         auto* window=app.getWindow();auto* renderer=app.getRenderer();
@@ -67,6 +73,13 @@ int main(int argc, char** argv) {
         record("initialized",{{"gpu",renderer->getVkContext()->getGpuName()},
                {"hidden",true},{"entity_spawner",true},{"world_loader",true},
                {"loaded_map",app.getWorldLoader()->getLoadedMapId()}});
+        if(mode=="scene_terrain"){
+            sceneTerrainProbe(app,std::filesystem::path(argv[1]),record);
+            app.shutdown();
+            record("complete",{{"state","pass"},{"game_connections_requested",0},
+                {"scope","Offline production scene rendering and real pending-work resets; no authenticated world entry or gameplay acceptance"}});
+            return 0;
+        }
         for (int i=0;i<3;++i) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
