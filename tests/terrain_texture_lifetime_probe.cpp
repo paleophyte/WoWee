@@ -10,6 +10,8 @@
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <array>
+#include <algorithm>
+#include <string>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -24,19 +26,84 @@ static void settle(rendering::VkContext& ctx){
     ctx.waitAllUploads();require(ctx.waitIdle("terrain texture probe")==VK_SUCCESS,"Device wait failed");
     ctx.flushDeferredCleanup();
 }
-static pipeline::TerrainMesh generatedTile(){
-    pipeline::TerrainMesh mesh{};mesh.validChunkCount=4;
-    for(int id=0;id<4;++id){
-        auto& c=mesh.chunks[id];c.chunkX=id;c.chunkY=0;c.worldX=float(id*2);c.worldY=0;c.worldZ=0;
-        c.vertices.resize(4);c.indices={0,1,2,0,2,3};
-        for(int v=0;v<4;++v){c.vertices[v].position[0]=c.worldX+float(v==1||v==2);c.vertices[v].position[1]=float(v>=2);c.vertices[v].normal[2]=1.f;}
+static pipeline::TerrainMesh generatedTile(int count=4){
+    pipeline::TerrainMesh mesh{};mesh.validChunkCount=count;
+    for(int id=0;id<count;++id){
+        auto& c=mesh.chunks[id];c.chunkX=id%16;c.chunkY=id/16;c.worldX=float(id*2);c.worldY=0;c.worldZ=0;
+        if(count==4){
+            c.vertices.resize(4);c.indices={0,1,2,0,2,3};
+            for(int v=0;v<4;++v){c.vertices[v].position[0]=c.worldX+float(v==1||v==2);c.vertices[v].position[1]=float(v>=2);c.vertices[v].normal[2]=1.f;}
+        }else{
+            // The ADT topology: 9x9 outer vertices plus 8x8 cell centres,
+            // with four triangles per cell (145 vertices, 768 indices).
+            c.vertices.resize(145);
+            for(int y=0;y<9;++y)for(int x=0;x<9;++x){
+                auto& v=c.vertices[y*9+x];v.position[0]=float(x);v.position[1]=float(y);v.normal[2]=1.f;
+            }
+            for(int y=0;y<8;++y)for(int x=0;x<8;++x){
+                const uint32_t centre=81+y*8+x;
+                auto& v=c.vertices[centre];v.position[0]=x+0.5f;v.position[1]=y+0.5f;v.normal[2]=1.f;
+                const uint32_t a=y*9+x,b=a+1,d=a+9,e=d+1;
+                c.indices.insert(c.indices.end(),{a,b,centre,b,e,centre,e,d,centre,d,a,centre});
+            }
+        }
         c.layers.resize(4);
         for(int layer=0;layer<4;++layer){c.layers[layer].textureId=0;c.layers[layer].flags=0;if(layer)c.layers[layer].alphaData.assign(64*64,uint8_t(40+layer*30+id));}
     }
     return mesh;
 }
+static Json memorySnapshot(rendering::VkContext& ctx){
+    VmaTotalStatistics stats{};vmaCalculateStatistics(ctx.getAllocator(),&stats);
+    const auto& s=stats.total.statistics;
+    return {{"allocations",s.allocationCount},{"allocation_bytes",s.allocationBytes},
+            {"blocks",s.blockCount},{"block_bytes",s.blockBytes}};
+}
+// Full 16x16 tiles, uploaded through the same 16-chunk asynchronous batches as
+// TerrainManager. Bound residency and retirements rather than testing to OOM.
+static bool streamingPressure(rendering::VkContext& ctx, rendering::TerrainRenderer& terrain,
+                              Json& result, const char* output){
+    const auto baseline=memorySnapshot(ctx);
+    const auto tile=generatedTile(256);
+    result["streaming_pressure"]={{"resident_tiles",9},{"chunks_per_tile",256},{"vertices_per_chunk",145},{"indices_per_chunk",768},
+        {"alpha_images_per_chunk",3},{"alpha_extent",{64,64}},
+        {"alpha_format","VK_FORMAT_R8_UNORM"},{"batch_chunks",16},
+        {"baseline",baseline},{"samples",Json::array()}};
+    result["state"]="streaming_pressure_running";
+    auto& samples=result["streaming_pressure"]["samples"];
+    auto sample=[&](const char* phase,int cycle,int tileId){
+        Json row=memorySnapshot(ctx);row["phase"]=phase;row["cycle"]=cycle;
+        row["tile"]=tileId;row["chunks"]=terrain.getChunkCount();samples.push_back(row);
+        // Persist before the next allocation: an abort must retain the last
+        // completed phase, even if destructors/exception handling cannot run.
+        std::ofstream(output)<<result.dump(2)<<'\n';
+        std::cout<<row.dump()<<std::endl;
+    };
+    sample("before_streaming",0,-1);
+    for(int cycle=0;cycle<3;++cycle){
+        for(int tileId=0;tileId<12;++tileId){
+            if(tileId>=9){terrain.removeTile(tileId-9,cycle);sample("retired_before_replacement",cycle,tileId);}
+            int next=0;
+            for(int calls=0;next<256 && calls<32;++calls){
+                const int before=next;
+                terrain.loadTerrainIncremental(tile,{},tileId,cycle,next,16);
+                require(next>before,"Streaming upload made no progress");
+            }
+            require(next==256,"Streaming upload exceeded bounded calls");
+            sample("uploaded_before_settle",cycle,tileId);
+            settle(ctx);
+            require(terrain.getChunkCount()==size_t(std::min(tileId+1,9)*256),"Streaming lost resident chunks");
+            sample("settled",cycle,tileId);
+        }
+        terrain.clear();sample("clear_before_fences",cycle,12);settle(ctx);
+        sample("cleared",cycle,12);
+        require(terrain.getChunkCount()==0,"Streaming clear retained chunks");
+        require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Streaming clear retained allocations");
+        require(memorySnapshot(ctx)["allocation_bytes"]==baseline["allocation_bytes"],"Streaming clear retained allocation bytes");
+    }
+    return true;
+}
 int main(int argc,char** argv){
-    if(argc!=2){std::cerr<<"Usage: terrain_alpha_probe RESULT.json\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -79,6 +146,7 @@ int main(int argc,char** argv){
         result["partial_unload"]={{"two_tile_allocations",two},{"one_tile_allocations",one},{"remaining_chunks",terrain.getChunkCount()}};
         passed=passed && one==baseline+(two-baseline)/2;
         terrain.clear();settle(ctx);result["final_allocations"]=allocations(ctx);passed=passed && allocations(ctx)==baseline;
+        if(argc==3) passed=streamingPressure(ctx,terrain,result,argv[1]) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;

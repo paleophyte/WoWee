@@ -10,19 +10,23 @@ if [[ "$(uname -s)" != Darwin ]]; then
     printf 'This probe runner requires macOS.\n' >&2
     exit 2
 fi
-if [[ $# != 1 || ! -x "$binary" ]]; then
-    printf 'Build wowee_terrain_texture_probe, then run: bash %s NEW_OUTPUT_DIRECTORY\n' "$0" >&2
+if [[ $# -lt 1 || $# -gt 2 || ! -x "$binary" || ( $# == 2 && "$2" != --streaming-pressure ) ]]; then
+    printf 'Build wowee_terrain_texture_probe, then run: bash %s NEW_OUTPUT_DIRECTORY [--streaming-pressure]\n' "$0" >&2
     exit 2
 fi
 # Refuse to overwrite an earlier trial, including a partial/failed one.
 if ! mkdir "$1"; then exit 2; fi
 output="$(cd "$1" && pwd)"
 mkdir "$output/config" || exit 2
+git -C "$root" diff --binary > "$output/source.patch"
+shasum -a 256 "$root"/build/bin/assets/shaders/terrain.*.spv > "$output/terrain-shader-sha256.txt"
 {
     date -u '+UTC: %Y-%m-%dT%H:%M:%SZ'
     sw_vers
     uname -m
     git -C "$root" rev-parse HEAD
+    git -C "$root" status --short
+    printf 'Probe mode: %s\n' "${2:-baseline}"
     shasum -a 256 "$binary"
     brew list --versions molten-vk vulkan-loader
     printf 'VK_DRIVER_FILES=%s\nVK_ICD_FILENAMES=%s\n' "${VK_DRIVER_FILES:-<unset>}" "${VK_ICD_FILENAMES:-<unset>}"
@@ -35,7 +39,7 @@ mkdir "$output/config" || exit 2
 
 cd "$root/build/bin" || exit 2
 WOWEE_CONFIG_ROOT="$output/config" DYLD_PRINT_LIBRARIES=1 VK_LOADER_DEBUG=driver \
-    "$binary" "$output/result.json" 2>&1 | tee "$output/probe.log"
+    "$binary" "$output/result.json" "${@:2}" 2>&1 | tee "$output/probe.log"
 results=("${PIPESTATUS[@]}")
 printf '%s\n' "${results[0]}" > "$output/exit-status.txt"
 printf 'Probe exit: %s; evidence: %s\n' "${results[0]}" "$output"

@@ -5,6 +5,38 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Latest local Mac validation — October 21, 2026
+
+The Mini now builds both requested targets. The original small terrain probe
+passes on Apple M4 with actual loaded MoltenVK 1.4.2 and Vulkan Loader
+1.4.363.0. A new opt-in `--streaming-pressure` mode also passes: three cycles
+of twelve full 256-chunk tiles, nine resident at a time, replacing three tiles
+before the next cleanup. Each chunk uses 145 vertices, 768 indices and three
+64x64 R8 alpha images, uploaded in asynchronous 16-chunk batches. Peak observed
+allocations: 15,878 / 153,965,824 bytes. Every clear returns to 6 allocations /
+94,867,712 bytes. Persistent renderer buffers are part of that baseline.
+
+Evidence is retained locally under `logs/r52-mac-validation-20261021-cbxXsY/`
+and `logs/r52-streaming-20261021-aAtMW2/` (full-geometry subdirectory).
+These are Mac results, not reused Windows results. Run the extended check with:
+
+```sh
+bash tools/run_macos_terrain_probe.sh NEW_OUTPUT_DIRECTORY --streaming-pressure
+```
+
+R52 remains unresolved. These checks do not render terrain in flight, load real
+reusable tileset textures, or drive asynchronous terrain workers/map transitions.
+The next investigation should address those gaps with bounded generated inputs,
+not an unbounded OOM test or a claimed gameplay-crash fix.
+
+The initial full Mac replay run failed one assertion (110/111 cases passed).
+The accepted-quest case consumed a diagnostic queued by earlier target selection;
+`UnitFactionGroup` returns zero Lua values when race is unknown, which the
+interface probe passed directly to `tostring`. A deterministic queued-probe
+regression and a fix are being validated separately; do not treat the original
+Mac replay run as green. Historical companion text about a queued GitHub run
+and an active old Goal is stale; this handoff and current local evidence govern.
+
 ## Objective and immediate focus
 
 The product is an interactive WoWee copilot for the existing TBC CMaNGOS
