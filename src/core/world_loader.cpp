@@ -750,8 +750,15 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         if (!loadingScreenOk) return;
         loadingScreen.setStatus(msg);
         loadingScreen.setProgress(progress);
+        const auto presentationStart = std::chrono::steady_clock::now();
         loadingScreen.render();
         window_->swapBuffers();
+        const float presentationMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - presentationStart).count();
+        if (presentationMs > 50.0f) {
+            LOG_WARNING("SLOW world-entry loading-screen presentation: ", presentationMs,
+                        "ms map=", mapId, " status=", msg);
+        }
     };
 
     // Everything a slow step needs to keep the screen alive.
@@ -858,7 +865,14 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 loadingWorld_ = false;
                 return;
             }
+            const auto networkStart = std::chrono::steady_clock::now();
             gameHandler_->update(1.0f / 60.0f);
+            const float networkMs = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - networkStart).count();
+            if (networkMs > 50.0f) {
+                LOG_WARNING("SLOW world-entry update while waiting for position: ",
+                            networkMs, "ms map=", mapId);
+            }
             if (pendingWorldEntry_) {
                 // Do the next cleanup before draining its destination creates.
                 if (loadingScreenOk) loadingScreen.shutdown();

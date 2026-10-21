@@ -5,6 +5,26 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Return-trip timing follow-up — October21,2026
+
+The user-driven logged round trip now passes both1→0and0→1destination loads in
+one process, then exits0. Correct server-world positions and49/48loaded tiles
+recorded; no GPU abort. User reports a brief return freeze, and watchdog logs
+1509msstall. Evidence: `logs/r52-live-roundtrip-20261021-01/roundtrip-acceptance.json`.
+This supersedes the repeated-live-transition evidence gap in the older summary.
+
+A new offline `--loading-screen` scene mode reproduces a371–484mspause on the
+old-map destruction frame, including61–138msalpha deletion. All48real loading
+presentations and warm allocation checks pass. Thresholded timing diagnostics
+added only; no lifetime/performance workaround. Evidence/source binding:
+`logs/r52-return-stall-20261021/REPORT.txt`, `verified-cleanup-timing/`, `summary.json`.
+One trial used an older binary during relink; preserved and excluded explicitly.
+
+Next smallest increment: bound ready destruction work per frame while retaining
+all-frame fence safety and eventual reclamation. Exact live stall cause still
+needs qualification because that run predated the inner timing logs. No new live
+session authorized or started. Existing replay/quest/control evidence preserved.
+
 ## Current state — October 21, 2026
 
 - **Implemented/published:** baseline copilot and accepted-quest workflow; R57

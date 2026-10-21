@@ -4,10 +4,12 @@ set -uo pipefail
 umask 077
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$root/build/bin/wowee_render_probe"
-if [[ "$(uname -s)" != Darwin || $# != 1 || ! -x "$binary" || ! -f "${WOW_DATA_PATH:-}/expansions/tbc/manifest.json" ]]; then
-    printf 'Build wowee_render_probe; set WOW_DATA_PATH to the data root containing expansions/tbc; run %s NEW_OUTPUT_DIRECTORY\n' "$0" >&2
+if [[ "$(uname -s)" != Darwin || $# -lt 1 || $# -gt 2 || ( $# == 2 && "$2" != --loading-screen ) || ! -x "$binary" || ! -f "${WOW_DATA_PATH:-}/expansions/tbc/manifest.json" ]]; then
+    printf 'Build wowee_render_probe; set WOW_DATA_PATH to the data root containing expansions/tbc; run %s NEW_OUTPUT_DIRECTORY [--loading-screen]\n' "$0" >&2
     exit 2
 fi
+probe_mode=scene_terrain
+if [[ "${2:-}" == --loading-screen ]]; then probe_mode=scene_loading; fi
 mkdir "$1" || exit 2
 output="$(cd "$1" && pwd)"
 mkdir "$output/config" || exit 2
@@ -43,16 +45,18 @@ git -C "$root" diff --binary > "$output/source.patch"
 shasum -a 256 "$root"/build/bin/assets/shaders/*.spv > "$output/shader-sha256.txt"
 # Resource metadata is relative to repository root in this integration probe.
 cd "$root" || exit 2
-printf '%s\n' '{"scope":"isolated_tbc_qa","mode":"scene_terrain"}' | \
+printf '{"scope":"isolated_tbc_qa","mode":"%s"}\n' "$probe_mode" | \
     WOWEE_CONFIG_ROOT="$output/config" WOWEE_WINDOW_HIDDEN=1 DYLD_PRINT_LIBRARIES=1 VK_LOADER_DEBUG=driver \
     "$binary" "$output/trace.jsonl" 2>&1 | tee "$output/probe.log"
 results=("${PIPESTATUS[@]}")
 printf '%s\n' "${results[1]}" > "$output/exit-status.txt"
 if [[ "${results[1]}" != 0 ]]; then exit "${results[1]}"; fi
 if [[ "${results[0]}" != 0 || "${results[2]}" != 0 ]]; then exit 1; fi
-python3 - "$output/trace.jsonl" <<'PY'
+python3 - "$output/trace.jsonl" "$probe_mode" <<'PY'
 import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1])]
 assert rows[-1]['event']=='complete' and rows[-1]['state']=='pass'
 assert len([r for r in rows if r['event']=='scene_loaded'])==4
+if sys.argv[2]=='scene_loading':
+    assert len([r for r in rows if r['event']=='loading_screen_presented'])==48
 PY

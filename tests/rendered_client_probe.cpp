@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
         const auto config=json::parse(line);
         const auto mode=config.value("mode",std::string{});
         if (config.value("scope",std::string{})!="isolated_tbc_qa" ||
-            (mode!="renderer_smoke" && mode!="scene_terrain"))
+            (mode!="renderer_smoke" && mode!="scene_terrain" && mode!="scene_loading"))
             throw std::runtime_error("Only isolated renderer modes are implemented");
         const char* root=std::getenv("WOWEE_CONFIG_ROOT");
         const char* data=std::getenv("WOW_DATA_PATH");
@@ -73,8 +73,8 @@ int main(int argc, char** argv) {
         record("initialized",{{"gpu",renderer->getVkContext()->getGpuName()},
                {"hidden",true},{"entity_spawner",true},{"world_loader",true},
                {"loaded_map",app.getWorldLoader()->getLoadedMapId()}});
-        if(mode=="scene_terrain"){
-            sceneTerrainProbe(app,std::filesystem::path(argv[1]),record);
+        if(mode=="scene_terrain" || mode=="scene_loading"){
+            sceneTerrainProbe(app,std::filesystem::path(argv[1]),record,mode=="scene_loading");
             app.shutdown();
             record("complete",{{"state","pass"},{"game_connections_requested",0},
                 {"scope","Offline production scene rendering and real pending-work resets; no authenticated world entry or gameplay acceptance"}});

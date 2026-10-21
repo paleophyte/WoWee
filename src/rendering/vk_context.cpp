@@ -321,10 +321,18 @@ void VkContext::flushDeferredCleanup() {
 void VkContext::runDeferredCleanup(uint32_t frameIndex) {
     auto& q = deferredCleanup_[frameIndex];
     if (q.empty()) return;
+    const auto cleanupStart = std::chrono::steady_clock::now();
+    const auto taskCount = q.size();
     for (auto& fn : q) {
         if (fn) fn();
     }
     q.clear();
+    const float cleanupMs = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - cleanupStart).count();
+    if (cleanupMs > 50.0f) {
+        LOG_WARNING("SLOW deferred GPU cleanup: ", cleanupMs,
+                    "ms tasks=", taskCount, " frame=", frameIndex);
+    }
 }
 
 VkSampler VkContext::getOrCreateSampler(const VkSamplerCreateInfo& info) {

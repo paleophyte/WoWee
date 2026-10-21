@@ -687,7 +687,14 @@ void TerrainRenderer::retireUnusedAlphaTextures() {
     }
     if (retired.empty()) return;
     vkCtx->deferAfterAllFrameFences([retired]() {
+        const auto retirementStart = std::chrono::steady_clock::now();
         for (auto* texture : retired) delete texture;
+        const float retirementMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - retirementStart).count();
+        if (retirementMs > 50.0f) {
+            LOG_WARNING("SLOW terrain alpha retirement: ", retirementMs,
+                        "ms textures=", retired.size());
+        }
     });
 }
 

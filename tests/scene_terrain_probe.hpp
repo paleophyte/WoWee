@@ -9,12 +9,13 @@
 #include "pipeline/asset_manager.hpp"
 #include <imgui.h>
 #include <thread>
+#include "rendering/loading_screen.hpp"
 
 // Offline scene fixture: production rendering and tile workers, no fabricated
 // network snapshot, character, quest result or invocation of world entry.
 static void sceneTerrainProbe(wowee::core::Application& app,
     const std::filesystem::path& tracePath,
-    const std::function<void(const char*,nlohmann::json)>& record){
+    const std::function<void(const char*,nlohmann::json)>& record,bool loadingPresentation=false){
     using namespace wowee;
     using json=nlohmann::json;
     auto check=[](bool ok,const char* error){if(!ok)throw std::runtime_error(error);};
@@ -82,11 +83,35 @@ static void sceneTerrainProbe(wowee::core::Application& app,
             int extra=0;for(int ty=y-3;ty<=y+3;++ty)extra+=enqueue(name,x-4,ty);
             check(extra>0 && manager->getRemainingTileCount()>0,"No real source work pending at scene reset");
             frame(false);record("scene_reset_with_pending_work",snapshot());
+            std::unique_ptr<rendering::LoadingScreen> loading;
+            if(loadingPresentation){
+                loading=std::make_unique<rendering::LoadingScreen>();
+                loading->setVkContext(ctx);loading->setSDLWindow(app.getWindow()->getSDLWindow());
+                check(loading->initialize(),"Offline loading-screen initialization failed");
+                loading->setZoneName(map?"Dustwallow Marsh":"Wetlands");
+                loading->setStatus("Waiting for world position...");loading->setProgress(.02f);
+                // Present once before cleanup, as normal world entry does.
+                app.beatWatchdog();loading->render();
+            }
             // Same ordering as WorldLoader's old-map cleanup. No thread gate,
             // fake cache input or forced generated placements.
             wmo->clearAll();m2->clear();
             if(auto* character=renderer->getCharacterRenderer())character->clear();
-            manager->softReset();frame(false);frame(false);
+            manager->softReset();
+            if(loading){
+                // Present after retirement too: beginFrame may execute deferred
+                // destruction once both source frame fences have been waited.
+                for(int i=0;i<12;++i){
+                    app.beatWatchdog();SDL_PumpEvents();const auto start=std::chrono::steady_clock::now();
+                    loading->render();
+                    const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+                    auto row=snapshot();row["cycle"]=cycle;row["map"]=name;row["sequence"]=i;row["presentation_ms"]=elapsed;
+                    record("loading_screen_presented",row);
+                    check(!ctx->isDeviceLost() && !ctx->isSwapchainDirty(),"Loading-screen presentation failed");
+                }
+                loading->shutdown();
+            }
+            frame(false);frame(false);
             check(manager->getLoadedTileCount()==0 && manager->getRemainingTileCount()==0 && terrain->getChunkCount()==0,"Scene reset retained old map work");
             check(m2->getModelCount()==0 && m2->getInstanceCount()==0 && wmo->getModelCount()==0 && wmo->getInstanceCount()==0 && water->getSurfaceCount()==0,"Scene reset retained model/water content");
             auto cleared=snapshot();
