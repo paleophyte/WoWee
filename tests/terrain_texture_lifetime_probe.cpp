@@ -20,6 +20,7 @@ using namespace wowee;
 static void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 #include "terrain_probe_frames.hpp"
 #include "terrain_probe_manager.hpp"
+#include "terrain_probe_blp.hpp"
 static uint32_t allocations(rendering::VkContext& ctx){
     VmaTotalStatistics stats{};vmaCalculateStatistics(ctx.getAllocator(),&stats);
     return stats.total.statistics.allocationCount;
@@ -106,7 +107,7 @@ static bool streamingPressure(rendering::VkContext& ctx, rendering::TerrainRende
     return true;
 }
 static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRenderer& terrain,
-                             VkDescriptorSetLayout layout,Json& result,const char* output,int residentTiles=2,bool largeTextures=false){
+                             VkDescriptorSetLayout layout,Json& result,const char* output,int residentTiles=2,bool largeTextures=false,bool parsedBLP=false){
     TerrainProbeFrames frames(ctx);frames.initialize(layout);terrain.setFrustumCulling(false);
     std::unordered_map<std::string,pipeline::BLPImage> textures;
     std::vector<std::string> paths;
@@ -119,15 +120,40 @@ static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRender
     std::ofstream(output)<<result.dump(2)<<'\n';
     for(int i=0;i<textureCount;++i){
         std::string path="generated_tileset_"+std::to_string(i);paths.push_back(path);
-        auto& image=textures[path];image.width=image.height=textureExtent;image.data.assign(textureExtent*textureExtent*4,uint8_t(70+i*40));
+        auto& image=textures[path];
+        if(parsedBLP){
+            const int variant=i%4==3?2:i%4;
+            const auto bytes=generatedBLP2(variant);
+            image=pipeline::BLPLoader::load(bytes,i%4!=3);
+            require(image.isValid(),"Generated BLP2 parser failed");
+            require(image.isBlockCompressed()==(i%4!=3),"BLP parser used wrong storage path");
+            const auto decoded=pipeline::BLPLoader::load(bytes,false);
+            require(decoded.isValid() && decoded.data.size()==512*512*4,"BLP CPU decode failed");
+            const auto pixels=image.isBlockCompressed()?pipeline::BLPLoader::decodeBaseLevel(image):image.data;
+            require(pixels==decoded.data,"BLP block/decoded pixels disagree");
+            const auto expected=variant==0?pipeline::BLPCompression::DXT1:(variant==1?pipeline::BLPCompression::DXT3:pipeline::BLPCompression::DXT5);
+            require(image.compression==expected,"BLP parser selected wrong compression format");
+            if(image.isBlockCompressed())require(image.mipmaps.size()==10,"BLP mip chain incomplete");
+        }else{
+            image.width=image.height=textureExtent;image.data.assign(textureExtent*textureExtent*4,uint8_t(70+i*40));
+        }
     }
+    if(parsedBLP)result["framed_retirement"]["tileset_format"]="Generated BLP2 DXT1/3/5 preserved plus DXT5 decoded to RGBA8";
     const auto allPaths=paths;
+    const auto blockUploadsBefore=rendering::VkTexture::blockUploadTally();
     settle(ctx);const auto beforeTilesets=allocations(ctx);
     result["state"]="uploading_reusable_textures";
     result["framed_retirement"]["before_tilesets"]=memorySnapshot(ctx);
     std::ofstream(output)<<result.dump(2)<<'\n';
     terrain.uploadPreloadedTextures(textures);settle(ctx);
     require(allocations(ctx)==beforeTilesets+textures.size(),"Generated reusable textures did not all upload");
+    if(parsedBLP){
+        const auto uploaded=rendering::VkTexture::blockUploadTally();
+        require(uploaded.textures-blockUploadsBefore.textures==uint64_t(textureCount/4*3),"BLP compressed uploads did not reach GPU path");
+        result["framed_retirement"]["block_uploads"]={{"textures",uploaded.textures-blockUploadsBefore.textures},
+            {"block_bytes",uploaded.blockBytes-blockUploadsBefore.blockBytes},
+            {"decoded_bytes",uploaded.decodedBytes-blockUploadsBefore.decodedBytes}};
+    }
     const auto baseline=memorySnapshot(ctx);
     auto tile=generatedTile(256);
     for(auto& chunk:tile.chunks)for(int i=0;i<4;++i)chunk.layers[i].textureId=i;
@@ -245,7 +271,7 @@ static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRender
     settle(ctx);return true;
 }
 int main(int argc,char** argv){
-    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure" && std::string(argv[2])!="--worker-transitions")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure|--worker-transitions]\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure" && std::string(argv[2])!="--worker-transitions" && std::string(argv[2])!="--blp-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure|--worker-transitions|--blp-pressure]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -293,6 +319,7 @@ int main(int argc,char** argv){
         if(argc==3 && std::string(argv[2])=="--framed-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49) && passed;
         if(argc==3 && std::string(argv[2])=="--texture-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true) && passed;
         if(argc==3 && std::string(argv[2])=="--worker-transitions") passed=workerTransitions(ctx,terrain,assets,perFrame,result,argv[1]) && passed;
+        if(argc==3 && std::string(argv[2])=="--blp-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true,true) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;
