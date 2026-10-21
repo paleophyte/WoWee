@@ -33,9 +33,18 @@ both frame-slot fences have been waited, then retain exactly the surviving
 14-allocation / 96,281,680-byte baseline including reusable textures and probe
 frame resources. Evidence: `logs/r52-framed-20261021-zU4M9z/probe/`.
 
-R52 remains unresolved. The draw test covers two tiles; the historical report
-loaded 49. Larger residency with reusable textures and active draws, actual
-terrain workers/map transitions, and real asset format variation remain gaps.
+The subsequent `--framed-pressure` mode passes three cycles of the reported
+49-tile scale: 12,544 chunks are uploaded through 16-chunk incremental batches,
+with a real frame drawn between tiles. Peak: 75,278 allocations / 374,005,840
+bytes. Removing one tile preserves all 12,288 remaining chunk draws and waits
+for both frame-slot fences before retirement; every clear returns to the same
+14-allocation / 96,281,680-byte baseline. The two-tile regression also passes.
+This mode spaces generated chunks across a tile to avoid artificial per-chunk
+overdraw, but repeats the tile geometry and uses only four small shared RGBA8
+textures. Evidence: `logs/r52-framed-20261021-zU4M9z/pressure49-final/`.
+
+R52 remains unresolved. Larger/varied reusable textures, actual terrain
+workers/map transitions, and real asset format variation remain gaps.
 CLI publication retries were rejected: the saved credential belongs to joshand,
 which cannot write this fork; paleophyte has no CLI credential. The connected
 GitHub integration also rejected tree writes (403). Local commits are preserved;
