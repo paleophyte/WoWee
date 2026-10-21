@@ -53,7 +53,7 @@ function Activity:capability(prefix, text, sender, player, control)
         return true
     end
     if prefix ~= 'WIDLECAP' or not WoweeBotStatus.samePlayer(sender, player) or
-        type(text) ~= 'string' or #text > 160 then return false end
+        type(text) ~= 'string' or #text > WoweeBotStatus.CAPABILITY_MAX_BYTES then return false end
     local id, generation, features = text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id then self.capabilityRejected = 'invalid capability fields'; return false end
     if id ~= control.ackId then self.capabilityRejected = 'capability request does not match accepted control reply'; return false end

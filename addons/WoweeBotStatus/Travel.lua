@@ -66,7 +66,7 @@ function Travel.decode(body)
 end
 function Travel:capability(prefix,text,sender,player,control)
     if prefix~='WIDLECAP' or not WoweeBotStatus.samePlayer(sender,player) or
-        type(text)~='string' or #text>160 then return end
+        type(text)~='string' or #text>WoweeBotStatus.CAPABILITY_MAX_BYTES then return end
     local id,generation,features=text:match('^1\t([%w_-]+)\t(%d+)\t([%w_,]+)$')
     if not id or id~=control.ackId or tonumber(generation)~=control.generation then return end
     self.supported=(','..features..','):find(',nav_1,',1,true)~=nil

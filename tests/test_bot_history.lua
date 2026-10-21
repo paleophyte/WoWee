@@ -59,19 +59,48 @@ deliver('1792234000_1\t1\n'..entry(5,'turnin',1,'Turned in A Bundle of Trouble')
 assert(#model.entries==3 and model.missed==2 and model.entries[3].sequence==5)
 deliver('1792234000_1\t1\n'..entry(5,'turnin',1,'Turned in A Bundle of Trouble'),'req8',12)
 assert(#model.entries==3 and model.missed==2)
--- The full feature list with maximum request/generation widths exceeds the
--- old120-byte capability limit; every model must accept the bounded new size.
+-- Use the current complete server feature list, not the older short fixture.
+-- The server check also supplies the compiled IdleSend body from PlayerbotMgr.
 local longId=string.rep('x',32)
 control={ackId=longId,generation=4294967295}
-local caps='1\t'..longId..'\t4294967295\tactivity_1,social_1,warning_1,fishing_1,collection_1,collection_stop_1,history_1'
-assert(#caps>120 and #caps<=160)
-model:capability('WIDLECAP',caps,'Jizzle','Jizzle',control);assert(model.supported)
-if WoweeBotControl then
-    local c=WoweeBotControl.new('test');c.ackId,c.generation=longId,4294967295
-    assert(c:capability('WIDLECAP',caps,'Jizzle','Jizzle') and c.fishingSupported)
+local features='activity_1,social_1,requests_1,warning_1,fishing_1,collection_1,collection_stop_1,history_1,training_1,training_plan_1,nav_1'
+local caps='1\t'..longId..'\t4294967295\t'..features
+assert(#caps==170)
+if arg and arg[1]=='--capability-fixture' then
+    local file=assert(io.open(arg[2],'rb'));local actual=file:read('*a');file:close()
+    assert(actual==caps,'compiled server capability must match the complete fixture')
+    caps=actual
 end
-if WoweeBotActivity then
-    assert(WoweeBotActivity.new():capability('WIDLECAP',caps,'Jizzle','Jizzle',control))
+local readers={}
+for _,name in ipairs({'Control','Activity','History','Training','TrainingPlan','Travel'}) do
+    local key='WoweeBot'..name
+    if not _G[key] then dofile('addons/WoweeBotStatus/'..name..'.lua') end
+    readers[#readers+1]={name=name,model=_G[key]}
+end
+local function receives(reader,text,sender,authority,prefix)
+    local fresh=reader.model.new('captest')
+    if reader.name=='Control' then
+        fresh.ackId,fresh.generation=control.ackId,control.generation
+        fresh:capability(prefix or 'WIDLECAP',text,sender or 'Jizzle','Jizzle')
+        return fresh.requestsSupported and fresh.socialSupported and fresh.fishingSupported
+    end
+    fresh:capability(prefix or 'WIDLECAP',text,sender or 'Jizzle','Jizzle',authority or control)
+    return fresh.supported
+end
+local rejected={}
+for _,reader in ipairs(readers) do
+    if not receives(reader,caps) then rejected[#rejected+1]=reader.name end
+end
+assert(#rejected==0,'server capability frame rejected by: '..table.concat(rejected,', '))
+for _,reader in ipairs(readers) do
+    local maxFrame=caps..','..string.rep('x',69)
+    assert(#maxFrame==240 and receives(reader,maxFrame),reader.name..' rejects bounded future features')
+    assert(not receives(reader,maxFrame..'x'),reader.name..' accepts oversized capability')
+    assert(not receives(reader,caps,'Other'),reader.name..' accepts another sender')
+    assert(not receives(reader,caps:gsub(longId,string.rep('y',32))),reader.name..' accepts another request')
+    assert(not receives(reader,caps:gsub('4294967295','4294967294')),reader.name..' accepts stale generation')
+    assert(not receives(reader,caps,nil,nil,'OTHER'),reader.name..' accepts another prefix')
+    assert(not receives(reader,caps..'\t'),reader.name..' accepts extra fields')
 end
 for epoch=2,10 do
     local records={}

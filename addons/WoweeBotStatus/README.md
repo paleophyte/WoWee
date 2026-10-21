@@ -2,6 +2,11 @@
 
 Compact activity and control panel for a self-playerbot on the patched CMaNGOS TBC server. Keep the game connected while the bot plays.
 
+Activity, History, training and navigation use the same bounded capability
+message size as Control. This accepts the server's complete feature list even
+with the longest valid request ID and generation; mismatched and oversized
+replies are still ignored.
+
 **Quests** or `/botquests` lists accepted quests and live objectives, including
 entries under collapsed stock headers. Click a row to inspect it, then **Work on
 this quest** to request a plan. On servers advertising `focus_1` (TBC0059), the

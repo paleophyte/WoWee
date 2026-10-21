@@ -6,6 +6,9 @@ WoweeBotStatus = {}
 local Status = WoweeBotStatus
 Status.__index = Status
 Status.STALE_AFTER = 25
+-- Full legacy capabilities reach 170 bytes with a valid 32-byte request ID
+-- and uint32 generation. Match the existing bounded control-channel limit.
+Status.CAPABILITY_MAX_BYTES = 240
 
 function Status.clean(text)
     text = (text or ''):gsub('|H.-|h(.-)|h', '%1')
