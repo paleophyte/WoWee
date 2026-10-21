@@ -31,6 +31,16 @@ WOW_DATA_PATH='/Users/neko/Library/Application Support/Wowee/Data' \
   bash tools/run_macos_scene_probe.sh NEW_OUTPUT_DIRECTORY
 ```
 
+The remaining entry audit found observation traces rather than replayable packet
+payloads/timing. `tools/run_macos_r52_capture.sh` now prepares metadata or launches
+the ordinary client with complete stdout/stderr, actual dylibs, INFO entry logs,
+exit status and available same-session crash reports. Build, shell syntax and
+`--prepare-only` pass; `--launch` has not run. Evidence:
+`logs/r52-entry-audit-20261021/REPORT.txt`. No client/game connection was started.
+Live scope is pending: one user-driven ordinary ferry arrival and normal logout,
+with no automated input, grants/character edits or server changes. The goal
+explicitly requires scope before this step. R52 remains open.
+
 The one unresolved Mac checklist is the companion `MAC-TEST-CHECKLIST.md`.
 Older sections below preserve investigation history; their completed next steps
 and old missing-assets/publication blockers are superseded by this summary.
