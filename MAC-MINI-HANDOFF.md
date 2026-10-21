@@ -5,6 +5,23 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Real multi-tile validation — October 21, 2026
+
+`--real-pressure` passes three seven-by-seven source/destination cycles using
+actual ADT/BLP data and production workers/finalization. All 49 Wetlands tiles
+and all 45 available Dustwallow tiles load; four absent ADTs are recorded.
+Resident chunks: 12,544 / 11,520; recorded draws: 7,132 / 6,947 with distance
+culling active. Peak observed: 59,010 allocations / 306,930,448 bytes.
+Warm clears consistently return to 90 allocations / 98,283,472 bytes.
+Evidence: `logs/r52-real-pressure-20261021/REPORT.txt` and `probe/`.
+
+R52 remains unresolved. No production changes or dependency workaround is
+supported by these passes. Next is isolated normal world rendering with actual
+M2/WMO/water and transition while source work remains in flight. This probe has
+no screenshot acceptance, account, connection or gameplay/server state changes.
+Use the explicit TBC WOW_DATA_PATH shown below with `--real-pressure` to repeat.
+Earlier next-step paragraphs are retained as historical context.
+
 ## Real-data terrain validation — October 21, 2026
 
 GitHub authentication is repaired; all earlier commits through `cf4724d78`
