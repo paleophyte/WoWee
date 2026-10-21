@@ -5,6 +5,20 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Live Mac arrival passed — October 21, 2026
+
+User-authorized normal ferry crossing now passes on this Mac. Logs show map0
+cleanup followed by map1 entry, correctly using fresh server-world coordinates
+(-4259.17,-4810.32,6.19747) instead of passenger-local packet offsets.
+Azeroth49tiles and Kalimdor45tiles load; user confirms successful arrival.
+Client and capture both exit0. Actual MoltenVK1.4.2 loaded. No automated gameplay
+or server administration. Evidence: `logs/r52-live-20261021-01/arrival-acceptance.json`.
+
+This is one successful crossing, not proof of repeated-continent-change coverage
+or the lost original Metal assertion's cause. R52 remains qualified/open pending
+that distinction; previous offline/replay evidence remains valid. Earlier scope
+requests below are historical: this user-driven session was explicitly approved.
+
 ## Current state — offline scene coverage, October 21, 2026
 
 - Implemented/published baseline: server-confirmed control, accepted-quest intent,
