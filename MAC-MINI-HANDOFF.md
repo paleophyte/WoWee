@@ -5,59 +5,41 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
-## Live Mac arrival passed — October 21, 2026
+## Current state — October 21, 2026
 
-User-authorized normal ferry crossing now passes on this Mac. Logs show map0
-cleanup followed by map1 entry, correctly using fresh server-world coordinates
-(-4259.17,-4810.32,6.19747) instead of passenger-local packet offsets.
-Azeroth49tiles and Kalimdor45tiles load; user confirms successful arrival.
-Client and capture both exit0. Actual MoltenVK1.4.2 loaded. No automated gameplay
-or server administration. Evidence: `logs/r52-live-20261021-01/arrival-acceptance.json`.
+- **Implemented/published:** baseline copilot and accepted-quest workflow; R57
+  worker cleanup, R58 authoritative passenger world position, R59 alpha-image
+  retirement, and the isolated queued-Lua replay fix. Production code unchanged
+  since the replay fix. Coherent client changes are on `codex/playerbot-client-sync`.
+- **Tested on Mac:** full replay passes3,574assertions/111cases; generated pressure,
+  actual49/45-tile ADT/BLP and production terrain/M2/WMO/water scene probes pass
+  repeated allocation/cleanup checks. Scene screenshots inspected.
+- **Live arrival passed:** user-authorized normal Azeroth→Kalimdor crossing.
+  Map0 cleanup precedes fresh map1 server-world position(-4259.17,-4810.32,6.19747),
+  rather than passenger-local(-4.60376,-2.55835,6.19747).49/45tiles load; user
+  confirms success; client/capture exit0. Actual loaded MoltenVK1.4.2 recorded.
+- **Deployed/preserved:** historical server0065 and earned control, kill/collection
+  turn-ins and ferry saved-relog evidence remain valid at their original scopes.
+  This session involved user-operated gameplay; no agent input, server writes,
+  grants, character edits or redeployment. Normal logout is not inferred solely
+  from disconnect lines; only clean client exit is newly established.
+- **Remaining:** R52 repeated live continent changes and original assertion/cause
+  remain unproven. No claimed original-abort fix from a single crossing. Proposed
+  next scope is one logged user-driven round trip in one process, requiring new
+  explicit authorization because the approved single crossing is finished.
 
-This is one successful crossing, not proof of repeated-continent-change coverage
-or the lost original Metal assertion's cause. R52 remains qualified/open pending
-that distinction; previous offline/replay evidence remains valid. Earlier scope
-requests below are historical: this user-driven session was explicitly approved.
+Evidence: `logs/r52-live-20261021-01/arrival-acceptance.json` and
+`goal-current-audit.json`; complete client/runtime/shader/binary hashes retained.
+Offline scene evidence: `logs/r52-scene-20261021/REPORT.txt` and
+`strengthened-probe/`. Replay: `logs/r52-streaming-20261021-aAtMW2/replay-full-after.log`.
+The live log has12ERRORlines: one initial WotLK/TBC asset-profile mismatch and11
+Lua/FrameXML errors. None is a GPU abort. Separate roadmap triage is recorded;
+this live arrival does not establish a fully error-free UI or new quest acceptance.
 
-## Current state — offline scene coverage, October 21, 2026
-
-- Implemented/published baseline: server-confirmed control, accepted-quest intent,
-  truthful plan/activity and blockers. Existing earned turn-ins and ferry results
-  retain their original scope. Server0065 remains the historical deployment;
-  no server or character changes occurred during Mac investigation.
-- Mac regression: deterministic queued-Lua failure fixed; full replay passes
-  3,574 assertions in111cases. Valid evidence is preserved without needless reruns.
-- New scene probe: two Wetlands/Dustwallow cycles pass with49/45 actual tiles,
-  terrain/M2/WMO draws, water, screenshots and resets with real work pending.
-  Peak observed68,540allocations /984,461,936bytes; warm clears plateau at213 /
-  544,981,080bytes. No logged ERROR or abort. No production change was needed.
-- R52 remains open: authenticated world entry/transport ordering and the missing
-  original Metal assertion remain gaps. Scene cleanup mirrors public loader
-  calls but does not replay a live passenger snapshot or call world entry.
-  Any live validation still needs explicit scope. No deliberate crash is needed.
-
-Evidence: `logs/r52-scene-20261021/REPORT.txt`, `strengthened-probe/trace.jsonl`
-and screenshots. Build/runtime/source and shader/asset hashes are preserved.
-Run with the installed data ROOT (unlike terrain probe's explicit TBC leaf):
-
-```sh
-WOW_DATA_PATH='/Users/neko/Library/Application Support/Wowee/Data' \
-  bash tools/run_macos_scene_probe.sh NEW_OUTPUT_DIRECTORY
-```
-
-The remaining entry audit found observation traces rather than replayable packet
-payloads/timing. `tools/run_macos_r52_capture.sh` now prepares metadata or launches
-the ordinary client with complete stdout/stderr, actual dylibs, INFO entry logs,
-exit status and available same-session crash reports. Build, shell syntax and
-`--prepare-only` pass; `--launch` has not run. Evidence:
-`logs/r52-entry-audit-20261021/REPORT.txt`. No client/game connection was started.
-Live scope is pending: one user-driven ordinary ferry arrival and normal logout,
-with no automated input, grants/character edits or server changes. The goal
-explicitly requires scope before this step. R52 remains open.
-
-The one unresolved Mac checklist is the companion `MAC-TEST-CHECKLIST.md`.
-Older sections below preserve investigation history; their completed next steps
-and old missing-assets/publication blockers are superseded by this summary.
+One unresolved checklist: companion `MAC-TEST-CHECKLIST.md`.
+Capture launcher: `bash tools/run_macos_r52_capture.sh --launch NEW_OUTPUT_DIRECTORY`.
+Use it for an approved session only. All earlier missing-assets/publication/scope
+requests below are historical. TBC assets are installed; GitHub publication works.
 
 ## Real multi-tile validation — October 21, 2026
 
