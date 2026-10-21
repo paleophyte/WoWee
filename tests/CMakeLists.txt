@@ -2596,6 +2596,20 @@ if(NOT ANDROID)
     target_sources(test_game_replay PRIVATE test_game_replay_energize.cpp)
     register_test_target(test_game_replay)
     target_sources(test_game_replay PRIVATE test_game_replay_spell_logs.cpp)
+
+    # Opt-in rendered integration runner: requires real extracted assets and a
+    # Vulkan device, so it is neither a default build nor an unattended CTest.
+    # Uses the same production objects as replay, including normal world loading.
+    add_executable(wowee_render_probe EXCLUDE_FROM_ALL rendered_client_probe.cpp
+        "$<FILTER:$<TARGET_OBJECTS:wowee>,EXCLUDE,/main([.]cpp)?[.]o(bj)?$>")
+    target_include_directories(wowee_render_probe PRIVATE
+        $<TARGET_PROPERTY:wowee,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(wowee_render_probe PRIVATE
+        $<TARGET_PROPERTY:wowee,COMPILE_DEFINITIONS>)
+    target_link_libraries(wowee_render_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_LIBRARIES>)
+    target_link_directories(wowee_render_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_DIRECTORIES>)
+    target_link_options(wowee_render_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_OPTIONS>)
+    add_dependencies(wowee_render_probe wowee)
 endif()
 
 # ── Sanitizers, once every test target exists ────────────────

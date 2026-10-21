@@ -190,6 +190,11 @@ bool Window::initialize() {
     if (config.resizable) {
         flags |= SDL_WINDOW_RESIZABLE;
     }
+    // Rendered integration runs use the same Vulkan surface without taking
+    // focus from the desktop. Ordinary client launches remain visible.
+    if (core::envFlagEnabled("WOWEE_WINDOW_HIDDEN", false)) {
+        flags |= SDL_WINDOW_HIDDEN;
+    }
 
     // SDL3 takes no position: a new window is placed by the platform, and
     // SDL_SetWindowPosition is the way to say otherwise.
