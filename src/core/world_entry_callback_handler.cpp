@@ -145,9 +145,28 @@ static void precacheNearbyTiles(rendering::TerrainManager* terrainMgr,
 void WorldEntryCallbackHandler::setupCallbacks() {
     // World entry callback (online mode) - load terrain when entering world
     gameHandler_.setWorldEntryCallback([this](uint32_t mapId, float x, float y, float z, bool isInitialEntry) {
+        // Even a return to the previously loaded map must wait for the current
+        // cleanup/load to finish. Otherwise the same-map fast path can consume
+        // a re-entrant ferry entry without replacing the in-progress load.
+        if (worldLoader_ && worldLoader_->isLoadingWorld()) {
+            LOG_WARNING("World entry deferred: map ", mapId, " while loading");
+            worldLoader_->setPendingEntry(mapId, x, y, z);
+            return;
+        }
         LOG_INFO("Online world entry: mapId=", mapId, " pos=(", x, ", ", y, ", ", z, ")"
                  " initial=", isInitialEntry);
         renderer_.resetCombatVisualState();
+
+        // Fast paths also position the camera and request tiles. They cannot
+        // use a passenger's local entry offset, including same-map reconnects.
+        const auto entryWorld = gameHandler_.resolveWorldEntryServerPosition(mapId, {x, y, z});
+        if (!entryWorld) {
+            if (worldLoader_) worldLoader_->setPendingEntry(mapId, x, y, z);
+            return;
+        }
+        x = entryWorld->x;
+        y = entryWorld->y;
+        z = entryWorld->z;
 
         // Reconnect to the same map: terrain stays loaded but all online entities are stale.
         // Despawn them properly so the server's fresh CREATE_OBJECTs will re-populate the world.
@@ -242,15 +261,6 @@ void WorldEntryCallbackHandler::setupCallbacks() {
             // This ensures background workers immediately start loading everything
             // visible from the new position (hearthstone may land far from old location).
             precacheNearbyTiles(renderer_.getTerrainManager(), renderPos, 8);
-            return;
-        }
-
-        // If a world load is already in progress (re-entrant call from
-        // gameHandler->update() processing SMSG_NEW_WORLD during warmup),
-        // defer this entry. The current load will pick it up when it finishes.
-        if (worldLoader_ && worldLoader_->isLoadingWorld()) {
-            LOG_WARNING("World entry deferred: map ", mapId, " while loading (will process after current load)");
-            worldLoader_->setPendingEntry(mapId, x, y, z);
             return;
         }
 

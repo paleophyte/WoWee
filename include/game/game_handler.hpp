@@ -1528,9 +1528,28 @@ public:
     bool isProfessionSpell(uint32_t spellId) const;
 
     // World entry callback (online mode - triggered when entering world)
-    // Parameters: mapId, x, y, z (canonical WoW coords), isInitialEntry=true on first login or reconnect
+    // Parameters: mapId, raw server x/y/z (transport-local for passenger entry),
+    // isInitialEntry=true on first login or reconnect. Terrain loading must use
+    // resolveWorldEntryServerPosition() rather than assume these are world axes.
     using WorldEntryCallback = std::function<void(uint32_t mapId, float x, float y, float z, bool isInitialEntry)>;
     void setWorldEntryCallback(WorldEntryCallback cb) { worldEntryCallback_ = std::move(cb); }
+
+    // A passenger entry packet carries a local offset. Its subsequent self
+    // movement block has a separate world position, independent of rendering
+    // or ship-model registration. Never use an old map's snapshot for loading.
+    void beginWorldEntryPosition(bool requiresPlayerSnapshot) {
+        worldEntryRequiresPlayerSnapshot_ = requiresPlayerSnapshot;
+        worldEntryServerPosition_.reset();
+    }
+    void recordWorldEntryServerPosition(const glm::vec3& position) {
+        worldEntryServerPosition_ = position;
+    }
+    std::optional<glm::vec3> resolveWorldEntryServerPosition(
+        uint32_t mapId, const glm::vec3& entryPosition) const {
+        if (state != WorldState::IN_WORLD || mapId != currentMapId_) return std::nullopt;
+        if (worldEntryRequiresPlayerSnapshot_) return worldEntryServerPosition_;
+        return entryPosition;
+    }
 
     // Knockback callback: called when server sends SMSG_MOVE_KNOCK_BACK for the player.
     // Parameters: vcos, vsin (2D direction vector in server/wire coord space - the
@@ -4486,6 +4505,8 @@ private:
     int shipNoDeckSupportFrames_ = 0;
     bool pendingPlayerTransportTransfer_ = false;
     bool awaitingPlayerMovementFrame_ = false;
+    bool worldEntryRequiresPlayerSnapshot_ = false;
+    std::optional<glm::vec3> worldEntryServerPosition_;
     uint64_t pendingPlayerTransportGuid_ = 0;
     uint32_t pendingPlayerTransportEntry_ = 0;
     uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;

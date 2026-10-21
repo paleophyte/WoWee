@@ -195,6 +195,7 @@ bool GameHandler::connect(const std::string& host,
 void GameHandler::disconnect() {
     taxiRecoverPending_ = onTaxiFlight_;
     awaitingPlayerMovementFrame_ = false;
+    beginWorldEntryPosition(false);
     cancelPendingPlayerTransportAttachment();
     clearPlayerTransport();
     playerTransportStickyGuid_ = 0;

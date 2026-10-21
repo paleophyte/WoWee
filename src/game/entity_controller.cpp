@@ -833,6 +833,13 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
         return isCorruptOriginPosition(owner_.getCurrentMapId(), x, y, z);
     };
 
+    // Preserve the actual world fields before composing a rendered transport
+    // pose. The loader needs them even when the ship model is not ready yet.
+    if (std::isfinite(block.x) && std::isfinite(block.y) && std::isfinite(block.z) &&
+        !positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
+        owner_.recordWorldEntryServerPosition({block.x, block.y, block.z});
+    }
+
     // What the server says about the player and transports, when it changes.
     //
     // The attach below is the only way a WMO transport ever picks the player

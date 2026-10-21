@@ -2333,6 +2333,9 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     }
 
     owner_.currentMapIdRef() = mapId;
+    // All earlier update-object batches have drained before this packet.
+    // Invalidate their loading position before accepting destination updates.
+    owner_.beginWorldEntryPosition(crossMapTransportTransfer);
     owner_.inInstanceRef() = false;
     if (owner_.getSocket()) {
         owner_.getSocket()->tracePacketsFor(std::chrono::seconds(12), "new_world");

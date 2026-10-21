@@ -556,6 +556,106 @@ TEST_CASE("saved TBC passenger waits for real ship registration without sending 
     }
 }
 
+TEST_CASE("passenger terrain entry waits for the self world frame without waiting for a ship model",
+          "[replay][movement][tbc-ferry][terrain-entry-frame]") {
+    Session s("tbc"); loginAtLocalOffset(s);
+    auto resolve = [&] { return s.handler().resolveWorldEntryServerPosition(1, kLoginLocal); };
+    CHECK_FALSE(resolve());
+    s.receive(loginPassengerUpdate());
+    const auto position = resolve(); REQUIRE(position);
+    CHECK(position->x == Catch::Approx(-4021.02f));
+    CHECK(position->y == Catch::Approx(-4753.37f));
+    CHECK(position->z == Catch::Approx(5.87536f));
+    const auto tile = wowee::core::coords::canonicalToTile(
+        wowee::core::coords::serverToCanonical(*position).x,
+        wowee::core::coords::serverToCanonical(*position).y);
+    CHECK(tile.first == 40);
+    CHECK(tile.second == 39);
+    CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).empty());
+    CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(0, kLoginLocal));
+}
+
+TEST_CASE("a ferry transfer invalidates earlier world snapshots before destination creates",
+          "[replay][movement][tbc-ferry][terrain-entry-frame]") {
+    using namespace wowee::game;
+    Session s("tbc"); loginAtLocalOffset(s); s.receive(loginPassengerUpdate());
+    REQUIRE(s.handler().resolveWorldEntryServerPosition(1, kLoginLocal));
+    Packet transfer(wireOpcode(Opcode::SMSG_NEW_WORLD)); transfer.writeUInt32(0);
+    for (float value : {kLoginLocal.x, kLoginLocal.y, kLoginLocal.z, 0.f}) transfer.writeFloat(value);
+    // The earlier movement batch must drain before the entry boundary resets
+    // its snapshot. The destination create must still wait for scene cleanup.
+    GameHandlerTestAccess::queue(s.handler(), loginPassengerUpdate());
+    GameHandlerTestAccess::queue(s.handler(), transfer);
+    GameHandlerTestAccess::queue(s.handler(), loginPassengerUpdate());
+    bool entered = false;
+    s.handler().setWorldEntryCallback([&](uint32_t map, float, float, float, bool) {
+        CHECK(map == 0); entered = true;
+        CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(0, kLoginLocal));
+    });
+    for (int frame = 0; frame < 100 && !entered; ++frame) GameHandlerTestAccess::drainFrame(s.handler());
+    REQUIRE(entered);
+    CHECK(GameHandlerTestAccess::packetsPending(s.handler()));
+    CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(1, kLoginLocal));
+    CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(0, kLoginLocal));
+    // This is the first permitted destination packet pass after cleanup.
+    for (int frame = 0; frame < 100 && GameHandlerTestAccess::packetsPending(s.handler()); ++frame)
+        GameHandlerTestAccess::drainFrame(s.handler());
+    GameHandlerTestAccess::drainFrame(s.handler());
+    REQUIRE(s.handler().resolveWorldEntryServerPosition(0, kLoginLocal));
+    s.handler().disconnect();
+    CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(0, kLoginLocal));
+}
+
+TEST_CASE("early self create supplies verified login terrain and cannot leak into another character",
+          "[replay][movement][tbc-ferry][terrain-entry-frame]") {
+    using namespace wowee::game;
+    Session s("tbc"); GameHandlerTestAccess::characterListReady(s.handler());
+    s.handler().selectCharacter(Session::kPlayerGuid);
+    s.receive(loginPassengerUpdate()); loginAtLocalOffset(s, false);
+    const auto position = s.handler().resolveWorldEntryServerPosition(1, kLoginLocal);
+    REQUIRE(position); CHECK(position->x == Catch::Approx(-4021.02f));
+    GameHandlerTestAccess::characterListReady(s.handler());
+    s.handler().selectCharacter(Session::kPlayerGuid); loginAtLocalOffset(s, false);
+    CHECK_FALSE(s.handler().resolveWorldEntryServerPosition(1, kLoginLocal));
+}
+
+TEST_CASE("on-foot world entry uses its own destination rather than an old self snapshot",
+          "[replay][movement][tbc-ferry][terrain-entry-frame]") {
+    using namespace wowee::game;
+    Session s("tbc"); loginAtLocalOffset(s); s.receive(loginPassengerUpdate(false));
+    const glm::vec3 destination{-9464.f, 64.f, 56.f};
+    for (uint32_t map : {0u, 0u, 1u}) {
+        Packet transfer(wireOpcode(Opcode::SMSG_NEW_WORLD)); transfer.writeUInt32(map);
+        for (float value : {destination.x, destination.y, destination.z, 0.f}) transfer.writeFloat(value);
+        s.receive(transfer);
+        const auto position = s.handler().resolveWorldEntryServerPosition(map, destination);
+        REQUIRE(position); CHECK(*position == destination);
+    }
+}
+
+TEST_CASE("later login verification entries cannot reuse the original loading snapshot",
+          "[replay][movement][tbc-ferry][terrain-entry-frame]") {
+    using namespace wowee::game;
+    for (bool aboard : {false, true}) {
+        CAPTURE(aboard);
+        Session s("tbc"); loginAtLocalOffset(s); s.receive(loginPassengerUpdate(aboard));
+        REQUIRE(s.handler().resolveWorldEntryServerPosition(1, kLoginLocal));
+        const glm::vec3 destination{-9464.f, 64.f, 56.f};
+        Packet entry(wireOpcode(Opcode::SMSG_LOGIN_VERIFY_WORLD)); entry.writeUInt32(0);
+        for (float value : {destination.x, destination.y, destination.z, 0.f}) entry.writeFloat(value);
+        s.receive(entry);
+        const auto position = s.handler().resolveWorldEntryServerPosition(0, destination);
+        if (aboard) {
+            CHECK_FALSE(position);
+            s.receive(loginPassengerUpdate());
+            REQUIRE(s.handler().resolveWorldEntryServerPosition(0, destination));
+        } else {
+            REQUIRE(position); CHECK(*position == destination);
+        }
+    }
+}
+
 TEST_CASE("authoritative detach and disconnect cancel a deferred passenger login",
           "[replay][movement][tbc-ferry][passenger-login]") {
     using namespace wowee::game;

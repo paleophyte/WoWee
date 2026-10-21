@@ -557,6 +557,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     playerTransportStickyGuid_ = 0;
     playerTransportStickyTimer_ = 0.0f;
     awaitingPlayerMovementFrame_ = true;
+    beginWorldEntryPosition(true);
     pendingPlayerTransportSince_ = std::chrono::steady_clock::now();
 
     // Make the selected character authoritative in GameHandler.
@@ -796,6 +797,12 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
                     " onTaxi=", flying,
                     " - the player is about to be placed at (", data.x, ", ",
                     data.y, ", ", data.z, ")");
+    }
+
+    // A genuine later entry must not reuse the login map's loading snapshot.
+    // Preserve an early self CREATE only for the original selected login.
+    if (!initialWorldEntry) {
+        beginWorldEntryPosition(isOnTransport() || hasPendingPlayerTransportWorldTransfer());
     }
 
     // Successfully entered the world (or teleported)

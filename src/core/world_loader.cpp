@@ -844,6 +844,48 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         app_.playerCharacterSpawned = false;
     }
 
+    // Destination creates stay queued until the old render scene has been
+    // cleared above. Now receive the self movement frame, whose world fields
+    // are independent of the ship model. Passenger entry x/y/z are local, so
+    // using them for ADTs would load the middle of the destination continent.
+    if (gameHandler_) {
+        const auto waitStart = std::chrono::steady_clock::now();
+        auto position = gameHandler_->resolveWorldEntryServerPosition(mapId, {x, y, z});
+        while (!position) {
+            showProgress("Waiting for world position...", 0.02f);
+            if (window_->shouldClose()) {
+                if (loadingScreenOk) loadingScreen.shutdown();
+                loadingWorld_ = false;
+                return;
+            }
+            gameHandler_->update(1.0f / 60.0f);
+            if (pendingWorldEntry_) {
+                // Do the next cleanup before draining its destination creates.
+                if (loadingScreenOk) loadingScreen.shutdown();
+                loadingWorld_ = false;
+                processPendingEntry();
+                return;
+            }
+            if (gameHandler_->getState() != game::WorldState::IN_WORLD ||
+                std::chrono::steady_clock::now() - waitStart > std::chrono::seconds(30)) {
+                LOG_ERROR("World entry has no authoritative position for map ", mapId);
+                if (loadingScreenOk) loadingScreen.shutdown();
+                loadingWorld_ = false;
+                pendingWorldEntry_.reset();
+                app_.disconnectNotice_ = "Unable to load your world position. Please reconnect.";
+                app_.logoutToLogin();
+                return;
+            }
+            position = gameHandler_->resolveWorldEntryServerPosition(mapId, {x, y, z});
+            if (!position) SDL_Delay(16);
+        }
+        LOG_INFO("World terrain entry: map=", mapId, " packet=(", x, ",", y, ",", z,
+                 ") serverWorld=(", position->x, ",", position->y, ",", position->z, ")");
+        x = position->x;
+        y = position->y;
+        z = position->z;
+    }
+
     // Resolve map folder name from Map.dbc (authoritative for world/instance maps).
     // This is required for instances like DeeprunTram (map 369) that are not Azeroth/Kalimdor.
     if (!mapNameCacheLoaded_ && assetManager_ && assetManager_->isInitialized()) {
