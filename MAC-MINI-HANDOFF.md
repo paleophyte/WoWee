@@ -5,61 +5,36 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
-## Return-trip timing follow-up — October21,2026
+## Current state — October21,2026
 
-The user-driven logged round trip now passes both1→0and0→1destination loads in
-one process, then exits0. Correct server-world positions and49/48loaded tiles
-recorded; no GPU abort. User reports a brief return freeze, and watchdog logs
-1509msstall. Evidence: `logs/r52-live-roundtrip-20261021-01/roundtrip-acceptance.json`.
-This supersedes the repeated-live-transition evidence gap in the older summary.
+- **Implemented:** copilot/accepted-quest baseline, R57worker cleanup, R58fresh
+  passenger world positions, R59alpha retirement, queued-Lua replay fix. New
+  terrain cleanup uses small batches after every frame fence, with8ms per-frame
+  soft budget and full shutdown flushing. Existing critical cleanup is unchanged.
+- **Mac tested:** full replay3,574assertions/111cases. Actual49/45tile scene and
+  loading-screen checks now reduce worst observed presentation from~484ms to
+  13.451ms. Warm clears remain213allocations /544,981,080bytes. Generated49tile
+  lifetime, live-tile draw, destination-overlap, forced-flush and busy-worker
+  reset checks pass. No logged GPU errors. Evidence/source/runtime hashes:
+  `logs/r52-budgeted-cleanup-20261021/REPORT.txt` and `summary.json`.
+- **Live predecessor:** one0→1arrival plus same-process1→0→1round trip passed
+  correct world positioning and streaming; both processes exited0. User reported
+  a return pause; watchdog1509ms and offline deferred-cleanup371–484ms isolated.
+  Original GPU abort not reproduced. Exact lost assertion/cause remains unproven.
+- **Deployed/preserved:** historical server0065 and earned quest/control/turn-in/
+  ferry saved-relog evidence retained. No server deployment or agent gameplay
+  input. New change affects native resource retirement only; addon/server intent
+  and gameplay execution unchanged. Coherent changes published on same branch.
+- **Awaiting:** a newly scoped normal Mac arrival on this candidate to confirm
+  the return-trip pause improves without regressions. No new live session begun.
+  Remaining checklist: companion `MAC-TEST-CHECKLIST.md`. Prior source-bound
+  results remain valid at their documented scope, not promoted to new builds.
 
-A new offline `--loading-screen` scene mode reproduces a371–484mspause on the
-old-map destruction frame, including61–138msalpha deletion. All48real loading
-presentations and warm allocation checks pass. Thresholded timing diagnostics
-added only; no lifetime/performance workaround. Evidence/source binding:
-`logs/r52-return-stall-20261021/REPORT.txt`, `verified-cleanup-timing/`, `summary.json`.
-One trial used an older binary during relink; preserved and excluded explicitly.
-
-Next smallest increment: bound ready destruction work per frame while retaining
-all-frame fence safety and eventual reclamation. Exact live stall cause still
-needs qualification because that run predated the inner timing logs. No new live
-session authorized or started. Existing replay/quest/control evidence preserved.
-
-## Current state — October 21, 2026
-
-- **Implemented/published:** baseline copilot and accepted-quest workflow; R57
-  worker cleanup, R58 authoritative passenger world position, R59 alpha-image
-  retirement, and the isolated queued-Lua replay fix. Production code unchanged
-  since the replay fix. Coherent client changes are on `codex/playerbot-client-sync`.
-- **Tested on Mac:** full replay passes3,574assertions/111cases; generated pressure,
-  actual49/45-tile ADT/BLP and production terrain/M2/WMO/water scene probes pass
-  repeated allocation/cleanup checks. Scene screenshots inspected.
-- **Live arrival passed:** user-authorized normal Azeroth→Kalimdor crossing.
-  Map0 cleanup precedes fresh map1 server-world position(-4259.17,-4810.32,6.19747),
-  rather than passenger-local(-4.60376,-2.55835,6.19747).49/45tiles load; user
-  confirms success; client/capture exit0. Actual loaded MoltenVK1.4.2 recorded.
-- **Deployed/preserved:** historical server0065 and earned control, kill/collection
-  turn-ins and ferry saved-relog evidence remain valid at their original scopes.
-  This session involved user-operated gameplay; no agent input, server writes,
-  grants, character edits or redeployment. Normal logout is not inferred solely
-  from disconnect lines; only clean client exit is newly established.
-- **Remaining:** R52 repeated live continent changes and original assertion/cause
-  remain unproven. No claimed original-abort fix from a single crossing. Proposed
-  next scope is one logged user-driven round trip in one process, requiring new
-  explicit authorization because the approved single crossing is finished.
-
-Evidence: `logs/r52-live-20261021-01/arrival-acceptance.json` and
-`goal-current-audit.json`; complete client/runtime/shader/binary hashes retained.
-Offline scene evidence: `logs/r52-scene-20261021/REPORT.txt` and
-`strengthened-probe/`. Replay: `logs/r52-streaming-20261021-aAtMW2/replay-full-after.log`.
-The live log has12ERRORlines: one initial WotLK/TBC asset-profile mismatch and11
-Lua/FrameXML errors. None is a GPU abort. Separate roadmap triage is recorded;
-this live arrival does not establish a fully error-free UI or new quest acceptance.
-
-One unresolved checklist: companion `MAC-TEST-CHECKLIST.md`.
-Capture launcher: `bash tools/run_macos_r52_capture.sh --launch NEW_OUTPUT_DIRECTORY`.
-Use it for an approved session only. All earlier missing-assets/publication/scope
-requests below are historical. TBC assets are installed; GitHub publication works.
+Capture: `bash tools/run_macos_r52_capture.sh --launch NEW_OUTPUT_DIRECTORY`
+for an explicitly approved session. Installed data root:
+`/Users/neko/Library/Application Support/Wowee/Data`. GitHub publication works.
+Separate live FrameXML errors are recorded in the roadmap, outside this fix.
+Older sections below preserve investigation history and superseded next steps.
 
 ## Real multi-tile validation — October 21, 2026
 

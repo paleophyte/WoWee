@@ -8,6 +8,7 @@
 #include <VkBootstrap.h>
 #include <SDL3/SDL.h>
 #include <vector>
+#include <deque>
 #include <functional>
 #include <cstdint>
 #include <unordered_map>
@@ -149,6 +150,12 @@ public:
     // been fenced - safe for shared resources bound by multiple frames' command
     // buffers (material descriptor sets, vertex/index buffers, etc.).
     void deferAfterAllFrameFences(std::function<void()>&& fn);
+
+    // Main-thread bulk retirement: wait every frame fence, then spend at most
+    // 8ms per beginFrame on ready work (one callback may overrun). Callbacks
+    // must be small and own their captures; owners must flush before shutdown.
+    void deferRetirementAfterAllFrameFences(std::function<void()>&& fn);
+    [[nodiscard]] bool hasPendingRetirements() const { return pendingRetirements_ != 0; }
 
     // Accessors
     [[nodiscard]] VkInstance getInstance() const { return instance; }
@@ -530,12 +537,15 @@ private:
     std::vector<InFlightBatch> inFlightBatches_;
 
     void runDeferredCleanup(uint32_t frameIndex);
+    void runReadyRetirements(bool drainAll);
 public:
     // Execute all deferred destruction immediately. For shutdown paths, where no
     // further frames will run to drain the queues naturally.
     void flushDeferredCleanup();
 private:
     std::vector<std::function<void()>> deferredCleanup_[MAX_FRAMES_IN_FLIGHT];
+    std::deque<std::function<void()>> readyRetirements_;
+    size_t pendingRetirements_ = 0;
 
     // Depth buffer (shared across all framebuffers)
     VkImage depthImage = VK_NULL_HANDLE;

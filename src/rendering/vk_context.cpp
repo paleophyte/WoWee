@@ -303,6 +303,24 @@ void VkContext::deferAfterAllFrameFences(std::function<void()>&& fn) {
     }
 }
 
+void VkContext::deferRetirementAfterAllFrameFences(std::function<void()>&& fn) {
+    ++pendingRetirements_;
+    deferAfterAllFrameFences([this, fn = std::move(fn)]() mutable {
+        readyRetirements_.push_back(std::move(fn));
+    });
+}
+
+void VkContext::runReadyRetirements(bool drainAll) {
+    const auto start = std::chrono::steady_clock::now();
+    while (!readyRetirements_.empty()) {
+        auto fn = std::move(readyRetirements_.front());
+        readyRetirements_.pop_front();
+        if (fn) fn();
+        --pendingRetirements_;
+        if (!drainAll && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(8)) break;
+    }
+}
+
 void VkContext::flushDeferredCleanup() {
     // Run every queued destruction now rather than waiting for the frame slots
     // to come around again. Subsystems defer destruction because in-flight
@@ -316,6 +334,9 @@ void VkContext::flushDeferredCleanup() {
     for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) {
         runDeferredCleanup(fi);
     }
+    // Parent descriptor pools/device are still alive here. Shutdown must not
+    // carry budgeted work past their destruction, even if no more frames run.
+    runReadyRetirements(true);
 }
 
 void VkContext::runDeferredCleanup(uint32_t frameIndex) {
@@ -2879,6 +2900,7 @@ VkCommandBuffer VkContext::beginFrame(uint32_t& imageIndex) {
 
     // Any work queued for this frame slot is now guaranteed to be unused by the GPU.
     runDeferredCleanup(currentFrame);
+    runReadyRetirements(false);
 
     // The wait above is what makes this slot's timestamps readable: the submit
     // that wrote them has completed. Read before the pool is reset below.

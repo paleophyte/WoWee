@@ -92,6 +92,11 @@ struct TerrainProbeFrames {
         });
         destroyBuffer(ctx.getAllocator(),staging);camera.setPosition(eye);
     }
+    void drainRetirements(wowee::rendering::TerrainRenderer& terrain){
+        int frames=0;
+        while(ctx.hasPendingRetirements() && frames++<256)frame(terrain);
+        require(!ctx.hasPendingRetirements(),"Budgeted terrain retirement did not converge within 256 frames");
+    }
     // The callback retires resources after commands reference them but before
     // submission. Destruction must wait for every real frame slot's fence.
     void frame(wowee::rendering::TerrainRenderer& terrain,const std::function<void()>& recorded={}){

@@ -686,16 +686,16 @@ void TerrainRenderer::retireUnusedAlphaTextures() {
         it = textureCache.erase(it);
     }
     if (retired.empty()) return;
-    vkCtx->deferAfterAllFrameFences([retired]() {
-        const auto retirementStart = std::chrono::steady_clock::now();
-        for (auto* texture : retired) delete texture;
-        const float retirementMs = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - retirementStart).count();
-        if (retirementMs > 50.0f) {
-            LOG_WARNING("SLOW terrain alpha retirement: ", retirementMs,
-                        "ms textures=", retired.size());
-        }
-    });
+    // Small independently owned batches prevent one all-fences callback from
+    // deleting tens of thousands of images inside a single loading frame.
+    constexpr size_t batchSize = 64;
+    for (size_t first = 0; first < retired.size(); first += batchSize) {
+        const auto last = std::min(first + batchSize, retired.size());
+        std::vector<VkTexture*> batch(retired.begin() + first, retired.begin() + last);
+        vkCtx->deferRetirementAfterAllFrameFences([batch = std::move(batch)]() {
+            for (auto* texture : batch) delete texture;
+        });
+    }
 }
 
 VkTexture* TerrainRenderer::loadTexture(const std::string& path) {
@@ -1289,7 +1289,7 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     for (VkTexture*& t : chunk.layerTextures) t = nullptr;
     for (VkTexture*& t : chunk.alphaTextures) t = nullptr;
 
-    vkCtx->deferAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
+    vkCtx->deferRetirementAfterAllFrameFences([device, allocator, vertexBuffer, vertexAlloc, indexBuffer, indexAlloc,
                                      paramsUBO, paramsAlloc, pool, materialSet]() {
         if (vertexBuffer) {
             AllocatedBuffer ab{}; ab.buffer = vertexBuffer; ab.allocation = vertexAlloc;

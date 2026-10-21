@@ -33,7 +33,7 @@ static void sceneTerrainProbe(wowee::core::Application& app,
     renderer->getCameraController()->setEnabled(false);
     auto snapshot=[&]{
         VmaTotalStatistics stats{};vmaCalculateStatistics(ctx->getAllocator(),&stats);
-        return json{{"allocations",stats.total.statistics.allocationCount},
+        return json{{"pending_retirements",ctx->hasPendingRetirements()}, {"allocations",stats.total.statistics.allocationCount},
             {"allocation_bytes",stats.total.statistics.allocationBytes},
             {"loaded_tiles",manager->getLoadedTileCount()},{"remaining_tiles",manager->getRemainingTileCount()},
             {"terrain_chunks",terrain->getChunkCount()},{"terrain_draws",terrain->getRenderedChunkCount()},
@@ -101,17 +101,21 @@ static void sceneTerrainProbe(wowee::core::Application& app,
             if(loading){
                 // Present after retirement too: beginFrame may execute deferred
                 // destruction once both source frame fences have been waited.
-                for(int i=0;i<12;++i){
+                for(int i=0;i<256 && (i<12 || ctx->hasPendingRetirements());++i){
                     app.beatWatchdog();SDL_PumpEvents();const auto start=std::chrono::steady_clock::now();
-                    loading->render();
+                    const auto slot=ctx->getCurrentFrame();loading->render();
+                    check(ctx->getCurrentFrame()!=slot,"Loading screen did not submit a frame");
                     const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
                     auto row=snapshot();row["cycle"]=cycle;row["map"]=name;row["sequence"]=i;row["presentation_ms"]=elapsed;
                     record("loading_screen_presented",row);
                     check(!ctx->isDeviceLost() && !ctx->isSwapchainDirty(),"Loading-screen presentation failed");
                 }
+                check(!ctx->hasPendingRetirements(),"Loading-screen retirement did not converge within 256 frames");
                 loading->shutdown();
             }
             frame(false);frame(false);
+            int drainFrames=0;while(ctx->hasPendingRetirements() && drainFrames++<256)frame(false);
+            check(!ctx->hasPendingRetirements(),"Scene retirement did not converge within 256 frames");
             check(manager->getLoadedTileCount()==0 && manager->getRemainingTileCount()==0 && terrain->getChunkCount()==0,"Scene reset retained old map work");
             check(m2->getModelCount()==0 && m2->getInstanceCount()==0 && wmo->getModelCount()==0 && wmo->getInstanceCount()==0 && water->getSurfaceCount()==0,"Scene reset retained model/water content");
             auto cleared=snapshot();

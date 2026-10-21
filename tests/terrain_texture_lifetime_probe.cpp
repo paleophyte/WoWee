@@ -28,6 +28,7 @@ static uint32_t allocations(rendering::VkContext& ctx){
 static void settle(rendering::VkContext& ctx){
     ctx.waitAllUploads();require(ctx.waitIdle("terrain texture probe")==VK_SUCCESS,"Device wait failed");
     ctx.flushDeferredCleanup();
+    require(!ctx.hasPendingRetirements(),"Forced cleanup retained budgeted work");
 }
 static pipeline::TerrainMesh generatedTile(int count=4){
     pipeline::TerrainMesh mesh{};mesh.validChunkCount=count;
@@ -198,16 +199,34 @@ static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRender
         require(allocations(ctx)==loaded,"Framed resources destroyed before both slot fences");
         sample("one_slot_waited",cycle);
         frames.frame(terrain);
+        frames.drainRetirements(terrain);
         require(allocations(ctx)==uint32_t(baseline["allocations"])+(loaded-uint32_t(baseline["allocations"]))*(residentTiles-1)/residentTiles,"Frame slots did not retire exactly one tile");
         require(terrain.getRenderedChunkCount()==(residentTiles-1)*256,"Framed retirement damaged live tile");
-        sample("both_slots_waited",cycle);
+        sample("retirement_converged_after_fences",cycle);
         frames.frame(terrain,[&]{terrain.clear();sample("clear_before_submit",cycle);});
-        frames.frame(terrain);frames.frame(terrain);
+        frames.frame(terrain);frames.frame(terrain);frames.drainRetirements(terrain);
         sample("cleared_through_frames",cycle);
         require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Framed clear retained allocations");
         require(memorySnapshot(ctx)["allocation_bytes"]==baseline["allocation_bytes"],"Framed clear retained allocation bytes");
     }
-    settle(ctx);return true;
+    // A destination may start allocating before old terrain has retired.
+    // Upload at the same coordinates while the old resources are still held,
+    // then require the destination draws and its exact allocation footprint.
+    require(terrain.loadTerrain(tile,paths,0,0),"Overlap source upload failed");settle(ctx);
+    const auto oneTile=allocations(ctx);
+    frames.frame(terrain,[&]{terrain.clear();});
+    require(ctx.hasPendingRetirements(),"Overlap source was not deferred");
+    require(terrain.loadTerrain(tile,paths,0,0),"Overlap destination upload failed");
+    require(ctx.hasPendingRetirements(),"Destination upload prematurely flushed old retirement");
+    const auto overlapped=allocations(ctx);
+    require(overlapped>oneTile,"Destination did not overlap old terrain allocations");
+    frames.drainRetirements(terrain);
+    require(terrain.getChunkCount()==256 && terrain.getRenderedChunkCount()==256,"Retirement damaged overlapping destination draws");
+    require(allocations(ctx)==oneTile,"Overlapping destination retained old allocations");
+    result["framed_retirement"]["overlap"]={{"overlapped_allocations",overlapped},{"destination_allocations",oneTile},{"destination_draws",256}};
+    terrain.clear();settle(ctx);
+    require(allocations(ctx)==uint32_t(baseline["allocations"]),"Forced flush retained overlap resources");
+    return true;
 }
 static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRenderer& terrain,
                               pipeline::AssetManager& assets,VkDescriptorSetLayout layout,
@@ -249,7 +268,7 @@ static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRender
             require(allocations(ctx)==loaded,"Map reset freed recorded resources before submission");
             sample("map_reset_before_submit",cycle);
         });
-        frames.frame(terrain);frames.frame(terrain);
+        frames.frame(terrain);frames.frame(terrain);frames.drainRetirements(terrain);
         require(Access::empty(manager),"Old worker published after map reset");
         require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Map reset retained allocations after frame fences");
         require(memorySnapshot(ctx)["allocation_bytes"]==baseline["allocation_bytes"],"Map reset retained allocation bytes");
@@ -263,7 +282,7 @@ static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRender
         require(Access::snapshot(manager)["loaded_tiles"]==1,"Fresh destination tile never finalized");
         require(terrain.getChunkCount()==256 && terrain.getRenderedChunkCount()==256,"Destination tile did not fully draw");
         sample("fresh_destination_drawn",cycle);
-        frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);
+        frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);frames.drainRetirements(terrain);
         require(Access::empty(manager),"Soft reset retained manager state");
         require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Soft reset retained GPU allocations");
         sample("soft_reset_through_frames",cycle);
@@ -305,7 +324,7 @@ static bool realTerrain(rendering::VkContext& ctx,rendering::TerrainRenderer& te
             row["expected_tiles"]=expected;row["missing_files"]=missing;
             row["chunks"]=terrain.getChunkCount();row["draws"]=terrain.getRenderedChunkCount();row["manager"]=Access::snapshot(manager);
             row["camera_target"]={center.x,center.y,center.z};
-            frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);
+            frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);frames.drainRetirements(terrain);
             require(Access::empty(manager),"Real reset retained worker or tile state");
             row["after_reset"]=memorySnapshot(ctx);result["real_terrain"]["samples"].push_back(row);
             std::ofstream(output)<<result.dump(2)<<'\n';std::cout<<row.dump()<<std::endl;
