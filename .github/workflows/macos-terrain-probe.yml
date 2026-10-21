@@ -1,0 +1,64 @@
+name: macOS terrain allocation probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/playerbot-client-sync]
+    paths:
+      - .github/workflows/macos-terrain-probe.yml
+      - tools/run_macos_terrain_probe.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-terrain-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    # Standard public-repository runner. Do not silently switch to a paid GPU
+    # runner. Its OS/GPU may differ from the user's Mac; preserve that evidence.
+    runs-on: macos-26
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja pkg-config sdl3 glm openssl@3 zlib ffmpeg unicorn \
+            stormlib vulkan-loader vulkan-headers molten-vk shaderc
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          BREW=$(brew --prefix)
+          export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix vulkan-loader)/lib/pkgconfig:$(brew --prefix shaderc)/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_PREFIX_PATH="$BREW" \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" -DWOWEE_BUILD_TESTS=ON
+
+      - name: Build native probe and copilot regression
+        run: cmake --build build --target wowee_terrain_texture_probe test_game_replay --parallel 3
+
+      - name: Native copilot regression
+        run: build/bin/test_game_replay
+
+      - name: Actual MoltenVK allocation test
+        run: |
+          set -euo pipefail
+          # Pin this CI run to the installed Homebrew ICD. The runtime trace
+          # still records the actual dylibs, rather than trusting brew versions.
+          export VK_DRIVER_FILES="$(brew --prefix molten-vk)/etc/vulkan/icd.d/MoltenVK_icd.json"
+          test -f "$VK_DRIVER_FILES"
+          bash tools/run_macos_terrain_probe.sh "$RUNNER_TEMP/terrain-probe"
+
+      - name: Preserve runtime, stderr and allocation results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-terrain-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/terrain-probe
+          if-no-files-found: warn
