@@ -2611,6 +2611,20 @@ if(NOT ANDROID)
     target_link_directories(wowee_render_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_DIRECTORIES>)
     target_link_options(wowee_render_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_OPTIONS>)
     add_dependencies(wowee_render_probe wowee)
+
+    # Explicit GPU regression: actual generated terrain and native allocation/
+    # fence cleanup. No extracted assets, network, or account required. Not a
+    # default CTest because it needs a Vulkan device and windowing surface.
+    add_executable(wowee_terrain_texture_probe EXCLUDE_FROM_ALL terrain_texture_lifetime_probe.cpp
+        "$<FILTER:$<TARGET_OBJECTS:wowee>,EXCLUDE,/main([.]cpp)?[.]o(bj)?$>")
+    target_include_directories(wowee_terrain_texture_probe PRIVATE
+        $<TARGET_PROPERTY:wowee,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(wowee_terrain_texture_probe PRIVATE
+        $<TARGET_PROPERTY:wowee,COMPILE_DEFINITIONS>)
+    target_link_libraries(wowee_terrain_texture_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_LIBRARIES>)
+    target_link_directories(wowee_terrain_texture_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_DIRECTORIES>)
+    target_link_options(wowee_terrain_texture_probe PRIVATE $<TARGET_PROPERTY:wowee,LINK_OPTIONS>)
+    add_dependencies(wowee_terrain_texture_probe wowee)
 endif()
 
 # ── Sanitizers, once every test target exists ────────────────

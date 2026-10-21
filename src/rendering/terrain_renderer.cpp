@@ -667,6 +667,30 @@ bool TerrainRenderer::evictTexturesFor(size_t needBytes) {
     return textureCacheBytes_ + needBytes <= textureCacheBudgetBytes_;
 }
 
+void TerrainRenderer::retireUnusedAlphaTextures() {
+    if (!vkCtx || textureCache.empty()) return;
+    std::unordered_set<const VkTexture*> inUse;
+    for (const auto& chunk : chunks) {
+        for (const auto* texture : chunk.alphaTextures) {
+            if (texture) inUse.insert(texture);
+        }
+    }
+    std::vector<VkTexture*> retired;
+    for (auto it = textureCache.begin(); it != textureCache.end();) {
+        if (!it->second.perChunkAlpha || inUse.count(it->second.texture.get())) {
+            ++it;
+            continue;
+        }
+        textureCacheBytes_ -= it->second.approxBytes;
+        retired.push_back(it->second.texture.release());
+        it = textureCache.erase(it);
+    }
+    if (retired.empty()) return;
+    vkCtx->deferAfterAllFrameFences([retired]() {
+        for (auto* texture : retired) delete texture;
+    });
+}
+
 VkTexture* TerrainRenderer::loadTexture(const std::string& path) {
     auto normalizeKey = [](std::string key) {
         std::replace(key.begin(), key.end(), '/', '\\');
@@ -800,6 +824,7 @@ VkTexture* TerrainRenderer::createAlphaTexture(const std::vector<uint8_t>& alpha
     TextureCacheEntry e;
     e.texture = std::move(tex);
     e.approxBytes = 64 * 64;
+    e.perChunkAlpha = true;
     e.lastUse = ++textureCacheCounter_;
     textureCacheBytes_ += e.approxBytes;
     textureCache[key] = std::move(e);
@@ -1170,6 +1195,7 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         }
     }
     if (removed > 0) {
+        retireUnusedAlphaTextures();
         LOG_DEBUG("Removed ", removed, " terrain chunks for tile [", tileX, ",", tileY, "]");
     }
 }
@@ -1185,6 +1211,7 @@ void TerrainRenderer::clear() {
     // No chunk is holding anything now, so nothing needs protecting from the
     // next upload's point of view either.
     evictProtectFrom_ = 0;
+    retireUnusedAlphaTextures();
 }
 
 void TerrainRenderer::registerRtChunk(TerrainChunkGPU& gpuChunk, const pipeline::ChunkMesh& chunk) {

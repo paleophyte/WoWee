@@ -231,11 +231,15 @@ private:
         std::unique_ptr<VkTexture> texture;
         size_t approxBytes = 0;
         uint64_t lastUse = 0;
+        bool perChunkAlpha = false;
     };
     std::unordered_map<std::string, TextureCacheEntry> textureCache;
     size_t textureCacheBytes_ = 0;
     uint64_t textureCacheCounter_ = 0;
     size_t textureCacheBudgetBytes_ = 4096ull * 1024 * 1024;
+    // Unique alpha keys are never looked up again. Once their chunk is gone,
+    // keep them only until the GPU fences are safe, not until the cache fills.
+    void retireUnusedAlphaTextures();
     std::unordered_set<std::string> failedTextureCache_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
     /// Cache entries handed out at or after this counter are never evicted.
