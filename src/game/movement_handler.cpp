@@ -489,6 +489,17 @@ void MovementHandler::sendMovement(Opcode opcode) {
         return;
     }
 
+    if (owner_.isPlayerMovementFramePending()) {
+        const char* reason = owner_.hasPendingPlayerTransportWorldTransfer()
+            ? "the server-reported transport is still loading"
+            : "the first server movement frame is still loading";
+        if (movementHeldReason_ != reason) {
+            movementHeldReason_ = reason;
+            LOG_WARNING("Movement: not sent while ", reason);
+        }
+        return;
+    }
+
     if (serverDrivenMovement_) {
         const bool manualStart = opcode == Opcode::MSG_MOVE_START_FORWARD ||
             opcode == Opcode::MSG_MOVE_START_BACKWARD ||
@@ -855,8 +866,10 @@ void MovementHandler::sendMovement(Opcode opcode) {
     wireInfo.orientation = core::coords::canonicalToServerYaw(wireInfo.orientation);
 
     if (includeTransportInWire) {
-        glm::vec3 serverTransportPos = core::coords::canonicalToServer(
-            glm::vec3(wireInfo.transportX, wireInfo.transportY, wireInfo.transportZ));
+        const glm::vec3 local(wireInfo.transportX, wireInfo.transportY, wireInfo.transportZ);
+        glm::vec3 serverTransportPos = owner_.getTransportManager()
+            ? owner_.getTransportManager()->transportLocalToServer(wireInfo.transportGuid, local)
+            : core::coords::canonicalToServer(local);
         wireInfo.transportX = serverTransportPos.x;
         wireInfo.transportY = serverTransportPos.y;
         wireInfo.transportZ = serverTransportPos.z;
@@ -1065,8 +1078,10 @@ network::Packet MovementHandler::buildForceAck(Opcode ackOpcode, uint32_t counte
     wire.y = serverPos.y;
     wire.z = serverPos.z;
     if (wire.hasFlag(MovementFlags::ONTRANSPORT)) {
-        glm::vec3 serverTransport =
-            core::coords::canonicalToServer(glm::vec3(wire.transportX, wire.transportY, wire.transportZ));
+        const glm::vec3 local(wire.transportX, wire.transportY, wire.transportZ);
+        glm::vec3 serverTransport = owner_.getTransportManager()
+            ? owner_.getTransportManager()->transportLocalToServer(wire.transportGuid, local)
+            : core::coords::canonicalToServer(local);
         wire.transportX = serverTransport.x;
         wire.transportY = serverTransport.y;
         wire.transportZ = serverTransport.z;
@@ -2178,15 +2193,17 @@ void MovementHandler::handleNewWorld(network::Packet& packet) {
     float serverY = packet.readFloat();
     float serverZ = packet.readFloat();
     float orientation = packet.readFloat();
-    const bool crossMapTransportTransfer = owner_.isOnTransport() &&
+    const bool crossMapTransportTransfer =
+        (owner_.isOnTransport() || owner_.hasPendingPlayerTransportWorldTransfer()) &&
         mapId != owner_.getCurrentMapId();
     if (crossMapTransportTransfer) {
         // While riding a cross-continent transport, SMSG_NEW_WORLD carries the
         // player's transport-local coordinates. They are not a world position
         // near map origin. Hold them until the same ship is registered on the
         // destination map, then compose them through its new transform.
-        owner_.beginPlayerTransportWorldTransfer(
-            mapId, core::coords::serverToCanonical(glm::vec3(serverX, serverY, serverZ)));
+        owner_.deferPlayerTransportAttachment(
+            owner_.isOnTransport() ? owner_.getPlayerTransportGuid() : owner_.getPendingPlayerTransportGuid(),
+            mapId, glm::vec3(serverX, serverY, serverZ));
     }
     const uint32_t transferAreaTriggerId = lastAreaTriggerId_;
     lastAreaTriggerId_ = 0;

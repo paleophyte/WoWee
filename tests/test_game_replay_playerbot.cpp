@@ -481,6 +481,245 @@ TEST_CASE("world entry yields before destination ferry updates reach deferred ma
     }
 }
 
+namespace {
+constexpr uint64_t kLoginFerry=0x1fc000000002b067ull;
+const glm::vec3 kLoginLocal{12.8247f,-4.51414f,5.87536f};
+Packet loginFerryCreate() {
+    using namespace wowee::game;
+    Packet p(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));p.writeUInt32(1);p.writeUInt8(1);
+    p.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));p.writePackedGuid(kLoginFerry);
+    p.writeUInt8(static_cast<uint8_t>(ObjectType::GAMEOBJECT));p.writeUInt8(0x42);
+    for(float v:{-4016.3899f,-4740.5884f,0.f,0.f})p.writeFloat(v);
+    p.writeUInt32(349498);
+    const std::map<uint16_t,uint32_t> fields{{fieldIndex(UF::OBJECT_FIELD_ENTRY),176231},
+        {fieldIndex(UF::GAMEOBJECT_DISPLAYID),3015},{21,15}};
+    uint32_t mask=0;for(auto [index,value]:fields){REQUIRE(index<32);mask|=1u<<index;}
+    p.writeUInt8(1);p.writeUInt32(mask);for(auto [index,value]:fields)p.writeUInt32(value);
+    return p;
+}
+Packet loginPassengerUpdate(bool aboard=true,bool create=true) {
+    using namespace wowee::game;
+    Packet p(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));p.writeUInt32(1);p.writeUInt8(1);
+    p.writeUInt8(static_cast<uint8_t>(create?UpdateType::CREATE_OBJECT2:UpdateType::MOVEMENT));
+    if(create)p.writePackedGuid(Session::kPlayerGuid);else p.writeUInt64(Session::kPlayerGuid);
+    if(create)p.writeUInt8(static_cast<uint8_t>(ObjectType::PLAYER));
+    p.writeUInt8(create?0x21:0x20); // SELF/LIVING, then CMaNGOS TBC MovementInfo::Write
+    p.writeUInt32(aboard?0x200:0);p.writeUInt8(0);p.writeUInt32(1000);
+    for(float v:{-4021.02f,-4753.37f,5.87536f,0.f})p.writeFloat(v);
+    if(aboard){p.writeUInt64(kLoginFerry);for(float v:{kLoginLocal.x,kLoginLocal.y,kLoginLocal.z,0.f})p.writeFloat(v);p.writeUInt32(700);}
+    p.writeUInt32(0);
+    for(float speed:{2.5f,7.f,4.5f,4.7f,2.5f,7.f,4.5f,3.14f})p.writeFloat(speed);
+    if(create)p.writeUInt8(0);
+    return p;
+}
+void loginAtLocalOffset(Session& s,bool select=true) {
+    if(select) {
+        wowee::game::GameHandlerTestAccess::characterListReady(s.handler());
+        s.handler().selectCharacter(Session::kPlayerGuid);
+    }
+    Packet p(wowee::game::wireOpcode(Opcode::SMSG_LOGIN_VERIFY_WORLD));p.writeUInt32(1);
+    for(float v:{kLoginLocal.x,kLoginLocal.y,kLoginLocal.z,0.f})p.writeFloat(v);
+    s.receive(p);
+}
+}
+
+TEST_CASE("saved TBC passenger waits for real ship registration without sending local world positions",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    for(bool boatFirst:{false,true}) {
+        CAPTURE(boatFirst);Session s("tbc");loginAtLocalOffset(s);
+        if(boatFirst)s.receive(loginFerryCreate());
+        s.receive(loginPassengerUpdate());
+        CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+        s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+        s.handler().sendMovement(Opcode::MSG_MOVE_START_FORWARD);
+        CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).empty());
+        CHECK(s.sent().of(Opcode::MSG_MOVE_START_FORWARD).empty());
+        if(!boatFirst)s.receive(loginFerryCreate());
+        CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+        auto* tm=s.handler().getTransportManager();REQUIRE(tm);
+        tm->loadPathFromNodes(1,{{0,0,0}},false);
+        tm->registerTransport(kLoginFerry,0,1,{-4740.5884f,-4016.3899f,0},176231,3015,false);
+        glm::vec3 world;
+        CHECK(s.handler().completePlayerTransportWorldTransfer(kLoginFerry,world));
+        CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+        CHECK(s.handler().getPlayerTransportGuid()==kLoginFerry);
+        CHECK(s.handler().getPlayerTransportOffset()==kLoginLocal); // WMO model axes, not swapped world axes
+        s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+        const auto sent=s.sent().of(Opcode::MSG_MOVE_HEARTBEAT);REQUIRE(sent.size()==1);
+        auto packet=sent.back();CHECK((packet.readUInt32()&0x200)!=0);packet.readUInt8();packet.readUInt32();
+        CHECK(std::abs(packet.readFloat())>1000);CHECK(std::abs(packet.readFloat())>1000);
+        packet.readFloat();packet.readFloat();CHECK(packet.readUInt64()==kLoginFerry);
+        CHECK(packet.readFloat()==Catch::Approx(kLoginLocal.x));
+        CHECK(packet.readFloat()==Catch::Approx(kLoginLocal.y));
+        CHECK(packet.readFloat()==Catch::Approx(kLoginLocal.z));
+    }
+}
+
+TEST_CASE("authoritative detach and disconnect cancel a deferred passenger login",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    for(bool disconnect:{false,true}) {
+        CAPTURE(disconnect);Session s("tbc");loginAtLocalOffset(s);s.receive(loginPassengerUpdate());
+        CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+        if(disconnect)s.handler().disconnect();else s.receive(loginPassengerUpdate(false,false));
+        CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+        CHECK_FALSE(s.handler().isOnTransport());
+        auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+        tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,false);
+        glm::vec3 world;CHECK_FALSE(s.handler().completePlayerTransportWorldTransfer(kLoginFerry,world));
+        if(!disconnect) {
+            s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+            auto packets=s.sent().of(Opcode::MSG_MOVE_HEARTBEAT);REQUIRE(packets.size()==1);
+            CHECK((packets.back().readUInt32()&0x200)==0);
+        }
+    }
+}
+
+TEST_CASE("a transport cached before its current object cannot release passenger login",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);
+    auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+    tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,false);
+    s.receive(loginPassengerUpdate());
+    CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK_FALSE(s.handler().isOnTransport());
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).empty());
+    s.receive(loginFerryCreate());
+    glm::vec3 world;CHECK(s.handler().completePlayerTransportWorldTransfer(kLoginFerry,world));
+    CHECK(s.handler().getPlayerTransportGuid()==kLoginFerry);
+}
+
+TEST_CASE("ship movement preserves local offsets and M2 keeps its on-foot wire contract",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    for(bool m2:{false,true}) {
+        CAPTURE(m2);Session s("tbc");loginAtLocalOffset(s);s.receive(loginFerryCreate());
+        auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+        tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,m2);
+        s.receive(loginPassengerUpdate());REQUIRE(s.handler().isOnTransport());
+        CHECK(tm->transportLocalToServer(kLoginFerry,s.handler().getPlayerTransportOffset())==kLoginLocal);
+        s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+        auto sent=s.sent().of(Opcode::MSG_MOVE_HEARTBEAT);REQUIRE(sent.size()==1);
+        auto p=sent.back();const bool wirePassenger=(p.readUInt32()&0x200)!=0;
+        CHECK(wirePassenger==!m2);
+        // Local M2 trams/lifts intentionally publish world movement. This
+        // repair preserves that existing contract; only WMO ferries send the
+        // embedded GUID and raw model-local passenger offset.
+        if(m2)continue;
+        REQUIRE(wirePassenger);p.readUInt8();p.readUInt32();
+        for(int i=0;i<4;++i)p.readFloat();CHECK(p.readUInt64()==kLoginFerry);
+        CHECK(p.readFloat()==Catch::Approx(kLoginLocal.x));
+        CHECK(p.readFloat()==Catch::Approx(kLoginLocal.y));
+        CHECK(p.readFloat()==Catch::Approx(kLoginLocal.z));
+    }
+}
+
+TEST_CASE("a pending passenger frame survives another continent transfer",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);s.receive(loginPassengerUpdate());
+    REQUIRE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    Packet transfer(wireOpcode(Opcode::SMSG_NEW_WORLD));transfer.writeUInt32(0);
+    for(float value:{kLoginLocal.x,kLoginLocal.y,kLoginLocal.z,0.f})transfer.writeFloat(value);
+    s.receive(transfer);
+    CHECK(s.handler().getCurrentMapId()==0);
+    CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK(s.sent().of(Opcode::MSG_MOVE_STOP).empty());
+    s.receive(loginFerryCreate());
+    auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+    tm->registerTransport(kLoginFerry,0,1,{-585,-3905,0},176231,3015,false);
+    glm::vec3 world;REQUIRE(s.handler().completePlayerTransportWorldTransfer(kLoginFerry,world));
+    CHECK(s.handler().getPlayerTransportOffset()==kLoginLocal);
+    CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+}
+
+TEST_CASE("a missing passenger transport ends safely after a bounded wait",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);s.receive(loginPassengerUpdate());
+    REQUIRE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    std::string failure;s.handler().setOnFailure([&](const std::string& reason){failure=reason;});
+    GameHandlerTestAccess::expirePendingTransport(s.handler());
+    s.handler().update(.01f);
+    CHECK(s.handler().getState()==WorldState::FAILED);
+    CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK_FALSE(s.handler().isOnTransport());
+    CHECK(failure=="Unable to load your transport. Please reconnect.");
+}
+
+TEST_CASE("an already registered ship accepts the initial passenger frame immediately",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);s.receive(loginFerryCreate());
+    auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+    tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,false);
+    s.receive(loginPassengerUpdate());
+    CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK(s.handler().isOnTransport());
+    CHECK(s.handler().getPlayerTransportOffset()==kLoginLocal);
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).size()==1);
+}
+
+TEST_CASE("a passenger create before login verification uses the verified map",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");GameHandlerTestAccess::characterListReady(s.handler());
+    s.handler().selectCharacter(Session::kPlayerGuid);
+    s.receive(loginPassengerUpdate());
+    REQUIRE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    loginAtLocalOffset(s,false);s.receive(loginFerryCreate());
+    auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+    tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,false);
+    glm::vec3 world;CHECK(s.handler().completePlayerTransportWorldTransfer(kLoginFerry,world));
+    CHECK(s.handler().getCurrentMapId()==1);
+    CHECK(s.handler().getPlayerTransportOffset()==kLoginLocal);
+}
+
+TEST_CASE("an initial on-foot snapshot releases movement using its world position",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);
+    CHECK(s.handler().isPlayerMovementFramePending());
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).empty());
+    s.receive(loginPassengerUpdate(false));
+    CHECK_FALSE(s.handler().isPlayerMovementFramePending());
+    CHECK_FALSE(s.handler().isOnTransport());
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    auto packets=s.sent().of(Opcode::MSG_MOVE_HEARTBEAT);REQUIRE(packets.size()==1);
+    auto p=packets.back();CHECK((p.readUInt32()&0x200)==0);p.readUInt8();p.readUInt32();
+    CHECK(p.readFloat()==Catch::Approx(-4021.02f));
+    CHECK(p.readFloat()==Catch::Approx(-4753.37f));
+}
+
+TEST_CASE("an authoritative on-foot create cancels a resolved rider's deferred frame",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);s.receive(loginFerryCreate());
+    auto* tm=s.handler().getTransportManager();tm->loadPathFromNodes(1,{{0,0,0}},false);
+    tm->registerTransport(kLoginFerry,0,1,{-4740,-4016,0},176231,3015,false);
+    s.receive(loginPassengerUpdate());REQUIRE(s.handler().isOnTransport());
+    s.handler().deferPlayerTransportAttachment(kLoginFerry,1,kLoginLocal);
+    s.receive(loginPassengerUpdate(false));
+    CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK_FALSE(s.handler().isOnTransport());
+}
+
+TEST_CASE("a missing initial movement snapshot has a bounded reconnect error",
+          "[replay][movement][tbc-ferry][passenger-login]") {
+    using namespace wowee::game;
+    Session s("tbc");loginAtLocalOffset(s);
+    REQUIRE(s.handler().isPlayerMovementFramePending());
+    std::string failure;s.handler().setOnFailure([&](const std::string& reason){failure=reason;});
+    GameHandlerTestAccess::expirePendingTransport(s.handler());s.handler().update(.01f);
+    CHECK(s.handler().getState()==WorldState::FAILED);
+    CHECK_FALSE(s.handler().isPlayerMovementFramePending());
+    CHECK(failure=="Unable to load your character. Please reconnect.");
+}
+
 TEST_CASE("TBC outgoing falls match the server jump flag and cosine-sine order",
           "[replay][movement][dock-movement]") {
     using namespace wowee::game;

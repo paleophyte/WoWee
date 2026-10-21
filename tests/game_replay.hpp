@@ -40,6 +40,9 @@ namespace wowee {
 namespace game {
 
 struct GameHandlerTestAccess {
+    static void expirePendingTransport(GameHandler& gh) {
+        gh.pendingPlayerTransportSince_ = std::chrono::steady_clock::now() - std::chrono::seconds(121);
+    }
     static void queue(GameHandler& gh, const network::Packet& packet) {
         gh.enqueueIncomingPacket(packet);
     }
@@ -59,6 +62,7 @@ struct GameHandlerTestAccess {
         REQUIRE_FALSE(pending());
     }
     static void enterWorld(GameHandler& gh) { gh.setState(WorldState::IN_WORLD); }
+    static void characterListReady(GameHandler& gh) { gh.setState(WorldState::CHAR_LIST_RECEIVED); }
     static void setSocket(GameHandler& gh, std::unique_ptr<network::WorldSocket> socket) {
         gh.socket = std::move(socket);
     }

@@ -2687,7 +2687,7 @@ void Application::applyServerMovementState(float deltaTime) {
     // hasn't loaded yet - prevents gravity from pulling player through void.
     bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
     const bool transportTransferFreeze = gameHandler &&
-        gameHandler->hasPendingPlayerTransportWorldTransfer();
+        gameHandler->isPlayerMovementFramePending();
     bool landingClampActive = !onTaxi && worldEntryCallbacks_ && worldEntryCallbacks_->getTaxiLandingClampTimer() > 0.0f &&
                               worldEntryCallbacks_->getWorldEntryMovementGraceTimer() <= 0.0f &&
                               !gameHandler->isMounted();

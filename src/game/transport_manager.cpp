@@ -451,6 +451,16 @@ glm::vec3 TransportManager::serverToTransportLocal(
     return core::coords::serverToCanonical(serverOffset);
 }
 
+glm::vec3 TransportManager::transportLocalToServer(
+    uint64_t transportGuid, const glm::vec3& localOffset) const {
+    const auto it = transports_.find(transportGuid);
+    // Inverse of serverToTransportLocal: WMO offsets are already model-local,
+    // while M2 offsets use canonical deltas. Never swap a WMO passenger's axes
+    // when publishing a heartbeat or acknowledging a speed change.
+    if (it != transports_.end() && !it->second.isM2) return localOffset;
+    return core::coords::canonicalToServer(localOffset);
+}
+
 bool TransportManager::isPointOnTransportDeck(uint64_t transportGuid,
                                                const glm::vec3& canonicalPosition,
                                                float maxFloorDelta) const {

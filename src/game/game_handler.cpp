@@ -194,6 +194,11 @@ bool GameHandler::connect(const std::string& host,
 
 void GameHandler::disconnect() {
     taxiRecoverPending_ = onTaxiFlight_;
+    awaitingPlayerMovementFrame_ = false;
+    cancelPendingPlayerTransportAttachment();
+    clearPlayerTransport();
+    playerTransportStickyGuid_ = 0;
+    playerTransportStickyTimer_ = 0.0f;
     if (socket) {
         socket->disconnect();
         socket.reset();
@@ -726,6 +731,19 @@ void GameHandler::update(float deltaTime) {
 
     updateNetworking();
     if (!socket) return;  // disconnect() may have been called
+
+    // Never turn an unresolved local frame into world movement. If its asset
+    // cannot be loaded, end the connection rather than leave input frozen or
+    // publish a guessed position. The server retains the authoritative rider.
+    if (isPlayerMovementFramePending() &&
+        std::chrono::steady_clock::now() - pendingPlayerTransportSince_ > std::chrono::seconds(120)) {
+        const std::string reason = pendingPlayerTransportTransfer_
+            ? "Unable to load your transport. Please reconnect."
+            : "Unable to load your character. Please reconnect.";
+        disconnect();
+        fail(reason);
+        return;
+    }
 
     // Sends a Warden response built off the main thread. Nothing else does:
     // without this the server's check goes unanswered and it drops the
@@ -1559,26 +1577,37 @@ glm::vec3 GameHandler::getComposedWorldPosition() {
     return glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
 }
 
-void GameHandler::beginPlayerTransportWorldTransfer(
-    uint32_t destinationMapId, const glm::vec3& localOffset) {
-    if (playerTransportGuid_ == 0) return;
-
+void GameHandler::deferPlayerTransportAttachment(
+    uint64_t transportGuid, uint32_t mapId, const glm::vec3& serverOffset) {
+    if (transportGuid == 0 || !std::isfinite(serverOffset.x) ||
+        !std::isfinite(serverOffset.y) || !std::isfinite(serverOffset.z)) return;
+    const bool newlyPending = !pendingPlayerTransportTransfer_ ||
+        pendingPlayerTransportGuid_ != transportGuid;
+    if (!isPlayerMovementFramePending()) pendingPlayerTransportSince_ = std::chrono::steady_clock::now();
     pendingPlayerTransportTransfer_ = true;
-    pendingPlayerTransportGuid_ = playerTransportGuid_;
-    pendingPlayerTransportMapId_ = destinationMapId;
-    pendingPlayerTransportOffset_ = localOffset;
-    pendingPlayerTransportEntry_ = 0;
+    pendingPlayerTransportGuid_ = transportGuid;
+    pendingPlayerTransportMapId_ = mapId;
+    pendingPlayerTransportOffset_ = serverOffset;
+    if (newlyPending) pendingPlayerTransportEntry_ = 0;
     if (transportManager_) {
-        if (const auto* transport = transportManager_->getTransport(playerTransportGuid_)) {
+        if (const auto* transport = transportManager_->getTransport(transportGuid)) {
             pendingPlayerTransportEntry_ = transport->entry;
         }
     }
-
-    LOG_WARNING("Transport world transfer armed: guid=0x", std::hex,
+    if (newlyPending) LOG_WARNING("Waiting for authoritative transport: guid=0x", std::hex,
                 pendingPlayerTransportGuid_, std::dec,
                 " entry=", pendingPlayerTransportEntry_,
-                " destinationMap=", destinationMapId,
-                " local=(", localOffset.x, ",", localOffset.y, ",", localOffset.z, ")");
+                " destinationMap=", mapId,
+                " serverLocal=(", serverOffset.x, ",", serverOffset.y, ",", serverOffset.z, ")");
+}
+
+void GameHandler::cancelPendingPlayerTransportAttachment() {
+    pendingPlayerTransportTransfer_ = false;
+    pendingPlayerTransportGuid_ = 0;
+    pendingPlayerTransportEntry_ = 0;
+    pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    pendingPlayerTransportOffset_ = glm::vec3(0.0f);
+    if (!awaitingPlayerMovementFrame_) pendingPlayerTransportSince_ = {};
 }
 
 bool GameHandler::completePlayerTransportWorldTransfer(
@@ -1595,24 +1624,23 @@ bool GameHandler::completePlayerTransportWorldTransfer(
          transport->entry == pendingPlayerTransportEntry_);
     if (!matchingTransport) return false;
 
-    setPlayerOnTransport(transportGuid, pendingPlayerTransportOffset_);
-    worldPosition = transportManager_->getPlayerWorldPosition(
+    const glm::vec3 localOffset = transportManager_->serverToTransportLocal(
         transportGuid, pendingPlayerTransportOffset_);
+    setPlayerOnTransport(transportGuid, localOffset);
+    if (playerTransportGuid_ != transportGuid) return false;
+    worldPosition = transportManager_->getPlayerWorldPosition(
+        transportGuid, localOffset);
     setPosition(worldPosition.x, worldPosition.y, worldPosition.z);
 
     LOG_WARNING("Transport world transfer restored: guid=0x", std::hex,
                 transportGuid, std::dec,
                 " entry=", transport->entry,
                 " map=", currentMapId_,
-                " local=(", pendingPlayerTransportOffset_.x, ",",
-                pendingPlayerTransportOffset_.y, ",",
-                pendingPlayerTransportOffset_.z, ") world=(",
+                " local=(", localOffset.x, ",", localOffset.y, ",",
+                localOffset.z, ") world=(",
                 worldPosition.x, ",", worldPosition.y, ",", worldPosition.z, ")");
 
-    pendingPlayerTransportTransfer_ = false;
-    pendingPlayerTransportGuid_ = 0;
-    pendingPlayerTransportEntry_ = 0;
-    pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
+    cancelPendingPlayerTransportAttachment();
     return true;
 }
 
@@ -1623,6 +1651,7 @@ bool GameHandler::completePlayerTransportWorldTransfer(
 // per-frame update loop and any other driver (e.g. a headless harness) that knows the
 // player's current canonical world position but has no renderer/camera of its own.
 void GameHandler::updateM2TransportBoarding(const glm::vec3& playerCanonical) {
+    if (isPlayerMovementFramePending()) return;
     auto* tm = getTransportManager();
     if (!tm) return;
 

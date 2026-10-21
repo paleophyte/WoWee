@@ -550,6 +550,15 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
         return;
     }
 
+    // LOGIN_VERIFY_WORLD can carry a transport-local position. Wait for the
+    // self movement snapshot before publishing any position to the server.
+    cancelPendingPlayerTransportAttachment();
+    clearPlayerTransport();
+    playerTransportStickyGuid_ = 0;
+    playerTransportStickyTimer_ = 0.0f;
+    awaitingPlayerMovementFrame_ = true;
+    pendingPlayerTransportSince_ = std::chrono::steady_clock::now();
+
     // Make the selected character authoritative in GameHandler.
     // This avoids relying on UI/Application ordering for appearance-dependent logic.
     activeCharacterGuid_ = characterGuid;
@@ -791,6 +800,9 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
 
     // Successfully entered the world (or teleported)
     currentMapId_ = data.mapId;
+    // A self CREATE may be queued before LOGIN_VERIFY_WORLD. Its trusted
+    // passenger frame belongs to this login map, not the previous/default map.
+    if (pendingPlayerTransportTransfer_) pendingPlayerTransportMapId_ = data.mapId;
     setState(WorldState::IN_WORLD);
     if (socket) {
         socket->tracePacketsFor(std::chrono::seconds(12), "login_verify_world");

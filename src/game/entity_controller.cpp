@@ -850,6 +850,13 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
     }
 
     if (block.onTransport) {
+        if (!owner_.isTransportGuid(block.transportGuid) || !owner_.getTransportManager() ||
+            !owner_.getTransportManager()->getTransport(block.transportGuid)) {
+            owner_.deferPlayerTransportAttachment(block.transportGuid, owner_.getCurrentMapId(),
+                glm::vec3(block.transportX, block.transportY, block.transportZ));
+            return;
+        }
+        owner_.cancelPendingPlayerTransportAttachment();
         // Convert transport offset from server → canonical coordinates
         glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
         glm::vec3 canonicalOffset = owner_.getTransportManager()
@@ -876,7 +883,10 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
                 " offset=(", owner_.playerTransportOffsetRef().x, ", ", owner_.playerTransportOffsetRef().y,
                 ", ", owner_.playerTransportOffsetRef().z, ")");
     } else {
-        if (updateMovementInfoPos) {
+        const bool wasDeferred = owner_.hasPendingPlayerTransportWorldTransfer();
+        owner_.cancelPendingPlayerTransportAttachment();
+        if (wasDeferred) owner_.clearPlayerTransport();
+        if (updateMovementInfoPos || owner_.isAwaitingPlayerMovementFrame()) {
             if (positionIsBad(canonicalPos.x, canonicalPos.y, canonicalPos.z)) {
                 LOG_WARNING("REJECTED player UPDATE_OBJECT to near-origin canonical=(",
                             canonicalPos.x, ", ", canonicalPos.y, ", ", canonicalPos.z, ")");
@@ -2644,6 +2654,7 @@ void EntityController::handleCreateObject(const UpdateBlock& block, bool& newIte
         // 3b: Track player-on-transport state
         if (block.guid == owner_.getPlayerGuid()) {
             applyPlayerTransportState(block, entity, pos, oCanonical, false);
+            if (!block.onTransport || block.transportGuid != 0) owner_.confirmPlayerMovementFrame();
         }
         // 3i: Track transport-relative children so they follow parent transport motion.
         updateNonPlayerTransportAttachment(block, entity, block.objectType);

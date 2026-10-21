@@ -1742,10 +1742,21 @@ public:
         playerTransportOffset_ = glm::vec3(0.0f);
         movementInfo.transportGuid = 0;
     }
-    // Preserve an authoritative on-deck offset while a continent transfer tears
-    // down the origin map's transport and constructs its destination instance.
-    void beginPlayerTransportWorldTransfer(uint32_t destinationMapId,
-                                           const glm::vec3& localOffset);
+    // Retain the server's local frame until the real transport is registered.
+    // Covers initial passenger login as well as continent transfers. Keep the
+    // wire offset unconverted: WMO local axes and M2 canonical deltas differ.
+    void deferPlayerTransportAttachment(uint64_t transportGuid, uint32_t mapId,
+                                        const glm::vec3& serverOffset);
+    void cancelPendingPlayerTransportAttachment();
+    uint64_t getPendingPlayerTransportGuid() const { return pendingPlayerTransportGuid_; }
+    bool isAwaitingPlayerMovementFrame() const { return awaitingPlayerMovementFrame_; }
+    bool isPlayerMovementFramePending() const {
+        return awaitingPlayerMovementFrame_ || pendingPlayerTransportTransfer_;
+    }
+    void confirmPlayerMovementFrame() {
+        awaitingPlayerMovementFrame_ = false;
+        if (!pendingPlayerTransportTransfer_) pendingPlayerTransportSince_ = {};
+    }
     bool hasPendingPlayerTransportWorldTransfer() const {
         return pendingPlayerTransportTransfer_;
     }
@@ -4474,10 +4485,12 @@ private:
     // Counted rather than tested instantly so a jump is not a disembark.
     int shipNoDeckSupportFrames_ = 0;
     bool pendingPlayerTransportTransfer_ = false;
+    bool awaitingPlayerMovementFrame_ = false;
     uint64_t pendingPlayerTransportGuid_ = 0;
     uint32_t pendingPlayerTransportEntry_ = 0;
     uint32_t pendingPlayerTransportMapId_ = 0xFFFFFFFFu;
     glm::vec3 pendingPlayerTransportOffset_ = glm::vec3(0.0f);
+    std::chrono::steady_clock::time_point pendingPlayerTransportSince_{};
     std::unique_ptr<TransportManager> transportManager_;  // Transport movement manager
     uint32_t weaponProficiency_ = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=2
     uint32_t armorProficiency_  = 0;  // bitmask from SMSG_SET_PROFICIENCY itemClass=4
