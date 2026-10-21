@@ -43,8 +43,16 @@ This mode spaces generated chunks across a tile to avoid artificial per-chunk
 overdraw, but repeats the tile geometry and uses only four small shared RGBA8
 textures. Evidence: `logs/r52-framed-20261021-zU4M9z/pressure49-final/`.
 
-R52 remains unresolved. Larger/varied reusable textures, actual terrain
-workers/map transitions, and real asset format variation remain gaps.
+The `--texture-pressure` extension also passes three 49-tile cycles with
+196 generated 512x512 RGBA8 reusable textures and mipmaps (four distinct textures
+per tile). Every image is required to upload. Peak: 75,470 allocations /
+648,863,824 bytes. Every clear through frame slots returns to 206 allocations /
+371,139,664 bytes, including the persistent reusable texture set. Evidence:
+`logs/r52-textures-20261021-VQcfI1/probe/`.
+
+R52 remains unresolved. Actual terrain workers/map transitions and real asset
+format variation remain gaps. More allocation-only scale tests should not
+substitute for that integration coverage.
 CLI publication retries were rejected: the saved credential belongs to joshand,
 which cannot write this fork; paleophyte has no CLI credential. The connected
 GitHub integration also rejected tree writes (403). Local commits are preserved;

@@ -105,22 +105,32 @@ static bool streamingPressure(rendering::VkContext& ctx, rendering::TerrainRende
     return true;
 }
 static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRenderer& terrain,
-                             VkDescriptorSetLayout layout,Json& result,const char* output,int residentTiles=2){
+                             VkDescriptorSetLayout layout,Json& result,const char* output,int residentTiles=2,bool largeTextures=false){
     TerrainProbeFrames frames(ctx);frames.initialize(layout);terrain.setFrustumCulling(false);
     std::unordered_map<std::string,pipeline::BLPImage> textures;
     std::vector<std::string> paths;
-    for(int i=0;i<4;++i){
+    const int textureCount=largeTextures?residentTiles*4:4;
+    const int textureExtent=largeTextures?512:256;
+    result["framed_retirement"]={{"resident_tiles",residentTiles},{"tileset_images",textureCount},
+        {"tileset_extent",{textureExtent,textureExtent}},{"tileset_format","RGBA8 with generated mipmaps"},
+        {"samples",Json::array()}};
+    result["state"]="generating_reusable_textures";
+    std::ofstream(output)<<result.dump(2)<<'\n';
+    for(int i=0;i<textureCount;++i){
         std::string path="generated_tileset_"+std::to_string(i);paths.push_back(path);
-        auto& image=textures[path];image.width=image.height=256;image.data.assign(256*256*4,uint8_t(70+i*40));
+        auto& image=textures[path];image.width=image.height=textureExtent;image.data.assign(textureExtent*textureExtent*4,uint8_t(70+i*40));
     }
+    const auto allPaths=paths;
     settle(ctx);const auto beforeTilesets=allocations(ctx);
+    result["state"]="uploading_reusable_textures";
+    result["framed_retirement"]["before_tilesets"]=memorySnapshot(ctx);
+    std::ofstream(output)<<result.dump(2)<<'\n';
     terrain.uploadPreloadedTextures(textures);settle(ctx);
     require(allocations(ctx)==beforeTilesets+textures.size(),"Generated reusable textures did not all upload");
     const auto baseline=memorySnapshot(ctx);
     auto tile=generatedTile(256);
     for(auto& chunk:tile.chunks)for(int i=0;i<4;++i)chunk.layers[i].textureId=i;
-    result["framed_retirement"]={{"baseline",baseline},{"resident_tiles",residentTiles},{"tileset_images",4},{"tileset_extent",{256,256}},
-        {"tileset_format","RGBA8 with generated mipmaps"},{"samples",Json::array()}};
+    result["framed_retirement"]["baseline"]=baseline;
     result["state"]="framed_retirement_running";
     auto sample=[&](const char* phase,int cycle){
         auto row=memorySnapshot(ctx);row["phase"]=phase;row["cycle"]=cycle;
@@ -130,6 +140,7 @@ static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRender
     sample("before_frames",0);
     for(int cycle=0;cycle<3;++cycle){
         for(int tileId=0;tileId<residentTiles;++tileId){
+            if(largeTextures)paths.assign(allPaths.begin()+tileId*4,allPaths.begin()+tileId*4+4);
             // Persist before any allocation that might abort inside Metal.
             sample("before_tile_upload",cycle);
             if(residentTiles==2){
@@ -172,7 +183,7 @@ static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRender
     settle(ctx);return true;
 }
 int main(int argc,char** argv){
-    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure]\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -218,6 +229,7 @@ int main(int argc,char** argv){
         if(argc==3 && std::string(argv[2])=="--streaming-pressure") passed=streamingPressure(ctx,terrain,result,argv[1]) && passed;
         if(argc==3 && std::string(argv[2])=="--framed-retirement") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1]) && passed;
         if(argc==3 && std::string(argv[2])=="--framed-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49) && passed;
+        if(argc==3 && std::string(argv[2])=="--texture-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;

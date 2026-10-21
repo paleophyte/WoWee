@@ -10,8 +10,8 @@ if [[ "$(uname -s)" != Darwin ]]; then
     printf 'This probe runner requires macOS.\n' >&2
     exit 2
 fi
-if [[ $# -lt 1 || $# -gt 2 || ! -x "$binary" || ( $# == 2 && "$2" != --streaming-pressure && "$2" != --framed-retirement && "$2" != --framed-pressure ) ]]; then
-    printf 'Build wowee_terrain_texture_probe, then run: bash %s NEW_OUTPUT_DIRECTORY [--streaming-pressure|--framed-retirement|--framed-pressure]\n' "$0" >&2
+if [[ $# -lt 1 || $# -gt 2 || ! -x "$binary" || ( $# == 2 && "$2" != --streaming-pressure && "$2" != --framed-retirement && "$2" != --framed-pressure && "$2" != --texture-pressure ) ]]; then
+    printf 'Build wowee_terrain_texture_probe, then run: bash %s NEW_OUTPUT_DIRECTORY [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure]\n' "$0" >&2
     exit 2
 fi
 # Refuse to overwrite an earlier trial, including a partial/failed one.
