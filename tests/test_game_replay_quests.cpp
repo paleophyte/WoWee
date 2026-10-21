@@ -6,6 +6,7 @@
 #include "game/quest_objectives.hpp"
 #include "game/entity.hpp"
 #include "addons/addon_manager.hpp"
+#include "ui/framexml_takeover.hpp"
 
 #include <algorithm>
 #include <string>
@@ -51,6 +52,10 @@ TEST_CASE("accepted quest copilot view preserves stock selection and reconciles 
     CHECK(lua->evaluateBoolean("WoweeBotQuestsFrame:IsShown() and WoweeBotQuestsStatus:GetText()=='2 accepted - page 1/1'"));
     REQUIRE(lua->executeString("WoweeBotQuestRow2:GetScript('OnClick')()"));
     CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Server marked complete; checking objective progress',1,true)~=nil"));
+    // A first target selection can queue this diagnostic before a UI exists.
+    // Unknown race makes UnitFactionGroup return zero Lua values. Exercise
+    // the queued probe here so this case also catches the failure in isolation.
+    wowee::ui::frameXmlRequestCheck();
     quests->questLogRef()[1].itemCounts[49001] = 8;
     lua->fireEvent("QUEST_LOG_UPDATE"); lua->dispatchOnUpdate(0.25f);
     CHECK(lua->evaluateBoolean("WoweeBotQuestsDetail:GetText():find('Ready to turn in',1,true)~=nil"));

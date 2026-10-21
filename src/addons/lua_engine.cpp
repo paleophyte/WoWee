@@ -11394,7 +11394,9 @@ void LuaEngine::runInterfaceProbe() {
         // exactly like one that should.
         "__WoweeWarn('[fxcheck] pvp=' .. yn(UnitIsPVP('player')) ..\n"
         "      ' ffa=' .. yn(UnitIsPVPFreeForAll('player')) ..\n"
-        "      ' faction=' .. tostring(UnitFactionGroup('player')) ..\n"
+        // Unknown race legitimately returns no Lua values. Parentheses coerce
+        // that to one nil value so tostring can still describe it.
+        "      ' faction=' .. tostring((UnitFactionGroup('player'))) ..\n"
         "      ' | PlayerPVPIcon shown=' ..\n"
         "      yn(PlayerPVPIcon and PlayerPVPIcon:IsShown()))\n"
         // The state icons share one sheet and one corner with the PvP icon, so

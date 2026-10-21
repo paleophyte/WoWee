@@ -11,7 +11,7 @@ The Mini now builds both requested targets. The original small terrain probe
 passes on Apple M4 with actual loaded MoltenVK 1.4.2 and Vulkan Loader
 1.4.363.0. A new opt-in `--streaming-pressure` mode also passes: three cycles
 of twelve full 256-chunk tiles, nine resident at a time, replacing three tiles
-before the next cleanup. Each chunk uses 145 vertices, 768 indices and three
+before cleanup of each replacement. Each chunk uses 145 vertices, 768 indices and three
 64x64 R8 alpha images, uploaded in asynchronous 16-chunk batches. Peak observed
 allocations: 15,878 / 153,965,824 bytes. Every clear returns to 6 allocations /
 94,867,712 bytes. Persistent renderer buffers are part of that baseline.
@@ -33,8 +33,10 @@ The initial full Mac replay run failed one assertion (110/111 cases passed).
 The accepted-quest case consumed a diagnostic queued by earlier target selection;
 `UnitFactionGroup` returns zero Lua values when race is unknown, which the
 interface probe passed directly to `tostring`. A deterministic queued-probe
-regression and a fix are being validated separately; do not treat the original
-Mac replay run as green. Historical companion text about a queued GitHub run
+regression reproduces that failure in isolation before the fix. Coercing the
+empty faction result to one nil value fixes it: focused 32/32 assertions and
+full Mac replay 3,574/3,574 assertions in 111 cases now pass. The original failed
+run remains retained. Historical companion text about a queued GitHub run
 and an active old Goal is stale; this handoff and current local evidence govern.
 
 ## Objective and immediate focus
