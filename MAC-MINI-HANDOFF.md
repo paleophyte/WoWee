@@ -5,6 +5,25 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Local game assets installed — October 21, 2026
+
+The previous missing-assets prerequisite is cleared. The user's original
+`/Users/neko/code/WoW-243-Client.zip` is preserved and unpacked at
+`/Users/neko/code/WoW-243-Client`. WoWee assets are installed at the standard
+macOS data root `/Users/neko/Library/Application Support/Wowee/Data`, with the
+TBC manifest under `expansions/tbc/manifest.json`. All 114,111 extracted manifest
+files passed size/CRC verification; zero extraction failures. The extractor
+skipped 8,949 zero/invalid-size MPQ entries. Client expansion metadata is seeded.
+
+A fresh isolated TBC profile initializes the actual renderer, spawner and world
+loader and renders three hidden frames on Apple M4 with no game connections
+requested. This is startup coverage, not map loading or an R52 crash fix.
+No personal login configuration, account, server or gameplay state changed.
+Paths and evidence: `logs/asset-setup-20261021/asset-setup.json` and `REPORT.txt`;
+companion `MAC-LOCAL-ASSETS.json` has the same reusable setup paths.
+Use those paths for the next isolated offline real-data R52 increment.
+GitHub publication still requires working write access.
+
 ## Latest local Mac validation — October 21, 2026
 
 The Mini now builds both requested targets. The original small terrain probe
