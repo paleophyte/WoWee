@@ -115,7 +115,10 @@ function Control:update(now)
     if self.socialSupported and now >= (self.nextSocial or 0) and not self:socialFresh(now) then
         return self:start('social', now, 'status')
     end
-    if self.requestsSupported and now >= (self.nextRequests or 0) and not self:requestsFresh(now) then
+    -- Renew before the 25s lease expires. Waiting for expiry (and previously
+    -- a 30s retry time) created recurring gaps in Bot-only invite rejection.
+    -- The last confirmed mask stays usable while a read-only renewal is pending.
+    if self.requestsSupported and now >= (self.nextRequests or 0) then
         return self:start('requests', now, 'status')
     end
     if self.fishingSupported and now >= (self.nextFishing or 0) and not self:fishingFresh(now) then
@@ -375,7 +378,7 @@ function Control:receiveRequests(text, sender, player, now)
         end
     end
     self.pending, self.requestsIntent = nil, nil
-    self.nextRequests = now + 30
+    self.nextRequests = now + (result == 'ok' and 15 or 30)
     if result == 'error' then
         self.requestsFailure, self.requestsAt = 'Policy rejected: ' .. reason, nil
     else

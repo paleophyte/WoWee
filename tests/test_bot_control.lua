@@ -372,6 +372,35 @@ do
 end
 print('Incoming request policy correlation, independent bits, handoffs and stale recovery passed')
 
+-- Keep a confirmed Bot policy continuously usable across normal polling cycles.
+-- Previously each reply expired at 25s, while renewal did not start until 30s.
+do
+ local c=Control.new('lease')
+ local function receive(verb,now)
+  local p=c.pending;assert(p and p.verb==verb)
+  local text=verb=='status' and ('1\t'..p.id..'\tok\tbot\t9\t0\tnone') or
+      ('1\t'..p.id..'\t9\tok\t7\tstored\tnone')
+  assert(c:receive(verb=='status' and 'WIDLE' or 'WIDLEREQ',text,'Jizzle','Jizzle',now))
+ end
+ c:update(0);receive('status',0)
+ assert(c:capability('WIDLECAP','1\tlease_1\t9\trequests_1','Jizzle','Jizzle'))
+ c:update(0.1);receive('requests',0.1)
+ for second=1,120 do
+  c:update(second)
+  assert(c:isBot(second) and c:requestsFresh(second) and c:rejectsRequest('guild'),
+      'Invite rejection gap at '..second..'s')
+  if c.pending then receive(c.pending.verb,second+0.1) end
+ end
+ -- A lost renewal must still expire; do not use stale policy/control forever.
+ c.pending=nil;c.nextStatus=1000;c.confirmedAt=121;c.nextRequests=121
+ c:update(121);assert(c.pending.verb=='requests')
+ assert(c:requestsFresh(121))
+ c:update(124);c:update(127);c:update(130)
+ assert(not c:requestsFresh(130))
+ c:want('manual');assert(not c:isBot(130))
+end
+print('Invite rejection lease renewals remain continuous; lost replies and Manual fail closed')
+
 -- A read-only recovery wait must be correlated, bounded and subordinate to Manual.
 do
  local c=Control.new('sick');assert(c:update(0)=='.bot idle sick_1 status')
