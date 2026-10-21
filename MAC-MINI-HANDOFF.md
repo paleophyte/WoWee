@@ -24,8 +24,22 @@ These are Mac results, not reused Windows results. Run the extended check with:
 bash tools/run_macos_terrain_probe.sh NEW_OUTPUT_DIRECTORY --streaming-pressure
 ```
 
-R52 remains unresolved. These checks do not render terrain in flight, load real
-reusable tileset textures, or drive asynchronous terrain workers/map transitions.
+The subsequent `--framed-retirement` mode also passes on this Mac. It draws two
+full tiles with four generated 256x256 RGBA8 reusable textures and mipmaps,
+retires a tile after recording its draws but before submission, and advances
+real swapchain frame slots. All three cycles retain 3,086 allocations until
+both frame-slot fences have been waited, then retain exactly the surviving
+256-chunk tile (1,550 allocations). Clearing through frames returns to the
+14-allocation / 96,281,680-byte baseline including reusable textures and probe
+frame resources. Evidence: `logs/r52-framed-20261021-zU4M9z/probe/`.
+
+R52 remains unresolved. The draw test covers two tiles; the historical report
+loaded 49. Larger residency with reusable textures and active draws, actual
+terrain workers/map transitions, and real asset format variation remain gaps.
+CLI publication retries were rejected: the saved credential belongs to joshand,
+which cannot write this fork; paleophyte has no CLI credential. The connected
+GitHub integration also rejected tree writes (403). Local commits are preserved;
+publication needs working write access, not more identical retries.
 The next investigation should address those gaps with bounded generated inputs,
 not an unbounded OOM test or a claimed gameplay-crash fix.
 

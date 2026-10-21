@@ -18,6 +18,7 @@
 using Json=nlohmann::json;
 using namespace wowee;
 static void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
+#include "terrain_probe_frames.hpp"
 static uint32_t allocations(rendering::VkContext& ctx){
     VmaTotalStatistics stats{};vmaCalculateStatistics(ctx.getAllocator(),&stats);
     return stats.total.statistics.allocationCount;
@@ -102,8 +103,56 @@ static bool streamingPressure(rendering::VkContext& ctx, rendering::TerrainRende
     }
     return true;
 }
+static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRenderer& terrain,
+                             VkDescriptorSetLayout layout,Json& result,const char* output){
+    TerrainProbeFrames frames(ctx);frames.initialize(layout);terrain.setFrustumCulling(false);
+    std::unordered_map<std::string,pipeline::BLPImage> textures;
+    std::vector<std::string> paths;
+    for(int i=0;i<4;++i){
+        std::string path="generated_tileset_"+std::to_string(i);paths.push_back(path);
+        auto& image=textures[path];image.width=image.height=256;image.data.assign(256*256*4,uint8_t(70+i*40));
+    }
+    terrain.uploadPreloadedTextures(textures);settle(ctx);
+    const auto baseline=memorySnapshot(ctx);
+    auto tile=generatedTile(256);
+    for(auto& chunk:tile.chunks)for(int i=0;i<4;++i)chunk.layers[i].textureId=i;
+    result["framed_retirement"]={{"baseline",baseline},{"tileset_images",4},{"tileset_extent",{256,256}},
+        {"tileset_format","RGBA8 with generated mipmaps"},{"samples",Json::array()}};
+    result["state"]="framed_retirement_running";
+    auto sample=[&](const char* phase,int cycle){
+        auto row=memorySnapshot(ctx);row["phase"]=phase;row["cycle"]=cycle;
+        row["chunks"]=terrain.getChunkCount();result["framed_retirement"]["samples"].push_back(row);
+        std::ofstream(output)<<result.dump(2)<<'\n';std::cout<<row.dump()<<std::endl;
+    };
+    sample("before_frames",0);
+    for(int cycle=0;cycle<3;++cycle){
+        require(terrain.loadTerrain(tile,paths,0,cycle),"Framed first tile failed");
+        require(terrain.loadTerrain(tile,paths,1,cycle),"Framed second tile failed");settle(ctx);
+        require(terrain.getChunkCount()==512,"Framed generated chunks missing");
+        const auto loaded=allocations(ctx);
+        frames.frame(terrain,[&]{
+            require(terrain.getRenderedChunkCount()==512,"Probe did not record every terrain draw");
+            terrain.removeTile(0,cycle);
+            require(allocations(ctx)==loaded,"Framed tile destroyed before submission");
+            sample("retired_before_submit",cycle);
+        });
+        frames.frame(terrain);
+        require(allocations(ctx)==loaded,"Framed resources destroyed before both slot fences");
+        sample("one_slot_waited",cycle);
+        frames.frame(terrain);
+        require(allocations(ctx)==uint32_t(baseline["allocations"])+(loaded-uint32_t(baseline["allocations"]))/2,"Frame slots did not retire exactly one tile");
+        require(terrain.getRenderedChunkCount()==256,"Framed retirement damaged live tile");
+        sample("both_slots_waited",cycle);
+        frames.frame(terrain,[&]{terrain.clear();sample("clear_before_submit",cycle);});
+        frames.frame(terrain);frames.frame(terrain);
+        sample("cleared_through_frames",cycle);
+        require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Framed clear retained allocations");
+        require(memorySnapshot(ctx)["allocation_bytes"]==baseline["allocation_bytes"],"Framed clear retained allocation bytes");
+    }
+    settle(ctx);return true;
+}
 int main(int argc,char** argv){
-    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure]\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -146,7 +195,8 @@ int main(int argc,char** argv){
         result["partial_unload"]={{"two_tile_allocations",two},{"one_tile_allocations",one},{"remaining_chunks",terrain.getChunkCount()}};
         passed=passed && one==baseline+(two-baseline)/2;
         terrain.clear();settle(ctx);result["final_allocations"]=allocations(ctx);passed=passed && allocations(ctx)==baseline;
-        if(argc==3) passed=streamingPressure(ctx,terrain,result,argv[1]) && passed;
+        if(argc==3 && std::string(argv[2])=="--streaming-pressure") passed=streamingPressure(ctx,terrain,result,argv[1]) && passed;
+        if(argc==3 && std::string(argv[2])=="--framed-retirement") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1]) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;
