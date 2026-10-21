@@ -2596,6 +2596,7 @@ if(NOT ANDROID)
     target_sources(test_game_replay PRIVATE test_game_replay_energize.cpp)
     register_test_target(test_game_replay)
     target_sources(test_game_replay PRIVATE test_game_replay_spell_logs.cpp)
+    target_sources(test_game_replay PRIVATE test_terrain_map_transition.cpp)
 
     # Opt-in rendered integration runner: requires real extracted assets and a
     # Vulkan device, so it is neither a default build nor an unattended CTest.

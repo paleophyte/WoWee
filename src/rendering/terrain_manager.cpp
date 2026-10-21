@@ -163,12 +163,8 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
 
     // Start background worker pool (dynamic: scales with available cores)
     // Keep defaults moderate; env override can increase if streaming is bottlenecked.
-    workerRunning.store(true);
     workerCount = computeTerrainWorkerCount();
-    workerThreads.reserve(workerCount);
-    for (int i = 0; i < workerCount; i++) {
-        workerThreads.emplace_back(&TerrainManager::workerLoop, this);
-    }
+    startWorkers();
 
     LOG_INFO("Terrain manager initialized (async loading enabled)");
     LOG_INFO("  Map: ", mapName);
@@ -292,15 +288,15 @@ bool TerrainManager::enqueueTile(int x, int y) {
     if (loadedTiles.find(coord) != loadedTiles.end()) {
         return true;
     }
-    if (pendingTiles.find(coord) != pendingTiles.end()) {
-        return true;
-    }
     if (failedTiles.find(coord) != failedTiles.end()) {
         return false;
     }
 
     {
         std::lock_guard<std::mutex> lock(queueMutex);
+        if (pendingTiles.find(coord) != pendingTiles.end()) {
+            return true;
+        }
         loadQueue.push_back(coord);
         pendingTiles[coord] = true;
     }
@@ -1683,6 +1679,15 @@ void TerrainManager::unloadTile(int x, int y) {
     loadedTiles.erase(it);
 }
 
+void TerrainManager::startWorkers() {
+    if (workerRunning.load()) return;
+    workerRunning.store(true);
+    workerThreads.reserve(workerCount);
+    for (int i = 0; i < workerCount; ++i) {
+        workerThreads.emplace_back(&TerrainManager::workerLoop, this);
+    }
+}
+
 void TerrainManager::stopWorkers() {
     if (!workerRunning.load()) {
         LOG_DEBUG("stopWorkers: already stopped");
@@ -1707,13 +1712,29 @@ void TerrainManager::stopWorkers() {
 }
 
 void TerrainManager::softReset() {
-    // Clear queues (workers may still be running - they'll find empty queues)
+    resetMapState(mapName);
+}
+
+void TerrainManager::setMapName(const std::string& name) {
+    if (mapName == name) return;
+    resetMapState(name);
+}
+
+void TerrainManager::resetMapState(std::string nextMapName) {
+    // A worker outside queueMutex can still publish a tile, fill the coordinate-
+    // only cache, or claim a WMO dedup ID. Join it before clearing any map state
+    // or changing the string it reads while preparing. Clearing only the queues
+    // let that old result arrive in the destination after cleanup had finished.
+    const bool resumeWorkers = workerRunning.load();
+    stopWorkers();
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         loadQueue.clear();
         while (!readyQueue.empty()) readyQueue.pop();
+        pendingTiles.clear();
+        preparingTiles_ = 0;
+        memoryWaitReported_ = false;
     }
-    pendingTiles.clear();
     finalizingTiles_.clear();
     placedDoodadIds.clear();
     placedWmoIds.clear();
@@ -1734,7 +1755,11 @@ void TerrainManager::softReset() {
         tileCacheLru_.clear();
     }
 
-    LOG_INFO("Soft-resetting terrain (clearing tiles + water + cache, workers stay alive)");
+    collisionTiles_.clear();
+    pendingUnloadQueue_.clear();
+    mapName = std::move(nextMapName);
+
+    LOG_INFO("Resetting terrain for ", mapName, " (old workers quiesced)");
     loadedTiles.clear();
     failedTiles.clear();
 
@@ -1747,6 +1772,7 @@ void TerrainManager::softReset() {
     if (waterRenderer) {
         waterRenderer->clear();
     }
+    if (resumeWorkers) startWorkers();
 }
 
 TileCoord TerrainManager::worldToTile(float glX, float glY) const {
