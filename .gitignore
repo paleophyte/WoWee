@@ -1,4 +1,5 @@
 # Build directories
+vcpkg_installed/
 build/
 build_asan/
 build-asan/
@@ -97,6 +98,20 @@ imgui.ini
 config.ini
 config.json
 .env
+
+# Local game installation and automation profiles/runtime. Keep future tool
+# source and example settings eligible for version control.
+/client/
+/tools/bot_fleet_manager/fleet.settings*.json
+!/tools/bot_fleet_manager/fleet.settings*.example.json
+/tools/bot_fleet_manager/runtime/
+/tools/headless_client/settings.json
+/tools/provisioning/roster.json
+/tools/provisioning/bot_roster.*.local.json
+
+# Historical personal test notes contain local account/setup instructions.
+# Current, reviewed continuation instructions live in MAC-MINI-HANDOFF.md.
+/TODO.md
 
 # Local signing and notarization handoff material
 .secrets/
