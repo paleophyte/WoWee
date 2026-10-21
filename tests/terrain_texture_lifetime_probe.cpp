@@ -1,4 +1,4 @@
-// Asset-free probe of the actual terrain renderer, Vulkan allocator and GPU uploads.
+// Offline probe of terrain uploads and lifetime; explicit opt-in real-data coverage.
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -270,8 +270,49 @@ static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRender
     }
     settle(ctx);return true;
 }
+static bool realTerrain(rendering::VkContext& ctx,rendering::TerrainRenderer& terrain,
+                        pipeline::AssetManager& assets,VkDescriptorSetLayout layout,
+                        Json& result,const char* output){
+    using Access=rendering::TerrainManagerTestAccess;
+    TerrainProbeFrames frames(ctx);frames.initialize(layout);terrain.setFrustumCulling(false);
+    terrain.setViewDistance(2400);
+    rendering::TerrainManager manager;require(manager.initialize(&assets,&terrain),"Real manager initialization failed");
+    result["scope"]="Offline real ADT/BLP terrain and production workers/finalizer; no account, connection, M2/WMO/water rendering or gameplay";
+    result["real_terrain"]={{"samples",Json::array()}};
+    Json warmBaseline;
+    for(int cycle=0;cycle<3;++cycle){
+        for(int map=0;map<2;++map){
+            const std::string name=map?"Kalimdor":"Azeroth";const int x=map?41:33,y=39;
+            manager.setMapName(name);Access::enqueueReal(manager,x,y);
+            result["state"]="real_terrain_loading";result["loading"]={{"cycle",cycle},{"map",name},{"x",x},{"y",y}};
+            std::ofstream(output)<<result.dump(2)<<'\n';
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(90);
+            while(Access::snapshot(manager)["loaded_tiles"]!=1){
+                require(std::chrono::steady_clock::now()<deadline,"Real terrain finalization timed out");
+                Access::pump(manager);frames.frame(terrain);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            const auto center=Access::realCenter(manager);frames.aimAt(center);frames.frame(terrain);
+            require(terrain.getChunkCount()>0 && terrain.getRenderedChunkCount()>0,"Real terrain recorded no draws");
+            auto row=memorySnapshot(ctx);row["cycle"]=cycle;row["map"]=name;
+            row["chunks"]=terrain.getChunkCount();row["draws"]=terrain.getRenderedChunkCount();row["manager"]=Access::snapshot(manager);
+            row["camera_target"]={center.x,center.y,center.z};
+            frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);
+            require(Access::empty(manager),"Real reset retained worker or tile state");
+            row["after_reset"]=memorySnapshot(ctx);result["real_terrain"]["samples"].push_back(row);
+            std::ofstream(output)<<result.dump(2)<<'\n';std::cout<<row.dump()<<std::endl;
+        }
+        const auto cleared=memorySnapshot(ctx);
+        if(cycle==0)warmBaseline=cleared;
+        else{
+            require(cleared["allocations"]==warmBaseline["allocations"],"Real terrain retained allocations after warm cycle");
+            require(cleared["allocation_bytes"]==warmBaseline["allocation_bytes"],"Real terrain retained bytes after warm cycle");
+        }
+    }
+    result["real_terrain"]["warm_baseline"]=warmBaseline;settle(ctx);return true;
+}
 int main(int argc,char** argv){
-    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure" && std::string(argv[2])!="--worker-transitions" && std::string(argv[2])!="--blp-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure|--worker-transitions|--blp-pressure]\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure" && std::string(argv[2])!="--worker-transitions" && std::string(argv[2])!="--blp-pressure" && std::string(argv[2])!="--real-terrain")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure|--worker-transitions|--blp-pressure|--real-terrain]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -293,6 +334,11 @@ int main(int argc,char** argv){
         bindings[1].pImmutableSamplers=&shadowSampler;
         const auto perFrame=rendering::createDescriptorSetLayout(ctx.getDevice(),std::vector<VkDescriptorSetLayoutBinding>(bindings.begin(),bindings.end()));require(perFrame,"Per-frame descriptor layout failed");
         pipeline::AssetManager assets;
+        if(argc==3 && std::string(argv[2])=="--real-terrain"){
+            const char* path=std::getenv("WOW_DATA_PATH");require(path && *path,"Real terrain requires explicit TBC manifest directory in WOW_DATA_PATH");
+            require(assets.initialize(path),"Real terrain asset initialization failed");
+            assets.setExpansionDataPath(path);result["asset_path"]=path;
+        }
         rendering::TerrainRenderer terrain;require(terrain.initialize(&ctx,perFrame,&assets),"Native terrain renderer initialization failed");
         settle(ctx);const auto baseline=allocations(ctx);result["baseline_allocations"]=baseline;result["rounds"]=Json::array();
         const auto tile=generatedTile();bool passed=true;
@@ -320,6 +366,7 @@ int main(int argc,char** argv){
         if(argc==3 && std::string(argv[2])=="--texture-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true) && passed;
         if(argc==3 && std::string(argv[2])=="--worker-transitions") passed=workerTransitions(ctx,terrain,assets,perFrame,result,argv[1]) && passed;
         if(argc==3 && std::string(argv[2])=="--blp-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true,true) && passed;
+        if(argc==3 && std::string(argv[2])=="--real-terrain") passed=realTerrain(ctx,terrain,assets,perFrame,result,argv[1]) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;

@@ -5,6 +5,26 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Real-data terrain validation — October 21, 2026
+
+GitHub authentication is repaired; all earlier commits through `cf4724d78`
+are published. Extracted TBC assets are installed and verified as below.
+The new opt-in `--real-terrain` probe passes three offline Wetlands/Dustwallow
+cycles through actual ADT/BLP reads, production workers and incremental upload.
+Each tile records 256 terrain draws. Once reusable textures warm, clears through
+frame fences return to 25 allocations / 95,533,008 bytes with no repeated growth.
+Evidence: `logs/r52-real-terrain-20261021/REPORT.txt` and `probe/`.
+
+R52 remains open. This covers one real tile at a time, without M2/WMO/water
+rendering or live arrival. Next is bounded multi-tile real-data pressure.
+No server, account or gameplay state changed. Historical missing-assets and
+GitHub-blocker paragraphs below are superseded by this section.
+
+```sh
+WOW_DATA_PATH='/Users/neko/Library/Application Support/Wowee/Data/expansions/tbc' \
+  bash tools/run_macos_terrain_probe.sh NEW_OUTPUT_DIRECTORY --real-terrain
+```
+
 ## Local game assets installed — October 21, 2026
 
 The previous missing-assets prerequisite is cleared. The user's original
@@ -22,7 +42,7 @@ No personal login configuration, account, server or gameplay state changed.
 Paths and evidence: `logs/asset-setup-20261021/asset-setup.json` and `REPORT.txt`;
 companion `MAC-LOCAL-ASSETS.json` has the same reusable setup paths.
 Use those paths for the next isolated offline real-data R52 increment.
-GitHub publication still requires working write access.
+GitHub publication is working; see the current section above.
 
 ## Latest local Mac validation — October 21, 2026
 

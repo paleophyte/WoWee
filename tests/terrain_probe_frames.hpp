@@ -76,6 +76,22 @@ struct TerrainProbeFrames {
         vkUpdateDescriptorSets(ctx.getDevice(),writes.size(),writes.data(),0,nullptr);
         camera.setPosition({4,4,30});
     }
+    void aimAt(glm::vec3 center){
+        using namespace wowee::rendering;
+        require(ctx.waitIdle("probe camera update")==VK_SUCCESS,"Camera fence failed");
+        GPUPerFrameData data{};
+        const auto eye=center+glm::vec3(0,0,700);
+        data.view=glm::lookAt(eye,center,glm::vec3(0,1,0));
+        data.projection=glm::orthoRH_ZO(-400.f,400.f,-300.f,300.f,0.1f,2000.f);
+        data.projection[1][1]*=-1;data.lightSpaceMatrix=glm::mat4(1);
+        data.ambientColor=glm::vec4(1);data.viewPos=glm::vec4(eye,1);
+        data.fogParams=glm::vec4(10000,20000,0,0);
+        auto staging=uploadBuffer(ctx,&data,sizeof(data),VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        ctx.immediateSubmit([&](VkCommandBuffer cmd){
+            VkBufferCopy region{0,0,sizeof(data)};vkCmdCopyBuffer(cmd,staging.buffer,ubo.buffer,1,&region);
+        });
+        destroyBuffer(ctx.getAllocator(),staging);camera.setPosition(eye);
+    }
     // The callback retires resources after commands reference them but before
     // submission. Destruction must wait for every real frame slot's fence.
     void frame(wowee::rendering::TerrainRenderer& terrain,const std::function<void()>& recorded={}){

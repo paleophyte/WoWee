@@ -5,7 +5,7 @@
 
 namespace wowee::rendering {
 // Use the existing test-access friendship; no production test mode or alternate
-// worker/finalization implementation. Only cached, already-decoded input is synthetic.
+// worker/finalization implementation. Generated modes seed cached input; real mode queues ADTs.
 struct TerrainManagerTestAccess {
     static void seed(TerrainManager& manager,const pipeline::TerrainMesh& mesh,
                      const std::vector<std::string>& paths,
@@ -55,6 +55,15 @@ struct TerrainManagerTestAccess {
         require(waited,"Map reset did not wait at busy worker join barrier");
         return {{"fixture_pool_started_under_cache_gate",true},{"observed_preparing_workers",observedPreparing},{"reset_waited_for_worker",waited},
                 {"workers_resumed",manager.workerRunning.load()}};
+    }
+    static void enqueueReal(TerrainManager& manager,int x,int y){
+        require(manager.enqueueTile(x,y),"Real ADT enqueue failed");
+    }
+    static glm::vec3 realCenter(TerrainManager& manager){
+        require(!manager.loadedTiles.empty(),"No loaded real tile");
+        const auto& tile=*manager.loadedTiles.begin()->second;
+        const auto& v=tile.mesh.chunks[128].vertices.at(0);
+        return {v.position[0],v.position[1],v.position[2]};
     }
     static void pump(TerrainManager& manager){manager.processReadyTiles();}
     static Json snapshot(TerrainManager& manager){
