@@ -2,6 +2,7 @@
 #include "pipeline/wowee_binary_io.hpp"
 #include "pipeline/wowee_building.hpp"
 #include "pipeline/wmo_loader.hpp"
+#include "pipeline/model_bounds.hpp"
 #include "core/logger.hpp"
 #include <glm/gtc/quaternion.hpp>
 #include <fstream>
@@ -371,6 +372,11 @@ bool WoweeBuildingLoader::toWMOModel(const WoweeBuilding& building, WMOModel& ou
     outModel.portals.clear();
     outModel.portalVertices.clear();
     outModel.portalRefs.clear();
+    // WOB stores per-group boxes, but no root box. The renderer uses the root
+    // box for collision broad phase as well as visibility; leaving it untouched
+    // makes a correctly drawn dock impossible to stand on away from its origin.
+    outModel.boundingBoxMin = outModel.boundingBoxMax = glm::vec3(0.0f);
+    bool hasBounds = false;
 
     // Build a global texture index from per-material texturePath strings.
     // First-group materials become the WMO material list; each unique texture
@@ -422,8 +428,17 @@ bool WoweeBuildingLoader::toWMOModel(const WoweeBuilding& building, WMOModel& ou
     for (const auto& grp : building.groups) {
         WMOGroup wmoGroup;
         wmoGroup.name = grp.name;
-        wmoGroup.boundingBoxMin = grp.boundMin;
-        wmoGroup.boundingBoxMax = grp.boundMax;
+        const auto bounds = modelBoundsOf(grp.vertices,
+            [](const WoweeBuilding::Vertex& vertex) { return vertex.position; });
+        wmoGroup.boundingBoxMin = bounds.min;
+        wmoGroup.boundingBoxMax = bounds.max;
+        if (!grp.vertices.empty()) {
+            outModel.boundingBoxMin = hasBounds
+                ? glm::min(outModel.boundingBoxMin, bounds.min) : bounds.min;
+            outModel.boundingBoxMax = hasBounds
+                ? glm::max(outModel.boundingBoxMax, bounds.max) : bounds.max;
+            hasBounds = true;
+        }
         if (grp.isOutdoor) wmoGroup.flags |= 0x08;
 
         wmoGroup.vertices.reserve(grp.vertices.size());

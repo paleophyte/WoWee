@@ -60,6 +60,7 @@ TEST_CASE("emitJsonFromDbc produces wowee-DBC-loadable JSON", "[emitter]") {
     REQUIRE(dbc.getUInt32(0, 1) == 100);
     REQUIRE(dbc.getUInt32(1, 2) == 400);
 
+    in.close(); // Release the Windows file handle before removing the fixture.
     cleanup();
 }
 

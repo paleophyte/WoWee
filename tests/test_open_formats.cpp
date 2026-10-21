@@ -74,6 +74,7 @@ TEST_CASE("WOM1 binary format structure", "[wom]") {
     auto fsize = std::filesystem::file_size(path);
     REQUIRE(fsize > 100); // Minimal valid WOM1
 
+    check.close(); // Windows cannot remove a file while this reader is open.
     std::filesystem::remove(path);
 }
 
@@ -102,6 +103,7 @@ TEST_CASE("WOM rejects invalid magic", "[wom]") {
     uint32_t m; check.read(reinterpret_cast<char*>(&m), 4);
     REQUIRE(m != 0x314D4F57);
     REQUIRE(m != 0x324D4F57);
+    check.close();
     std::filesystem::remove(path);
 }
 
@@ -191,6 +193,44 @@ TEST_CASE("WOB toWMOModel conversion", "[wob]") {
     REQUIRE(wmoOut.nGroups == 1);
     REQUIRE(wmoOut.groups[0].vertices.size() == 3);
     REQUIRE(wmoOut.groups[0].indices.size() == 3);
+}
+
+TEST_CASE("WOB conversion restores collision bounds away from the model origin", "[wob][bounds]") {
+    WoweeBuilding building;
+    // Exported buildings can have stale metadata. Runtime collision needs the
+    // box of the actual geometry, including groups far from the model origin.
+    for (float x : {-80.0f, -20.0f}) {
+        WoweeBuilding::Group group;
+        group.boundMin = group.boundMax = glm::vec3(0.0f);
+        for (auto p : {glm::vec3(x, 40, 10), glm::vec3(x + 10, 40, 10),
+                       glm::vec3(x, 60, 15)}) {
+            group.vertices.push_back({p, {0,0,1}, {0,0}, {1,1,1,1}});
+        }
+        group.indices = {0, 1, 2};
+        building.groups.push_back(group);
+    }
+    building.groups.emplace_back(); // An empty group must not expand to (0,0,0).
+    WMOModel model;
+    model.boundingBoxMin = model.boundingBoxMax = glm::vec3(999.0f);
+    REQUIRE(WoweeBuildingLoader::toWMOModel(building, model));
+    CHECK(model.boundingBoxMin == glm::vec3(-80, 40, 10));
+    CHECK(model.boundingBoxMax == glm::vec3(-10, 60, 15));
+    for (size_t i = 0; i < 2; ++i) {
+        const auto& group = model.groups[i];
+        for (const auto& vertex : group.vertices) {
+            for (int axis = 0; axis < 3; ++axis) {
+                CHECK(vertex.position[axis] >= model.boundingBoxMin[axis]);
+                CHECK(vertex.position[axis] <= model.boundingBoxMax[axis]);
+                CHECK(vertex.position[axis] >= group.boundingBoxMin[axis]);
+                CHECK(vertex.position[axis] <= group.boundingBoxMax[axis]);
+            }
+        }
+    }
+    // Converting again must replace the old model's box, rather than retain it.
+    building.groups.erase(building.groups.begin());
+    REQUIRE(WoweeBuildingLoader::toWMOModel(building, model));
+    CHECK(model.boundingBoxMin == glm::vec3(-20, 40, 10));
+    CHECK(model.boundingBoxMax == glm::vec3(-10, 60, 15));
 }
 
 TEST_CASE("WOB toWMOModel restores materials/portals/doodads/doodadSet", "[wob]") {
