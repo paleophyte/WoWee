@@ -3676,6 +3676,15 @@ void GameHandler::processQueuedIncomingPackets() {
                         " state=", worldStateName(state));
         }
         ++processed;
+        // World-entry callbacks defer heavy map cleanup to Application's next
+        // stage. Leave destination creates queued until that cleanup has run:
+        // otherwise it discards their render spawns and one-shot ferry clocks.
+        // The same boundary is needed during WorldLoader's warmup loop when
+        // another transfer arrives while the previous map is still loading.
+        if (logicalOp && (*logicalOp == Opcode::SMSG_NEW_WORLD ||
+                          *logicalOp == Opcode::SMSG_LOGIN_VERIFY_WORLD)) {
+            break;
+        }
     }
 
     if (entityController_->hasPendingUpdateObjectWork()) {

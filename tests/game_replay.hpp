@@ -40,6 +40,11 @@ namespace wowee {
 namespace game {
 
 struct GameHandlerTestAccess {
+    static void queue(GameHandler& gh, const network::Packet& packet) {
+        gh.enqueueIncomingPacket(packet);
+    }
+    static void drainFrame(GameHandler& gh) { gh.processQueuedIncomingPackets(); }
+    static bool packetsPending(const GameHandler& gh) { return !gh.pendingIncomingPackets_.empty(); }
     // Queued and drained the way update() drains the socket's packets, frame
     // after frame, since update object blocks are applied after their packet
     // rather than inside it. Bounded, so work that never drains fails here

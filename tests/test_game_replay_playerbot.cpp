@@ -427,6 +427,60 @@ TEST_CASE("TBC ferry create clocks survive compression and deferred model regist
     }
 }
 
+TEST_CASE("world entry yields before destination ferry updates reach deferred map cleanup",
+          "[replay][movement][tbc-ferry][world-entry-order]") {
+    using namespace wowee::game;
+    for (const auto opcode : {Opcode::SMSG_NEW_WORLD, Opcode::SMSG_LOGIN_VERIFY_WORLD}) {
+        CAPTURE(static_cast<int>(opcode));
+        Session s("tbc");
+        bool worldLoadQueued = false;
+        s.handler().setWorldEntryCallback([&](uint32_t map, float, float, float, bool) {
+            CHECK(map == 1);
+            worldLoadQueued = true;
+        });
+        Packet transfer(wireOpcode(opcode));
+        transfer.writeUInt32(1);
+        for (float v : {-3741.0f, -744.0f, 11.0f, 1.25f}) transfer.writeFloat(v);
+        Packet boat(wireOpcode(Opcode::SMSG_UPDATE_OBJECT));
+        const auto received = Packet::Clock::now() - std::chrono::seconds(5);
+        boat.setReceivedAt(received);
+        boat.writeUInt32(1); boat.writeUInt8(1);
+        boat.writeUInt8(static_cast<uint8_t>(UpdateType::CREATE_OBJECT2));
+        boat.writePackedGuid(kDockFerry);
+        boat.writeUInt8(static_cast<uint8_t>(ObjectType::GAMEOBJECT));
+        boat.writeUInt8(0x42);
+        for (float v : {-3741.0f, -744.0f, 11.0f, 1.25f}) boat.writeFloat(v);
+        boat.writeUInt32(3000000000u);
+        const std::map<uint16_t, uint32_t> fields{
+            {fieldIndex(UF::OBJECT_FIELD_ENTRY), 176231},
+            {fieldIndex(UF::GAMEOBJECT_DISPLAYID), 3015}, {21, 15}};
+        uint32_t mask=0;
+        for (const auto& [index,value] : fields) { REQUIRE(index<32); mask|=1u<<index; }
+        boat.writeUInt8(1); boat.writeUInt32(mask);
+        for (const auto& [index,value] : fields) boat.writeUInt32(value);
+        GameHandlerTestAccess::queue(s.handler(), transfer);
+        GameHandlerTestAccess::queue(s.handler(), boat);
+        GameHandlerTestAccess::drainFrame(s.handler());
+        REQUIRE(worldLoadQueued);
+        // Application runs its deferred WorldLoader after this packet pass.
+        // Applying the destination create before that cleanup erased both the
+        // queued render spawn and its one-shot server path-progress sample.
+        REQUIRE(GameHandlerTestAccess::packetsPending(s.handler()));
+        CHECK_FALSE(s.handler().getEntityManager().getEntity(kDockFerry));
+        auto* tm=s.handler().getTransportManager(); REQUIRE(tm);
+        tm->clearTransports();
+        for (int frame=0;frame<8;++frame) GameHandlerTestAccess::drainFrame(s.handler());
+        CHECK_FALSE(GameHandlerTestAccess::packetsPending(s.handler()));
+        REQUIRE(s.handler().getEntityManager().getEntity(kDockFerry));
+        tm->loadPathFromNodes(1, {{0,0,0}}, false);
+        tm->registerTransport(kDockFerry,0,1,{0,0,0},176231,3015,false);
+        const auto* registered=tm->getTransport(kDockFerry); REQUIRE(registered);
+        CHECK(registered->hasServerPathProgress);
+        CHECK(registered->serverPathProgressMs==3000000000u);
+        CHECK(registered->serverPathProgressAt==received);
+    }
+}
+
 TEST_CASE("TBC outgoing falls match the server jump flag and cosine-sine order",
           "[replay][movement][dock-movement]") {
     using namespace wowee::game;
