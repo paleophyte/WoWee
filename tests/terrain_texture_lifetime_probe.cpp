@@ -19,6 +19,7 @@ using Json=nlohmann::json;
 using namespace wowee;
 static void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 #include "terrain_probe_frames.hpp"
+#include "terrain_probe_manager.hpp"
 static uint32_t allocations(rendering::VkContext& ctx){
     VmaTotalStatistics stats{};vmaCalculateStatistics(ctx.getAllocator(),&stats);
     return stats.total.statistics.allocationCount;
@@ -182,8 +183,69 @@ static bool framedRetirement(rendering::VkContext& ctx, rendering::TerrainRender
     }
     settle(ctx);return true;
 }
+static bool workerTransitions(rendering::VkContext& ctx,rendering::TerrainRenderer& terrain,
+                              pipeline::AssetManager& assets,VkDescriptorSetLayout layout,
+                              Json& result,const char* output){
+    using Access=rendering::TerrainManagerTestAccess;
+    TerrainProbeFrames frames(ctx);frames.initialize(layout);terrain.setFrustumCulling(false);
+    rendering::TerrainManager manager;require(manager.initialize(&assets,&terrain),"Terrain manager initialization failed");
+    std::unordered_map<std::string,pipeline::BLPImage> textures;std::vector<std::string> paths;
+    for(int i=0;i<4;++i){
+        const auto path="generated_worker_tileset_"+std::to_string(i);paths.push_back(path);
+        auto& image=textures[path];image.width=image.height=256;image.data.assign(256*256*4,127);
+    }
+    terrain.uploadPreloadedTextures(textures);settle(ctx);const auto baseline=memorySnapshot(ctx);
+    auto tile=generatedTile(256);for(auto& chunk:tile.chunks)for(int i=0;i<4;++i)chunk.layers[i].textureId=i;
+    result["worker_transitions"]={{"baseline",baseline},{"input","Generated cached decoded tiles; real workers, queues, finalizer and map reset"},{"samples",Json::array()}};
+    result["state"]="worker_transitions_running";
+    auto sample=[&](const char* phase,int cycle){
+        auto row=memorySnapshot(ctx);row["phase"]=phase;row["cycle"]=cycle;row["chunks"]=terrain.getChunkCount();
+        row["manager"]=Access::snapshot(manager);result["worker_transitions"]["samples"].push_back(row);
+        std::ofstream(output)<<result.dump(2)<<'\n';std::cout<<row.dump()<<std::endl;
+    };
+    for(int cycle=0;cycle<3;++cycle){
+        manager.setMapName("GeneratedSource"+std::to_string(cycle));Access::seed(manager,tile,paths,textures,8);
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+        for(int step=0;terrain.getChunkCount()==0 && step<256;++step){
+            require(std::chrono::steady_clock::now()<deadline,"Worker source finalization timed out");
+            Access::pump(manager);frames.frame(terrain);std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        require(terrain.getChunkCount()>0,"Worker source did not upload terrain");
+        require(Access::snapshot(manager)["loaded_tiles"]!=8,"Source finalized completely before interruption");
+        sample("source_partially_finalized",cycle);
+        const auto loaded=allocations(ctx);
+        frames.frame(terrain,[&]{
+            require(terrain.getRenderedChunkCount()>0,"Worker source did not record draws");
+            auto barrier=Access::resetWithBusyWorker(manager,"GeneratedDestination"+std::to_string(cycle),tile);
+            result["worker_transitions"]["busy_reset_barriers"].push_back(barrier);
+            require(terrain.getChunkCount()==0,"Map reset retained GPU chunks");
+            require(Access::empty(manager),"Map reset retained old worker/cache/finalizer state");
+            require(allocations(ctx)==loaded,"Map reset freed recorded resources before submission");
+            sample("map_reset_before_submit",cycle);
+        });
+        frames.frame(terrain);frames.frame(terrain);
+        require(Access::empty(manager),"Old worker published after map reset");
+        require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Map reset retained allocations after frame fences");
+        require(memorySnapshot(ctx)["allocation_bytes"]==baseline["allocation_bytes"],"Map reset retained allocation bytes");
+        sample("destination_empty_after_fences",cycle);
+        Access::seed(manager,tile,paths,textures,1);
+        const auto arrivalDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+        for(int step=0;Access::snapshot(manager)["loaded_tiles"]!=1 && step<256;++step){
+            require(std::chrono::steady_clock::now()<arrivalDeadline,"Destination worker finalization timed out");
+            Access::pump(manager);frames.frame(terrain);std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        require(Access::snapshot(manager)["loaded_tiles"]==1,"Fresh destination tile never finalized");
+        require(terrain.getChunkCount()==256 && terrain.getRenderedChunkCount()==256,"Destination tile did not fully draw");
+        sample("fresh_destination_drawn",cycle);
+        frames.frame(terrain,[&]{manager.softReset();});frames.frame(terrain);frames.frame(terrain);
+        require(Access::empty(manager),"Soft reset retained manager state");
+        require(memorySnapshot(ctx)["allocations"]==baseline["allocations"],"Soft reset retained GPU allocations");
+        sample("soft_reset_through_frames",cycle);
+    }
+    settle(ctx);return true;
+}
 int main(int argc,char** argv){
-    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure]\n";return 2;}
+    if(argc<2 || argc>3 || (argc==3 && std::string(argv[2])!="--streaming-pressure" && std::string(argv[2])!="--framed-retirement" && std::string(argv[2])!="--framed-pressure" && std::string(argv[2])!="--texture-pressure" && std::string(argv[2])!="--worker-transitions")){std::cerr<<"Usage: terrain_alpha_probe RESULT.json [--streaming-pressure|--framed-retirement|--framed-pressure|--texture-pressure|--worker-transitions]\n";return 2;}
     Json result={{"scope","Actual GPU allocation lifetime; generated four-chunk tiles, no extracted assets, accounts or gameplay"}};
     try{
         require(SDL_Init(SDL_INIT_VIDEO),"SDL video initialization failed");
@@ -230,6 +292,7 @@ int main(int argc,char** argv){
         if(argc==3 && std::string(argv[2])=="--framed-retirement") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1]) && passed;
         if(argc==3 && std::string(argv[2])=="--framed-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49) && passed;
         if(argc==3 && std::string(argv[2])=="--texture-pressure") passed=framedRetirement(ctx,terrain,perFrame,result,argv[1],49,true) && passed;
+        if(argc==3 && std::string(argv[2])=="--worker-transitions") passed=workerTransitions(ctx,terrain,assets,perFrame,result,argv[1]) && passed;
         terrain.shutdown();settle(ctx);vkDestroyDescriptorSetLayout(ctx.getDevice(),perFrame,nullptr);ctx.shutdown();
         result["state"]=passed?"pass":"obsolete_alpha_allocations_retained";
         result["exit"]=passed?0:42;

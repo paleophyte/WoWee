@@ -50,9 +50,24 @@ per tile). Every image is required to upload. Peak: 75,470 allocations /
 371,139,664 bytes, including the persistent reusable texture set. Evidence:
 `logs/r52-textures-20261021-VQcfI1/probe/`.
 
-R52 remains unresolved. Actual terrain workers/map transitions and real asset
-format variation remain gaps. More allocation-only scale tests should not
-substitute for that integration coverage.
+The `--worker-transitions` mode now passes three cycles through actual worker
+queues, cache lookup, nested upload batching, processReadyTiles finalization,
+map reset and soft reset. Generated decoded tiles enter through the existing
+cache/test-access friendship; no alternate worker/finalizer is used. A source
+map is interrupted with ready/queued work and partially uploaded terrain.
+For the busy reset, the fixture restarts the pool under the held cache lock to
+ensure six real workers are blocked in prepareTile; reset must wait at their
+join before the gate is released. Reset itself runs serially on a helper thread
+only to permit that gate release; no concurrent render-thread access occurs.
+Old queues/cache/finalizers are empty afterward, and GPU allocations return to
+14 / 96,281,680 bytes through real frame slots. A fresh destination tile at the
+same coordinates fully loads and records 256 draws, followed by a clean soft
+reset. Evidence: `logs/r52-workers-20261021-sR4Y8x/busy-worker-probe/`.
+
+R52 remains unresolved. Generated cached input does not cover actual ADT/BLP
+file decoding, non-RGBA8 tileset formats, M2/WMO/water or full-world rendering.
+A missing original Metal assertion still prevents a direct crash comparison.
+Do not substitute more allocation-only scale tests for those remaining gaps.
 CLI publication retries were rejected: the saved credential belongs to joshand,
 which cannot write this fork; paleophyte has no CLI credential. The connected
 GitHub integration also rejected tree writes (403). Local commits are preserved;
