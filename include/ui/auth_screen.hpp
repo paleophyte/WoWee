@@ -51,6 +51,7 @@ public:
     [[nodiscard]] bool isAuthenticating() const { return authenticating; }
 
     void stopLoginMusic();
+    bool startSavedLogin(const std::string& selector, auth::AuthHandler& handler, std::string& error);
 
     /// Draws the login art, filling the window.
     ///
@@ -174,6 +175,7 @@ private:
      */
     void saveLoginInfo(bool includePasswordHash);
     void loadLoginInfo();
+    void ensureLoginInfoLoaded();
     static std::string getConfigPath();
     bool loginInfoLoaded = false;
 

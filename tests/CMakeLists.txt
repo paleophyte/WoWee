@@ -2652,3 +2652,5 @@ endif()
 # the re-parsing it saved (950.8 s of CPU against 945.2 s without). The main
 # target benefits because it is one target over 413 objects; the tests are the
 # opposite shape. Do not re-add it without measuring.
+
+wowee_add_test(test_launch_options SOURCES test_launch_options.cpp)

@@ -1,3 +1,4 @@
+#include "core/launch_options.hpp"
 #include "ui/character_screen.hpp"
 #include "game/equipment_hash.hpp"
 #include "ui/ui_colors.hpp"
@@ -43,6 +44,21 @@ ImVec4 classColor(uint8_t classId) { return ui::getClassColor(classId); }
 } // namespace
 
 CharacterScreen::CharacterScreen() {
+}
+
+void CharacterScreen::enterNamedCharacter(game::GameHandler& handler, const std::string& name) {
+    const auto& characters = handler.getCharacters();
+    std::vector<std::vector<std::string>> aliases;
+    for (const auto& character : characters) aliases.push_back({character.name});
+    const int index = core::uniqueLaunchMatch(aliases, name);
+    const auto& character = characters[index];
+    selectedCharacterIndex = index;
+    selectedCharacterGuid = character.guid;
+    characterSelected = true;
+    saveLastCharacter(character.guid);
+    setStatus("Entering world with " + character.name + "...");
+    handler.selectCharacter(character.guid);
+    if (onCharacterSelected) onCharacterSelected(character.guid);
 }
 
 void CharacterScreen::render(game::GameHandler& gameHandler) {

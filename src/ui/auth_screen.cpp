@@ -1,3 +1,4 @@
+#include "core/launch_options.hpp"
 #include "ui/auth_screen.hpp"
 #include <future>
 #include <chrono>
@@ -268,7 +269,7 @@ void AuthScreen::setPort(int value) {
     portText_.setText(buf);
 }
 
-void AuthScreen::render(auth::AuthHandler& authHandler) {
+void AuthScreen::ensureLoginInfoLoaded() {
     // Load saved login info on first render
     if (!loginInfoLoaded) {
         loadLoginInfo();
@@ -294,6 +295,37 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
             }
         }
     }
+
+}
+
+bool AuthScreen::startSavedLogin(const std::string& selector, auth::AuthHandler& handler,
+                                 std::string& error) {
+    ensureLoginInfoLoaded();
+    std::vector<std::vector<std::string>> aliases;
+    for (const auto& profile : servers_) {
+        std::vector<std::string> names{profile.hostname + ":" + std::to_string(profile.port)};
+        if (!profile.label.empty()) names.push_back(profile.label);
+        aliases.push_back(std::move(names));
+    }
+    int index;
+    try { index = core::uniqueLaunchMatch(aliases, selector); }
+    catch (const std::invalid_argument& e) { error = e.what(); return false; }
+    const auto& profile = servers_[index];
+    const bool validHash = profile.passwordHash.size() == 40 &&
+        std::all_of(profile.passwordHash.begin(), profile.passwordHash.end(),
+                    [](unsigned char c) { return std::isxdigit(c); });
+    if (profile.username.empty() || !validHash) {
+        error = "Selected profile has no usable saved credentials; log in interactively first";
+        return false;
+    }
+    selectServerProfile(index);
+    attemptAuth(handler);
+    if (!authenticating) { error = "Saved-profile authentication could not start"; return false; }
+    return true;
+}
+
+void AuthScreen::render(auth::AuthHandler& authHandler) {
+    ensureLoginInfoLoaded();
 
     drawBackdrop();
     updateMusic();

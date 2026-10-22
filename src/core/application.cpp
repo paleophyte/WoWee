@@ -3899,6 +3899,57 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     }
 }
 
+void Application::updateLaunch() {
+    if (!launchOptions_.enabled() || launchComplete_) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!launchStarted_) launchStarted_ = now;
+    try {
+        if (state == AppState::IN_GAME) {
+            bool intendedCharacter = false;
+            if (launchCharacterStarted_ && gameHandler) {
+                for (const auto& character : gameHandler->getCharacters()) {
+                    if (character.guid == gameHandler->getActiveCharacterGuid() &&
+                        character.name == launchOptions_.character) intendedCharacter = true;
+                }
+            }
+            if (!intendedCharacter) throw std::runtime_error("World entry did not match requested character");
+            launchComplete_ = true;
+            LOG_WARNING("Launch: entered requested character; existing server bot control is unchanged");
+            return;
+        }
+        if (now - *launchStarted_ >= std::chrono::seconds(launchOptions_.startupTimeoutSeconds))
+            throw std::runtime_error("Startup deadline exceeded");
+        if (state == AppState::AUTHENTICATION && !launchAuthStarted_ && uiManager && authHandler) {
+            launchAuthStarted_ = true;
+            uiManager->getRealmScreen().setAutomaticSelectionEnabled(false);
+            std::string error;
+            if (!uiManager->getAuthScreen().startSavedLogin(launchOptions_.profile, *authHandler, error))
+                throw std::runtime_error(error);
+        }
+        if (state == AppState::REALM_SELECTION && !launchRealmStarted_ && authHandler &&
+            authHandler->getState() == auth::AuthState::REALM_LIST_RECEIVED) {
+            launchRealmStarted_ = true;
+            const auto& realms = authHandler->getRealms();
+            std::string name = launchOptions_.realm;
+            if (name.empty()) {
+                if (realms.size() != 1) throw std::runtime_error("Specify --realm for a realm list without exactly one realm");
+                name = realms[0].name;
+            }
+            if (!uiManager->getRealmScreen().enterNamedRealm(*authHandler, name))
+                throw std::runtime_error("Requested realm is unavailable");
+        }
+        if (state == AppState::CHARACTER_SELECTION && !launchCharacterStarted_ && gameHandler &&
+            gameHandler->getState() == game::WorldState::CHAR_LIST_RECEIVED) {
+            launchCharacterStarted_ = true;
+            uiManager->getCharacterScreen().enterNamedCharacter(*gameHandler, launchOptions_.character);
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Launch failed: ", e.what());
+        launchExitCode_ = 2;
+        running = false;
+    }
+}
+
 void Application::update(float deltaTime) {
     ZoneScopedN("Application::update");
     const char* updateCheckpoint = "enter";
@@ -3933,6 +3984,8 @@ void Application::update(float deltaTime) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
+    updateLaunch();
+    if (launchExitCode_ != 0) return;
     // Update based on current state
     updateCheckpoint = "state switch";
     switch (state) {

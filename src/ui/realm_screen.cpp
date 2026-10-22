@@ -1,3 +1,4 @@
+#include "core/launch_options.hpp"
 #include "ui/realm_screen.hpp"
 #include "ui/ui_colors.hpp"
 
@@ -43,6 +44,22 @@ const char* RealmScreen::getPopulationName(float population) {
     return "Full";
 }
 
+bool RealmScreen::enterNamedRealm(auth::AuthHandler& handler, const std::string& name) {
+    const auto& realms = handler.getRealms();
+    std::vector<std::vector<std::string>> aliases;
+    for (const auto& realm : realms) aliases.push_back({realm.name});
+    const int index = core::uniqueLaunchMatch(aliases, name);
+    const auto& realm = realms[index];
+    if (realm.lock || (realm.flags & 0x03)) return false; // Locked, invalid or offline realm
+    if (!onRealmSelected) return false;
+    selectedRealmIndex = index;
+    realmSelected = autoSelectAttempted = true;
+    selectedRealmName = realm.name;
+    selectedRealmAddress = realm.address;
+    onRealmSelected(selectedRealmName, selectedRealmAddress);
+    return true;
+}
+
 void RealmScreen::render(auth::AuthHandler& authHandler) {
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     const float scale = std::clamp(std::min(screen.x / 1280.0f, screen.y / 760.0f), 0.62f, 2.6f);
@@ -55,7 +72,7 @@ void RealmScreen::render(auth::AuthHandler& authHandler) {
     const auto& realms = authHandler.getRealms();
 
     // Auto-select: prefer realm with characters, then single realm, then first available
-    if (!realms.empty() && !autoSelectAttempted && !realmSelected) {
+    if (automaticSelectionEnabled_ && !realms.empty() && !autoSelectAttempted && !realmSelected) {
         autoSelectAttempted = true;
 
         int bestRealm = -1;

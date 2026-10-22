@@ -5,6 +5,18 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Session tools: saved-profile launch — October 21, 2026
+
+First tooling increment implements --login-profile label/host:port, --character,
+optional --realm and --startup-timeout. Saved credentials only; exact unique
+selection; no Bot control change/reconnect. Normal build and offline25assertions/
+2cases pass; --help/invalid args verified without connection. Live login is not
+yet verified. Current binary adds this increment to the prior native guard.
+Evidence: `logs/launch-tools-20261021/REPORT.md`; design/remaining increments:
+`docs/SESSION-AUTOMATION.md`. Not ready for unattended runs: confirmed local
+control/status, bounded stop/logout and server-side disconnect/lease behavior
+remain work. No live session or server/character changes in this increment.
+
 ## Server0066 deployed and healthy — October 21, 2026
 
 Approved normal CMake build/install completed; exact tested candidate reproduced.

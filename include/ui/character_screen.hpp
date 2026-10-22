@@ -22,6 +22,7 @@ namespace ui {
 class CharacterScreen {
 public:
     CharacterScreen();
+    void enterNamedCharacter(game::GameHandler& handler, const std::string& name);
 
     /**
      * Render the UI

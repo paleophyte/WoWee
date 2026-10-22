@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/window.hpp"
+#include "core/launch_options.hpp"
 #include <chrono>
 #include "core/gamepad.hpp"
 #include "ui/unit_portrait.hpp"
@@ -76,6 +77,8 @@ public:
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
 
+    void setLaunchOptions(LaunchOptions options) { launchOptions_ = std::move(options); }
+    int getExitCode() const { return launchExitCode_; }
     bool initialize();
     void run();
     void shutdown();
@@ -360,6 +363,12 @@ private:
 
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
+    LaunchOptions launchOptions_;
+    bool launchAuthStarted_ = false, launchRealmStarted_ = false, launchCharacterStarted_ = false;
+    bool launchComplete_ = false;
+    int launchExitCode_ = 0;
+    std::optional<std::chrono::steady_clock::time_point> launchStarted_;
+    void updateLaunch();
     bool renderingFrame_ = false;
     bool logoutToLoginPending_ = false;
     /// Why the player is back at the login screen, when it was not their idea.

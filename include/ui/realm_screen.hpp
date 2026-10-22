@@ -17,6 +17,8 @@ namespace wowee { namespace ui {
 class RealmScreen {
 public:
     RealmScreen();
+    void setAutomaticSelectionEnabled(bool enabled) { automaticSelectionEnabled_ = enabled; }
+    bool enterNamedRealm(auth::AuthHandler& handler, const std::string& name);
 
     /**
      * Render the UI
@@ -74,6 +76,7 @@ private:
     int selectedRealmIndex = -1;
     bool realmSelected = false;
     bool autoSelectAttempted = false;
+    bool automaticSelectionEnabled_ = true;
     std::string selectedRealmName;
     std::string selectedRealmAddress;
 

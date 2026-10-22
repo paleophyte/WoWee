@@ -3,6 +3,7 @@
 #include "core/logger.hpp"
 #include "core/version.hpp"
 #include <exception>
+#include <iostream>
 #include <csignal>
 #include <cstdlib>
 #include "core/env.hpp"
@@ -130,6 +131,11 @@ static void selectUserDataPath() {
 }
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
+    wowee::core::LaunchOptions launch;
+    try { launch = wowee::core::parseLaunchOptions(argc, argv); }
+    catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 2; }
+    if (launch.help) { std::cout << wowee::core::launchHelp; return 0; }
+
 #ifdef __ANDROID__
     // Everything after this opens its files relative to the working directory,
     // which on Android is not a directory that holds any of them.
@@ -245,6 +251,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         wowee::core::migratePortableConfigIfNeeded();
 
         wowee::core::Application app;
+        app.setLaunchOptions(std::move(launch));
 
         if (!app.initialize()) {
             LOG_FATAL("Failed to initialize application");
@@ -258,7 +265,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #if defined(__linux__) && !defined(__ANDROID__)
         if (g_emergencyDisplay) { XCloseDisplay(g_emergencyDisplay); g_emergencyDisplay = nullptr; }
 #endif
-        return 0;
+        return app.getExitCode();
     }
     catch (const std::exception& e) {
         releaseMouseGrab();
