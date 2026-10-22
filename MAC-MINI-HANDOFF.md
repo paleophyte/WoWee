@@ -5,6 +5,22 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Server0066 deployed and healthy — October 21, 2026
+
+Approved normal CMake build/install completed; exact tested candidate reproduced.
+Installed mangosd SHA256: `0d48ddb77a970f104b8150c33f88e7c99b675801ee8af7ffc2bc9b57f44214e3`.
+Fresh world PID992450, startup marker, authenticated read-only world response,
+listeners and stable NRestarts0 pass. Five active configs unchanged; only mangosd
+installed, all other install items up-to-date. Jizzle's latest saved position,
+transport fields, health and offline state match before/after; no character edits.
+Source/binary/config rollback evidence retained; no rollback needed. One-use
+liveness credentials removed. Evidence: `logs/server0066-normal-deploy-20261021/REPORT.md`.
+
+Current client functional changes34c9ce77a+d8a006756 are published. Remaining gate:
+separately approved bounded user-operated bot ferry/accepted-quest confirmation.
+No live session launched after deployment. R52 transport remains open; original
+Metal assertion cause unknown. Historical sections below retain their old scopes.
+
 ## Mac SSH and rollback readiness — October 21, 2026
 
 Mac SSH alias `wow-tbc` authenticates as `mangos-helper` with pinned host key.
