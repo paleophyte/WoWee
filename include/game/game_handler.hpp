@@ -1,4 +1,5 @@
 #pragma once
+#include "game/logout_observation.hpp"
 
 #include "game/quest_giver_status.hpp"
 #include "game/calendar_data.hpp"
@@ -692,6 +693,7 @@ public:
 
     // Logout commands. exitAfterLogout: /quit and /exit leave the game; /logout and
     // /camp drop back to character select.
+    LogoutObservation getLogoutObservation() const;
     void requestLogout(bool exitAfterLogout = false);
 
     /// Turn the character to face a canonical yaw, and tell the server.

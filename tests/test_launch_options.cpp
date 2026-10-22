@@ -38,3 +38,14 @@ TEST_CASE("Launch selection never falls back to an unintended identity", "[launc
     CHECK_THROWS(uniqueLaunchMatch({{"TBC"}, {"TBC"}}, "TBC"));
     CHECK(uniqueLaunchMatch({{"TBC", "TBC"}}, "TBC") == 0);
 }
+
+TEST_CASE("Managed duration and shutdown arguments require explicit session wiring", "[launch]") {
+    auto options=parse({"wowee","--login-profile","TBC","--character","Jizzle","--control-socket","/private/session/control.sock","--session-seconds","1200","--stop-timeout","45"});
+    CHECK(options.sessionSeconds==1200);CHECK(options.stopTimeoutSeconds==45);
+    CHECK_THROWS(parse({"wowee","--session-seconds","1200"}));
+    CHECK_THROWS(parse({"wowee","--login-profile","TBC","--character","Jizzle","--session-seconds","1200"}));
+    CHECK_THROWS(parse({"wowee","--stop-timeout","45"}));
+    for(auto value:{"0","86401","1s","-1"})
+        CHECK_THROWS(parse({"wowee","--login-profile","TBC","--character","Jizzle","--control-socket","/private/control.sock","--session-seconds",value}));
+    CHECK_THROWS(parse({"wowee","--control-socket","/private/control.sock","--stop-timeout","121"}));
+}

@@ -70,6 +70,7 @@ LocalControlServer::LocalControlServer(const std::string& path, Handler handler)
         throw std::runtime_error("Cannot secure/listen on local control socket");
 }
 LocalControlServer::~LocalControlServer()=default;
+bool LocalControlServer::hasClients() const { return !impl_->clients.empty(); }
 void LocalControlServer::tick(Clock::time_point now) {
     auto& s=*impl_;
     for (int n=0;n<4 && s.clients.size()<8;++n) {
@@ -104,10 +105,10 @@ void LocalControlServer::tick(Clock::time_point now) {
                             c.id=request.at("id").get<std::string>();c.command=request.at("command").get<std::string>();
                             if (c.id.empty() || c.id.size()>64 || c.id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")!=std::string::npos)
                                 throw std::runtime_error("Invalid id");
-                            if (c.command!="status" && c.command!="manual" && c.command!="bot" && c.command!="stop") throw std::runtime_error("Invalid command");
-                            if (request.contains("timeout_seconds") && !request["timeout_seconds"].is_number_integer()) throw std::runtime_error("Invalid timeout");
-                            const int timeout=request.value("timeout_seconds",15);
-                            if (timeout<1 || timeout>30) throw std::runtime_error("Invalid timeout");
+                            if (c.command!="status" && c.command!="manual" && c.command!="bot" && c.command!="stop" && c.command!="quit") throw std::runtime_error("Invalid command");
+                            if (request.contains("timeout_seconds") && (!request["timeout_seconds"].is_number_integer() || request["timeout_seconds"]<1 || request["timeout_seconds"]>(c.command=="quit"?120:30))) throw std::runtime_error("Invalid timeout");
+                            const int timeout=request.value("timeout_seconds",c.command=="quit"?60:15);
+                            if (timeout<1 || timeout>(c.command=="quit"?120:30)) throw std::runtime_error("Invalid timeout");
                             c.deadline=now+std::chrono::seconds(timeout);
                             auto result=s.handler(c.command,c.id);
                             if (c.command=="status") s.respond(c,"observed",result);
@@ -149,5 +150,6 @@ struct LocalControlServer::Impl {};
 LocalControlServer::LocalControlServer(const std::string&,Handler) { throw std::runtime_error("Local control sockets currently require desktop macOS or Linux"); }
 LocalControlServer::~LocalControlServer()=default;
 void LocalControlServer::tick(Clock::time_point) {}
+bool LocalControlServer::hasClients() const { return false; }
 }
 #endif

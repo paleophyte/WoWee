@@ -16,6 +16,7 @@ public:
     LocalControlServer(const LocalControlServer&) = delete;
     LocalControlServer& operator=(const LocalControlServer&) = delete;
     void tick(Clock::time_point now = Clock::now());
+    bool hasClients() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

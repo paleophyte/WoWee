@@ -1729,6 +1729,10 @@ void GameHandler::faceCanonicalYaw(float canonicalYaw) {
     sendMovement(Opcode::MSG_MOVE_SET_FACING);
 }
 
+LogoutObservation GameHandler::getLogoutObservation() const {
+    return socialHandler_ ? socialHandler_->getLogoutObservation() : LogoutObservation{};
+}
+
 void GameHandler::requestLogout(bool exitAfterLogout) {
     if (socialHandler_) socialHandler_->requestLogout(exitAfterLogout);
 }

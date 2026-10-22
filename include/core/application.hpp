@@ -51,6 +51,8 @@ class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
 class LocalControlServer;
+class ManagedSession;
+class SessionJournal;
 
 enum class AppState {
     AUTHENTICATION,
@@ -67,6 +69,7 @@ enum class AppState {
 
 class Application {
     friend class WorldLoader;
+    friend struct ManagedSessionTestAccess;
     /// tests/game_replay.hpp: installs the expansion registry the game code
     /// asks which protocol it is speaking.
     friend struct game::GameHandlerTestAccess;
@@ -366,6 +369,12 @@ private:
     bool running = false;
     LaunchOptions launchOptions_;
     std::unique_ptr<LocalControlServer> localControl_;
+    std::unique_ptr<ManagedSession> managedSession_;
+    std::unique_ptr<SessionJournal> sessionJournal_;
+    std::optional<std::chrono::steady_clock::time_point> sessionTerminalAt_;
+    void initializeLocalControl();
+    void updateManagedSession();
+    bool requestManagedStop(const std::string& id, const std::string& reason);
     bool launchAuthStarted_ = false, launchRealmStarted_ = false, launchCharacterStarted_ = false;
     bool launchComplete_ = false;
     int launchExitCode_ = 0;

@@ -1,3 +1,5 @@
+#include "core/managed_session.hpp"
+#include "core/session_signal.hpp"
 #include "core/local_control.hpp"
 #include "addons/local_control_bridge.hpp"
 #include "core/application.hpp"
@@ -252,16 +254,40 @@ Application::~Application() {
     instance = nullptr;
 }
 
-bool Application::initialize() {
+void Application::initializeLocalControl() {
     if (!launchOptions_.controlSocket.empty()) {
         localControl_ = std::make_unique<LocalControlServer>(launchOptions_.controlSocket,
             [this](const std::string& command, const std::string& id) {
                 auto* lua = addonManager_ ? addonManager_->getLuaEngine() : nullptr;
-                return addons::dispatchLocalControl(lua ? lua->getState() : nullptr,
-                    state == AppState::IN_GAME && gameHandler &&
-                    gameHandler->getState() == game::WorldState::IN_WORLD, command, id);
+                const bool inWorld = state == AppState::IN_GAME && gameHandler &&
+                    gameHandler->getState() == game::WorldState::IN_WORLD;
+                auto control = [&]() { return addons::dispatchLocalControl(lua ? lua->getState() : nullptr,inWorld,command,id); };
+                if (command == "quit") {
+                    if (!managedSession_->stopping() && !managedSession_->terminal() && inWorld)
+                        requestManagedStop(id,"local_quit");
+                    else if (managedSession_->id() != id) return nlohmann::json{{"outcome",inWorld?"busy":"disconnected"}};
+                }
+                if ((command == "quit" || command == "poll" || command == "cancel") && managedSession_->id() == id) {
+                    // A lost quit caller does not abandon an already requested safe shutdown.
+                    return managedSession_->snapshot();
+                }
+                if (command == "status") {
+                    auto result = control();result["session"] = managedSession_->snapshot();return result;
+                }
+                if (managedSession_->stopping() || managedSession_->terminal()) {
+                    if (command == "bot" || command == "manual" || command == "stop")
+                        return nlohmann::json{{"outcome","refused"},{"reason","session_is_stopping"}};
+                }
+                return control();
             });
+        managedSession_ = std::make_unique<ManagedSession>(launchOptions_.sessionSeconds,launchOptions_.stopTimeoutSeconds);
+        sessionJournal_ = std::make_unique<SessionJournal>(std::filesystem::path(launchOptions_.controlSocket).parent_path().string());
+        sessionJournal_->record(managedSession_->snapshot());
     }
+}
+
+bool Application::initialize() {
+    initializeLocalControl();
 
     LOG_INFO("Initializing Wowee Native Client");
 
@@ -1562,14 +1588,14 @@ void Application::run() {
 
             // Handle window events
             if (event.type == SDL_EVENT_QUIT) {
-                window->setShouldClose(true);
+                if (!requestManagedStop("window-close","window_close")) window->setShouldClose(true);
             }
             else if ((event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)) {
                 // Closing the game's window quits. SDL sends QUIT only when the
                 // last window closes, so with the map window open, closing this
                 // one said nothing but this.
                 if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-                    window->setShouldClose(true);
+                    if (!requestManagedStop("window-close","window_close")) window->setShouldClose(true);
                 }
                 if (event.type == SDL_EVENT_WINDOW_RESIZED) {
                     int newWidth = event.window.data1;
@@ -1986,6 +2012,11 @@ void Application::updateMapWindow() {
 }
 
 void Application::shutdown() {
+    if (managedSession_ && !managedSession_->terminal()) {
+        managedSession_->interrupt("client_closed_before_shutdown_confirmation");
+        launchExitCode_ = 2;
+        if (sessionJournal_) sessionJournal_->record(managedSession_->snapshot());
+    }
     localControl_.reset();
     LOG_DEBUG("Shutting down application...");
 
@@ -2015,6 +2046,7 @@ void Application::shutdown() {
     // holding a world full of entities and crashed on the first one. Calling
     // it now empties the entity list, so the destructor's own disconnect()
     // has nothing left to fire.
+    if (managedSession_) unloadInterface();
     if (gameHandler) {
         gameHandler->disconnect();
     }
@@ -2112,6 +2144,7 @@ void Application::shutdown() {
     window.reset();
 
     running = false;
+    if (sessionJournal_ && managedSession_) sessionJournal_->record(managedSession_->snapshot(),true);
     LOG_DEBUG("Application shutdown complete");
 }
 
@@ -2260,6 +2293,9 @@ void Application::setState(AppState newState) {
                 // confirms with SMSG_LOGOUT_COMPLETE, and only then does the client
                 // leave. Without this the countdown ran out and nothing happened.
                 gameHandler->setLogoutCompleteCallback([this](bool exiting) {
+                    if (managedSession_ && managedSession_->completedLogout(gameHandler->getLogoutObservation().completions))
+                        return; // Managed shutdown consumes only the real server packet, on the next update.
+
                     if (exiting) {
                         if (auto* ac = getAudioCoordinator()) {
                             if (auto* music = ac->getMusicManager()) music->stopMusic(0.0f);
@@ -3912,6 +3948,42 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     }
 }
 
+bool Application::requestManagedStop(const std::string& id,const std::string& reason) {
+    if (!managedSession_) return false;
+    managedSession_->beginStop(id,reason,std::chrono::steady_clock::now());
+    return true;
+}
+
+void Application::updateManagedSession() {
+    if (!managedSession_) return;
+    if (sessionStopSignal) requestManagedStop("signal-stop","signal");
+    auto* lua = addonManager_ ? addonManager_->getLuaEngine() : nullptr;
+    ManagedSession::Observation observation;
+    observation.connected = gameHandler && gameHandler->getState() != game::WorldState::DISCONNECTED &&
+        gameHandler->getState() != game::WorldState::FAILED;
+    observation.inWorld = state == AppState::IN_GAME && gameHandler && gameHandler->getState() == game::WorldState::IN_WORLD;
+    if (gameHandler) {
+        observation.logout = gameHandler->getLogoutObservation();
+        observation.loggingOut = gameHandler->isLoggingOut();
+    }
+    if (managedSession_->stopping()) observation.control = addons::dispatchLocalControl(
+        lua ? lua->getState() : nullptr,observation.inWorld,"poll",managedSession_->id());
+    const auto actions = managedSession_->tick(std::chrono::steady_clock::now(),observation);
+    // Persist each confirmed fact before a potentially blocking logout/disconnect or teardown.
+    sessionJournal_->record(managedSession_->snapshot());
+    for (auto action : actions) {
+        switch(action) {
+            case ManagedSession::Action::Manual:
+                addons::dispatchLocalControl(lua ? lua->getState() : nullptr,observation.inWorld,"manual",managedSession_->id());break;
+            case ManagedSession::Action::Logout: gameHandler->requestLogout(false);break;
+            case ManagedSession::Action::Disconnect: unloadInterface();gameHandler->disconnect();break;
+            case ManagedSession::Action::Cancel:
+                addons::dispatchLocalControl(lua ? lua->getState() : nullptr,observation.inWorld,"cancel",managedSession_->id());break;
+        }
+    }
+    sessionJournal_->record(managedSession_->snapshot());
+}
+
 void Application::updateLaunch() {
     if (!launchOptions_.enabled() || launchComplete_) return;
     const auto now = std::chrono::steady_clock::now();
@@ -3958,6 +4030,7 @@ void Application::updateLaunch() {
         }
     } catch (const std::exception& e) {
         LOG_ERROR("Launch failed: ", e.what());
+        if (managedSession_) managedSession_->interrupt(std::string("launch_failed: ")+e.what());
         launchExitCode_ = 2;
         running = false;
     }
@@ -3997,7 +4070,16 @@ void Application::update(float deltaTime) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
+    updateManagedSession();
     if (localControl_) localControl_->tick();
+    if (managedSession_ && managedSession_->terminal()) {
+        launchExitCode_ = managedSession_->exitCode();
+        const auto now = std::chrono::steady_clock::now();
+        if (!sessionTerminalAt_) sessionTerminalAt_ = now;
+        if (!localControl_ || !localControl_->hasClients() || now-*sessionTerminalAt_ >= std::chrono::seconds(1)) {
+            running = false;return;
+        }
+    }
     updateLaunch();
     if (launchExitCode_ != 0) return;
     // Update based on current state

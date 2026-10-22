@@ -1,3 +1,4 @@
+#include "core/session_signal.hpp"
 #include "core/application.hpp"
 #include "core/config_paths.hpp"
 #include "core/logger.hpp"
@@ -169,8 +170,13 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         sigaction(SIGABRT, &sa, nullptr);
         sigaction(SIGFPE,  &sa, nullptr);
     }
-    std::signal(SIGTERM, [](int) { std::_Exit(1); });
-    std::signal(SIGINT,  [](int) { std::_Exit(1); });
+    if (!launch.controlSocket.empty()) {
+        std::signal(SIGTERM, wowee::core::handleSessionStopSignal);
+        std::signal(SIGINT, wowee::core::handleSessionStopSignal);
+    } else {
+        std::signal(SIGTERM, [](int) { std::_Exit(1); });
+        std::signal(SIGINT, [](int) { std::_Exit(1); });
+    }
 #elif defined(__ANDROID__)
     // Android already has a crash reporter, and it is a far better one than
     // this: debuggerd writes a symbolised tombstone and the abort message to

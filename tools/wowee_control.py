@@ -13,11 +13,14 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', required=True, type=Path)
-    parser.add_argument('--timeout', type=int, choices=range(1, 31), default=15, metavar='1..30')
-    parser.add_argument('command', choices=('status', 'manual', 'bot', 'stop'))
+    parser.add_argument('--timeout', type=int, choices=range(1, 121), default=None, metavar='1..120')
+    parser.add_argument('command', choices=('status', 'manual', 'bot', 'stop', 'quit'))
     args = parser.parse_args()
     if not hasattr(os, "getuid") or not hasattr(socket, "AF_UNIX"):
         parser.error("Local control currently requires desktop macOS or Linux")
+    args.timeout = args.timeout if args.timeout is not None else (60 if args.command == "quit" else 15)
+    if args.command != "quit" and args.timeout > 30:
+        parser.error("Control command timeout must be at most 30 seconds")
     identity = uuid.uuid4().hex
     try:
         parent = args.socket.parent
@@ -48,7 +51,11 @@ def main():
         if result.get('outcome') == 'confirmed':
             control = result.get('control', {})
             desired = 'bot' if args.command == 'bot' else 'manual'
-            if (control.get('request_id') != identity or not control.get('fresh') or
+            if args.command == 'quit':
+                if (control.get('request_id') != identity or control.get('phase') != 'finished' or
+                        not all(control.get(k) for k in ('manual_confirmed', 'logout_confirmed', 'disconnected'))):
+                    raise ValueError('Shutdown is not confirmed')
+            elif (control.get('request_id') != identity or not control.get('fresh') or
                     control.get('mode') != desired or control.get('pending_mode') or control.get('failure')):
                 raise ValueError('Control confirmation does not match request')
         print(json.dumps(result))

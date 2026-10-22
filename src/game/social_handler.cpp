@@ -3360,6 +3360,8 @@ void SocialHandler::handleRandomRoll(network::Packet& packet) {
 void SocialHandler::handleLogoutResponse(network::Packet& packet) {
     LogoutResponseData data;
     if (!LogoutResponseParser::parse(packet, data)) return;
+    ++logoutObservation_.responses;
+    logoutObservation_.result = data.result;
     if (data.result == 0) {
         if (data.instant) { owner_.addSystemChatMessage("Logging out..."); logoutCountdown_ = 0.0f; }
         else { owner_.addSystemChatMessage("Logging out in 20 seconds..."); logoutCountdown_ = 20.0f; }
@@ -3400,6 +3402,7 @@ void SocialHandler::handleLogoutResponse(network::Packet& packet) {
 }
 
 void SocialHandler::handleLogoutComplete(network::Packet& /*packet*/) {
+    ++logoutObservation_.completions;
     // The countdown finishing is not the end of it: the server says when the
     // character is actually out of the world, and only then can the client leave -
     // to character select, or out of the game entirely for /quit and /exit.

@@ -5,6 +5,23 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Session tools: bounded lifecycle — October21,2026
+
+--session-seconds plus --stop-timeout, local `quit`, and tools/wowee_session.py
+now support bounded Manual -> actual server logout completion -> disconnect ->
+exit. Separate private receipts track each confirmation and completed client
+cleanup. Supervisor checks actual child exit and bounds startup/play/shutdown/
+cleanup freezes; kill/nonzero/missing confirmation stays unconfirmed/exit2.
+Stop remains Manual-only; no automatic Bot request or server-side lease added.
+
+Normal build passes; lifecycle86/7, local190/9, launch37/3, replay3653/115 and
+6fake-child supervisor tests pass. Real application/control socket/GameHandler
+packet lifecycle is covered offline; no live login, gameplay, server action or
+character edit. Evidence: `logs/managed-session-20261021/REPORT.md`.
+Usage: `docs/SESSION-AUTOMATION.md`. Remaining: scoped real login/control/logout,
+0066 ferry/quest confirmation and server disconnect/lease safety. Unattended
+crash-safe readiness is not yet claimed; original Metal assertion cause unknown.
+
 ## Session tools: local control — October21,2026
 
 Opt-in --control-socket now exposes owner-only local status/manual/bot/stop via

@@ -1,4 +1,5 @@
 #pragma once
+#include "game/logout_observation.hpp"
 
 #include "game/world_packets.hpp"
 #include "game/opcode_table.hpp"
@@ -135,6 +136,7 @@ public:
 
     // Logout. exitAfterLogout distinguishes /quit and /exit, which leave the game
     // entirely, from /logout and /camp, which drop back to character select.
+    LogoutObservation getLogoutObservation() const { return logoutObservation_; }
     void requestLogout(bool exitAfterLogout = false);
     void cancelLogout();
     [[nodiscard]] bool  isLoggingOut()        const { return loggingOut_; }
@@ -602,6 +604,7 @@ private:
     InspectResult inspectResult_;
 
     // Logout
+    LogoutObservation logoutObservation_;
     bool  loggingOut_        = false;
     bool  exitAfterLogout_   = false;
     float logoutCountdown_   = 0.0f;

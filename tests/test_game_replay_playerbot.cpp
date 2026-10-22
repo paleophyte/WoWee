@@ -1868,3 +1868,23 @@ TEST_CASE("ferry attachment rejects the world-sized offset observed during bot t
     s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
     CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).size() == 2);
 }
+
+TEST_CASE("Managed logout observations distinguish UI exit callbacks from actual server completion", "[managed-session]") {
+    Session s("tbc");
+    int callbacks=0;s.handler().setLogoutCompleteCallback([&](bool){++callbacks;});
+    CHECK(s.handler().getLogoutObservation().completions==0);
+    s.handler().requestLogout(true);
+    Packet refused(wowee::game::wireOpcode(Opcode::SMSG_LOGOUT_RESPONSE));
+    refused.writeUInt32(1);refused.writeUInt8(0);s.receive(refused);
+    CHECK(callbacks==1); // Interactive force-exit behavior is not confirmation.
+    CHECK(s.handler().getLogoutObservation().responses==1);
+    CHECK(s.handler().getLogoutObservation().result==1);
+    CHECK(s.handler().getLogoutObservation().completions==0);
+    s.handler().requestLogout(false);
+    Packet accepted(wowee::game::wireOpcode(Opcode::SMSG_LOGOUT_RESPONSE));
+    accepted.writeUInt32(0);accepted.writeUInt8(1);s.receive(accepted);
+    CHECK(s.handler().getLogoutObservation().completions==0); // Instant flag still needs completion.
+    Packet complete(wowee::game::wireOpcode(Opcode::SMSG_LOGOUT_COMPLETE));s.receive(complete);
+    CHECK(s.handler().getLogoutObservation().completions==1);
+    CHECK(callbacks==2);
+}

@@ -21,9 +21,9 @@ Requests need identifiers, bounded waits and explicit outcomes: requested, confi
 
 Status should contain session identity, connection/loading state, requested and acknowledged control, selected quest and its acknowledgement, immediate activity, objective progress, Notes, map/position/transport, heartbeat age and last error. Produce atomic JSON status plus ordered JSONL events in a unique evidence directory. Exclude secrets.
 
-## Bounded run and shutdown
+## Bounded run and shutdown design
 
-Add a session duration, startup/control/stop deadlines and observable terminal reason. Let the supervisor stop on success, deadline, disconnect, loss of control acknowledgement, transport coordinate rejection or stalled progress. Start with explicit, narrow completion conditions; unknown does not mean success. Manual takeover must cancel or inhibit automatic re-enabling of Bot.
+The third increment below implements session duration, startup/control/stop deadlines and observable terminal reasons. Let the supervisor stop on success, deadline, disconnect, loss of control acknowledgement, transport coordinate rejection or stalled progress. Start with explicit, narrow completion conditions; unknown does not mean success. Manual takeover must cancel or inhibit automatic re-enabling of Bot.
 
 A normal stop must request Manual, wait for server confirmation, request logout, wait for logout/disconnect, flush evidence and exit. Report each step separately and return nonzero when the stop cannot be confirmed. A crashed or disconnected client cannot prove the bot stopped. For dependable unattended runs, Playerbots needs a bounded server-side control lease or equivalent verified disconnect behavior, so a lost supervisor cannot leave it active indefinitely. This must preserve the selected quest and earned progress.
 
@@ -46,13 +46,13 @@ It never removes a pre-existing endpoint, including a stale one from a crash.
 Inspect/remove a stale socket yourself after verifying its process is gone.
 
 ```sh
-mkdir -m 700 "$HOME/.wowee-session"
-./build/bin/wowee --control-socket "$HOME/.wowee-session/control.sock"
+session_dir=$(mktemp -d "$HOME/.wowee-session.XXXXXX")
+./build/bin/wowee --control-socket "$session_dir/control.sock"
 # Optional: combine with --login-profile / --realm / --character.
-python3 tools/wowee_control.py --socket "$HOME/.wowee-session/control.sock" status
-python3 tools/wowee_control.py --socket "$HOME/.wowee-session/control.sock" bot
-python3 tools/wowee_control.py --socket "$HOME/.wowee-session/control.sock" manual
-python3 tools/wowee_control.py --socket "$HOME/.wowee-session/control.sock" stop
+python3 tools/wowee_control.py --socket "$session_dir/control.sock" status
+python3 tools/wowee_control.py --socket "$session_dir/control.sock" bot
+python3 tools/wowee_control.py --socket "$session_dir/control.sock" manual
+python3 tools/wowee_control.py --socket "$session_dir/control.sock" stop
 ```
 
 The addon must include RemoteControl.lua; refresh an installed copy with
@@ -71,7 +71,7 @@ a cached mode alone does not. Manual/stop supersedes an outstanding Bot request.
 Human takeover supersedes remote intent; it is never automatically reissued.
 
 **Stop means server-confirmed Manual only. It leaves the client connected.**
-Logout/process exit is the next session-lifecycle increment. Do not treat this
+Use the managed `quit` command below for logout/process exit. Do not treat this
 endpoint alone as an unattended supervisor or disconnect safety mechanism.
 
 Responses are one JSON object per request. Each includes protocol version1,
@@ -90,3 +90,64 @@ report that control may still be active. A stalled main thread may prevent the
 socket from answering; the CLI's independent timeout reports unconfirmed. A
 server-side lease/disconnect guarantee is still needed for crash-safe unattended
 runs. No new server deployment is required for this interface; it reuses WIDLE.
+
+## Bounded lifecycle and supervisor (third increment)
+
+Implemented offline on desktop macOS/Linux. Neither example below requests Bot
+by itself. Use the local `bot` command explicitly after verifying the intended
+character. Real login, control and shutdown still require scoped live validation.
+
+```sh
+# Once: create a parent for new per-run evidence directories.
+mkdir -m 700 "$HOME/.wowee-runs"
+python3 tools/wowee_session.py --profile 'My TBC' --character Jizzle \
+  --seconds 1200 --output "$HOME/.wowee-runs/run-001"
+# From another terminal, against this session:
+python3 tools/wowee_control.py --socket "$HOME/.wowee-runs/run-001/control.sock" status
+python3 tools/wowee_control.py --socket "$HOME/.wowee-runs/run-001/control.sock" bot
+python3 tools/wowee_control.py --socket "$HOME/.wowee-runs/run-001/control.sock" quit
+```
+
+`quit` is new; `stop` continues to mean Manual only. Quit initiates a managed
+sequence: request a fresh confirmed Manual mode through the same addon
+controller, request ordinary logout without the interactive force-exit flag,
+wait for a **new actual SMSG_LOGOUT_COMPLETE**, disconnect, and exit. A refused
+logout, expired countdown, cached mode, cancelled logout, superseding control,
+missing addon or lost connection cannot establish success. No retry re-enables
+Bot. Once shutdown starts, new socket control mutations are refused. Losing the
+quit caller does not abandon a safe shutdown already in progress.
+
+The native `--session-seconds 1..86400` timer starts when the requested character
+is in-world; it requires saved-profile launch and `--control-socket`. On expiry
+it initiates that same managed quit. `--stop-timeout 1..120` (default45 seconds)
+bounds the whole Manual/logout/disconnect sequence, including the normal20-second
+logout wait. Native timers need a responsive frame loop. `SIGTERM`/`SIGINT` and
+window close request managed quit when this endpoint is enabled. A second signal
+forces exit2; it does not certify that Bot stopped. Interactive clients without
+this endpoint keep their existing exit behavior.
+
+The independent supervisor covers freezes during initialization, play and
+cleanup. Default startup deadline180 seconds; requested duration; stop deadline45
+seconds; final cleanup grace30 seconds. It asks for managed quit with SIGTERM at
+the applicable deadline, then kills an unresponsive child after the allowed stop
+and cleanup time. A native terminal receipt starts the cleanup grace immediately.
+It always reaps its child. A forced kill, nonzero client exit, missing receipt or
+incomplete shutdown is **unconfirmed/exit2**, including a hang after successful
+logout. It does not call a frozen/disconnected Bot stopped merely because the
+client process is gone. Server-side lease/disconnect safety remains unresolved.
+
+Each socket-enabled run requires a fresh private directory, with no existing
+`session.json` or `session-events.jsonl`. Paths must be canonical and short enough
+for the platform's Unix socket path limit. Native receipts are owner-only:
+atomic `session.json`, ordered flushed `session-events.jsonl`, fresh Manual
+evidence, separate logout/disconnect confirmations, terminal reason and exit
+code. Shutdown flushes addon variables before disconnect/teardown and marks
+`client_shutdown_complete` only after native cleanup. The supervisor adds
+`client.log`, `supervisor-start.json` and final `supervisor.json`, checking both
+receipt confirmations and the actual child exit status.
+
+A local quit response confirms the protocol sequence and impending exit; it is
+not proof that graphics cleanup or OS process exit has finished. Use the final
+supervisor result for that. A failed Manual request may leave server control
+active; receipts say so. No grants, resets, teleports, character edits, alternate
+server credentials or native gameplay execution are involved.

@@ -2572,7 +2572,7 @@ wowee_add_test(test_pass_ablation
 # The filter drops main by the object names Makefiles, Ninja, Xcode and Visual
 # Studio give it; src/main.cpp is the only file of that name in the client.
 if(NOT ANDROID)
-    add_executable(test_game_replay test_game_replay.cpp test_game_replay_quests.cpp
+    add_executable(test_game_replay test_game_replay.cpp test_game_replay_quests.cpp test_game_replay_managed_session.cpp
         test_game_replay_playerbot.cpp
         "$<FILTER:$<TARGET_OBJECTS:wowee>,EXCLUDE,/main([.]cpp)?[.]o(bj)?$>")
     target_include_directories(test_game_replay PRIVATE ${TEST_INCLUDE_DIRS}
@@ -2660,3 +2660,6 @@ wowee_add_test(test_local_control SOURCES test_local_control.cpp
     ${CMAKE_SOURCE_DIR}/src/addons/local_control_bridge.cpp)
 target_link_libraries(test_local_control PRIVATE lua51)
 target_compile_definitions(test_local_control PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+wowee_add_test(test_managed_session SOURCES test_managed_session.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/managed_session.cpp)

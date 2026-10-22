@@ -609,6 +609,7 @@ set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
     src/core/local_control.cpp
+    src/core/managed_session.cpp
     src/addons/local_control_bridge.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
