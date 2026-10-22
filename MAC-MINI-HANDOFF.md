@@ -5,6 +5,19 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Mac SSH and rollback readiness — October 21, 2026
+
+Mac SSH alias `wow-tbc` authenticates as `mangos-helper` with pinned host key.
+Keys are installed privately in ~/.ssh; no private material is in this repo.
+An isolated rebuild of current0065 reproduced the exact object, archive, linked
+binary and installed RUNPATH projection hashes. Primary source/archive/installed
+bytes remain unchanged; no service or character changes. Evidence:
+`logs/server0066-rollback-build-20261021/REPORT.md`.
+The existing permitted CMake build/install route avoids needing new admin access.
+Concrete deploy/rollback scope is in the private handoff
+`/Users/neko/code/wow-idle/server/handoffs/0066-deployment-reviewed-20261021/NORMAL-BUILD-PLAN.md`.
+Deployment/restart and subsequent live validation still require explicit scope.
+
 ## Server0066 candidate reviewed — October 21, 2026
 
 Source-bound fixtures reproduce the boarding-order defect in8active world-spline
@@ -17,8 +30,8 @@ All48files in the private evidence capsule verify on this Mac. Receipt:
 The patch and review/limits are in its `server/patches/0066-transport-attach-order.md`.
 
 Primary0065 source64, installed binary and service are unchanged. Two read-only
-Jizzle saves match: offline, alive, no transport; no character edits. Windows is
-preparing concrete deploy/rollback readiness; deployment/restart and further live
+Jizzle saves match: offline, alive, no transport; no character edits. Mac has
+prepared concrete deploy/rollback readiness; deployment/restart and further live
 validation require explicit scope. R52 transport issue remains open; original
 Metal assertion cause remains unknown. Prior earned evidence is retained.
 
@@ -33,7 +46,7 @@ or prove successful quest travel. Evidence: `logs/quest-reliability-live-2026102
 
 Windows chat “Find WoW idle leveling projects” is explicitly authorized for
 read-only server inspection and isolated candidate build/testing. No deployment,
-server restart, live gameplay, or character edits authorized. SSH key stays there.
+server restart, live gameplay, or character edits authorized. Mac SSH access is now verified.
 Boarding-before-stopping-old-world-spline is under investigation. New live
 validation will need explicit scope after an underlying fix is verified.
 
