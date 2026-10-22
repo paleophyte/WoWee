@@ -5,36 +5,42 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
-## Current state — October21,2026
+## Current state — validated October21,2026
 
-- **Implemented:** copilot/accepted-quest baseline, R57worker cleanup, R58fresh
-  passenger world positions, R59alpha retirement, queued-Lua replay fix. New
-  terrain cleanup uses small batches after every frame fence, with8ms per-frame
-  soft budget and full shutdown flushing. Existing critical cleanup is unchanged.
-- **Mac tested:** full replay3,574assertions/111cases. Actual49/45tile scene and
-  loading-screen checks now reduce worst observed presentation from~484ms to
-  13.451ms. Warm clears remain213allocations /544,981,080bytes. Generated49tile
-  lifetime, live-tile draw, destination-overlap, forced-flush and busy-worker
-  reset checks pass. No logged GPU errors. Evidence/source/runtime hashes:
-  `logs/r52-budgeted-cleanup-20261021/REPORT.txt` and `summary.json`.
-- **Live predecessor:** one0→1arrival plus same-process1→0→1round trip passed
-  correct world positioning and streaming; both processes exited0. User reported
-  a return pause; watchdog1509ms and offline deferred-cleanup371–484ms isolated.
-  Original GPU abort not reproduced. Exact lost assertion/cause remains unproven.
-- **Deployed/preserved:** historical server0065 and earned quest/control/turn-in/
-  ferry saved-relog evidence retained. No server deployment or agent gameplay
-  input. New change affects native resource retirement only; addon/server intent
-  and gameplay execution unchanged. Coherent changes published on same branch.
-- **Awaiting:** a newly scoped normal Mac arrival on this candidate to confirm
-  the return-trip pause improves without regressions. No new live session begun.
-  Remaining checklist: companion `MAC-TEST-CHECKLIST.md`. Prior source-bound
-  results remain valid at their documented scope, not promoted to new builds.
+**Current client:** `d17866e7b`, published on `codex/playerbot-client-sync`.
+Server0065remains the retained reproducible deployment; no server changes made.
+Copilot control, accepted-quest intent/activity/blockers and earned kill/collection
+turn-ins remain verified at their documented scopes.93retained evidence hashes
+rechecked successfully. Playerbots still executes gameplay; addon owns intent/UI.
 
-Capture: `bash tools/run_macos_r52_capture.sh --launch NEW_OUTPUT_DIRECTORY`
-for an explicitly approved session. Installed data root:
-`/Users/neko/Library/Application Support/Wowee/Data`. GitHub publication works.
-Separate live FrameXML errors are recorded in the roadmap, outside this fix.
-Older sections below preserve investigation history and superseded next steps.
+**Mac acceptance:** full replay3,574assertions/111cases passes. Real scene/loading,
+49tile allocation/fence, destination-overlap, shutdown-style flush and busy-worker
+checks pass. Cleanup worst offline presentation~484ms→13.451ms, with the same
+warm allocation baseline and no leaked retirement work.
+
+**Final live confirmation:** tested binary matches8fc86122…; user-operated
+map1→0→1round trip loads49/45destination tiles using fresh world positions.
+User confirms both legs looked great; client/logger exit0. No GPU error,
+watchdog stall or slow cleanup warning. Evidence:
+`logs/r52-live-budgeted-roundtrip-20261021-01/arrival-acceptance.json`.
+Audit: `logs/goal-completion-audit-20261021/REPORT.txt` and `requirements.json`.
+
+**R52 resolution scope:** current Mac/TBC reported ferry route validated after
+worker, world-position, resource-lifetime and cleanup fixes. Exact original lost
+Metal assertion/unique original cause is not proven. No broader hardware/route
+or unattended guarantee. The return pause has both offline reproduction/fix
+and relevant user-confirmed Mac acceptance; no further release check is pending.
+
+No agent gameplay input, grants, resets, teleports, character edits or deployment.
+Live gameplay occurred only in explicitly approved user-driven sessions. Existing
+normal logout/saved-relog proof remains historical; new clean exits are not
+misrepresented as a fresh server-side logout/save audit.
+
+One current Mac checklist: companion `MAC-TEST-CHECKLIST.md` (none unresolved for
+this milestone). Next recommended small milestone: fix the repeated TBC combat-log
+`strreplace` compatibility error, with focused offline event coverage. Other
+FrameXML errors stay in roadmap; no broad UI work or new goal started.
+Older sections below preserve qualified investigation history, not pending gates.
 
 ## Real multi-tile validation — October 21, 2026
 
