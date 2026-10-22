@@ -1848,7 +1848,7 @@ void Application::run() {
             }
         }
 
-        if (window->shouldClose()) {
+        if (!running || window->shouldClose()) {
             break;
         }
 
@@ -1886,7 +1886,7 @@ void Application::run() {
                       ", dt=", deltaTime, "): ", e.what());
             throw;
         }
-        if (window->shouldClose()) {
+        if (!running || window->shouldClose()) {
             break;
         }
         // Render
@@ -3976,7 +3976,13 @@ void Application::updateManagedSession() {
             case ManagedSession::Action::Manual:
                 addons::dispatchLocalControl(lua ? lua->getState() : nullptr,observation.inWorld,"manual",managedSession_->id());break;
             case ManagedSession::Action::Logout: gameHandler->requestLogout(false);break;
-            case ManagedSession::Action::Disconnect: unloadInterface();gameHandler->disconnect();break;
+            case ManagedSession::Action::Disconnect:
+                unloadInterface();
+                gameHandler->disconnect();
+                // This is an intentional exit, not a lost connection that must
+                // rebuild the login scene while a quit reply is being flushed.
+                setState(AppState::DISCONNECTED);
+                break;
             case ManagedSession::Action::Cancel:
                 addons::dispatchLocalControl(lua ? lua->getState() : nullptr,observation.inWorld,"cancel",managedSession_->id());break;
         }
@@ -4192,6 +4198,10 @@ void Application::beatWatchdog() {
 }
 
 void Application::render() {
+    // Managed shutdown can finish update() before UIManager starts a new ImGui
+    // frame. Reusing the previous draw data after interface teardown is invalid.
+    if (!running) return;
+
 #ifdef __ANDROID__
     // Nothing to draw to between the activity leaving the foreground and coming
     // back. Acquiring an image from a destroyed swapchain is undefined, and the

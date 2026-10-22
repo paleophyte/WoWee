@@ -5,6 +5,23 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Short Mac validation passed after shutdown fix — October21,2026
+
+Saved-profile Jizzle login, status, fresh Manual→Bot(~2s)→Manual and logout protocol
+passed. First client then SIGBUS-crashed during an extra render after update had
+stopped; supervisor correctly classified failure. Offline regression reproduced
+stopped rendering/incorrect managed exit state (2failed/43). Fix skips rendering
+once stopped and sends managed exit to DISCONNECTED without login-scene reset.
+Normal build, focused43/3 and replay3655/116 pass. Corrected Manual-only15second
+expiry verified actual logout, disconnect, cleanup and client/supervisor exit0;
+no forced kill/process left. Jizzle offline, same XY/health; no character edits.
+Evidence: `logs/session-tools-shutdown-fix-20261021/REPORT.md`, both failed and
+successful raw captures retained. Original Metal assertion cause still unknown.
+
+Short tooling check accepted; remaining: server disconnect/lease safety before
+crash-safe unattended use, and separately scoped0066 Bot ferry/quest confirmation.
+No server deployment in this validation. No automatic Bot launch option added.
+
 ## Session tools: bounded lifecycle — October21,2026
 
 --session-seconds plus --stop-timeout, local `quit`, and tools/wowee_session.py

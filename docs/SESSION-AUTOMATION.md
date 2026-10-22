@@ -93,9 +93,7 @@ runs. No new server deployment is required for this interface; it reuses WIDLE.
 
 ## Bounded lifecycle and supervisor (third increment)
 
-Implemented offline on desktop macOS/Linux. Neither example below requests Bot
-by itself. Use the local `bot` command explicitly after verifying the intended
-character. Real login, control and shutdown still require scoped live validation.
+Implemented on desktop macOS/Linux; short Mac validation now passes at the scope below. Neither example requests Bot by itself. Use the local `bot` command explicitly after verifying the intended character.
 
 ```sh
 # Once: create a parent for new per-run evidence directories.
@@ -151,3 +149,20 @@ not proof that graphics cleanup or OS process exit has finished. Use the final
 supervisor result for that. A failed Manual request may leave server control
 active; receipts say so. No grants, resets, teleports, character edits, alternate
 server credentials or native gameplay execution are involved.
+
+## Short Mac validation — October21,2026
+
+Saved TBC profile/Jizzle login, status, fresh Manual→Bot→Manual and quit protocol
+were acknowledged in a short run. It exposed a post-stop render crash, now fixed
+by skipping rendering once update stops and avoiding an unnecessary login-scene
+reset during managed exit. Before regression fails2/43; after43/3 and full
+replay3655/116 pass. A corrected15second Manual-only expiry run confirmed Manual,
+actual logout completion, disconnect, cleanup and both client/supervisor exit0.
+No forced kill or remaining client process; Jizzle offline. Valid first-run
+control evidence is retained; post-fix clean exit is verified through the common
+managed duration path. No server deployment or gameplay edits.
+
+Evidence: logs/session-tools-shutdown-fix-20261021/REPORT.md and the two
+logs/session-tools-live-20261021-* directories. This accepts the short tooling
+check; it does not establish0066 Bot ferry/quest acceptance or crash-safe server
+lease/disconnect behavior. The original lost Metal assertion cause is unknown.

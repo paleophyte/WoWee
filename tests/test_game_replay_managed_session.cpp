@@ -20,6 +20,12 @@ struct ManagedSessionTestAccess {
     static addons::LuaEngine& lua(Application& app){return *app.addonManager_->getLuaEngine();}
     static void tick(Application& app){app.updateManagedSession();app.localControl_->tick();}
     static auto snapshot(Application& app){return app.managedSession_->snapshot();}
+    static void installStoppedRenderer(Application& app) {
+        app.renderer=std::make_unique<rendering::Renderer>();app.running=false;
+    }
+    static void render(Application& app){app.render();}
+    static bool renderStagesEmpty(const Application& app){return app.stageStats_.empty();}
+
 };
 }
 TEST_CASE("Application managed quit requests real logout only after Manual and records a verified disconnect", "[managed-session]") {
@@ -57,6 +63,7 @@ TEST_CASE("Application managed quit requests real logout only after Manual and r
         CHECK(core::ManagedSessionTestAccess::snapshot(app)["logout_confirmed"]==false);
         network::Packet complete(game::wireOpcode(game::Opcode::SMSG_LOGOUT_COMPLETE));game::GameHandlerTestAccess::receive(gh,complete);
         core::ManagedSessionTestAccess::tick(app);CHECK(gh.getState()==game::WorldState::DISCONNECTED);
+        CHECK(app.getState()==core::AppState::DISCONNECTED);
         core::ManagedSessionTestAccess::tick(app);
         const auto state=core::ManagedSessionTestAccess::snapshot(app);CHECK(state["phase"]=="finished");
         char reply[16385];const auto count=recv(client,reply,sizeof(reply),0);REQUIRE(count>0);close(client);
@@ -67,5 +74,12 @@ TEST_CASE("Application managed quit requests real logout only after Manual and r
         CHECK(receipt["client_shutdown_complete"]==true);CHECK(receipt["exit_code"]==0);
     }
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("A stopped application never submits another render frame", "[managed-session]") {
+    wowee::core::Application app;
+    wowee::core::ManagedSessionTestAccess::installStoppedRenderer(app);
+    wowee::core::ManagedSessionTestAccess::render(app);
+    CHECK(wowee::core::ManagedSessionTestAccess::renderStagesEmpty(app));
 }
 #endif
