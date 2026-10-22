@@ -1721,34 +1721,7 @@ public:
     // Client-side transport board/disembark check by proximity to the live deck.
     // Covers M2 trams/lifts and client-animated TaxiPathNode WMO ships.
     void updateM2TransportBoarding(const glm::vec3& playerCanonical);
-    void setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
-        // Validate transport is registered before attaching player
-        // (defer if transport not yet registered to prevent desyncs)
-        if (transportGuid != 0 && !isTransportGuid(transportGuid)) {
-            // Said, rather than dropped in silence.
-            //
-            // This is the one decision between the server saying the player
-            // has boarded and the client agreeing, and taking it means the
-            // player stands still while the transport leaves without them -
-            // with nothing logged, nothing raised, and no retry. If the
-            // zeppelin sails off and the player does not, this line is the
-            // first place to look.
-            static uint64_t saidFor = 0;
-            if (saidFor != transportGuid) {
-                saidFor = transportGuid;
-                LOG_WARNING("Transport attach refused: guid=0x", std::hex,
-                            transportGuid, std::dec,
-                            " is not a registered transport yet - the player "
-                            "will not move with it");
-            }
-            return;  // Transport not yet registered; skip attachment
-        }
-        playerTransportGuid_ = transportGuid;
-        playerTransportOffset_ = localOffset;
-        playerTransportStickyGuid_ = transportGuid;
-        playerTransportStickyTimer_ = 8.0f;
-        movementInfo.transportGuid = transportGuid;
-    }
+    bool setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset);
     void setPlayerTransportOffset(const glm::vec3& offset) {
         playerTransportOffset_ = offset;
     }
@@ -4504,6 +4477,7 @@ private:
     // Counted rather than tested instantly so a jump is not a disembark.
     int shipNoDeckSupportFrames_ = 0;
     bool pendingPlayerTransportTransfer_ = false;
+    bool invalidPlayerTransportOffsetReported_ = false;
     bool awaitingPlayerMovementFrame_ = false;
     bool worldEntryRequiresPlayerSnapshot_ = false;
     std::optional<glm::vec3> worldEntryServerPosition_;

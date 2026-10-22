@@ -1578,10 +1578,62 @@ glm::vec3 GameHandler::getComposedWorldPosition() {
     return glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
 }
 
+bool GameHandler::setPlayerOnTransport(uint64_t transportGuid, const glm::vec3& localOffset) {
+    // Validate transport is registered before attaching player
+    // (defer if transport not yet registered to prevent desyncs)
+    if (transportGuid != 0 && !isTransportGuid(transportGuid)) {
+        // Said, rather than dropped in silence.
+        //
+        // This is the one decision between the server saying the player
+        // has boarded and the client agreeing, and taking it means the
+        // player stands still while the transport leaves without them -
+        // with nothing logged, nothing raised, and no retry. If the
+        // zeppelin sails off and the player does not, this line is the
+        // first place to look.
+        static uint64_t saidFor = 0;
+        if (saidFor != transportGuid) {
+            saidFor = transportGuid;
+            LOG_WARNING("Transport attach refused: guid=0x", std::hex,
+                        transportGuid, std::dec,
+                        " is not a registered transport yet - the player "
+                        "will not move with it");
+        }
+        return false;  // Transport not yet registered; skip attachment
+    }
+    if (transportGuid != 0 && transportManager_) {
+        const auto* transport = transportManager_->getTransport(transportGuid);
+        // Ship deck offsets are small model-local coordinates. A walking
+        // spline in world coordinates must never become a passenger offset
+        // and then be echoed back to the server as authoritative movement.
+        if (transport && !transport->isM2 &&
+            (!std::isfinite(localOffset.x) || !std::isfinite(localOffset.y) ||
+             !std::isfinite(localOffset.z) ||
+             std::abs(localOffset.x) > 200.f || std::abs(localOffset.y) > 200.f ||
+             std::abs(localOffset.z) > 200.f)) {
+            deferPlayerTransportAttachment(transportGuid, currentMapId_,
+                transportManager_->transportLocalToServer(transportGuid, localOffset));
+            if (!invalidPlayerTransportOffsetReported_) {
+                invalidPlayerTransportOffsetReported_ = true;
+                LOG_ERROR("Invalid ship-local passenger offset; movement held: guid=0x",
+                    std::hex, transportGuid, std::dec, " local=(", localOffset.x,
+                    ",", localOffset.y, ",", localOffset.z, ")");
+                addSystemChatMessage("Transport position is invalid. Movement is held to protect your position. Switch to Manual and reconnect.");
+            }
+            return false;
+        }
+    }
+    invalidPlayerTransportOffsetReported_ = false;
+    playerTransportGuid_ = transportGuid;
+    playerTransportOffset_ = localOffset;
+    playerTransportStickyGuid_ = transportGuid;
+    playerTransportStickyTimer_ = 8.0f;
+    movementInfo.transportGuid = transportGuid;
+    return true;
+}
+
 void GameHandler::deferPlayerTransportAttachment(
     uint64_t transportGuid, uint32_t mapId, const glm::vec3& serverOffset) {
-    if (transportGuid == 0 || !std::isfinite(serverOffset.x) ||
-        !std::isfinite(serverOffset.y) || !std::isfinite(serverOffset.z)) return;
+    if (transportGuid == 0) return;
     const bool newlyPending = !pendingPlayerTransportTransfer_ ||
         pendingPlayerTransportGuid_ != transportGuid;
     if (!isPlayerMovementFramePending()) pendingPlayerTransportSince_ = std::chrono::steady_clock::now();
@@ -1603,6 +1655,7 @@ void GameHandler::deferPlayerTransportAttachment(
 }
 
 void GameHandler::cancelPendingPlayerTransportAttachment() {
+    invalidPlayerTransportOffsetReported_ = false;
     pendingPlayerTransportTransfer_ = false;
     pendingPlayerTransportGuid_ = 0;
     pendingPlayerTransportEntry_ = 0;
@@ -1627,8 +1680,7 @@ bool GameHandler::completePlayerTransportWorldTransfer(
 
     const glm::vec3 localOffset = transportManager_->serverToTransportLocal(
         transportGuid, pendingPlayerTransportOffset_);
-    setPlayerOnTransport(transportGuid, localOffset);
-    if (playerTransportGuid_ != transportGuid) return false;
+    if (!setPlayerOnTransport(transportGuid, localOffset)) return false;
     worldPosition = transportManager_->getPlayerWorldPosition(
         transportGuid, localOffset);
     setPosition(worldPosition.x, worldPosition.y, worldPosition.z);

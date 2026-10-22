@@ -863,13 +863,13 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
                 glm::vec3(block.transportX, block.transportY, block.transportZ));
             return;
         }
-        owner_.cancelPendingPlayerTransportAttachment();
         // Convert transport offset from server → canonical coordinates
         glm::vec3 serverOffset(block.transportX, block.transportY, block.transportZ);
         glm::vec3 canonicalOffset = owner_.getTransportManager()
             ? owner_.getTransportManager()->serverToTransportLocal(block.transportGuid, serverOffset)
             : core::coords::serverToCanonical(serverOffset);
-        owner_.setPlayerOnTransport(block.transportGuid, canonicalOffset);
+        if (!owner_.setPlayerOnTransport(block.transportGuid, canonicalOffset)) return;
+        owner_.cancelPendingPlayerTransportAttachment();
         if (owner_.getTransportManager() && owner_.getTransportManager()->getTransport(owner_.playerTransportGuidRef())) {
             glm::vec3 composed = owner_.getTransportManager()->getPlayerWorldPosition(owner_.playerTransportGuidRef(), owner_.playerTransportOffsetRef());
             entity->setPosition(composed.x, composed.y, composed.z, oCanonical);

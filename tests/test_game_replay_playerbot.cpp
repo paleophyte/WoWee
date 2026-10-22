@@ -1829,3 +1829,41 @@ TEST_CASE("legacy aura tooltips use raw slots and money tooltips tolerate older 
     CAPTURE(errors);
     CHECK(errors.empty());
 }
+
+TEST_CASE("ferry attachment rejects the world-sized offset observed during bot travel",
+          "[replay][movement][tbc-ferry][invalid-passenger-offset]") {
+    using namespace wowee::game;
+    Session s("tbc");
+    loginAtLocalOffset(s);
+    s.receive(loginFerryCreate());
+    s.handler().confirmPlayerMovementFrame();
+    auto* tm = s.handler().getTransportManager(); REQUIRE(tm);
+    tm->loadPathFromNodes(1, {{0,0,0}}, false);
+    tm->registerTransport(kLoginFerry, 0, 1, {-495.11f,-4167.19f,0}, 176231,3015,false);
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    REQUIRE(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).size() == 1);
+    // Reconstructed from the retained 2026-10-21 bot crossing log, not a raw
+    // packet replay. This value was accepted as local and composed 6,000 yd
+    // away from the ferry before being eligible for outgoing movement.
+    s.handler().deferPlayerTransportAttachment(kLoginFerry, 1,
+        {-3957.12f,-4677.06f,5.79032f});
+    glm::vec3 world;
+    CHECK_FALSE(s.handler().completePlayerTransportWorldTransfer(kLoginFerry, world));
+    CHECK(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK_FALSE(s.handler().isOnTransport());
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).size() == 1);
+    const auto messages = s.handler().getChatHistory().size();
+    CHECK_FALSE(s.handler().completePlayerTransportWorldTransfer(kLoginFerry, world));
+    CHECK(s.handler().getChatHistory().size() == messages); // no repeated warning flood
+    CHECK(std::any_of(s.handler().getChatHistory().begin(), s.handler().getChatHistory().end(),
+        [](const auto& message) { return message.message.find("Transport position is invalid") != std::string::npos; }));
+    // A fresh, valid passenger frame can resolve the hold without inventing an
+    // offset or changing server state. The same ferry still accepts normal data.
+    s.handler().deferPlayerTransportAttachment(kLoginFerry, 1, kLoginLocal);
+    CHECK(s.handler().completePlayerTransportWorldTransfer(kLoginFerry, world));
+    CHECK_FALSE(s.handler().hasPendingPlayerTransportWorldTransfer());
+    CHECK(s.handler().getPlayerTransportOffset() == kLoginLocal);
+    s.handler().sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+    CHECK(s.sent().of(Opcode::MSG_MOVE_HEARTBEAT).size() == 2);
+}

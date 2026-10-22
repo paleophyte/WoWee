@@ -5,6 +5,34 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Native ferry guard verified — October 21, 2026
+
+Impossible WMO passenger offsets now retain the movement hold and produce one
+local error, instead of attaching thousands of yards from the ship. Fresh valid
+passenger data can resolve the hold. Focused21 assertions/1case, ferry370/19,
+full replay3,609/113 all pass; normal Mac client builds. This prevents client
+amplification of malformed attachment data; it does not fix its server origin
+or prove successful quest travel. Evidence: `logs/quest-reliability-live-20261021-01/GUARD-REPORT.txt`.
+
+Windows chat “Find WoW idle leveling projects” is explicitly authorized for
+read-only server inspection and isolated candidate build/testing. No deployment,
+server restart, live gameplay, or character edits authorized. SSH key stays there.
+Boarding-before-stopping-old-world-spline is under investigation. New live
+validation will need explicit scope after an underlying fix is verified.
+
+## Ordinary quest session failed — October 21, 2026
+
+Approved user-operated “Lifting the Curse” (290) attempt confirmed selected quest
+survives Manual/Bot, but exposed a transport blocker: falling/warping after ferry
+arrival, then return to Kalimdor/Feralas. Client/logger exited 0 at 19:19:20 CDT.
+Attachment log accepted a world-sized offset and composed a position thousands
+of yards from the ship; origin is under investigation. No character/server edits.
+R52 reopened for relevant transport failure; original Metal assertion cause unknown.
+Evidence: `logs/quest-reliability-live-20261021-01/failure-observation.json`.
+No `strreplace` error in the closed attempt; other FrameXML errors remain separate.
+Current goal stays active. Offline reproduction/fix precedes any newly scoped live
+validation. Earlier successful ferry evidence below is retained at its old scope.
+
 ## Current reliability increment — October 21, 2026
 
 TBC combat-log `strreplace` compatibility is fixed in the native Lua API.
@@ -13,11 +41,9 @@ after the fix, focused coverage passes 14 assertions and full replay passes
 3,588 assertions / 112 cases. The normal Mac client builds successfully.
 Evidence: `logs/combatlog-strreplace-20261021/REPORT.txt`.
 
-No server changes or live gameplay in this increment. One bounded ordinary
-accepted-quest session remains, pending explicit scope. Preserve the delivered
-quest/control/earned turn-in evidence below. Other FrameXML errors are tracked
-separately in the companion roadmap. Original Metal assertion cause remains
-unknown; reopen R52 if relevant failures recur.
+The approved ordinary quest session above failed at ferry arrival. Prior
+quest/control/earned turn-in evidence remains valid at its original scope. Other
+FrameXML errors remain separately tracked; original Metal assertion cause unknown.
 
 ## Current state — validated October21,2026
 
