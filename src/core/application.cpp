@@ -1,3 +1,5 @@
+#include "core/local_control.hpp"
+#include "addons/local_control_bridge.hpp"
 #include "core/application.hpp"
 #include "core/frame_pacer.hpp"
 #include "core/env_flag.hpp"
@@ -251,6 +253,16 @@ Application::~Application() {
 }
 
 bool Application::initialize() {
+    if (!launchOptions_.controlSocket.empty()) {
+        localControl_ = std::make_unique<LocalControlServer>(launchOptions_.controlSocket,
+            [this](const std::string& command, const std::string& id) {
+                auto* lua = addonManager_ ? addonManager_->getLuaEngine() : nullptr;
+                return addons::dispatchLocalControl(lua ? lua->getState() : nullptr,
+                    state == AppState::IN_GAME && gameHandler &&
+                    gameHandler->getState() == game::WorldState::IN_WORLD, command, id);
+            });
+    }
+
     LOG_INFO("Initializing Wowee Native Client");
 
     // Initialize memory monitoring for dynamic cache sizing
@@ -1974,6 +1986,7 @@ void Application::updateMapWindow() {
 }
 
 void Application::shutdown() {
+    localControl_.reset();
     LOG_DEBUG("Shutting down application...");
 
     // Before the window, whose destructor takes SDL down with it.
@@ -3984,6 +3997,7 @@ void Application::update(float deltaTime) {
             addons::LuaEngine::setUiSoundsSuppressed(false);
         }
     }
+    if (localControl_) localControl_->tick();
     updateLaunch();
     if (launchExitCode_ != 0) return;
     // Update based on current state

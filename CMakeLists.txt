@@ -608,6 +608,8 @@ endif()
 set(WOWEE_SOURCES
     # Core
     src/core/application.cpp
+    src/core/local_control.cpp
+    src/addons/local_control_bridge.cpp
     src/core/screen_recorder.cpp
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp

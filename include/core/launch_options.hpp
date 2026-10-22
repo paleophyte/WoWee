@@ -7,7 +7,7 @@
 
 namespace wowee::core {
 struct LaunchOptions {
-    std::string profile, realm, character;
+    std::string profile, realm, character, controlSocket;
     unsigned startupTimeoutSeconds = 180;
     bool help = false;
     bool enabled() const { return !profile.empty(); }
@@ -27,7 +27,8 @@ inline LaunchOptions parseLaunchOptions(int argc, char* const argv[]) {
             if (!field.empty()) throw std::invalid_argument("Duplicate launch argument");
             field = value();
         };
-        if (arg == "--login-profile") assign(out.profile);
+        if (arg == "--control-socket") assign(out.controlSocket);
+        else if (arg == "--login-profile") assign(out.profile);
         else if (arg == "--realm") assign(out.realm);
         else if (arg == "--character") assign(out.character);
         else if (arg == "--startup-timeout") {
@@ -62,6 +63,7 @@ inline int uniqueLaunchMatch(const std::vector<std::vector<std::string>>& aliase
 inline constexpr const char* launchHelp =
     "Usage: wowee [--login-profile LABEL_OR_HOST:PORT --character NAME]\n"
     "             [--realm NAME] [--startup-timeout SECONDS]\n"
+    "             [--control-socket ABSOLUTE_PATH_IN_PRIVATE_DIRECTORY]\n"
     "Uses saved credentials; exact names only. Multiple realms require --realm.\n"
     "Startup timeout: 1..600 seconds (default 180). No automatic reconnect.\n"
     "Does not change bot control or impose a gameplay time limit.\n";

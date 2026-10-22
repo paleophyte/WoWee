@@ -95,6 +95,10 @@ travelDetail:SetTextColor(0.9,0.76,0.4)
 
 local settings, nextPoll, nextDraw, lastRequest = nil, 0, 0, -100
 local inWorld = UnitExists('player') and true or false
+local remoteModule=rawget(_G,'WoweeBotRemote')
+if type(remoteModule)=='table' and type(remoteModule.new)=='function' then
+    WoweeBotRemoteSession = remoteModule.new(function() return controller, inWorld end)
+end
 local lastDriverTick
 local function notifyHistory()
     local changed=rawget(_G,'WoweeBotHistoryChanged')

@@ -50,6 +50,7 @@ class AnimationCallbackHandler;
 class TransportCallbackHandler;
 class WorldEntryCallbackHandler;
 class UIScreenCallbackHandler;
+class LocalControlServer;
 
 enum class AppState {
     AUTHENTICATION,
@@ -364,6 +365,7 @@ private:
     AppState state = AppState::AUTHENTICATION;
     bool running = false;
     LaunchOptions launchOptions_;
+    std::unique_ptr<LocalControlServer> localControl_;
     bool launchAuthStarted_ = false, launchRealmStarted_ = false, launchCharacterStarted_ = false;
     bool launchComplete_ = false;
     int launchExitCode_ = 0;

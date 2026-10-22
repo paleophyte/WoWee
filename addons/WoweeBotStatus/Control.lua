@@ -21,6 +21,7 @@ end
 
 function Control:want(mode)
     if mode ~= 'manual' and mode ~= 'bot' then return end
+    self.intentRevision = (self.intentRevision or 0) + 1
     self.intent, self.failure, self.pending = mode, nil, nil
     self.desiredGrind = nil
     self.socialIntent, self.socialAt = nil, nil

@@ -145,3 +145,11 @@ selected plan; a successful kill or skin is not inferred from the label.
 
 The feature requires the matching server update. The client change is addon
 only: update the installed addon and reload/restart; no new native API is needed.
+
+## Native local control
+
+RemoteControl.lua exposes the existing acknowledged controller to the native
+client's opt-in owner-only local socket. It never executes gameplay itself.
+Manual takeover supersedes a pending remote Bot request; timeout/cancellation
+discard unconfirmed mutations. See ../../docs/SESSION-AUTOMATION.md for CLI use
+and limits. Stop requests Manual; it does not logout or exit.

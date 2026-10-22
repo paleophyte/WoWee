@@ -13,6 +13,8 @@ LaunchOptions parse(std::initializer_list<const char*> values) {
 TEST_CASE("Launch identity is explicit and bounded", "[launch]") {
     CHECK_FALSE(parse({"wowee"}).enabled());
     CHECK(parse({"wowee", "--help"}).help);
+    CHECK(parse({"wowee", "--control-socket", "/private/control.sock"}).controlSocket == "/private/control.sock");
+    CHECK_THROWS(parse({"wowee", "--control-socket"}));
     const auto options = parse({"wowee", "--login-profile", "My TBC", "--character", "Jizzle", "--realm", "My Realm", "--startup-timeout", "60"});
     CHECK(options.profile == "My TBC"); CHECK(options.character == "Jizzle");
     CHECK(options.realm == "My Realm"); CHECK(options.startupTimeoutSeconds == 60);

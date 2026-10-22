@@ -5,6 +5,22 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Session tools: local control — October21,2026
+
+Opt-in --control-socket now exposes owner-only local status/manual/bot/stop via
+`tools/wowee_control.py`. Uses the live addon's acknowledged controller; fresh
+matching reply required, Manual supersedes Bot, unconfirmed mutations discarded
+on timeout/caller loss. Stop confirms Manual and leaves the client connected.
+Mac socket+CLI+native bridge+actual controller/simulated-server round trip passes;
+9focused cases, launch27assertions/2cases and full replay3612/113 pass. Normal
+client builds. Evidence: `logs/local-control-20261021/REPORT.md`.
+
+No live login/control or server/character changes in this increment. Linux
+implemented but not runtime-tested; Windows endpoint not implemented. Bounded
+logout/exit and server-side lease/disconnect safety remain next work; not an
+unattended harness yet. Usage: `docs/SESSION-AUTOMATION.md`. Prior0066 ferry/quest
+acceptance remains unresolved; original Metal assertion cause unknown.
+
 ## Session tools: saved-profile launch — October 21, 2026
 
 First tooling increment implements --login-profile label/host:port, --character,

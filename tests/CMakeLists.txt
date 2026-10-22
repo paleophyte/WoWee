@@ -2654,3 +2654,9 @@ endif()
 # opposite shape. Do not re-add it without measuring.
 
 wowee_add_test(test_launch_options SOURCES test_launch_options.cpp)
+
+wowee_add_test(test_local_control SOURCES test_local_control.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/local_control.cpp
+    ${CMAKE_SOURCE_DIR}/src/addons/local_control_bridge.cpp)
+target_link_libraries(test_local_control PRIVATE lua51)
+target_compile_definitions(test_local_control PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
