@@ -5,6 +5,20 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Current reliability increment — October 21, 2026
+
+TBC combat-log `strreplace` compatibility is fixed in the native Lua API.
+A production-engine regression reproduces the prior nil-function failure;
+after the fix, focused coverage passes 14 assertions and full replay passes
+3,588 assertions / 112 cases. The normal Mac client builds successfully.
+Evidence: `logs/combatlog-strreplace-20261021/REPORT.txt`.
+
+No server changes or live gameplay in this increment. One bounded ordinary
+accepted-quest session remains, pending explicit scope. Preserve the delivered
+quest/control/earned turn-in evidence below. Other FrameXML errors are tracked
+separately in the companion roadmap. Original Metal assertion cause remains
+unknown; reopen R52 if relevant failures recur.
+
 ## Current state — validated October21,2026
 
 **Current client:** `d17866e7b`, published on `codex/playerbot-client-sync`.

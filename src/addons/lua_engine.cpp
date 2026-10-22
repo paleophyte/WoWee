@@ -5735,7 +5735,29 @@ static int lua_CreateFrame(lua_State* L) {
 
 // --- WoW Utility Functions ---
 
-// strsplit(delimiter, str) - WoW's string split
+// WoW replaces literal tokens, unlike string.gsub's patterns and captures.
+// Advance over the source only, so replacement text cannot be replaced again.
+static int lua_strreplace(lua_State* L) {
+    size_t sourceSize, tokenSize, replacementSize;
+    const char* source = luaL_checklstring(L, 1, &sourceSize);
+    const char* token = luaL_checklstring(L, 2, &tokenSize);
+    const char* replacement = luaL_checklstring(L, 3, &replacementSize);
+    const std::string input(source, sourceSize);
+    std::string output;
+    size_t cursor = 0;
+    if (tokenSize != 0) {
+        for (;;) {
+            const size_t match = input.find(token, cursor, tokenSize);
+            if (match == std::string::npos) break;
+            output.append(input, cursor, match - cursor);
+            output.append(replacement, replacementSize);
+            cursor = match + tokenSize;
+        }
+    }
+    output.append(input, cursor, std::string::npos);
+    lua_pushlstring(L, output.data(), output.size());
+    return 1;
+}
 
 LuaEngine::LuaEngine() = default;
 
@@ -5848,6 +5870,9 @@ void LuaEngine::setLuaServices(const LuaServices& services) {
 
 
 void LuaEngine::registerCoreAPI() {
+    lua_pushcfunction(L_, lua_strreplace);
+    lua_setglobal(L_, "strreplace");
+
     // Override print() to go to chat
     lua_pushcfunction(L_, lua_wow_print);
     lua_setglobal(L_, "print");

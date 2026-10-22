@@ -270,3 +270,25 @@ TEST_CASE("inventory reconciliation clamps counts without completing unrelated o
     CHECK(lines[0].finished);
     CHECK_FALSE(lines[1].finished);
 }
+
+// TBC Blizzard_CombatLog captures this global before formatting combat results.
+TEST_CASE("TBC combat log replaces literal result tokens", "[replay][lua][combatlog]") {
+    Session s("tbc");
+    wowee::addons::AddonManager manager;
+    REQUIRE(manager.initialize(&s.handler()));
+    auto* lua = manager.getLuaEngine();
+    REQUIRE(lua);
+    REQUIRE(lua->executeString(R"lua(
+        local strreplace = _G.strreplace
+        -- Critical spell branch from CombatLog_String_DamageResultString.
+        combatResult = strreplace(" ($resultString)", "$resultString", "Critical")
+    )lua"));
+    CHECK(lua->evaluateBoolean("combatResult == ' (Critical)'"));
+    CHECK(lua->evaluateBoolean("strreplace('$amount + $amount', '$amount', 42) == '42 + 42'"));
+    CHECK(lua->evaluateBoolean("strreplace('a.b aXb', 'a.b', '%1') == '%1 aXb'"));
+    CHECK(lua->evaluateBoolean("strreplace('aaaa', 'aa', 'aaa') == 'aaaaaa'"));
+    CHECK(lua->evaluateBoolean("strreplace('unchanged', 'missing', 'x') == 'unchanged'"));
+    CHECK(lua->evaluateBoolean("strreplace('abc', 'b', '') == 'ac'"));
+    CHECK(lua->evaluateBoolean("strreplace('abc', '', 'x') == 'abc'"));
+    CHECK(lua->evaluateBoolean("select('#', strreplace('aa', 'a', 'b')) == 1"));
+}
