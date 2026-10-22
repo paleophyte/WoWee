@@ -5,6 +5,23 @@ companion implementation/evidence records, and read-only checks on the Mini.
 This is the current continuation guide; the older companion
 `wow-idle/MAC-MINI-HANDOFF.md` and `MAC-MINI-SETUP.md` describe earlier setup.
 
+## Server0066 candidate reviewed — October 21, 2026
+
+Source-bound fixtures reproduce the boarding-order defect in8active world-spline
+cases;0066 passes23/23 cases on Windows and Linux. It stops/clears the old motion
+before attaching, preserving local path geometry and routing/teleport policy.
+Actual full changed-file TBC compilation and incremental server link pass. The
+candidate is built, not deployed; this is not connected ferry/quest acceptance.
+All48files in the private evidence capsule verify on this Mac. Receipt:
+`/Users/neko/code/wow-idle/server/handoffs/0066-transport-attach-order-20261021/receipt.json`.
+The patch and review/limits are in its `server/patches/0066-transport-attach-order.md`.
+
+Primary0065 source64, installed binary and service are unchanged. Two read-only
+Jizzle saves match: offline, alive, no transport; no character edits. Windows is
+preparing concrete deploy/rollback readiness; deployment/restart and further live
+validation require explicit scope. R52 transport issue remains open; original
+Metal assertion cause remains unknown. Prior earned evidence is retained.
+
 ## Native ferry guard verified — October 21, 2026
 
 Impossible WMO passenger offsets now retain the movement hold and produce one
